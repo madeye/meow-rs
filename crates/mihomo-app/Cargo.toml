@@ -24,3 +24,9 @@ serde_yaml = { workspace = true }
 parking_lot = { workspace = true }
 rustls = { workspace = true }
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+serde_yaml = { workspace = true }
+mihomo-config = { workspace = true }
+libc = "0.2"

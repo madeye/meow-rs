@@ -82,6 +82,9 @@ jobs:
       - name: Config persistence tests
         run: cargo test --test config_persistence_test -- --nocapture
 
+      - name: Systemd config tests
+        run: cargo test -p mihomo-app --test systemd_config_test -- --nocapture
+
       - name: Trojan integration tests
         run: cargo test --test trojan_integration -- --nocapture
 

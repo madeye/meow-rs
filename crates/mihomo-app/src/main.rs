@@ -118,40 +118,7 @@ fn install_service(config_override: Option<&str>, args: &Args) -> Result<()> {
         cwd.join(config_rel).to_string_lossy().to_string()
     };
 
-    // Determine working directory (config file's parent)
-    let work_dir = std::path::Path::new(&config_path)
-        .parent()
-        .unwrap_or(std::path::Path::new("/"))
-        .to_string_lossy()
-        .to_string();
-
-    let unit = format!(
-        r#"[Unit]
-Description=mihomo-rust proxy service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart={exe} -f {config}
-WorkingDirectory={work_dir}
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=1048576
-
-# Hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ReadWritePaths={work_dir}
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-"#,
-        exe = exe_path,
-        config = config_path,
-        work_dir = work_dir,
-    );
+    let unit = mihomo_app::generate_systemd_unit(&exe_path, &config_path);
 
     let service_path = format!("/etc/systemd/system/{}.service", SERVICE_NAME);
 
