@@ -128,7 +128,10 @@ pub fn rebuild_from_raw(
         if still_remaining.len() == remaining.len() {
             // No progress — log remaining failures and break
             for raw_group in &still_remaining {
-                warn!("Failed to parse proxy group '{}': unresolved dependencies", raw_group.name);
+                warn!(
+                    "Failed to parse proxy group '{}': unresolved dependencies",
+                    raw_group.name
+                );
             }
             break;
         }

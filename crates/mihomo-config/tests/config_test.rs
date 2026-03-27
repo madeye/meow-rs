@@ -379,4 +379,3 @@ fn test_invalid_yaml() {
     let yaml = "{{invalid yaml}}";
     assert!(load_config_from_str(yaml).is_err());
 }
-

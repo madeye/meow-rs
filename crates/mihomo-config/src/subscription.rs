@@ -43,10 +43,7 @@ pub fn parse_subscription_yaml(text: &str) -> Result<SubscriptionData, anyhow::E
             .keys()
             .filter_map(|k| k.as_str().map(|s| s.to_string()))
             .collect();
-        anyhow::anyhow!(
-            "subscription missing 'proxies' key; found keys: {:?}",
-            keys
-        )
+        anyhow::anyhow!("subscription missing 'proxies' key; found keys: {:?}", keys)
     })?;
     let proxies_seq = proxies_val
         .as_sequence()

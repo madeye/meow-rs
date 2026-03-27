@@ -30,7 +30,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/version", get(version))
         .route("/proxies", get(get_proxies))
         .route("/proxies/{name}", get(get_proxy).put(update_proxy))
-        .route("/rules", get(get_rules).post(replace_rules).put(update_rule_at_index))
+        .route(
+            "/rules",
+            get(get_rules).post(replace_rules).put(update_rule_at_index),
+        )
         .route("/rules/{index}", delete(delete_rule))
         .route("/rules/reorder", post(reorder_rules))
         .route("/connections", get(get_connections))
@@ -41,13 +44,28 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Config save
         .route("/api/config/save", post(save_config))
         // Subscriptions
-        .route("/api/subscriptions", get(get_subscriptions).post(add_subscription))
+        .route(
+            "/api/subscriptions",
+            get(get_subscriptions).post(add_subscription),
+        )
         .route("/api/subscriptions/{name}", delete(delete_subscription))
-        .route("/api/subscriptions/{name}/refresh", post(refresh_subscription))
+        .route(
+            "/api/subscriptions/{name}/refresh",
+            post(refresh_subscription),
+        )
         // Proxy groups
-        .route("/api/proxy-groups", get(get_proxy_groups).post(create_proxy_group))
-        .route("/api/proxy-groups/{name}", put(update_proxy_group).delete(delete_proxy_group))
-        .route("/api/proxy-groups/{name}/select", put(select_proxy_in_group))
+        .route(
+            "/api/proxy-groups",
+            get(get_proxy_groups).post(create_proxy_group),
+        )
+        .route(
+            "/api/proxy-groups/{name}",
+            put(update_proxy_group).delete(delete_proxy_group),
+        )
+        .route(
+            "/api/proxy-groups/{name}/select",
+            put(select_proxy_in_group),
+        )
         // Web UI
         .route("/ui", get(ui::serve_ui))
         .route("/ui/{*rest}", get(ui::serve_ui))
@@ -62,10 +80,16 @@ async fn hello() -> &'static str {
 }
 
 #[derive(Serialize)]
-struct VersionResponse { version: String, meta: bool }
+struct VersionResponse {
+    version: String,
+    meta: bool,
+}
 
 async fn version() -> Json<VersionResponse> {
-    Json(VersionResponse { version: env!("CARGO_PKG_VERSION").to_string(), meta: true })
+    Json(VersionResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        meta: true,
+    })
 }
 
 #[derive(Serialize)]
@@ -87,13 +111,16 @@ async fn get_proxies(State(state): State<Arc<AppState>>) -> Json<ProxiesResponse
     let proxies = state.tunnel.proxies();
     let mut result = std::collections::HashMap::new();
     for (name, proxy) in &proxies {
-        result.insert(name.clone(), ProxyInfo {
-            name: proxy.name().to_string(),
-            proxy_type: proxy.adapter_type().to_string(),
-            alive: proxy.alive(),
-            history: proxy.delay_history(),
-            udp: proxy.support_udp(),
-        });
+        result.insert(
+            name.clone(),
+            ProxyInfo {
+                name: proxy.name().to_string(),
+                proxy_type: proxy.adapter_type().to_string(),
+                alive: proxy.alive(),
+                history: proxy.delay_history(),
+                udp: proxy.support_udp(),
+            },
+        );
     }
     Json(ProxiesResponse { proxies: result })
 }
@@ -114,7 +141,9 @@ async fn get_proxy(
 }
 
 #[derive(Deserialize)]
-struct UpdateProxyRequest { name: String }
+struct UpdateProxyRequest {
+    name: String,
+}
 
 async fn update_proxy(
     State(state): State<Arc<AppState>>,
@@ -124,7 +153,10 @@ async fn update_proxy(
     use mihomo_proxy::SelectorGroup;
     let proxies = state.tunnel.proxies();
     if let Some(proxy) = proxies.get(&group_name) {
-        if let Some(selector) = proxy.as_any().and_then(|a| a.downcast_ref::<SelectorGroup>()) {
+        if let Some(selector) = proxy
+            .as_any()
+            .and_then(|a| a.downcast_ref::<SelectorGroup>())
+        {
             if selector.select(&body.name) {
                 info!("Selector '{}' switched to '{}'", group_name, body.name);
                 return StatusCode::NO_CONTENT;
@@ -144,13 +176,19 @@ struct RuleInfo {
 }
 
 #[derive(Serialize)]
-struct RulesResponse { rules: Vec<RuleInfo> }
+struct RulesResponse {
+    rules: Vec<RuleInfo>,
+}
 
 async fn get_rules(State(state): State<Arc<AppState>>) -> Json<RulesResponse> {
     let rules = state.tunnel.rules_info();
     let result: Vec<RuleInfo> = rules
         .into_iter()
-        .map(|(rt, payload, adapter)| RuleInfo { rule_type: rt, payload, proxy: adapter })
+        .map(|(rt, payload, adapter)| RuleInfo {
+            rule_type: rt,
+            payload,
+            proxy: adapter,
+        })
         .collect();
     Json(RulesResponse { rules: result })
 }
@@ -168,16 +206,25 @@ async fn get_connections(State(state): State<Arc<AppState>>) -> Json<Connections
     let conns = stats.active_connections();
     let connections: Vec<serde_json::Value> = conns
         .into_iter()
-        .map(|c| serde_json::json!({
-            "id": c.id, "upload": c.upload, "download": c.download,
-            "start": c.start, "chains": c.chains, "rule": c.rule,
-            "rulePayload": c.rule_payload,
-        }))
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id, "upload": c.upload, "download": c.download,
+                "start": c.start, "chains": c.chains, "rule": c.rule,
+                "rulePayload": c.rule_payload,
+            })
+        })
         .collect();
-    Json(ConnectionsResponse { upload_total: up, download_total: down, connections })
+    Json(ConnectionsResponse {
+        upload_total: up,
+        download_total: down,
+        connections,
+    })
 }
 
-async fn close_connection(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> StatusCode {
+async fn close_connection(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> StatusCode {
     state.tunnel.statistics().close_connection(&id);
     StatusCode::NO_CONTENT
 }
@@ -193,7 +240,10 @@ struct ConfigResponse {
     socks_port: Option<u16>,
     #[serde(rename = "port", skip_serializing_if = "Option::is_none")]
     http_port: Option<u16>,
-    #[serde(rename = "external-controller", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "external-controller",
+        skip_serializing_if = "Option::is_none"
+    )]
     external_controller: Option<String>,
 }
 
@@ -210,12 +260,22 @@ async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse>
 }
 
 #[derive(Deserialize)]
-struct UpdateConfigRequest { mode: Option<String>, #[serde(rename = "log-level")] log_level: Option<String> }
+struct UpdateConfigRequest {
+    mode: Option<String>,
+    #[serde(rename = "log-level")]
+    log_level: Option<String>,
+}
 
-async fn update_configs(State(state): State<Arc<AppState>>, Json(body): Json<UpdateConfigRequest>) -> StatusCode {
+async fn update_configs(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UpdateConfigRequest>,
+) -> StatusCode {
     if let Some(mode_str) = body.mode {
         match mode_str.parse::<TunnelMode>() {
-            Ok(mode) => { state.tunnel.set_mode(mode); info!("Mode changed to {}", mode); }
+            Ok(mode) => {
+                state.tunnel.set_mode(mode);
+                info!("Mode changed to {}", mode);
+            }
             Err(_) => return StatusCode::BAD_REQUEST,
         }
     }
@@ -224,7 +284,10 @@ async fn update_configs(State(state): State<Arc<AppState>>, Json(body): Json<Upd
 }
 
 #[derive(Serialize)]
-struct TrafficResponse { up: i64, down: i64 }
+struct TrafficResponse {
+    up: i64,
+    down: i64,
+}
 
 async fn get_traffic(State(state): State<Arc<AppState>>) -> Json<TrafficResponse> {
     let (up, down) = state.tunnel.statistics().snapshot();
@@ -232,9 +295,16 @@ async fn get_traffic(State(state): State<Arc<AppState>>) -> Json<TrafficResponse
 }
 
 #[derive(Deserialize)]
-struct DnsQueryRequest { name: String, #[serde(rename = "type")] qtype: Option<String> }
+struct DnsQueryRequest {
+    name: String,
+    #[serde(rename = "type")]
+    qtype: Option<String>,
+}
 
-async fn dns_query(State(state): State<Arc<AppState>>, Json(body): Json<DnsQueryRequest>) -> Json<serde_json::Value> {
+async fn dns_query(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DnsQueryRequest>,
+) -> Json<serde_json::Value> {
     let resolver = state.tunnel.resolver();
     let result = resolver.resolve_ip(&body.name).await;
     let _ = body.qtype;
@@ -295,7 +365,11 @@ async fn get_subscriptions(State(state): State<Arc<AppState>>) -> Json<Vec<Subsc
 }
 
 #[derive(Deserialize)]
-struct AddSubscriptionRequest { name: String, url: String, interval: Option<u64> }
+struct AddSubscriptionRequest {
+    name: String,
+    url: String,
+    interval: Option<u64>,
+}
 
 async fn add_subscription(
     State(state): State<Arc<AppState>>,
@@ -314,7 +388,10 @@ async fn add_subscription(
 
     if let Some(ref subs) = raw.subscriptions {
         if subs.iter().any(|s| s.name == body.name) {
-            return Err((StatusCode::CONFLICT, "subscription name already exists".into()));
+            return Err((
+                StatusCode::CONFLICT,
+                "subscription name already exists".into(),
+            ));
         }
     }
 
@@ -484,13 +561,18 @@ async fn create_proxy_group(
         }
     }
     let group = RawProxyGroup {
-        name: body.name.clone(), group_type: body.group_type,
-        proxies: Some(body.proxies), url: body.url,
-        interval: body.interval, tolerance: body.tolerance,
+        name: body.name.clone(),
+        group_type: body.group_type,
+        proxies: Some(body.proxies),
+        url: body.url,
+        interval: body.interval,
+        tolerance: body.tolerance,
     };
     raw.proxy_groups.get_or_insert_with(Vec::new).push(group);
     apply_raw_to_tunnel(&raw, &state.tunnel)?;
-    Ok(Json(serde_json::json!({"message": "group created", "name": body.name})))
+    Ok(Json(
+        serde_json::json!({"message": "group created", "name": body.name}),
+    ))
 }
 
 async fn update_proxy_group(
@@ -499,7 +581,9 @@ async fn update_proxy_group(
     Json(body): Json<CreateProxyGroupRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let mut raw = state.raw_config.write();
-    let group = raw.proxy_groups.as_mut()
+    let group = raw
+        .proxy_groups
+        .as_mut()
         .and_then(|groups| groups.iter_mut().find(|g| g.name == name))
         .ok_or_else(|| (StatusCode::NOT_FOUND, "group not found".into()))?;
     group.group_type = body.group_type;
@@ -536,7 +620,9 @@ async fn delete_proxy_group(
 }
 
 #[derive(Deserialize)]
-struct SelectProxyRequest { name: String }
+struct SelectProxyRequest {
+    name: String,
+}
 
 async fn select_proxy_in_group(
     State(state): State<Arc<AppState>>,
@@ -546,7 +632,10 @@ async fn select_proxy_in_group(
     use mihomo_proxy::SelectorGroup;
     let proxies = state.tunnel.proxies();
     if let Some(proxy) = proxies.get(&group_name) {
-        if let Some(selector) = proxy.as_any().and_then(|a| a.downcast_ref::<SelectorGroup>()) {
+        if let Some(selector) = proxy
+            .as_any()
+            .and_then(|a| a.downcast_ref::<SelectorGroup>())
+        {
             if selector.select(&body.name) {
                 info!("Selector '{}' switched to '{}'", group_name, body.name);
                 return StatusCode::NO_CONTENT;
@@ -560,7 +649,9 @@ async fn select_proxy_in_group(
 // ── Rules CRUD ───────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct ReplaceRulesRequest { rules: Vec<String> }
+struct ReplaceRulesRequest {
+    rules: Vec<String>,
+}
 
 async fn replace_rules(
     State(state): State<Arc<AppState>>,
@@ -573,7 +664,10 @@ async fn replace_rules(
 }
 
 #[derive(Deserialize)]
-struct UpdateRuleRequest { index: usize, rule: String }
+struct UpdateRuleRequest {
+    index: usize,
+    rule: String,
+}
 
 async fn update_rule_at_index(
     State(state): State<Arc<AppState>>,
@@ -604,7 +698,10 @@ async fn delete_rule(
 }
 
 #[derive(Deserialize)]
-struct ReorderRulesRequest { from: usize, to: usize }
+struct ReorderRulesRequest {
+    from: usize,
+    to: usize,
+}
 
 async fn reorder_rules(
     State(state): State<Arc<AppState>>,

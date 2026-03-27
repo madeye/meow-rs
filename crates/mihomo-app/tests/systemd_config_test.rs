@@ -29,10 +29,7 @@ fn minimal_raw_config() -> RawConfig {
 
 #[test]
 fn unit_contains_read_write_paths_for_config_dir() {
-    let unit = mihomo_app::generate_systemd_unit(
-        "/usr/bin/mihomo",
-        "/etc/mihomo/config.yaml",
-    );
+    let unit = mihomo_app::generate_systemd_unit("/usr/bin/mihomo", "/etc/mihomo/config.yaml");
 
     assert!(
         unit.contains("ReadWritePaths=/etc/mihomo"),
@@ -43,10 +40,7 @@ fn unit_contains_read_write_paths_for_config_dir() {
 
 #[test]
 fn unit_working_directory_matches_config_parent() {
-    let unit = mihomo_app::generate_systemd_unit(
-        "/usr/bin/mihomo",
-        "/opt/mihomo/config.yaml",
-    );
+    let unit = mihomo_app::generate_systemd_unit("/usr/bin/mihomo", "/opt/mihomo/config.yaml");
 
     assert!(unit.contains("WorkingDirectory=/opt/mihomo"));
     assert!(unit.contains("ReadWritePaths=/opt/mihomo"));
@@ -54,10 +48,7 @@ fn unit_working_directory_matches_config_parent() {
 
 #[test]
 fn unit_exec_start_uses_absolute_config_path() {
-    let unit = mihomo_app::generate_systemd_unit(
-        "/usr/bin/mihomo",
-        "/etc/mihomo/config.yaml",
-    );
+    let unit = mihomo_app::generate_systemd_unit("/usr/bin/mihomo", "/etc/mihomo/config.yaml");
 
     assert!(
         unit.contains("ExecStart=/usr/bin/mihomo -f /etc/mihomo/config.yaml"),
@@ -68,20 +59,15 @@ fn unit_exec_start_uses_absolute_config_path() {
 
 #[test]
 fn unit_has_protect_system_strict() {
-    let unit = mihomo_app::generate_systemd_unit(
-        "/usr/bin/mihomo",
-        "/etc/mihomo/config.yaml",
-    );
+    let unit = mihomo_app::generate_systemd_unit("/usr/bin/mihomo", "/etc/mihomo/config.yaml");
 
     assert!(unit.contains("ProtectSystem=strict"));
 }
 
 #[test]
 fn unit_paths_consistent_for_nested_config() {
-    let unit = mihomo_app::generate_systemd_unit(
-        "/usr/bin/mihomo",
-        "/var/lib/mihomo/configs/config.yaml",
-    );
+    let unit =
+        mihomo_app::generate_systemd_unit("/usr/bin/mihomo", "/var/lib/mihomo/configs/config.yaml");
 
     assert!(unit.contains("WorkingDirectory=/var/lib/mihomo/configs"));
     assert!(unit.contains("ReadWritePaths=/var/lib/mihomo/configs"));
@@ -90,10 +76,7 @@ fn unit_paths_consistent_for_nested_config() {
 #[test]
 fn unit_root_config_path_defaults_to_slash() {
     // Edge case: config at filesystem root
-    let unit = mihomo_app::generate_systemd_unit(
-        "/usr/bin/mihomo",
-        "/config.yaml",
-    );
+    let unit = mihomo_app::generate_systemd_unit("/usr/bin/mihomo", "/config.yaml");
 
     assert!(unit.contains("WorkingDirectory=/"));
     assert!(unit.contains("ReadWritePaths=/"));

@@ -60,7 +60,10 @@ fn save_creates_backup_of_existing() {
 
     // Backup should have original content
     assert!(bak_path.exists());
-    assert_eq!(std::fs::read_to_string(&bak_path).unwrap(), "original-content");
+    assert_eq!(
+        std::fs::read_to_string(&bak_path).unwrap(),
+        "original-content"
+    );
 
     // Main file should have new content
     let content = std::fs::read_to_string(&path).unwrap();
@@ -230,10 +233,7 @@ fn rebuild_from_raw_with_groups() {
 fn rebuild_from_raw_skips_invalid_proxy() {
     let mut raw = minimal_raw_config();
     let mut bad_proxy = HashMap::new();
-    bad_proxy.insert(
-        "name".to_string(),
-        serde_yaml::Value::String("bad".into()),
-    );
+    bad_proxy.insert("name".to_string(), serde_yaml::Value::String("bad".into()));
     bad_proxy.insert(
         "type".to_string(),
         serde_yaml::Value::String("unknown_protocol".into()),

@@ -136,7 +136,9 @@ async fn handle_http_inner(
         let (proxy, rule_name, rule_payload) = match inner.resolve_proxy(&metadata) {
             Some(v) => v,
             None => {
-                stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+                stream
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    .await?;
                 return Err("no matching rule".into());
             }
         };
@@ -193,7 +195,9 @@ async fn handle_http_inner(
             }
             Err(e) => {
                 warn!("HTTP dial error: {}", e);
-                stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await?;
+                stream
+                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                    .await?;
             }
         }
 
@@ -237,5 +241,8 @@ fn extract_path_from_url(url: &str) -> &str {
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .unwrap_or(url);
-    without_scheme.find('/').map(|i| &without_scheme[i..]).unwrap_or("/")
+    without_scheme
+        .find('/')
+        .map(|i| &without_scheme[i..])
+        .unwrap_or("/")
 }

@@ -1,6 +1,6 @@
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use mihomo_api::routes::{AppState, create_router};
+use mihomo_api::routes::{create_router, AppState};
 use mihomo_common::DnsMode;
 use mihomo_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
 use mihomo_dns::Resolver;
@@ -128,7 +128,11 @@ async fn version_endpoint() {
     let state = test_state_default();
     let app = create_router(state);
     let resp = app
-        .oneshot(Request::get("/version").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/version")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -142,7 +146,11 @@ async fn get_proxies_contains_builtins() {
     let state = test_state_default();
     let app = create_router(state);
     let resp = app
-        .oneshot(Request::get("/proxies").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/proxies")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -190,7 +198,11 @@ async fn get_configs_returns_mode() {
     let state = test_state_default();
     let app = create_router(state);
     let resp = app
-        .oneshot(Request::get("/configs").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/configs")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -218,7 +230,11 @@ async fn patch_configs_change_mode() {
     // Verify the mode changed
     let app2 = create_router(state);
     let resp2 = app2
-        .oneshot(Request::get("/configs").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/configs")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let json = body_json(resp2).await;
@@ -248,7 +264,11 @@ async fn get_traffic() {
     let state = test_state_default();
     let app = create_router(state);
     let resp = app
-        .oneshot(Request::get("/traffic").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/traffic")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -262,7 +282,11 @@ async fn get_connections_empty() {
     let state = test_state_default();
     let app = create_router(state);
     let resp = app
-        .oneshot(Request::get("/connections").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/connections")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -279,7 +303,11 @@ async fn get_rules_returns_initial() {
     let state = test_state_default();
     let app = create_router(state);
     let resp = app
-        .oneshot(Request::get("/rules").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/rules")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -314,7 +342,11 @@ async fn replace_rules() {
     // Verify
     let app2 = create_router(state.clone());
     let resp2 = app2
-        .oneshot(Request::get("/rules").body(axum::body::Body::empty()).unwrap())
+        .oneshot(
+            Request::get("/rules")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let json = body_json(resp2).await;
@@ -809,7 +841,9 @@ async fn get_subscriptions_reports_counts() {
         name: "G".into(),
         group_type: "select".into(),
         proxies: Some(vec!["S1".into()]),
-        url: None, interval: None, tolerance: None,
+        url: None,
+        interval: None,
+        tolerance: None,
     }]);
     raw.rules = Some(vec!["MATCH,DIRECT".into()]);
 
@@ -863,7 +897,9 @@ async fn delete_subscription_clears_data() {
         name: "G".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into(), "S1".into()]),
-        url: None, interval: None, tolerance: None,
+        url: None,
+        interval: None,
+        tolerance: None,
     }]);
 
     let state = test_state(raw);
@@ -995,32 +1031,43 @@ async fn select_proxy_roundtrip() {
         name: "Sel".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
-        url: None, interval: None, tolerance: None,
+        url: None,
+        interval: None,
+        tolerance: None,
     }]);
     let state = test_state(raw);
-    
+
     // Select REJECT
     let app = create_router(state.clone());
-    let resp = app.oneshot(
-        Request::builder()
-            .method("PUT")
-            .uri("/api/proxy-groups/Sel/select")
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(r#"{"name":"REJECT"}"#))
-            .unwrap(),
-    ).await.unwrap();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/proxy-groups/Sel/select")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"name":"REJECT"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "select failed");
-    
+
     // Read back proxy groups
     let app = create_router(state.clone());
-    let resp = app.oneshot(
-        Request::get("/api/proxy-groups")
-            .body(axum::body::Body::empty())
-            .unwrap(),
-    ).await.unwrap();
+    let resp = app
+        .oneshot(
+            Request::get("/api/proxy-groups")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let groups: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let sel = &groups[0];
-    assert_eq!(sel["now"], "REJECT", "now field should be REJECT after select");
+    assert_eq!(
+        sel["now"], "REJECT",
+        "now field should be REJECT after select"
+    );
 }
