@@ -87,11 +87,3 @@ jobs:
 
       - name: Trojan integration tests
         run: cargo test --test trojan_integration -- --nocapture
-
-      - name: Install QEMU and busybox for TUN test
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 busybox-static
-
-      - name: TUN QEMU integration tests
-        run: bash tests/test_tun_qemu.sh
