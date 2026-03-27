@@ -71,10 +71,11 @@ pub fn save_raw_config(path: &str, raw: &raw::RawConfig) -> Result<(), anyhow::E
     Ok(())
 }
 
+/// The result of rebuilding proxies and rules from a RawConfig.
+pub type RebuildResult = (HashMap<String, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>);
+
 /// Rebuild proxies and rules from a RawConfig (used for runtime updates).
-pub fn rebuild_from_raw(
-    raw: &raw::RawConfig,
-) -> Result<(HashMap<String, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>), anyhow::Error> {
+pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::Error> {
     let mut proxies: HashMap<String, Arc<dyn Proxy>> = HashMap::new();
     // Built-in proxies
     proxies.insert(

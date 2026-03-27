@@ -612,7 +612,7 @@ async fn delete_proxy_group(
     if let Some(ref mut rules) = raw.rules {
         rules.retain(|r| {
             let parts: Vec<&str> = r.split(',').collect();
-            !parts.last().is_some_and(|target| target.trim() == name)
+            parts.last().is_none_or(|target| target.trim() != name)
         });
     }
     apply_raw_to_tunnel(&raw, &state.tunnel)?;
