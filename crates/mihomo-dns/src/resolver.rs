@@ -25,6 +25,22 @@ pub struct Resolver {
     inflight: DashMap<String, ()>,
 }
 
+/// Extract a usable cache TTL from a hickory LookupIp response.
+/// Clamps to [10s, 3600s] and falls back to 60s if the value is zero/negative.
+fn ttl_from_lookup(lookup: &hickory_resolver::lookup_ip::LookupIp) -> Duration {
+    const MIN_TTL: Duration = Duration::from_secs(10);
+    const MAX_TTL: Duration = Duration::from_secs(3600);
+    const FALLBACK_TTL: Duration = Duration::from_secs(60);
+    let valid_until = lookup.valid_until();
+    let now = std::time::Instant::now();
+    let raw = valid_until.saturating_duration_since(now);
+    if raw.is_zero() {
+        FALLBACK_TTL
+    } else {
+        raw.clamp(MIN_TTL, MAX_TTL)
+    }
+}
+
 impl Resolver {
     pub fn new(
         main_servers: Vec<SocketAddr>,
@@ -121,9 +137,10 @@ impl Resolver {
         // Try main resolver
         match self.main.lookup_ip(host).await {
             Ok(lookup) => {
+                let ttl = ttl_from_lookup(&lookup);
                 let ips: Vec<IpAddr> = lookup.iter().collect();
                 if !ips.is_empty() {
-                    self.cache.put(host, ips.clone(), Duration::from_secs(300));
+                    self.cache.put(host, ips.clone(), ttl);
                     return Some(ips);
                 }
             }
@@ -136,9 +153,10 @@ impl Resolver {
         if let Some(fallback) = &self.fallback {
             match fallback.lookup_ip(host).await {
                 Ok(lookup) => {
+                    let ttl = ttl_from_lookup(&lookup);
                     let ips: Vec<IpAddr> = lookup.iter().collect();
                     if !ips.is_empty() {
-                        self.cache.put(host, ips.clone(), Duration::from_secs(300));
+                        self.cache.put(host, ips.clone(), ttl);
                         return Some(ips);
                     }
                 }
