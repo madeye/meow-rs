@@ -1,6 +1,6 @@
 use crate::tunnel::TunnelInner;
 use dashmap::DashMap;
-use mihomo_common::{DnsMode, Metadata, ProxyPacketConn};
+use mihomo_common::{Metadata, ProxyPacketConn};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -24,15 +24,8 @@ pub async fn handle_udp(
     src: SocketAddr,
     mut metadata: Metadata,
 ) {
-    // Fix metadata for FakeIP
-    if let Some(dst_ip) = metadata.dst_ip {
-        if tunnel.resolver.is_fake_ip(dst_ip) {
-            if let Some(host) = tunnel.resolver.fake_ip_reverse(dst_ip) {
-                metadata.host = host;
-                metadata.dns_mode = DnsMode::FakeIp;
-            }
-        }
-    }
+    // Pre-resolve metadata (FakeIP reverse + host -> real IP if rules need it)
+    tunnel.pre_resolve(&mut metadata).await;
 
     let key = format!("{}:{}", src, metadata.remote_address());
 

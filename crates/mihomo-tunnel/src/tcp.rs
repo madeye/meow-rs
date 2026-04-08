@@ -1,6 +1,5 @@
 use crate::tunnel::TunnelInner;
-use mihomo_common::{DnsMode, Metadata, ProxyConn};
-use mihomo_dns::Resolver;
+use mihomo_common::{Metadata, ProxyConn};
 use tokio::io;
 use tracing::{debug, info, warn};
 
@@ -9,8 +8,8 @@ pub async fn handle_tcp(
     mut conn: Box<dyn ProxyConn>,
     mut metadata: Metadata,
 ) {
-    // Fix metadata: resolve FakeIP back to real host
-    pre_handle_metadata(&mut metadata, &tunnel.resolver);
+    // Pre-resolve metadata (FakeIP reverse + host -> real IP if rules need it)
+    tunnel.pre_resolve(&mut metadata).await;
 
     // Match rules to find the right proxy
     let (proxy, rule_name, rule_payload) = match tunnel.resolve_proxy(&metadata) {
@@ -64,19 +63,4 @@ pub async fn handle_tcp(
     }
 
     tunnel.stats.close_connection(&conn_id);
-}
-
-fn pre_handle_metadata(metadata: &mut Metadata, resolver: &Resolver) {
-    // If the destination IP is a FakeIP, look up the real host
-    if let Some(dst_ip) = metadata.dst_ip {
-        if resolver.is_fake_ip(dst_ip) {
-            if let Some(host) = resolver.fake_ip_reverse(dst_ip) {
-                metadata.host = host;
-                metadata.dns_mode = DnsMode::FakeIp;
-            }
-        }
-    }
-
-    // If we have a host but no resolved IP, the actual resolution
-    // happens lazily during rule matching.
 }
