@@ -48,6 +48,8 @@ impl TunnelInner {
         if metadata.host.is_empty() {
             return;
         }
+        // Step 1 populated `metadata.host` but left `dst_ip` as the (still-fake)
+        // address. Detect that here and replace it with the real routable IP.
         let needs_resolve = match metadata.dst_ip {
             None => true,
             Some(ip) => self.resolver.is_fake_ip(ip),
@@ -153,10 +155,15 @@ impl Tunnel {
 
     pub fn update_rules(&self, rules: Vec<Box<dyn Rule>>) {
         let needs = rules.iter().any(|r| r.should_resolve_ip());
-        *self.inner.rules.write() = rules;
-        self.inner
-            .needs_ip_resolution
-            .store(needs, Ordering::Relaxed);
+        {
+            let mut guard = self.inner.rules.write();
+            *guard = rules;
+            // Store under the write lock so any reader that acquires the rules
+            // lock after this point also sees the updated flag.
+            self.inner
+                .needs_ip_resolution
+                .store(needs, Ordering::Relaxed);
+        }
         info!("Rules updated (needs_ip_resolution={})", needs);
     }
 
