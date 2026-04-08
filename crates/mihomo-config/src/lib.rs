@@ -2,12 +2,14 @@ pub mod dns_parser;
 pub mod proxy_parser;
 pub mod raw;
 pub mod rule_parser;
+pub mod rule_provider;
 pub mod subscription;
 
 use mihomo_common::{Proxy, Rule, TunnelMode};
 use mihomo_dns::Resolver;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -51,12 +53,17 @@ pub struct ApiConfig {
 
 pub fn load_config(path: &str) -> Result<Config, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
-    load_config_from_str(&content)
+    let raw: raw::RawConfig = serde_yaml::from_str(&content)?;
+    // Rule-provider cache files live next to config.yaml.
+    let cache_dir: Option<PathBuf> = std::path::Path::new(path)
+        .parent()
+        .and_then(|p| if p.as_os_str().is_empty() { None } else { Some(p.to_path_buf()) });
+    build_config(raw, cache_dir.as_deref())
 }
 
 pub fn load_config_from_str(content: &str) -> Result<Config, anyhow::Error> {
     let raw: raw::RawConfig = serde_yaml::from_str(content)?;
-    build_config(raw)
+    build_config(raw, None)
 }
 
 /// Save a RawConfig back to disk with atomic write (.tmp → rename) and .bak backup.
@@ -78,7 +85,19 @@ pub fn save_raw_config(path: &str, raw: &raw::RawConfig) -> Result<(), anyhow::E
 pub type RebuildResult = (HashMap<String, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>);
 
 /// Rebuild proxies and rules from a RawConfig (used for runtime updates).
+///
+/// Does not resolve rule-provider cache paths; use
+/// [`rebuild_from_raw_with_cache_dir`] when a working directory is available.
 pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::Error> {
+    rebuild_from_raw_with_cache_dir(raw, None)
+}
+
+/// Same as [`rebuild_from_raw`] but accepts a `cache_dir` used to resolve
+/// relative rule-provider paths and to cache fetched HTTP payloads.
+pub fn rebuild_from_raw_with_cache_dir(
+    raw: &raw::RawConfig,
+    cache_dir: Option<&Path>,
+) -> Result<RebuildResult, anyhow::Error> {
     let mut proxies: HashMap<String, Arc<dyn Proxy>> = HashMap::new();
     // Built-in proxies
     let direct = if let Some(mark) = raw.routing_mark {
@@ -145,12 +164,22 @@ pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::E
         remaining = still_remaining;
     }
 
-    let rules = rule_parser::parse_rules(raw.rules.as_deref().unwrap_or(&[]));
+    // Load rule-providers before rule parsing so RULE-SET entries can
+    // resolve their named sets.
+    let providers = match raw.rule_providers.as_ref() {
+        Some(map) if !map.is_empty() => rule_provider::load_providers(map, cache_dir),
+        _ => HashMap::new(),
+    };
+
+    let rules = rule_parser::parse_rules_with_providers(
+        raw.rules.as_deref().unwrap_or(&[]),
+        &providers,
+    );
 
     Ok((proxies, rules))
 }
 
-fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
+fn build_config(raw: raw::RawConfig, cache_dir: Option<&Path>) -> Result<Config, anyhow::Error> {
     // General config
     let mode = raw
         .mode
@@ -176,7 +205,7 @@ fn build_config(raw: raw::RawConfig) -> Result<Config, anyhow::Error> {
     let dns_config = dns_parser::parse_dns(&raw)?;
 
     // Proxies and rules via rebuild
-    let (proxies, rules) = rebuild_from_raw(&raw)?;
+    let (proxies, rules) = rebuild_from_raw_with_cache_dir(&raw, cache_dir)?;
 
     // Listener config
     let bind_addr = if general.allow_lan {

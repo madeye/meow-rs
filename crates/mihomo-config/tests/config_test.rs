@@ -575,3 +575,72 @@ fn test_invalid_yaml() {
     let yaml = "{{invalid yaml}}";
     assert!(load_config_from_str(yaml).is_err());
 }
+
+#[test]
+fn test_file_rule_provider_end_to_end() {
+    // Write a small domain list to a temp file.
+    let dir = tempfile::tempdir().unwrap();
+    let list_path = dir.path().join("ads.yaml");
+    std::fs::write(
+        &list_path,
+        "payload:\n  - '+.ads.example'\n  - banner.test\n",
+    )
+    .unwrap();
+
+    let yaml = format!(
+        r#"
+mixed-port: 7890
+rule-providers:
+  ads:
+    type: file
+    behavior: domain
+    format: yaml
+    path: {path}
+rules:
+  - RULE-SET,ads,REJECT
+  - MATCH,DIRECT
+"#,
+        path = list_path.to_string_lossy()
+    );
+
+    let config = load_config_from_str(&yaml).unwrap();
+    // RULE-SET rule + MATCH
+    assert_eq!(config.rules.len(), 2);
+    assert_eq!(config.rules[0].rule_type().to_string(), "RULE-SET");
+    assert_eq!(config.rules[0].adapter(), "REJECT");
+    assert_eq!(config.rules[0].payload(), "ads");
+
+    // Verify the RULE-SET rule actually matches via its backing set.
+    use mihomo_common::{Metadata, RuleMatchHelper};
+    let helper = RuleMatchHelper {
+        find_process: Box::new(|| {}),
+    };
+    let meta = Metadata {
+        host: "tracker.ads.example".to_string(),
+        dst_port: 443,
+        ..Default::default()
+    };
+    assert!(config.rules[0].match_metadata(&meta, &helper));
+
+    let meta_miss = Metadata {
+        host: "example.com".to_string(),
+        dst_port: 443,
+        ..Default::default()
+    };
+    assert!(!config.rules[0].match_metadata(&meta_miss, &helper));
+}
+
+#[test]
+fn test_missing_rule_provider_is_skipped() {
+    // Referencing an undefined rule-set should warn and skip, not panic.
+    let yaml = r#"
+mixed-port: 7890
+rules:
+  - RULE-SET,nonexistent,REJECT
+  - MATCH,DIRECT
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    // Only the MATCH rule survives.
+    assert_eq!(config.rules.len(), 1);
+    assert_eq!(config.rules[0].rule_type().to_string(), "MATCH");
+}

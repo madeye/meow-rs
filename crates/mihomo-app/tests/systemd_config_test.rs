@@ -21,6 +21,7 @@ fn minimal_raw_config() -> RawConfig {
             "DOMAIN,example.com,DIRECT".into(),
             "MATCH,REJECT".into(),
         ]),
+        rule_providers: None,
         subscriptions: None,
         tproxy_port: None,
         tproxy_sni: None,

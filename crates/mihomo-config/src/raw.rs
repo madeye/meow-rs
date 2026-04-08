@@ -18,6 +18,7 @@ pub struct RawConfig {
     pub proxies: Option<Vec<HashMap<String, serde_yaml::Value>>>,
     pub proxy_groups: Option<Vec<RawProxyGroup>>,
     pub rules: Option<Vec<String>>,
+    pub rule_providers: Option<HashMap<String, RawRuleProvider>>,
     pub subscriptions: Option<Vec<RawSubscription>>,
     pub tproxy_port: Option<u16>,
     pub tproxy_sni: Option<bool>,
@@ -46,6 +47,22 @@ pub struct RawProxyGroup {
     pub url: Option<String>,
     pub interval: Option<u64>,
     pub tolerance: Option<u16>,
+}
+
+/// A single entry in the top-level `rule-providers:` map.
+///
+/// `interval` is accepted for upstream-config compatibility but is currently
+/// ignored — providers are loaded exactly once at startup.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawRuleProvider {
+    #[serde(rename = "type")]
+    pub provider_type: String, // "http" | "file"
+    pub behavior: String,      // "domain" | "ipcidr" | "classical"
+    pub format: Option<String>, // "yaml" (default) | "text"
+    pub url: Option<String>,
+    pub path: Option<String>,
+    pub interval: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
