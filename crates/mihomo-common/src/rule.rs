@@ -55,7 +55,8 @@ impl fmt::Display for RuleType {
     }
 }
 
-/// Helper passed to Rule::match_metadata for lazy evaluation
+/// Helper passed to `Rule::match_metadata` to supply platform-specific lookups
+/// (currently only process-name lookup) without coupling rules to the host OS.
 pub struct RuleMatchHelper {
     pub find_process: Box<dyn Fn() + Send + Sync>,
 }
