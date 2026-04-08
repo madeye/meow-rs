@@ -46,6 +46,25 @@ fn obfs_server_available() -> bool {
         .is_ok()
 }
 
+/// Returns true if `MIHOMO_REQUIRE_INTEGRATION_BINS=1` is set. CI exports this
+/// so that integration tests must actually run instead of being silently
+/// skipped when their helper binaries are missing.
+fn require_integration_bins() -> bool {
+    std::env::var("MIHOMO_REQUIRE_INTEGRATION_BINS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Helper that either skips with a message (local dev) or hard-fails the test
+/// (CI), depending on `MIHOMO_REQUIRE_INTEGRATION_BINS`.
+#[track_caller]
+fn skip_or_fail(reason: &str) {
+    if require_integration_bins() {
+        panic!("{} (MIHOMO_REQUIRE_INTEGRATION_BINS=1)", reason);
+    }
+    eprintln!("SKIP: {}", reason);
+}
+
 /// Start a TCP echo server that reads data and writes it back.
 async fn start_tcp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -153,7 +172,7 @@ async fn free_port() -> u16 {
 #[tokio::test]
 async fn test_ss_tcp_relay() {
     if !ssserver_available() {
-        eprintln!("SKIP: ssserver not found in PATH");
+        skip_or_fail("ssserver not found in PATH");
         return;
     }
 
@@ -215,7 +234,7 @@ async fn test_ss_tcp_relay() {
 #[tokio::test]
 async fn test_ss_udp_relay() {
     if !ssserver_available() {
-        eprintln!("SKIP: ssserver not found in PATH");
+        skip_or_fail("ssserver not found in PATH");
         return;
     }
 
@@ -282,11 +301,11 @@ async fn test_ss_udp_relay() {
 #[tokio::test]
 async fn test_ss_tcp_relay_with_obfs_plugin() {
     if !ssserver_available() {
-        eprintln!("SKIP: ssserver not found in PATH");
+        skip_or_fail("ssserver not found in PATH");
         return;
     }
     if !obfs_available() {
-        eprintln!("SKIP: obfs-local/obfs-server not found in PATH");
+        skip_or_fail("obfs-local/obfs-server not found in PATH");
         return;
     }
 
@@ -358,11 +377,11 @@ async fn test_ss_tcp_relay_with_obfs_plugin() {
 #[tokio::test]
 async fn test_ss_tcp_relay_with_builtin_obfs_http() {
     if !ssserver_available() {
-        eprintln!("SKIP: ssserver not found in PATH");
+        skip_or_fail("ssserver not found in PATH");
         return;
     }
     if !obfs_server_available() {
-        eprintln!("SKIP: obfs-server not found in PATH");
+        skip_or_fail("obfs-server not found in PATH");
         return;
     }
 
@@ -423,11 +442,11 @@ async fn test_ss_tcp_relay_with_builtin_obfs_http() {
 #[tokio::test]
 async fn test_ss_tcp_relay_with_builtin_obfs_tls() {
     if !ssserver_available() {
-        eprintln!("SKIP: ssserver not found in PATH");
+        skip_or_fail("ssserver not found in PATH");
         return;
     }
     if !obfs_server_available() {
-        eprintln!("SKIP: obfs-server not found in PATH");
+        skip_or_fail("obfs-server not found in PATH");
         return;
     }
 

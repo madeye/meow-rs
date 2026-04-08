@@ -52,6 +52,15 @@ jobs:
         if: steps.cache-ssserver.outputs.cache-hit != 'true'
         run: cargo install shadowsocks-rust --features "stream-cipher aead-cipher-2022" --locked
 
+      - name: Install simple-obfs (obfs-local / obfs-server)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends simple-obfs
+          # Fail fast if either binary is missing — the obfs integration tests
+          # rely on both being on PATH (otherwise they would silently SKIP).
+          command -v obfs-local
+          command -v obfs-server
+
       - name: Build
         run: cargo build --tests
 
@@ -73,7 +82,11 @@ jobs:
       - name: Rules tests
         run: cargo test --test rules_test -- --nocapture
 
-      - name: Shadowsocks integration tests
+      - name: Shadowsocks integration tests (incl. simple-obfs)
+        env:
+          # Force-fail (instead of silently SKIP) if ssserver / obfs-local /
+          # obfs-server are missing on PATH — they are installed above.
+          MIHOMO_REQUIRE_INTEGRATION_BINS: "1"
         run: cargo test --test shadowsocks_integration -- --nocapture
 
       - name: API integration tests

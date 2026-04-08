@@ -116,8 +116,9 @@ fn build_http_request(host: &str, port: u16, body: &[u8]) -> Vec<u8> {
 impl<S: AsyncRead + AsyncWrite + Unpin> HttpObfs<S> {
     fn poll_drain_write_buf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.write_buf_off < self.write_buf.len() {
-            let n = ready!(Pin::new(&mut self.inner)
-                .poll_write(cx, &self.write_buf[self.write_buf_off..]))?;
+            let n = ready!(
+                Pin::new(&mut self.inner).poll_write(cx, &self.write_buf[self.write_buf_off..])
+            )?;
             if n == 0 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -320,8 +321,9 @@ impl<S> TlsObfs<S> {
 impl<S: AsyncRead + AsyncWrite + Unpin> TlsObfs<S> {
     fn poll_drain_write_buf(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         while self.write_buf_off < self.write_buf.len() {
-            let n = ready!(Pin::new(&mut self.inner)
-                .poll_write(cx, &self.write_buf[self.write_buf_off..]))?;
+            let n = ready!(
+                Pin::new(&mut self.inner).poll_write(cx, &self.write_buf[self.write_buf_off..])
+            )?;
             if n == 0 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -628,9 +630,7 @@ mod tests {
         // The data payload should be embedded somewhere — search for it.
         assert!(hello.windows(data.len()).any(|w| w == data));
         // SNI should contain the server name.
-        assert!(hello
-            .windows(server.len())
-            .any(|w| w == server.as_bytes()));
+        assert!(hello.windows(server.len()).any(|w| w == server.as_bytes()));
     }
 
     // ---- HttpObfs round-trip against an in-memory duplex ----
