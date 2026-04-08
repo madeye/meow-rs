@@ -224,16 +224,17 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[tokio::test]
-    async fn resolve_ip_real_uses_hosts_and_skips_fakeip() {
-        use std::net::Ipv4Addr;
+    async fn resolve_ip_real_uses_hosts_file() {
+        // Sanity check: when the host is in the hosts file, resolve_ip_real
+        // returns the mapped IP regardless of FakeIP mode.
         let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         hosts.insert("example.test", vec![real]);
 
         let pool = Arc::new(FakeIpPool::new("198.18.0.0/15").unwrap());
-
         let resolver = Resolver::new(
             vec![],
             vec![],
@@ -242,8 +243,42 @@ mod tests {
             hosts,
         );
 
-        let got = resolver.resolve_ip_real("example.test").await;
-        assert_eq!(got, Some(real));
+        assert_eq!(resolver.resolve_ip_real("example.test").await, Some(real));
+    }
+
+    #[tokio::test]
+    async fn resolve_ip_real_returns_cached_ip_instead_of_fake_ip() {
+        // The real bypass test: with a host NOT in the hosts file, in FakeIP
+        // mode, `resolve_ip` would return a fake IP (from the 198.18.0.0/15
+        // pool). `resolve_ip_real` must instead return the cached real IP,
+        // bypassing the fake pool entirely.
+        let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let pool = Arc::new(FakeIpPool::new("198.18.0.0/15").unwrap());
+        let resolver = Resolver::new(
+            vec![],
+            vec![],
+            Some(pool),
+            DnsMode::FakeIp,
+            hosts,
+        );
+
+        let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        resolver
+            .cache
+            .put("cached.test", vec![real], Duration::from_secs(60));
+
+        // Sanity: `resolve_ip` in FakeIp mode should hand out a fake IP,
+        // NOT the cached real one (FakeIP branch fires before the cache).
+        let via_resolve_ip = resolver.resolve_ip("cached.test").await.unwrap();
+        assert!(
+            resolver.is_fake_ip(via_resolve_ip),
+            "resolve_ip should have returned a fake IP, got {}",
+            via_resolve_ip
+        );
+
+        // The real test: `resolve_ip_real` must bypass the fake pool and
+        // return the cached real IP.
+        assert_eq!(resolver.resolve_ip_real("cached.test").await, Some(real));
     }
 
     #[test]
