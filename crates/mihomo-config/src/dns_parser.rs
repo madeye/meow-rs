@@ -33,9 +33,7 @@ pub fn parse_dns(raw: &RawConfig) -> Result<DnsConfig, anyhow::Error> {
     // so existing Clash-style configs still load.
     let mode = match dns.enhanced_mode.as_deref() {
         Some("fake-ip") => {
-            warn!(
-                "dns.enhanced-mode: 'fake-ip' is no longer supported; falling back to 'normal'"
-            );
+            warn!("dns.enhanced-mode: 'fake-ip' is no longer supported; falling back to 'normal'");
             DnsMode::Normal
         }
         Some("redir-host") => DnsMode::Mapping,
