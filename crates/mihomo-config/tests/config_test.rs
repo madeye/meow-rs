@@ -453,6 +453,124 @@ proxies:
 }
 
 #[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_simple_obfs_alias() {
+    // The legacy `plugin: simple-obfs` (the SIP003 binary's name) must also
+    // route through the built-in implementation.
+    let yaml = r#"
+proxies:
+  - name: "ss-simple-obfs"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: simple-obfs
+    plugin-opts:
+      mode: http
+      host: bing.com
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(config.proxies.contains_key("ss-simple-obfs"));
+}
+
+#[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_sip003_keys_yaml_map() {
+    // YAML map using SIP003-native key names `obfs` / `obfs-host`.
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-sip003-map"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+    plugin-opts:
+      obfs: tls
+      obfs-host: gateway.icloud.com
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(config.proxies.contains_key("ss-obfs-sip003-map"));
+}
+
+#[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_uppercase_mode() {
+    // Mode value should be parsed case-insensitively.
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-upper"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+    plugin-opts:
+      mode: TLS
+      host: cloudflare.com
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(config.proxies.contains_key("ss-obfs-upper"));
+}
+
+#[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_no_plugin_opts() {
+    // Built-in obfs requires `mode`; with no plugin-opts at all, the proxy
+    // must be skipped instead of accidentally falling back to "external".
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-no-opts"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(!config.proxies.contains_key("ss-obfs-no-opts"));
+}
+
+#[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_host_falls_back_to_server() {
+    // If `host` is omitted, the built-in obfs uses the SS server name as
+    // the fake Host: / SNI.
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-default-host"
+    type: ss
+    server: "ss.example.org"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+    plugin-opts:
+      mode: http
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(config.proxies.contains_key("ss-obfs-default-host"));
+}
+
+#[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_invalid_mode_skipped() {
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-bad-mode"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+    plugin-opts:
+      mode: quic
+      host: foo
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(!config.proxies.contains_key("ss-obfs-bad-mode"));
+}
+
+#[test]
 fn test_invalid_yaml() {
     let yaml = "{{invalid yaml}}";
     assert!(load_config_from_str(yaml).is_err());
