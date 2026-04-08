@@ -25,20 +25,22 @@ pub struct Resolver {
     inflight: DashMap<String, ()>,
 }
 
-/// Extract a usable cache TTL from a hickory LookupIp response.
-/// Clamps to [10s, 3600s] and falls back to 60s if the value is zero/negative.
-fn ttl_from_lookup(lookup: &hickory_resolver::lookup_ip::LookupIp) -> Duration {
+fn clamp_ttl(raw: Duration) -> Duration {
     const MIN_TTL: Duration = Duration::from_secs(10);
     const MAX_TTL: Duration = Duration::from_secs(3600);
-    const FALLBACK_TTL: Duration = Duration::from_secs(60);
-    let valid_until = lookup.valid_until();
-    let now = std::time::Instant::now();
-    let raw = valid_until.saturating_duration_since(now);
-    if raw.is_zero() {
-        FALLBACK_TTL
-    } else {
-        raw.clamp(MIN_TTL, MAX_TTL)
-    }
+    raw.clamp(MIN_TTL, MAX_TTL)
+}
+
+/// Extract a usable cache TTL from a hickory LookupIp response.
+/// Clamps the time-until-expiry reported by hickory to [10s, 3600s].
+/// If hickory reports an already-expired entry (`valid_until` in the past),
+/// this returns `MIN_TTL` so we cache for the shortest allowed window
+/// instead of a misleading longer fallback.
+fn ttl_from_lookup(lookup: &hickory_resolver::lookup_ip::LookupIp) -> Duration {
+    let raw = lookup
+        .valid_until()
+        .saturating_duration_since(std::time::Instant::now());
+    clamp_ttl(raw)
 }
 
 impl Resolver {
@@ -197,5 +199,30 @@ impl Resolver {
 
     pub fn clear_cache(&self) {
         self.cache.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_ttl_zero_returns_min() {
+        assert_eq!(clamp_ttl(Duration::ZERO), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn clamp_ttl_below_min_returns_min() {
+        assert_eq!(clamp_ttl(Duration::from_secs(3)), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn clamp_ttl_in_range_returns_raw() {
+        assert_eq!(clamp_ttl(Duration::from_secs(120)), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn clamp_ttl_above_max_returns_max() {
+        assert_eq!(clamp_ttl(Duration::from_secs(99_999)), Duration::from_secs(3600));
     }
 }
