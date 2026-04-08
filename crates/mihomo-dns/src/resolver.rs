@@ -235,13 +235,7 @@ mod tests {
         hosts.insert("example.test", vec![real]);
 
         let pool = Arc::new(FakeIpPool::new("198.18.0.0/15").unwrap());
-        let resolver = Resolver::new(
-            vec![],
-            vec![],
-            Some(pool),
-            DnsMode::FakeIp,
-            hosts,
-        );
+        let resolver = Resolver::new(vec![], vec![], Some(pool), DnsMode::FakeIp, hosts);
 
         assert_eq!(resolver.resolve_ip_real("example.test").await, Some(real));
     }
@@ -254,13 +248,7 @@ mod tests {
         // bypassing the fake pool entirely.
         let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
         let pool = Arc::new(FakeIpPool::new("198.18.0.0/15").unwrap());
-        let resolver = Resolver::new(
-            vec![],
-            vec![],
-            Some(pool),
-            DnsMode::FakeIp,
-            hosts,
-        );
+        let resolver = Resolver::new(vec![], vec![], Some(pool), DnsMode::FakeIp, hosts);
 
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         resolver
@@ -293,11 +281,17 @@ mod tests {
 
     #[test]
     fn clamp_ttl_in_range_returns_raw() {
-        assert_eq!(clamp_ttl(Duration::from_secs(120)), Duration::from_secs(120));
+        assert_eq!(
+            clamp_ttl(Duration::from_secs(120)),
+            Duration::from_secs(120)
+        );
     }
 
     #[test]
     fn clamp_ttl_above_max_returns_max() {
-        assert_eq!(clamp_ttl(Duration::from_secs(99_999)), Duration::from_secs(3600));
+        assert_eq!(
+            clamp_ttl(Duration::from_secs(99_999)),
+            Duration::from_secs(3600)
+        );
     }
 }

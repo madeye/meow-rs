@@ -1565,6 +1565,7 @@ dependencies = [
  "mihomo-dns",
  "mihomo-proxy",
  "mihomo-rules",
+ "mihomo-trie",
  "parking_lot",
  "serde",
  "serde_json",

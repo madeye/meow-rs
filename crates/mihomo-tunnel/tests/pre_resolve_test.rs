@@ -12,13 +12,7 @@ use std::sync::Arc;
 fn build_resolver_with_host(host: &str, ip: IpAddr) -> Arc<Resolver> {
     let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
     hosts.insert(host, vec![ip]);
-    Arc::new(Resolver::new(
-        vec![],
-        vec![],
-        None,
-        DnsMode::Normal,
-        hosts,
-    ))
+    Arc::new(Resolver::new(vec![], vec![], None, DnsMode::Normal, hosts))
 }
 
 #[tokio::test]
@@ -42,8 +36,10 @@ async fn pre_resolve_populates_dst_ip_for_ipcidr_rule() {
     tunnel.inner().pre_resolve(&mut md).await;
 
     assert_eq!(md.dst_ip, Some(real_ip), "pre_resolve should fill dst_ip");
-    let (_proxy, rule_name, _payload) =
-        tunnel.inner().resolve_proxy(&md).expect("rule should match");
+    let (_proxy, rule_name, _payload) = tunnel
+        .inner()
+        .resolve_proxy(&md)
+        .expect("rule should match");
     assert_eq!(rule_name, "IP-CIDR");
 }
 
