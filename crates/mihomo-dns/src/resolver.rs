@@ -106,6 +106,25 @@ impl Resolver {
         self.lookup_actual(host).await
     }
 
+    /// Resolve a hostname to a real (routable) IP address, bypassing the
+    /// FakeIP pool. This is intended for rule matching (GeoIP / IP-CIDR)
+    /// where a synthetic fake IP would be useless.
+    ///
+    /// Order: hosts file -> cache -> upstream DNS. Results are cached with
+    /// the TTL from the DNS response (see `lookup_actual_all`).
+    pub async fn resolve_ip_real(&self, host: &str) -> Option<IpAddr> {
+        // 1. Hosts file
+        if let Some(ips) = self.hosts.search(host) {
+            return ips.first().copied();
+        }
+        // 2. Cache
+        if let Some(ips) = self.cache.get(host) {
+            return ips.first().copied();
+        }
+        // 3. Upstream DNS (skips FakeIP allocation)
+        self.lookup_actual(host).await
+    }
+
     pub async fn lookup_ipv4(&self, host: &str) -> Option<IpAddr> {
         if let Some(ips) = self.hosts.search(host) {
             return ips.iter().find(|ip| ip.is_ipv4()).copied();
@@ -205,6 +224,27 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resolve_ip_real_uses_hosts_and_skips_fakeip() {
+        use std::net::Ipv4Addr;
+        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        hosts.insert("example.test", vec![real]);
+
+        let pool = Arc::new(FakeIpPool::new("198.18.0.0/15").unwrap());
+
+        let resolver = Resolver::new(
+            vec![],
+            vec![],
+            Some(pool),
+            DnsMode::FakeIp,
+            hosts,
+        );
+
+        let got = resolver.resolve_ip_real("example.test").await;
+        assert_eq!(got, Some(real));
+    }
 
     #[test]
     fn clamp_ttl_zero_returns_min() {
