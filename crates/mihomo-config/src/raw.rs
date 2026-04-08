@@ -58,7 +58,7 @@ pub struct RawProxyGroup {
 pub struct RawRuleProvider {
     #[serde(rename = "type")]
     pub provider_type: String, // "http" | "file"
-    pub behavior: String,      // "domain" | "ipcidr" | "classical"
+    pub behavior: String,       // "domain" | "ipcidr" | "classical"
     pub format: Option<String>, // "yaml" (default) | "text"
     pub url: Option<String>,
     pub path: Option<String>,

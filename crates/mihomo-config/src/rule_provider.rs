@@ -68,10 +68,7 @@ fn load_one(
     cfg: &RawRuleProvider,
     cache_dir: Option<&Path>,
 ) -> Result<Arc<dyn RuleSet>> {
-    let behavior: RuleSetBehavior = cfg
-        .behavior
-        .parse()
-        .map_err(|e: String| anyhow!("{}", e))?;
+    let behavior: RuleSetBehavior = cfg.behavior.parse().map_err(|e: String| anyhow!("{}", e))?;
 
     let format: RuleSetFormat = match cfg.format.as_deref() {
         Some(s) => s.parse().map_err(|e: String| anyhow!("{}", e))?,
@@ -167,9 +164,8 @@ fn fetch_http_with_cache(url: &str, cache_path: Option<&Path>) -> Result<String>
                         fetch_err,
                         path.display()
                     );
-                    return std::fs::read_to_string(path).with_context(|| {
-                        format!("reading cached provider {}", path.display())
-                    });
+                    return std::fs::read_to_string(path)
+                        .with_context(|| format!("reading cached provider {}", path.display()));
                 }
             }
             Err(fetch_err)
@@ -212,8 +208,8 @@ fn fetch_http_blocking(url: &str) -> Result<String> {
 fn parse_payload(format: RuleSetFormat, raw: &str) -> Result<Vec<String>> {
     match format {
         RuleSetFormat::Yaml => {
-            let root: serde_yaml::Value = serde_yaml::from_str(raw)
-                .context("rule-set yaml parse error")?;
+            let root: serde_yaml::Value =
+                serde_yaml::from_str(raw).context("rule-set yaml parse error")?;
             let payload = root
                 .get("payload")
                 .ok_or_else(|| anyhow!("rule-set yaml missing 'payload' key"))?
@@ -260,11 +256,7 @@ mod tests {
     fn file_provider_loads() {
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("list.yaml");
-        std::fs::write(
-            &file_path,
-            "payload:\n  - '+.example.com'\n  - foo.com\n",
-        )
-        .unwrap();
+        std::fs::write(&file_path, "payload:\n  - '+.example.com'\n  - foo.com\n").unwrap();
 
         let mut providers = HashMap::new();
         providers.insert(

@@ -55,9 +55,13 @@ pub fn load_config(path: &str) -> Result<Config, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
     let raw: raw::RawConfig = serde_yaml::from_str(&content)?;
     // Rule-provider cache files live next to config.yaml.
-    let cache_dir: Option<PathBuf> = std::path::Path::new(path)
-        .parent()
-        .and_then(|p| if p.as_os_str().is_empty() { None } else { Some(p.to_path_buf()) });
+    let cache_dir: Option<PathBuf> = std::path::Path::new(path).parent().and_then(|p| {
+        if p.as_os_str().is_empty() {
+            None
+        } else {
+            Some(p.to_path_buf())
+        }
+    });
     build_config(raw, cache_dir.as_deref())
 }
 
@@ -171,10 +175,8 @@ pub fn rebuild_from_raw_with_cache_dir(
         _ => HashMap::new(),
     };
 
-    let rules = rule_parser::parse_rules_with_providers(
-        raw.rules.as_deref().unwrap_or(&[]),
-        &providers,
-    );
+    let rules =
+        rule_parser::parse_rules_with_providers(raw.rules.as_deref().unwrap_or(&[]), &providers);
 
     Ok((proxies, rules))
 }

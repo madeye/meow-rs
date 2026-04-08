@@ -157,7 +157,10 @@ impl IpCidrRuleSet {
             }
             match entry.parse::<IpNet>() {
                 Ok(net) => cidrs.push(net),
-                Err(e) => warn!("rule-set (ipcidr): skipping invalid entry '{}': {}", entry, e),
+                Err(e) => warn!(
+                    "rule-set (ipcidr): skipping invalid entry '{}': {}",
+                    entry, e
+                ),
             }
         }
         Self { cidrs }
@@ -313,10 +316,22 @@ mod tests {
 
     #[test]
     fn behavior_from_str() {
-        assert_eq!("domain".parse::<RuleSetBehavior>().unwrap(), RuleSetBehavior::Domain);
-        assert_eq!("ipcidr".parse::<RuleSetBehavior>().unwrap(), RuleSetBehavior::IpCidr);
-        assert_eq!("IPCIDR".parse::<RuleSetBehavior>().unwrap(), RuleSetBehavior::IpCidr);
-        assert_eq!("classical".parse::<RuleSetBehavior>().unwrap(), RuleSetBehavior::Classical);
+        assert_eq!(
+            "domain".parse::<RuleSetBehavior>().unwrap(),
+            RuleSetBehavior::Domain
+        );
+        assert_eq!(
+            "ipcidr".parse::<RuleSetBehavior>().unwrap(),
+            RuleSetBehavior::IpCidr
+        );
+        assert_eq!(
+            "IPCIDR".parse::<RuleSetBehavior>().unwrap(),
+            RuleSetBehavior::IpCidr
+        );
+        assert_eq!(
+            "classical".parse::<RuleSetBehavior>().unwrap(),
+            RuleSetBehavior::Classical
+        );
         assert!("nope".parse::<RuleSetBehavior>().is_err());
     }
 }
