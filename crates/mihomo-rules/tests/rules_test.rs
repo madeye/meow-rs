@@ -15,7 +15,6 @@ use mihomo_rules::process::ProcessRule;
 
 fn helper() -> RuleMatchHelper {
     RuleMatchHelper {
-        resolve_ip: Box::new(|| {}),
         find_process: Box::new(|| {}),
     }
 }

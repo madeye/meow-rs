@@ -36,13 +36,10 @@ impl Rule for IpCidrRule {
         }
     }
 
-    fn match_metadata(&self, metadata: &Metadata, helper: &RuleMatchHelper) -> bool {
+    fn match_metadata(&self, metadata: &Metadata, _helper: &RuleMatchHelper) -> bool {
         let ip = if self.is_src {
             metadata.src_ip
         } else {
-            if !self.no_resolve && !metadata.resolved() {
-                (helper.resolve_ip)();
-            }
             metadata.dst_ip
         };
         ip.is_some_and(|addr| self.cidr.contains(&addr))

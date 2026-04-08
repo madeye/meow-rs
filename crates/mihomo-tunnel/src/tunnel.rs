@@ -49,7 +49,7 @@ impl TunnelInner {
             }
             TunnelMode::Rule => {
                 let rules = self.rules.read();
-                let result = match_engine::match_rules(metadata, &rules, &self.resolver);
+                let result = match_engine::match_rules(metadata, &rules);
                 match result {
                     Some(m) => {
                         let proxies = self.proxies.read();

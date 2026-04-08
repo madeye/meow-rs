@@ -36,10 +36,7 @@ impl Rule for GeoIpRule {
         RuleType::GeoIp
     }
 
-    fn match_metadata(&self, metadata: &Metadata, helper: &RuleMatchHelper) -> bool {
-        if !self.no_resolve && !metadata.resolved() {
-            (helper.resolve_ip)();
-        }
+    fn match_metadata(&self, metadata: &Metadata, _helper: &RuleMatchHelper) -> bool {
         if let Some(ip) = metadata.dst_ip {
             if let Some(code) = self.lookup_country(ip) {
                 return code.to_uppercase() == self.country;

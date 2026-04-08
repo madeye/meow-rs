@@ -57,7 +57,6 @@ impl fmt::Display for RuleType {
 
 /// Helper passed to Rule::match_metadata for lazy evaluation
 pub struct RuleMatchHelper {
-    pub resolve_ip: Box<dyn Fn() + Send + Sync>,
     pub find_process: Box<dyn Fn() + Send + Sync>,
 }
 

@@ -1,6 +1,4 @@
 use mihomo_common::{Metadata, Rule, RuleMatchHelper};
-use mihomo_dns::Resolver;
-use std::sync::Arc;
 
 pub struct MatchResult {
     pub adapter_name: String,
@@ -9,22 +7,15 @@ pub struct MatchResult {
 }
 
 /// Match metadata against rules. Returns the adapter name and matched rule info.
+/// Pre-resolution of `metadata.dst_ip` from a hostname must happen before this
+/// function is called (see `TunnelInner::pre_resolve`).
 pub fn match_rules(
     metadata: &Metadata,
     rules: &[Box<dyn Rule>],
-    _resolver: &Arc<Resolver>,
 ) -> Option<MatchResult> {
-    // Create the lazy helper.
-    // Note: In a real implementation, resolve_ip would mutate metadata.dst_ip via interior
-    // mutability. For now, we provide the callbacks that the rules can use.
     let helper = RuleMatchHelper {
-        resolve_ip: Box::new(|| {
-            // This is called lazily when a rule needs IP resolution.
-            // The actual resolution happens in the tunnel's pre-handle phase.
-        }),
         find_process: Box::new(|| {
-            // This is called lazily when a rule needs process info.
-            // Process lookup is platform-specific.
+            // Process lookup is platform-specific and not yet implemented.
         }),
     };
 

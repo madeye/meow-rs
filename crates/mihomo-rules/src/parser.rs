@@ -69,7 +69,6 @@ mod tests {
 
     fn noop_helper() -> RuleMatchHelper {
         RuleMatchHelper {
-            resolve_ip: Box::new(|| {}),
             find_process: Box::new(|| {}),
         }
     }
