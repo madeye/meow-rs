@@ -82,7 +82,6 @@ fn test_network_display() {
 #[test]
 fn test_dns_mode_display() {
     assert_eq!(DnsMode::Normal.to_string(), "normal");
-    assert_eq!(DnsMode::FakeIp.to_string(), "fake-ip");
     assert_eq!(DnsMode::Mapping.to_string(), "redir-host");
 }
 

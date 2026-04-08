@@ -1,5 +1,4 @@
 use crate::cache::DnsCache;
-use crate::fakeip::FakeIpPool;
 use dashmap::DashMap;
 use hickory_proto::xfer::Protocol;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
@@ -8,7 +7,6 @@ use hickory_resolver::TokioResolver;
 use mihomo_common::DnsMode;
 use mihomo_trie::DomainTrie;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -16,7 +14,6 @@ pub struct Resolver {
     main: TokioResolver,
     fallback: Option<TokioResolver>,
     cache: DnsCache,
-    fakeip_pool: Option<Arc<FakeIpPool>>,
     mode: DnsMode,
     // Policy: domain trie mapping to specific resolver index
     hosts: DomainTrie<Vec<IpAddr>>,
@@ -47,7 +44,6 @@ impl Resolver {
     pub fn new(
         main_servers: Vec<SocketAddr>,
         fallback_servers: Vec<SocketAddr>,
-        fakeip_pool: Option<Arc<FakeIpPool>>,
         mode: DnsMode,
         hosts: DomainTrie<Vec<IpAddr>>,
     ) -> Self {
@@ -62,7 +58,6 @@ impl Resolver {
             main,
             fallback,
             cache: DnsCache::new(4096),
-            fakeip_pool,
             mode,
             hosts,
             inflight: DashMap::new(),
@@ -90,39 +85,21 @@ impl Resolver {
             return ips.first().copied();
         }
 
-        // 2. Check FakeIP mode
-        if self.mode == DnsMode::FakeIp {
-            if let Some(pool) = &self.fakeip_pool {
-                return Some(pool.lookup_host(host));
-            }
-        }
-
-        // 3. Check cache
+        // 2. Check cache
         if let Some(ips) = self.cache.get(host) {
             return ips.first().copied();
         }
 
-        // 4. Resolve via DNS
+        // 3. Resolve via DNS
         self.lookup_actual(host).await
     }
 
-    /// Resolve a hostname to a real (routable) IP address, bypassing the
-    /// FakeIP pool. This is intended for rule matching (GeoIP / IP-CIDR)
-    /// where a synthetic fake IP would be useless.
-    ///
-    /// Order: hosts file -> cache -> upstream DNS. Results are cached with
-    /// the TTL from the DNS response (see `lookup_actual_all`).
+    /// Resolve a hostname to a routable IP address. Kept as a separate entry
+    /// point so callers that specifically need a real IP for rule matching
+    /// (GeoIP / IP-CIDR) remain explicit; currently identical to
+    /// [`resolve_ip`].
     pub async fn resolve_ip_real(&self, host: &str) -> Option<IpAddr> {
-        // 1. Hosts file
-        if let Some(ips) = self.hosts.search(host) {
-            return ips.first().copied();
-        }
-        // 2. Cache
-        if let Some(ips) = self.cache.get(host) {
-            return ips.first().copied();
-        }
-        // 3. Upstream DNS (skips FakeIP allocation)
-        self.lookup_actual(host).await
+        self.resolve_ip(host).await
     }
 
     pub async fn lookup_ipv4(&self, host: &str) -> Option<IpAddr> {
@@ -190,30 +167,14 @@ impl Resolver {
         None
     }
 
-    /// Reverse lookup for FakeIP: given a fake IP, return the original host
-    pub fn fake_ip_reverse(&self, ip: IpAddr) -> Option<String> {
-        self.fakeip_pool.as_ref()?.lookup_ip(ip)
-    }
-
     /// Reverse lookup via DNS snooping: given a real IP, return the domain
     /// that was recently resolved to it (from the DNS cache).
     pub fn reverse_lookup(&self, ip: IpAddr) -> Option<String> {
         self.cache.reverse_lookup(ip)
     }
 
-    /// Check if an IP is a fake IP
-    pub fn is_fake_ip(&self, ip: IpAddr) -> bool {
-        self.fakeip_pool
-            .as_ref()
-            .is_some_and(|pool| pool.contains(ip))
-    }
-
     pub fn mode(&self) -> DnsMode {
         self.mode
-    }
-
-    pub fn fakeip_pool(&self) -> Option<&Arc<FakeIpPool>> {
-        self.fakeip_pool.as_ref()
     }
 
     pub fn clear_cache(&self) {
@@ -227,46 +188,27 @@ mod tests {
     use std::net::Ipv4Addr;
 
     #[tokio::test]
-    async fn resolve_ip_real_uses_hosts_file() {
-        // Sanity check: when the host is in the hosts file, resolve_ip_real
-        // returns the mapped IP regardless of FakeIP mode.
+    async fn resolve_ip_uses_hosts_file() {
         let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         hosts.insert("example.test", vec![real]);
 
-        let pool = Arc::new(FakeIpPool::new("198.18.0.0/15").unwrap());
-        let resolver = Resolver::new(vec![], vec![], Some(pool), DnsMode::FakeIp, hosts);
-
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts);
+        assert_eq!(resolver.resolve_ip("example.test").await, Some(real));
         assert_eq!(resolver.resolve_ip_real("example.test").await, Some(real));
     }
 
     #[tokio::test]
-    async fn resolve_ip_real_returns_cached_ip_instead_of_fake_ip() {
-        // The real bypass test: with a host NOT in the hosts file, in FakeIP
-        // mode, `resolve_ip` would return a fake IP (from the 198.18.0.0/15
-        // pool). `resolve_ip_real` must instead return the cached real IP,
-        // bypassing the fake pool entirely.
+    async fn resolve_ip_returns_cached_entry() {
         let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
-        let pool = Arc::new(FakeIpPool::new("198.18.0.0/15").unwrap());
-        let resolver = Resolver::new(vec![], vec![], Some(pool), DnsMode::FakeIp, hosts);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts);
 
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         resolver
             .cache
             .put("cached.test", vec![real], Duration::from_secs(60));
 
-        // Sanity: `resolve_ip` in FakeIp mode should hand out a fake IP,
-        // NOT the cached real one (FakeIP branch fires before the cache).
-        let via_resolve_ip = resolver.resolve_ip("cached.test").await.unwrap();
-        assert!(
-            resolver.is_fake_ip(via_resolve_ip),
-            "resolve_ip should have returned a fake IP, got {}",
-            via_resolve_ip
-        );
-
-        // The real test: `resolve_ip_real` must bypass the fake pool and
-        // return the cached real IP.
-        assert_eq!(resolver.resolve_ip_real("cached.test").await, Some(real));
+        assert_eq!(resolver.resolve_ip("cached.test").await, Some(real));
     }
 
     #[test]

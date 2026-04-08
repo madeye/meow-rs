@@ -36,7 +36,6 @@ Logic composition rules (AND, OR, NOT) are also supported for combining conditio
 ### DNS
 - UDP DNS server with configurable listen address
 - Main + fallback nameserver groups
-- **FakeIP** mode for transparent proxying (configurable CIDR range)
 - Response caching and in-flight request deduplication
 - **DNS snooping** -- reverse IP→domain lookup table for transparent proxy hostname recovery
 
@@ -106,7 +105,7 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 Listeners (HTTP/SOCKS5/Mixed/TProxy)
         |
         v
-    Tunnel (routing engine)  <-->  DNS Resolver (FakeIP/Normal/Snooping)
+    Tunnel (routing engine)  <-->  DNS Resolver (Normal/Snooping)
         |
     Rule Matching Engine
         |
@@ -124,7 +123,7 @@ Listeners (HTTP/SOCKS5/Mixed/TProxy)
 | `mihomo-trie` | Domain trie for efficient pattern matching |
 | `mihomo-proxy` | Proxy protocol implementations and groups |
 | `mihomo-rules` | Rule matching engine and parser |
-| `mihomo-dns` | DNS resolver, FakeIP pool, cache, DNS snooping, server |
+| `mihomo-dns` | DNS resolver, cache, DNS snooping, server |
 | `mihomo-tunnel` | Core routing, TCP/UDP relay, statistics |
 | `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
 | `mihomo-config` | YAML configuration parsing, subscription fetcher, config persistence |
@@ -230,8 +229,6 @@ external-controller: 127.0.0.1:9090
 dns:
   enable: true
   listen: 127.0.0.1:1053
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.1/16
   nameserver:
     - 8.8.8.8
   fallback:

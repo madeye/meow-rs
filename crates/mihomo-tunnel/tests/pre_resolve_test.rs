@@ -12,7 +12,7 @@ use std::sync::Arc;
 fn build_resolver_with_host(host: &str, ip: IpAddr) -> Arc<Resolver> {
     let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
     hosts.insert(host, vec![ip]);
-    Arc::new(Resolver::new(vec![], vec![], None, DnsMode::Normal, hosts))
+    Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts))
 }
 
 #[tokio::test]

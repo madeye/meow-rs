@@ -1,7 +1,7 @@
 use crate::match_engine;
 use crate::statistics::Statistics;
 use crate::udp::{self, NatTable};
-use mihomo_common::{DnsMode, Metadata, Proxy, ProxyAdapter, Rule, TunnelMode};
+use mihomo_common::{Metadata, Proxy, ProxyAdapter, Rule, TunnelMode};
 use mihomo_dns::Resolver;
 use mihomo_proxy::DirectAdapter;
 use parking_lot::RwLock;
@@ -23,38 +23,18 @@ pub struct TunnelInner {
 }
 
 impl TunnelInner {
-    /// Pre-process metadata before rule matching:
-    /// 1. Reverse FakeIP back to the original host (so domain rules see the host).
-    /// 2. If any rule needs IP resolution and we don't yet have a real IP,
-    ///    resolve `metadata.host` via the internal resolver and populate `dst_ip`.
+    /// Pre-process metadata before rule matching: if any rule needs IP
+    /// resolution and we don't yet have a destination IP, resolve
+    /// `metadata.host` via the internal resolver and populate `dst_ip`.
     ///
-    /// `Metadata::remote_address()` prefers `host` over `dst_ip`, so overwriting
-    /// `dst_ip` here does not change which destination the proxy adapter dials.
+    /// `Metadata::remote_address()` prefers `host` over `dst_ip`, so
+    /// overwriting `dst_ip` here does not change which destination the proxy
+    /// adapter dials.
     pub async fn pre_resolve(&self, metadata: &mut Metadata) {
-        // Step 1: FakeIP reverse
-        if let Some(dst_ip) = metadata.dst_ip {
-            if self.resolver.is_fake_ip(dst_ip) {
-                if let Some(host) = self.resolver.fake_ip_reverse(dst_ip) {
-                    metadata.host = host;
-                    metadata.dns_mode = DnsMode::FakeIp;
-                }
-            }
-        }
-
-        // Step 2: Resolve host -> real IP for rule matching
         if !self.needs_ip_resolution.load(Ordering::Relaxed) {
             return;
         }
-        if metadata.host.is_empty() {
-            return;
-        }
-        // Step 1 populated `metadata.host` but left `dst_ip` as the (still-fake)
-        // address. Detect that here and replace it with the real routable IP.
-        let needs_resolve = match metadata.dst_ip {
-            None => true,
-            Some(ip) => self.resolver.is_fake_ip(ip),
-        };
-        if !needs_resolve {
+        if metadata.host.is_empty() || metadata.dst_ip.is_some() {
             return;
         }
         if let Some(real_ip) = self.resolver.resolve_ip_real(&metadata.host).await {

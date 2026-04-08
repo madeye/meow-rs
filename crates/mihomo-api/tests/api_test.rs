@@ -41,7 +41,6 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
     let resolver = Arc::new(Resolver::new(
         vec!["8.8.8.8:53".parse().unwrap()],
         vec![],
-        None,
         DnsMode::Normal,
         DomainTrie::new(),
     ));

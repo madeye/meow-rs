@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. It provides rule-based tunneling with support for multiple proxy protocols (Shadowsocks, Trojan, Direct, Reject), transparent proxy (nftables/pf), DNS with FakeIP and snooping, and a REST API for runtime control. Licensed under GPL-3.0.
+Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. It provides rule-based tunneling with support for multiple proxy protocols (Shadowsocks, Trojan, Direct, Reject), transparent proxy (nftables/pf), DNS with snooping (IP→domain reverse table), and a REST API for runtime control. Licensed under GPL-3.0.
 
 ## Build Commands
 
@@ -43,7 +43,7 @@ cargo clippy --all-targets
 Listeners (HTTP/SOCKS5/Mixed/TProxy)
         |
         v
-    Tunnel (routing engine)  <-->  DNS Resolver (FakeIP/Normal/Snooping)
+    Tunnel (routing engine)  <-->  DNS Resolver (Normal/Snooping)
         |
     Rule Matching Engine
         |
@@ -61,7 +61,7 @@ Listeners (HTTP/SOCKS5/Mixed/TProxy)
 | `mihomo-trie` | Domain trie for efficient pattern matching |
 | `mihomo-proxy` | Proxy protocol implementations (SS, Trojan, Direct, Reject) and groups (Selector, URLTest, Fallback) |
 | `mihomo-rules` | Rule matching engine and parser (domain, IP-CIDR, GeoIP, process, logic composition) |
-| `mihomo-dns` | DNS resolver, FakeIP pool, cache, DNS snooping (IP→domain reverse table), UDP server |
+| `mihomo-dns` | DNS resolver, cache, DNS snooping (IP→domain reverse table), UDP server |
 | `mihomo-tunnel` | Core routing engine: TCP/UDP relay, rule matching dispatch, connection statistics |
 | `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
 | `mihomo-config` | YAML configuration parsing into typed structs |

@@ -1,7 +1,7 @@
 use crate::raw::RawConfig;
 use crate::DnsConfig;
 use mihomo_common::DnsMode;
-use mihomo_dns::{FakeIpPool, Resolver};
+use mihomo_dns::Resolver;
 use mihomo_trie::DomainTrie;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -15,7 +15,6 @@ pub fn parse_dns(raw: &RawConfig) -> Result<DnsConfig, anyhow::Error> {
             let resolver = Arc::new(Resolver::new(
                 vec!["8.8.8.8:53".parse().unwrap()],
                 vec![],
-                None,
                 DnsMode::Normal,
                 DomainTrie::new(),
             ));
@@ -30,25 +29,17 @@ pub fn parse_dns(raw: &RawConfig) -> Result<DnsConfig, anyhow::Error> {
     let main_servers = parse_nameservers(dns.nameserver.as_deref().unwrap_or(&[]));
     let fallback_servers = parse_nameservers(dns.fallback.as_deref().unwrap_or(&[]));
 
-    // Parse DNS mode
+    // Parse DNS mode. FakeIP was removed; fall back to Normal with a warning
+    // so existing Clash-style configs still load.
     let mode = match dns.enhanced_mode.as_deref() {
-        Some("fake-ip") => DnsMode::FakeIp,
+        Some("fake-ip") => {
+            warn!(
+                "dns.enhanced-mode: 'fake-ip' is no longer supported; falling back to 'normal'"
+            );
+            DnsMode::Normal
+        }
         Some("redir-host") => DnsMode::Mapping,
         _ => DnsMode::Normal,
-    };
-
-    // Create FakeIP pool if needed
-    let fakeip_pool = if mode == DnsMode::FakeIp {
-        let range = dns.fake_ip_range.as_deref().unwrap_or("198.18.0.1/16");
-        match FakeIpPool::new(range) {
-            Ok(pool) => Some(Arc::new(pool)),
-            Err(e) => {
-                warn!("Failed to create FakeIP pool: {}", e);
-                None
-            }
-        }
-    } else {
-        None
     };
 
     // DNS listen address
@@ -59,13 +50,7 @@ pub fn parse_dns(raw: &RawConfig) -> Result<DnsConfig, anyhow::Error> {
 
     let hosts = DomainTrie::new();
 
-    let resolver = Arc::new(Resolver::new(
-        main_servers,
-        fallback_servers,
-        fakeip_pool,
-        mode,
-        hosts,
-    ));
+    let resolver = Arc::new(Resolver::new(main_servers, fallback_servers, mode, hosts));
 
     Ok(DnsConfig {
         resolver,

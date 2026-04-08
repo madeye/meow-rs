@@ -24,7 +24,7 @@ pub async fn handle_udp(
     src: SocketAddr,
     mut metadata: Metadata,
 ) {
-    // Pre-resolve metadata (FakeIP reverse + host -> real IP if rules need it)
+    // Pre-resolve metadata (host -> real IP if rules need it)
     tunnel.pre_resolve(&mut metadata).await;
 
     let key = format!("{}:{}", src, metadata.remote_address());

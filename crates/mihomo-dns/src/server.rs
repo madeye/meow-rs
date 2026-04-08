@@ -5,7 +5,6 @@ use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
 
 /// Simple DNS server that handles queries by forwarding to our resolver.
-/// For FakeIP mode, returns fake IPs for non-filtered domains.
 pub struct DnsServer {
     resolver: Arc<Resolver>,
     listen_addr: SocketAddr,

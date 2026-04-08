@@ -138,14 +138,29 @@ fn test_dns_config_enabled() {
 dns:
   enable: true
   listen: "0.0.0.0:5353"
-  enhanced-mode: fake-ip
-  fake-ip-range: "198.18.0.1/16"
   nameserver:
     - "8.8.8.8"
     - "8.8.4.4:53"
 "#;
     let config = load_config_from_str(yaml).unwrap();
     assert_eq!(config.dns.listen_addr.unwrap().to_string(), "0.0.0.0:5353");
+}
+
+#[test]
+fn test_dns_config_fakeip_falls_back_to_normal() {
+    // FakeIP support has been removed; legacy `enhanced-mode: fake-ip` configs
+    // must still load (with a warning) and silently fall back to Normal mode.
+    let yaml = r#"
+dns:
+  enable: true
+  listen: "0.0.0.0:5353"
+  enhanced-mode: fake-ip
+  fake-ip-range: "198.18.0.1/16"
+  nameserver:
+    - "8.8.8.8"
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert_eq!(config.dns.resolver.mode().to_string(), "normal");
 }
 
 #[test]
@@ -294,8 +309,6 @@ external-controller: "127.0.0.1:9090"
 dns:
   enable: true
   listen: "0.0.0.0:5353"
-  enhanced-mode: fake-ip
-  fake-ip-range: "198.18.0.1/16"
   nameserver:
     - "8.8.8.8"
     - "8.8.4.4"

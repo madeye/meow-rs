@@ -129,7 +129,7 @@ footer a { color: var(--accent); }
       </div>
       <div class="card">
         <h3><span class="icon">&#x1F50D;</span> DNS &amp; Snooping</h3>
-        <p>Built-in UDP DNS server with main + fallback nameservers, FakeIP mode, response caching, and IP&#x2192;domain reverse lookup table for transparent proxy hostname recovery.</p>
+        <p>Built-in UDP DNS server with main + fallback nameservers, response caching, and IP&#x2192;domain reverse lookup table for transparent proxy hostname recovery.</p>
       </div>
       <div class="card">
         <h3><span class="icon">&#x1F6E1;</span> Transparent Proxy</h3>
@@ -169,7 +169,7 @@ footer a { color: var(--accent); }
     <div class="arch-diagram"><span class="hl">Listeners</span> (HTTP / SOCKS5 / Mixed / TProxy)
         |
         v
-    <span class="hl">Tunnel</span> (routing engine)  &lt;--&gt;  <span class="hl2">DNS Resolver</span> (FakeIP / Normal / Snooping)
+    <span class="hl">Tunnel</span> (routing engine)  &lt;--&gt;  <span class="hl2">DNS Resolver</span> (Normal / Snooping)
         |
     <span class="hl">Rule Matching Engine</span>
         |
@@ -190,7 +190,7 @@ footer a { color: var(--accent); }
         <tr><td>mihomo-trie</td><td>Domain trie for efficient pattern matching</td></tr>
         <tr><td>mihomo-proxy</td><td>Proxy protocol implementations and groups</td></tr>
         <tr><td>mihomo-rules</td><td>Rule matching engine and parser</td></tr>
-        <tr><td>mihomo-dns</td><td>DNS resolver, FakeIP pool, cache, DNS snooping, server</td></tr>
+        <tr><td>mihomo-dns</td><td>DNS resolver, cache, DNS snooping, server</td></tr>
         <tr><td>mihomo-tunnel</td><td>Core routing, TCP/UDP relay, statistics</td></tr>
         <tr><td>mihomo-listener</td><td>Inbound handlers (Mixed / HTTP / SOCKS5 / TProxy)</td></tr>
         <tr><td>mihomo-config</td><td>YAML config parsing, subscription fetcher, persistence</td></tr>
