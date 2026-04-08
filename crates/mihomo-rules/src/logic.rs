@@ -39,6 +39,10 @@ impl Rule for AndRule {
     fn payload(&self) -> &str {
         &self.payload
     }
+
+    fn should_resolve_ip(&self) -> bool {
+        self.rules.iter().any(|r| r.should_resolve_ip())
+    }
 }
 
 pub struct OrRule {
@@ -80,6 +84,10 @@ impl Rule for OrRule {
     fn payload(&self) -> &str {
         &self.payload
     }
+
+    fn should_resolve_ip(&self) -> bool {
+        self.rules.iter().any(|r| r.should_resolve_ip())
+    }
 }
 
 pub struct NotRule {
@@ -114,5 +122,9 @@ impl Rule for NotRule {
 
     fn payload(&self) -> &str {
         &self.payload
+    }
+
+    fn should_resolve_ip(&self) -> bool {
+        self.rule.should_resolve_ip()
     }
 }
