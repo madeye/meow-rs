@@ -43,6 +43,8 @@ proxies:
     password: "your-password"
     udp: true
 
+  # Built-in simple-obfs plugin (no external `obfs-local` / `simple-obfs`
+  # binary required). Set `plugin: obfs` and pick `mode: http` or `mode: tls`.
   # - name: "ss-obfs-example"
   #   type: ss
   #   server: 1.2.3.4
@@ -50,7 +52,7 @@ proxies:
   #   cipher: aes-256-gcm
   #   password: "your-password"
   #   udp: true
-  #   plugin: obfs-local
+  #   plugin: obfs
   #   plugin-opts:
   #     mode: http
   #     host: bing.com

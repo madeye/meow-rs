@@ -375,6 +375,84 @@ proxies:
 }
 
 #[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_http() {
+    // `plugin: obfs` with mode=http is handled by the built-in simple-obfs
+    // implementation — no external binary is required, so the proxy must
+    // register successfully.
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-http"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+    plugin-opts:
+      mode: http
+      host: bing.com
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(config.proxies.contains_key("ss-obfs-http"));
+}
+
+#[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_tls() {
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-tls"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+    plugin-opts:
+      mode: tls
+      host: gateway.icloud.com
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(config.proxies.contains_key("ss-obfs-tls"));
+}
+
+#[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_string_opts() {
+    // SIP003 string form (`obfs=http;obfs-host=...`) must also be accepted.
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-str"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+    plugin-opts: "obfs=tls;obfs-host=cloudflare.com"
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(config.proxies.contains_key("ss-obfs-str"));
+}
+
+#[test]
+fn test_proxy_parsing_ss_with_builtin_obfs_missing_mode() {
+    // Without `mode`, the built-in obfs config is invalid and the proxy is skipped.
+    let yaml = r#"
+proxies:
+  - name: "ss-obfs-bad"
+    type: ss
+    server: "1.2.3.4"
+    port: 8388
+    cipher: "aes-256-gcm"
+    password: "password123"
+    plugin: obfs
+    plugin-opts:
+      host: example.com
+"#;
+    let config = load_config_from_str(yaml).unwrap();
+    assert!(!config.proxies.contains_key("ss-obfs-bad"));
+}
+
+#[test]
 fn test_invalid_yaml() {
     let yaml = "{{invalid yaml}}";
     assert!(load_config_from_str(yaml).is_err());

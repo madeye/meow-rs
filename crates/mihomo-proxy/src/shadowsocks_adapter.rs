@@ -10,14 +10,29 @@ use shadowsocks::relay::udprelay::{DatagramReceive, DatagramSend, DatagramSocket
 use shadowsocks::relay::Address;
 use shadowsocks::ProxyClientStream;
 use std::net::SocketAddr;
+use tokio::net::TcpStream;
 use tracing::debug;
+
+use crate::simple_obfs::{HttpObfs, TlsObfs};
+
+/// Built-in (native, no external process) simple-obfs configuration.
+#[derive(Debug, Clone)]
+pub enum BuiltinObfs {
+    /// HTTP simple-obfs with the configured fake `Host` header.
+    Http { host: String },
+    /// TLS simple-obfs with the configured fake SNI server name.
+    Tls { server: String },
+}
 
 pub struct ShadowsocksAdapter {
     name: String,
+    server: String,
+    port: u16,
     server_config: ServerConfig,
     context: shadowsocks::context::SharedContext,
     addr_str: String,
     support_udp: bool,
+    builtin_obfs: Option<BuiltinObfs>,
     _plugin: Option<Plugin>,
 }
 
@@ -41,33 +56,90 @@ impl ShadowsocksAdapter {
         let context = Context::new_shared(ServerType::Local);
         let addr_str = format!("{}:{}", server, port);
 
-        let plugin = if let Some(pname) = plugin_name {
-            let plugin_config = PluginConfig {
-                plugin: pname.to_string(),
-                plugin_opts: plugin_opts.map(String::from),
-                plugin_args: vec![],
-                plugin_mode: Mode::TcpOnly,
-            };
-            let started = Plugin::start(&plugin_config, server_config.addr(), PluginMode::Client)
-                .map_err(|e| {
-                MihomoError::Config(format!("failed to start ss plugin '{}': {}", pname, e))
-            })?;
-            server_config.set_plugin_addr(ServerAddr::SocketAddr(started.local_addr()));
-            server_config.set_plugin(plugin_config);
-            debug!("SS plugin '{}' started on {}", pname, started.local_addr());
-            Some(started)
+        // Native simple-obfs handled in dial_tcp; never spawn an external process for it.
+        let builtin_obfs = match plugin_name {
+            Some("obfs") | Some("simple-obfs") => Some(parse_obfs_opts(plugin_opts, server)?),
+            _ => None,
+        };
+
+        let plugin = if builtin_obfs.is_none() {
+            if let Some(pname) = plugin_name {
+                let plugin_config = PluginConfig {
+                    plugin: pname.to_string(),
+                    plugin_opts: plugin_opts.map(String::from),
+                    plugin_args: vec![],
+                    plugin_mode: Mode::TcpOnly,
+                };
+                let started =
+                    Plugin::start(&plugin_config, server_config.addr(), PluginMode::Client)
+                        .map_err(|e| {
+                            MihomoError::Config(format!(
+                                "failed to start ss plugin '{}': {}",
+                                pname, e
+                            ))
+                        })?;
+                server_config.set_plugin_addr(ServerAddr::SocketAddr(started.local_addr()));
+                server_config.set_plugin(plugin_config);
+                debug!("SS plugin '{}' started on {}", pname, started.local_addr());
+                Some(started)
+            } else {
+                None
+            }
         } else {
+            debug!(
+                "SS '{}' using built-in simple-obfs ({:?})",
+                name, builtin_obfs
+            );
             None
         };
 
         Ok(Self {
             name: name.to_string(),
+            server: server.to_string(),
+            port,
             server_config,
             context,
             addr_str,
             support_udp: udp,
+            builtin_obfs,
             _plugin: plugin,
         })
+    }
+}
+
+/// Parses `plugin-opts` (already serialized to SIP003 `key=value;...` form) for
+/// the built-in simple-obfs plugin. Recognizes `mode=http|tls` and `host=...`.
+fn parse_obfs_opts(plugin_opts: Option<&str>, server: &str) -> Result<BuiltinObfs> {
+    let opts = plugin_opts.unwrap_or("");
+    let mut mode: Option<&str> = None;
+    let mut host: Option<&str> = None;
+    for part in opts.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let mut kv = part.splitn(2, '=');
+        let k = kv.next().unwrap_or("").trim();
+        let v = kv.next().unwrap_or("").trim();
+        match k {
+            "obfs" | "mode" => mode = Some(v),
+            "obfs-host" | "host" => host = Some(v),
+            _ => {}
+        }
+    }
+    let mode = mode.ok_or_else(|| {
+        MihomoError::Config(
+            "simple-obfs plugin-opts must specify mode=http or mode=tls".to_string(),
+        )
+    })?;
+    let host = host.unwrap_or(server).to_string();
+    match mode {
+        "http" => Ok(BuiltinObfs::Http { host }),
+        "tls" => Ok(BuiltinObfs::Tls { server: host }),
+        other => Err(MihomoError::Config(format!(
+            "simple-obfs unsupported mode '{}'",
+            other
+        ))),
     }
 }
 
@@ -193,10 +265,43 @@ impl ProxyAdapter for ShadowsocksAdapter {
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
         let addr = parse_address(metadata);
         debug!("SS connecting to {} via {}", addr, self.addr_str);
-        let stream = ProxyClientStream::connect(self.context.clone(), &self.server_config, addr)
-            .await
-            .map_err(|e| MihomoError::Proxy(format!("ss connect: {}", e)))?;
-        Ok(Box::new(SsConn(stream)))
+
+        if let Some(obfs) = &self.builtin_obfs {
+            // Open a raw TCP connection to the SS server, wrap it in the
+            // simple-obfs codec, then layer the SS crypto stream on top.
+            let tcp = TcpStream::connect((self.server.as_str(), self.port))
+                .await
+                .map_err(|e| MihomoError::Proxy(format!("ss obfs tcp connect: {}", e)))?;
+            let _ = tcp.set_nodelay(true);
+            match obfs.clone() {
+                BuiltinObfs::Http { host } => {
+                    let wrapped = HttpObfs::new(tcp, host, self.port);
+                    let stream = ProxyClientStream::from_stream(
+                        self.context.clone(),
+                        wrapped,
+                        &self.server_config,
+                        addr,
+                    );
+                    Ok(Box::new(SsConn(stream)))
+                }
+                BuiltinObfs::Tls { server } => {
+                    let wrapped = TlsObfs::new(tcp, server);
+                    let stream = ProxyClientStream::from_stream(
+                        self.context.clone(),
+                        wrapped,
+                        &self.server_config,
+                        addr,
+                    );
+                    Ok(Box::new(SsConn(stream)))
+                }
+            }
+        } else {
+            let stream =
+                ProxyClientStream::connect(self.context.clone(), &self.server_config, addr)
+                    .await
+                    .map_err(|e| MihomoError::Proxy(format!("ss connect: {}", e)))?;
+            Ok(Box::new(SsConn(stream)))
+        }
     }
 
     async fn dial_udp(&self, _metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {

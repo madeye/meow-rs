@@ -3,6 +3,7 @@ pub mod group;
 pub mod health;
 pub mod reject;
 pub mod shadowsocks_adapter;
+pub mod simple_obfs;
 pub mod trojan;
 
 pub use direct::DirectAdapter;

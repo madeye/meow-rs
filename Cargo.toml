@@ -82,6 +82,12 @@ regex = "1"
 # Byte manipulation
 bytes = "1"
 
+# Randomness
+rand = "0.9"
+
+# Base64 encoding
+base64 = "0.22"
+
 # Socket utilities
 socket2 = { version = "0.5", features = ["all"] }
 

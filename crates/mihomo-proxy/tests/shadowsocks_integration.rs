@@ -38,6 +38,14 @@ fn obfs_available() -> bool {
             .is_ok()
 }
 
+fn obfs_server_available() -> bool {
+    std::process::Command::new("obfs-server")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
+}
+
 /// Start a TCP echo server that reads data and writes it back.
 async fn start_tcp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -340,5 +348,136 @@ async fn test_ss_tcp_relay_with_obfs_plugin() {
     assert_eq!(
         &buf2, payload2,
         "TCP echo mismatch through obfs plugin round 2"
+    );
+}
+
+/// End-to-end test for the *built-in* simple-obfs HTTP client. Uses
+/// `obfs-server` on the server side (still external, since simple-obfs has no
+/// server-side native impl) and the in-process `HttpObfs` wrapper on the
+/// client side. Verifies wire compatibility with the reference Go protocol.
+#[tokio::test]
+async fn test_ss_tcp_relay_with_builtin_obfs_http() {
+    if !ssserver_available() {
+        eprintln!("SKIP: ssserver not found in PATH");
+        return;
+    }
+    if !obfs_server_available() {
+        eprintln!("SKIP: obfs-server not found in PATH");
+        return;
+    }
+
+    let (echo_addr, _echo_handle) = start_tcp_echo_server().await;
+    let ss_port = free_port().await;
+    let _ssserver = start_ssserver_with_plugin(ss_port, "obfs-server", "obfs=http").await;
+
+    // Client uses the *built-in* simple-obfs HTTP plugin (no external binary).
+    let adapter = ShadowsocksAdapter::new(
+        "test-ss-builtin-obfs-http",
+        "127.0.0.1",
+        ss_port,
+        SS_PASSWORD,
+        SS_CIPHER,
+        false,
+        Some("obfs"),
+        Some("mode=http;host=bing.com"),
+    )
+    .expect("failed to create adapter with built-in obfs http");
+
+    let metadata = Metadata {
+        network: Network::Tcp,
+        dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        dst_port: echo_addr.port(),
+        ..Default::default()
+    };
+
+    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
+        .await
+        .expect("TCP dial timed out")
+        .expect("TCP dial failed");
+
+    // Round 1
+    let payload = b"hello shadowsocks built-in obfs-http";
+    conn.write_all(payload).await.expect("TCP write failed");
+    conn.flush().await.expect("TCP flush failed");
+    let mut buf = vec![0u8; payload.len()];
+    conn.read_exact(&mut buf)
+        .await
+        .expect("TCP read_exact failed");
+    assert_eq!(&buf, payload, "TCP echo mismatch via built-in obfs-http");
+
+    // Round 2 — exercises the post-handshake passthrough path.
+    let payload2 = b"second message via builtin obfs";
+    conn.write_all(payload2).await.expect("TCP write2 failed");
+    conn.flush().await.expect("TCP flush2 failed");
+    let mut buf2 = vec![0u8; payload2.len()];
+    conn.read_exact(&mut buf2)
+        .await
+        .expect("TCP read_exact2 failed");
+    assert_eq!(
+        &buf2, payload2,
+        "TCP echo round-2 mismatch via built-in obfs-http"
+    );
+}
+
+/// Same as above, but for `mode=tls` simple-obfs.
+#[tokio::test]
+async fn test_ss_tcp_relay_with_builtin_obfs_tls() {
+    if !ssserver_available() {
+        eprintln!("SKIP: ssserver not found in PATH");
+        return;
+    }
+    if !obfs_server_available() {
+        eprintln!("SKIP: obfs-server not found in PATH");
+        return;
+    }
+
+    let (echo_addr, _echo_handle) = start_tcp_echo_server().await;
+    let ss_port = free_port().await;
+    let _ssserver = start_ssserver_with_plugin(ss_port, "obfs-server", "obfs=tls").await;
+
+    let adapter = ShadowsocksAdapter::new(
+        "test-ss-builtin-obfs-tls",
+        "127.0.0.1",
+        ss_port,
+        SS_PASSWORD,
+        SS_CIPHER,
+        false,
+        Some("obfs"),
+        Some("mode=tls;host=cloudflare.com"),
+    )
+    .expect("failed to create adapter with built-in obfs tls");
+
+    let metadata = Metadata {
+        network: Network::Tcp,
+        dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        dst_port: echo_addr.port(),
+        ..Default::default()
+    };
+
+    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
+        .await
+        .expect("TCP dial timed out")
+        .expect("TCP dial failed");
+
+    let payload = b"hello shadowsocks built-in obfs-tls";
+    conn.write_all(payload).await.expect("TCP write failed");
+    conn.flush().await.expect("TCP flush failed");
+    let mut buf = vec![0u8; payload.len()];
+    conn.read_exact(&mut buf)
+        .await
+        .expect("TCP read_exact failed");
+    assert_eq!(&buf, payload, "TCP echo mismatch via built-in obfs-tls");
+
+    // Round 2 to exercise post-handshake framing.
+    let payload2 = b"second message via builtin obfs-tls";
+    conn.write_all(payload2).await.expect("TCP write2 failed");
+    conn.flush().await.expect("TCP flush2 failed");
+    let mut buf2 = vec![0u8; payload2.len()];
+    conn.read_exact(&mut buf2)
+        .await
+        .expect("TCP read_exact2 failed");
+    assert_eq!(
+        &buf2, payload2,
+        "TCP echo round-2 mismatch via built-in obfs-tls"
     );
 }
