@@ -15,7 +15,7 @@ mihomo-trie = { workspace = true }
 mihomo-dns = { workspace = true }
 mihomo-rules = { workspace = true }
 mihomo-proxy = { workspace = true }
-mihomo-transport = { workspace = true }
+mihomo-transport = { workspace = true, features = ["grpc", "h2", "httpupgrade"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -30,3 +30,4 @@ maxminddb = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"
+tracing-subscriber = { workspace = true }

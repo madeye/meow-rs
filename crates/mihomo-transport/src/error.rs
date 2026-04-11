@@ -22,6 +22,9 @@ pub enum TransportError {
     #[error("grpc framing: {0}")]
     Grpc(String),
 
+    #[error("h2: {0}")]
+    H2(String),
+
     #[error("http upgrade: {0}")]
     HttpUpgrade(String),
 

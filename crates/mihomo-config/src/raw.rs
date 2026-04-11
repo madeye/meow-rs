@@ -57,7 +57,7 @@ pub struct RawDns {
     pub fake_ip_filter: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawProxyGroup {
     pub name: String,
@@ -67,6 +67,8 @@ pub struct RawProxyGroup {
     pub url: Option<String>,
     pub interval: Option<u64>,
     pub tolerance: Option<u16>,
+    pub strategy: Option<String>,
+    pub lazy: Option<bool>,
 }
 
 /// A single entry in the top-level `rule-providers:` map.

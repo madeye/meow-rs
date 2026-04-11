@@ -333,11 +333,14 @@ boundary.
 
 ## Implementation checklist (for engineer handoff)
 
-**Sequencing: M1.B-1 (VMess) must land before this PR starts.**
-Team-lead confirmed 2026-04-11: M1.B before M1.C-2. The M1.B-1 VMess
-PR introduces `connect_over` to the `ProxyAdapter` trait and retrofits
-Direct/Reject/Shadowsocks/Trojan in the same commit. M1.C-2 engineer
-picks up relay once that trait change is in main.
+**Sequencing (updated 2026-04-11):** `ProxyAdapter::connect_over` is
+implemented in M1.B-3/B-4 (HTTP CONNECT + SOCKS5) — coded and reviewed,
+pending push to main. Direct/Reject/SS/Trojan get a default `Err(NotSupported)`;
+HTTP and SOCKS5 have full implementations.
+**Once M1.B-3/B-4 merges, M1.C-2 is unblocked and can run in parallel
+with VLESS.** VLESS must still add its own `connect_over` override before
+a relay chain can use a VLESS hop, but that does not block the relay group
+implementation or its tests (use SS/HTTP/Direct hops in tests instead).
 
 - [ ] Add `AdapterType::Relay` to `mihomo-common/src/adapter_type.rs`.
 - [ ] Add `connect_over(&self, stream: Box<dyn ProxyConn>, meta: &Metadata) -> Result<Box<dyn ProxyConn>>`
@@ -356,9 +359,12 @@ picks up relay once that trait change is in main.
 ## Resolved questions (architect sign-off 2026-04-11)
 
 1. **Architecture: `connect_over` on `ProxyAdapter`** — Option (a)
-   approved. Required method (no default impl). Each adapter splits
-   "dial TCP" from "send protocol header over stream". `DirectAdapter`
-   returns stream unchanged; `RejectAdapter` returns error.
+   approved. Implemented in M1.B-3/B-4 (pending merge) with a default
+   `Err(NotSupported)` impl on the trait (updated 2026-04-11 — original
+   spec said "required method, no default" but the implementation uses a
+   defaulted impl so existing adapters compile without override).
+   `DirectAdapter` returns stream unchanged; `RejectAdapter` returns
+   error; HTTP+SOCKS5 have full impls.
 
 2. **Relay-of-relay (nested relay groups)** — works transparently.
    `RelayGroup` implements `ProxyAdapter`; its `connect_over` runs the

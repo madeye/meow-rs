@@ -117,6 +117,19 @@ impl ProxyAdapter for RejectAdapter {
         Ok(Box::new(RejectPacketConn))
     }
 
+    /// Refuse the relay chain at a Reject hop.
+    ///
+    /// upstream: adapter/outbound/reject.go — no DialContextWithDialer.
+    /// Inserting REJECT into a relay chain is a misconfiguration; we surface
+    /// a clear error rather than silently dropping bytes.
+    async fn connect_over(
+        &self,
+        _stream: Box<dyn ProxyConn>,
+        _metadata: &Metadata,
+    ) -> Result<Box<dyn ProxyConn>> {
+        Err(MihomoError::Proxy("rejected".into()))
+    }
+
     fn health(&self) -> &ProxyHealth {
         &self.health
     }

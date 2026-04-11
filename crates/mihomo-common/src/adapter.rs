@@ -99,6 +99,27 @@ pub trait ProxyAdapter: Send + Sync {
     fn support_udp(&self) -> bool;
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>>;
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>>;
+    /// Run this adapter's handshake over an already-established `stream`.
+    ///
+    /// Used by relay groups (M1.C-2) to chain proxy hops without dialling a
+    /// new TCP connection.  The TLS-wrap step from `dial_tcp` is intentionally
+    /// skipped — the passed stream is already inside whatever encryption the
+    /// relay chain provides.
+    ///
+    /// Default implementation returns `Err(NotSupported)`.  Override in
+    /// adapters that support relay chaining (HTTP CONNECT, SOCKS5, …).
+    ///
+    /// upstream: adapter/outbound/<proto>.go — `DialContextWithDialer`
+    async fn connect_over(
+        &self,
+        _stream: Box<dyn ProxyConn>,
+        _metadata: &Metadata,
+    ) -> Result<Box<dyn ProxyConn>> {
+        Err(crate::error::MihomoError::NotSupported(format!(
+            "{}: connect_over not supported",
+            self.name()
+        )))
+    }
     fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
         None
     }

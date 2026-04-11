@@ -568,9 +568,7 @@ async fn create_proxy_group_duplicate_name() {
         name: "Existing".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     let state = test_state(raw);
     let app = create_router(state);
@@ -597,9 +595,7 @@ async fn get_proxy_groups_with_data() {
         name: "TestSelector".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     let state = test_state(raw);
     let app = create_router(state);
@@ -629,9 +625,7 @@ async fn update_proxy_group() {
         name: "G1".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     let state = test_state(raw);
     let app = create_router(state.clone());
@@ -682,9 +676,7 @@ async fn delete_proxy_group() {
         name: "ToDelete".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     // Add a rule targeting this group
     raw.rules = Some(vec![
@@ -739,9 +731,7 @@ async fn select_proxy_in_selector_group() {
         name: "Sel".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     let state = test_state(raw);
     let app = create_router(state);
@@ -766,9 +756,7 @@ async fn select_proxy_invalid_target() {
         name: "Sel".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     let state = test_state(raw);
     let app = create_router(state);
@@ -870,9 +858,7 @@ async fn get_subscriptions_reports_counts() {
         name: "G".into(),
         group_type: "select".into(),
         proxies: Some(vec!["S1".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     raw.rules = Some(vec!["MATCH,DIRECT".into()]);
 
@@ -926,9 +912,7 @@ async fn delete_subscription_clears_data() {
         name: "G".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into(), "S1".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
 
     let state = test_state(raw);
@@ -1012,9 +996,7 @@ async fn put_proxy_selector_switch() {
         name: "MySelector".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     let state = test_state(raw);
 
@@ -1060,9 +1042,7 @@ async fn select_proxy_roundtrip() {
         name: "Sel".into(),
         group_type: "select".into(),
         proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
-        url: None,
-        interval: None,
-        tolerance: None,
+        ..Default::default()
     }]);
     let state = test_state(raw);
 

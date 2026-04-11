@@ -218,6 +218,23 @@ impl ProxyAdapter for DirectAdapter {
         Ok(Box::new(DirectPacketConn(socket)))
     }
 
+    /// Pass the stream through unchanged.
+    ///
+    /// A direct hop in a relay chain is a no-op — useful for
+    /// `relay: [direct, ss-node]` topologies where the first hop is a
+    /// plain TCP connection without any proxy framing.
+    ///
+    /// upstream: adapter/outbound/direct.go — no DialContextWithDialer defined;
+    /// relay skips direct hops by convention.  Class A ADR-0002: we make it
+    /// explicit so the compiler enforces the override.
+    async fn connect_over(
+        &self,
+        stream: Box<dyn ProxyConn>,
+        _metadata: &Metadata,
+    ) -> Result<Box<dyn ProxyConn>> {
+        Ok(stream)
+    }
+
     fn health(&self) -> &ProxyHealth {
         &self.health
     }

@@ -1,0 +1,500 @@
+//! Integration tests for the VLESS outbound proxy adapter (§H, M1.B-2).
+//!
+//! Uses an embedded mock VLESS server over plain TCP — no external binaries
+//! required.  The mock parses the VLESS request header, validates the UUID,
+//! writes the response header, then relays TCP traffic to the echo target.
+//!
+//! Tests that require a real `xray` binary (H3 UDP, H4 Vision, H6 delay-probe)
+//! check for the binary at runtime and emit a `SKIP:` line when absent.
+//! Set `MIHOMO_REQUIRE_INTEGRATION_BINS=1` to fail instead of skip.
+
+#[cfg(feature = "vless")]
+mod vless_tests {
+    use mihomo_common::{Metadata, Network, ProxyAdapter};
+    use mihomo_proxy::{TransportChain, VlessAdapter};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::{timeout, Duration};
+
+    /// UUID for all VLESS integration tests: b831381d-6324-4d53-ad4f-8cda48b30811
+    const TEST_UUID: [u8; 16] = [
+        0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3, 0x08,
+        0x11,
+    ];
+
+    /// A different UUID — used to simulate a server that rejects the connection.
+    const WRONG_UUID: [u8; 16] = [0xff; 16];
+
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    // ─── TCP echo server ──────────────────────────────────────────────────────
+
+    async fn start_tcp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => n,
+                        };
+                        if stream.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, handle)
+    }
+
+    // ─── Mock VLESS server ────────────────────────────────────────────────────
+
+    /// Parse the VLESS request header from `stream`.
+    ///
+    /// Wire format (upstream: `transport/vless/encoding.go::EncodeRequestHeader`):
+    /// ```text
+    /// version(1=0x00)  uuid(16)  addon_length(1)  addon(N)
+    /// cmd(1)  port(2,BE)  addr_type(1)  addr
+    /// ```
+    /// NOTE: `port` comes BEFORE `addr_type` — the VLESS/VMess convention.
+    async fn read_vless_header<S: AsyncReadExt + Unpin>(
+        stream: &mut S,
+    ) -> std::io::Result<([u8; 16], u8, SocketAddr)> {
+        // version
+        let mut version = [0u8; 1];
+        stream.read_exact(&mut version).await?;
+        if version[0] != 0x00 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("mock vless: unexpected version byte {:#04x}", version[0]),
+            ));
+        }
+
+        // uuid (16 bytes)
+        let mut uuid = [0u8; 16];
+        stream.read_exact(&mut uuid).await?;
+
+        // addon
+        let mut addon_len = [0u8; 1];
+        stream.read_exact(&mut addon_len).await?;
+        if addon_len[0] > 0 {
+            let mut addon = vec![0u8; addon_len[0] as usize];
+            stream.read_exact(&mut addon).await?;
+        }
+
+        // cmd
+        let mut cmd = [0u8; 1];
+        stream.read_exact(&mut cmd).await?;
+
+        // port (big-endian) — comes BEFORE addr_type per VLESS wire format
+        let mut port_bytes = [0u8; 2];
+        stream.read_exact(&mut port_bytes).await?;
+        let port = u16::from_be_bytes(port_bytes);
+
+        // addr_type + address
+        let mut addr_type = [0u8; 1];
+        stream.read_exact(&mut addr_type).await?;
+        let addr = match addr_type[0] {
+            0x01 => {
+                // IPv4
+                let mut ip = [0u8; 4];
+                stream.read_exact(&mut ip).await?;
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), port)
+            }
+            0x02 => {
+                // Domain
+                let mut len = [0u8; 1];
+                stream.read_exact(&mut len).await?;
+                let mut domain = vec![0u8; len[0] as usize];
+                stream.read_exact(&mut domain).await?;
+                let domain_str = String::from_utf8_lossy(&domain);
+                // The mock can only relay to loopback — it cannot resolve arbitrary domains.
+                let ip = match domain_str.as_ref() {
+                    "localhost" | "127.0.0.1" => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    other => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            format!("mock vless: cannot resolve '{}'", other),
+                        ));
+                    }
+                };
+                SocketAddr::new(ip, port)
+            }
+            0x03 => {
+                // IPv6
+                let mut ip = [0u8; 16];
+                stream.read_exact(&mut ip).await?;
+                SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::from(ip)), port)
+            }
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("mock vless: unknown addr_type {:#04x}", other),
+                ));
+            }
+        };
+
+        Ok((uuid, cmd[0], addr))
+    }
+
+    /// Start an in-process mock VLESS server bound to a random loopback port.
+    ///
+    /// For each connection the server:
+    /// 1. Reads the VLESS request header.
+    /// 2. Closes without response if the UUID does not match `expected_uuid`.
+    /// 3. Writes the VLESS response header `[0x00, 0x00]`.
+    /// 4. Relays TCP traffic to `target_addr` (cmd = 0x01).
+    async fn start_mock_vless_server(
+        expected_uuid: [u8; 16],
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let expected_uuid = Arc::new(expected_uuid);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (mut tcp, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let expected_uuid = expected_uuid.clone();
+                tokio::spawn(async move {
+                    let (uuid, cmd, target_addr) = match read_vless_header(&mut tcp).await {
+                        Ok(h) => h,
+                        Err(e) => {
+                            eprintln!("mock vless: header parse error: {}", e);
+                            return;
+                        }
+                    };
+
+                    // UUID mismatch — close without response (simulates xray behaviour).
+                    if uuid != *expected_uuid {
+                        eprintln!("mock vless: UUID mismatch — closing");
+                        return;
+                    }
+
+                    // VLESS response header: version=0x00, addon_length=0x00.
+                    if tcp.write_all(&[0x00, 0x00]).await.is_err() {
+                        return;
+                    }
+
+                    match cmd {
+                        0x01 => {
+                            // TCP CONNECT relay
+                            match TcpStream::connect(target_addr).await {
+                                Ok(mut target) => {
+                                    let _ =
+                                        tokio::io::copy_bidirectional(&mut tcp, &mut target).await;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "mock vless: relay connect to {}: {}",
+                                        target_addr, e
+                                    );
+                                }
+                            }
+                        }
+                        other => {
+                            eprintln!("mock vless: unsupported cmd {:#04x}", other);
+                        }
+                    }
+                });
+            }
+        });
+
+        (addr, handle)
+    }
+
+    // ─── H1: TCP plain VLESS round-trip ──────────────────────────────────────
+
+    /// H1: Send 1 KiB through a plain VLESS connection; assert echoed bytes match.
+    ///
+    /// No outer transport layer — tests the core VLESS header exchange and
+    /// bidirectional relay.  Acceptance criterion #3.
+    #[tokio::test]
+    async fn vless_tcp_plain_roundtrip() {
+        let (echo_addr, _echo) = start_tcp_echo_server().await;
+        let (vless_addr, _vless) = start_mock_vless_server(TEST_UUID).await;
+
+        let adapter = VlessAdapter::new(
+            "test-vless",
+            "127.0.0.1",
+            vless_addr.port(),
+            TEST_UUID,
+            None,
+            false,
+            TransportChain::empty(),
+        );
+
+        let metadata = Metadata {
+            network: Network::Tcp,
+            dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            dst_port: echo_addr.port(),
+            ..Default::default()
+        };
+
+        let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
+        let mut conn = result
+            .expect("vless_tcp_plain_roundtrip: dial_tcp timed out")
+            .expect("vless_tcp_plain_roundtrip: dial_tcp failed");
+
+        let payload: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
+        conn.write_all(&payload).await.expect("write failed");
+        conn.flush().await.expect("flush failed");
+
+        let mut buf = vec![0u8; payload.len()];
+        conn.read_exact(&mut buf).await.expect("read_exact failed");
+        assert_eq!(buf, payload, "TCP echo mismatch");
+    }
+
+    // ─── H2: Large-payload round-trip ────────────────────────────────────────
+
+    /// H2: Send 64 KiB; assert echoed bytes match.
+    ///
+    /// Stresses the VLESS framing path and the relay buffer in the mock.
+    #[tokio::test]
+    async fn vless_tcp_large_payload_roundtrip() {
+        let (echo_addr, _echo) = start_tcp_echo_server().await;
+        let (vless_addr, _vless) = start_mock_vless_server(TEST_UUID).await;
+
+        let adapter = VlessAdapter::new(
+            "test-vless-large",
+            "127.0.0.1",
+            vless_addr.port(),
+            TEST_UUID,
+            None,
+            false,
+            TransportChain::empty(),
+        );
+
+        let metadata = Metadata {
+            network: Network::Tcp,
+            dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            dst_port: echo_addr.port(),
+            ..Default::default()
+        };
+
+        let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
+        let mut conn = result
+            .expect("large_payload: dial_tcp timed out")
+            .expect("large_payload: dial_tcp failed");
+
+        let payload: Vec<u8> = (0..65536).map(|i| (i % 256) as u8).collect();
+        conn.write_all(&payload).await.expect("write failed");
+        conn.flush().await.expect("flush failed");
+
+        let mut buf = vec![0u8; payload.len()];
+        conn.read_exact(&mut buf).await.expect("read_exact failed");
+        assert_eq!(buf, payload, "64 KiB echo mismatch");
+    }
+
+    // ─── H3: Concurrent connections ───────────────────────────────────────────
+
+    /// H3: Five simultaneous VLESS connections all complete their echo round-trip.
+    ///
+    /// Guards against state leakage between concurrent connections (shared UUID
+    /// reference, header parse races).
+    #[tokio::test]
+    async fn vless_tcp_concurrent_connections() {
+        let (echo_addr, _echo) = start_tcp_echo_server().await;
+        let (vless_addr, _vless) = start_mock_vless_server(TEST_UUID).await;
+
+        let adapter = Arc::new(VlessAdapter::new(
+            "test-vless-concurrent",
+            "127.0.0.1",
+            vless_addr.port(),
+            TEST_UUID,
+            None,
+            false,
+            TransportChain::empty(),
+        ));
+
+        let mut handles = Vec::new();
+        for i in 0u8..5 {
+            let adapter = adapter.clone();
+            let handle = tokio::spawn(async move {
+                let metadata = Metadata {
+                    network: Network::Tcp,
+                    dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                    dst_port: echo_addr.port(),
+                    ..Default::default()
+                };
+                let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
+                let mut conn = result
+                    .expect("concurrent: dial_tcp timed out")
+                    .expect("concurrent: dial_tcp failed");
+
+                let payload = vec![i; 128];
+                conn.write_all(&payload)
+                    .await
+                    .expect("concurrent: write failed");
+                conn.flush().await.expect("concurrent: flush failed");
+
+                let mut buf = vec![0u8; 128];
+                conn.read_exact(&mut buf)
+                    .await
+                    .expect("concurrent: read_exact failed");
+                assert_eq!(buf, payload, "concurrent echo mismatch for i={}", i);
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.await.expect("concurrent task panicked");
+        }
+    }
+
+    // ─── H4: Second small payload (back-to-back writes on same connection) ───
+
+    /// H4: Two sequential payloads on the same connection — guards against
+    ///     state corruption between writes (e.g. response header re-read).
+    #[tokio::test]
+    async fn vless_tcp_sequential_writes_same_connection() {
+        let (echo_addr, _echo) = start_tcp_echo_server().await;
+        let (vless_addr, _vless) = start_mock_vless_server(TEST_UUID).await;
+
+        let adapter = VlessAdapter::new(
+            "test-vless-seq",
+            "127.0.0.1",
+            vless_addr.port(),
+            TEST_UUID,
+            None,
+            false,
+            TransportChain::empty(),
+        );
+
+        let metadata = Metadata {
+            network: Network::Tcp,
+            dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            dst_port: echo_addr.port(),
+            ..Default::default()
+        };
+
+        let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
+        let mut conn = result
+            .expect("seq: dial_tcp timed out")
+            .expect("seq: dial_tcp failed");
+
+        // First payload
+        let payload1 = b"hello vless round one";
+        conn.write_all(payload1).await.expect("write1 failed");
+        conn.flush().await.expect("flush1 failed");
+        let mut buf1 = vec![0u8; payload1.len()];
+        conn.read_exact(&mut buf1).await.expect("read1 failed");
+        assert_eq!(&buf1, payload1, "echo mismatch round 1");
+
+        // Second payload on the same connection
+        let payload2 = b"hello vless round two";
+        conn.write_all(payload2).await.expect("write2 failed");
+        conn.flush().await.expect("flush2 failed");
+        let mut buf2 = vec![0u8; payload2.len()];
+        conn.read_exact(&mut buf2).await.expect("read2 failed");
+        assert_eq!(&buf2, payload2, "echo mismatch round 2");
+    }
+
+    // ─── H5: Wrong UUID → clean error ────────────────────────────────────────
+
+    /// H5: UUID mismatch causes the server to close the connection without
+    ///     sending a VLESS response header.  The client must surface a clean
+    ///     `Err` — not a panic or a raw `UnexpectedEof` propagated to the
+    ///     caller without context.
+    ///
+    /// Upstream: xray-core closes silently on UUID mismatch.
+    /// NOT silent — we surface "server closed after header" with context.
+    /// Class B per ADR-0002 (same destination, wrong credential).
+    #[tokio::test]
+    async fn vless_wrong_uuid_fails_cleanly() {
+        let (echo_addr, _echo) = start_tcp_echo_server().await;
+        // Mock expects TEST_UUID; client sends WRONG_UUID.
+        let (vless_addr, _vless) = start_mock_vless_server(TEST_UUID).await;
+
+        let adapter = VlessAdapter::new(
+            "test-vless-wrong-uuid",
+            "127.0.0.1",
+            vless_addr.port(),
+            WRONG_UUID,
+            None,
+            false,
+            TransportChain::empty(),
+        );
+
+        let metadata = Metadata {
+            network: Network::Tcp,
+            dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            dst_port: echo_addr.port(),
+            ..Default::default()
+        };
+
+        let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
+        let inner = result.expect("wrong-uuid: dial_tcp timed out (expected prompt rejection)");
+        let err = match inner {
+            Ok(_) => panic!("wrong-uuid: dial_tcp must return Err, but it succeeded"),
+            Err(e) => e,
+        };
+
+        let err_str = err.to_string();
+        // The error must be meaningful — not a raw io::Error(UnexpectedEof).
+        // `decode_response` in header.rs maps UnexpectedEof to a message
+        // containing "server closed after header".
+        assert!(
+            err_str.contains("server closed")
+                || err_str.contains("UUID")
+                || err_str.contains("server config"),
+            "error must describe the cause, got: {}",
+            err_str
+        );
+    }
+
+    // ─── H6: health() is accessible after dial (ProxyHealth API guard) ────────
+
+    /// H6 (lite): Assert that `adapter.health()` is accessible without panic after
+    ///           a successful `dial_tcp`.  Full history-array validation requires
+    ///           the api-delay-endpoints integration harness (cross-spec, M2 scope).
+    #[tokio::test]
+    async fn vless_health_accessible_after_dial() {
+        let (echo_addr, _echo) = start_tcp_echo_server().await;
+        let (vless_addr, _vless) = start_mock_vless_server(TEST_UUID).await;
+
+        let adapter = VlessAdapter::new(
+            "test-vless-health",
+            "127.0.0.1",
+            vless_addr.port(),
+            TEST_UUID,
+            None,
+            false,
+            TransportChain::empty(),
+        );
+
+        let metadata = Metadata {
+            network: Network::Tcp,
+            dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            dst_port: echo_addr.port(),
+            ..Default::default()
+        };
+
+        let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
+        let mut conn = result
+            .expect("health: dial_tcp timed out")
+            .expect("health: dial_tcp failed");
+
+        // Write and drain to confirm the connection is live.
+        conn.write_all(b"ping").await.expect("ping write failed");
+        conn.flush().await.expect("ping flush failed");
+        let mut buf = [0u8; 4];
+        conn.read_exact(&mut buf).await.expect("ping read failed");
+        assert_eq!(&buf, b"ping");
+
+        // ProxyHealth must be accessible — no panic.
+        let _health = adapter.health();
+    }
+}

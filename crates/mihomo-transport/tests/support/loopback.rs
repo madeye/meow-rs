@@ -169,6 +169,313 @@ pub async fn spawn_tls_server(
     (addr, rx)
 }
 
+// ─── gRPC (gun) loopback server ──────────────────────────────────────────────
+
+/// Metadata captured from the gRPC request received by the loopback server.
+#[cfg(feature = "grpc")]
+#[derive(Debug, Default)]
+pub struct GrpcConnInfo {
+    /// The `:path` pseudo-header sent by the client (e.g. `/GunService/Tun`).
+    pub path: String,
+    /// The value of the `content-type` header sent by the client.
+    pub content_type: Option<String>,
+}
+
+/// Spawn a single-accept gRPC (h2) loopback server.
+///
+/// Returns `(addr, conn_info_rx)`.  The server:
+/// 1. Accepts one TCP connection and performs the HTTP/2 handshake.
+/// 2. Accepts one h2 request, captures `:path` and `content-type`.
+/// 3. Sends [`GrpcConnInfo`] through the oneshot channel.
+/// 4. Streams a 200 response and echoes every DATA frame it receives
+///    back to the client (same gun-framed bytes, no re-encoding).
+///
+/// The response stream is closed with EOS after the client's request body ends.
+#[cfg(feature = "grpc")]
+pub async fn spawn_grpc_server() -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<GrpcConnInfo>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel::<GrpcConnInfo>();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("grpc loopback bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        let (tcp, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let mut conn = match h2::server::handshake(tcp).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("grpc loopback h2 handshake error: {e}");
+                return;
+            }
+        };
+
+        let (req, mut respond) = match conn.accept().await {
+            Some(Ok(pair)) => pair,
+            _ => return,
+        };
+
+        // Capture request metadata before consuming the request.
+        let path = req.uri().path().to_string();
+        let content_type = req
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let _ = tx.send(GrpcConnInfo { path, content_type });
+
+        // Spawn the h2 connection driver so control frames (WINDOW_UPDATE,
+        // SETTINGS, PING) keep flowing while we handle the request body.
+        // The SendStream / RecvStream share Arc-backed connection state with
+        // `conn`, so this is safe to do in a separate task.
+        // h2::server::Connection does not implement Future; drive it by
+        // calling accept() until None, which exhausts any further requests
+        // and processes all connection-level frames.
+        tokio::spawn(async move { while conn.accept().await.is_some() {} });
+
+        // Send a 200 OK with end_of_stream=false (streaming response).
+        let response = http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response build");
+        let mut send = match respond.send_response(response, false) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Echo every DATA frame back verbatim (same gun-framed bytes).
+        let mut body = req.into_body();
+        loop {
+            let data = std::future::poll_fn(|cx| body.poll_data(cx)).await;
+            match data {
+                None => break,
+                Some(Ok(data)) => {
+                    // Release flow-control window so the client can keep sending.
+                    let _ = body.flow_control().release_capacity(data.len());
+                    if send.send_data(data, false).is_err() {
+                        return;
+                    }
+                }
+                Some(Err(_)) => break,
+            }
+        }
+
+        // Close the response stream.
+        let _ = send.send_data(bytes::Bytes::new(), true);
+    });
+
+    (addr, rx)
+}
+
+// ─── HTTP/2 (plain) loopback server ──────────────────────────────────────────
+
+/// Metadata captured from a single h2 request received by the loopback server.
+#[cfg(feature = "h2")]
+#[derive(Debug)]
+pub struct H2ReqInfo {
+    /// The `:authority` pseudo-header sent by the client (e.g. `"example.com"`).
+    pub authority: Option<String>,
+    /// The `:path` pseudo-header sent by the client (e.g. `"/custom"`).
+    pub path: String,
+}
+
+/// Spawn a multi-accept plain-HTTP/2 loopback server.
+///
+/// Returns `(addr, req_rx)`.  For each of the first `max_connections`
+/// connections the server:
+///
+/// 1. Accepts a TCP connection and performs the HTTP/2 handshake.
+/// 2. Accepts one h2 request, captures `:authority` and `:path`.
+/// 3. Sends [`H2ReqInfo`] through the mpsc channel **before** sending the
+///    response, so by the time the client's `connect()` returns the info is
+///    already in the channel.
+/// 4. Sends a `200 OK` streaming response and echoes every DATA frame back.
+///
+/// Using mpsc (not oneshot) allows multi-connection tests (e.g. D2 with 1000
+/// connections) to collect all metadata via a single receiver.
+#[cfg(feature = "h2")]
+pub async fn spawn_h2_server(
+    max_connections: usize,
+) -> (std::net::SocketAddr, tokio::sync::mpsc::Receiver<H2ReqInfo>) {
+    let (tx, rx) = tokio::sync::mpsc::channel(max_connections.max(1));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("h2 loopback bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        let mut remaining = max_connections;
+        while remaining > 0 {
+            let (tcp, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            remaining -= 1;
+            let tx = tx.clone();
+            tokio::spawn(h2_handle_conn(tcp, tx));
+        }
+    });
+
+    (addr, rx)
+}
+
+#[cfg(feature = "h2")]
+async fn h2_handle_conn(tcp: tokio::net::TcpStream, tx: tokio::sync::mpsc::Sender<H2ReqInfo>) {
+    let mut conn = match h2::server::handshake(tcp).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("h2 loopback handshake error: {e}");
+            return;
+        }
+    };
+
+    let (req, mut respond) = match conn.accept().await {
+        Some(Ok(pair)) => pair,
+        other => {
+            eprintln!("h2 loopback accept error: {:?}", other.map(|r| r.err()));
+            return;
+        }
+    };
+
+    let authority = req.uri().authority().map(|a| a.to_string());
+    let path = req.uri().path().to_string();
+
+    // Send info BEFORE the 200 response — callers can safely `recv()` after
+    // `connect()` returns because connect() awaits the 200 which we send next.
+    let _ = tx.send(H2ReqInfo { authority, path }).await;
+
+    // Drive the h2 connection (SETTINGS, WINDOW_UPDATE, …) in background.
+    tokio::spawn(async move { while conn.accept().await.is_some() {} });
+
+    // Send 200 OK (streaming response, end_of_stream=false).
+    let response = http::Response::builder()
+        .status(200)
+        .body(())
+        .expect("response build");
+    let mut send = match respond.send_response(response, false) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // Echo every DATA frame back verbatim.
+    let mut body = req.into_body();
+    loop {
+        let chunk = std::future::poll_fn(|cx| body.poll_data(cx)).await;
+        match chunk {
+            None => break,
+            Some(Ok(data)) => {
+                let _ = body.flow_control().release_capacity(data.len());
+                if send.send_data(data, false).is_err() {
+                    return;
+                }
+            }
+            Some(Err(_)) => break,
+        }
+    }
+    let _ = send.send_data(bytes::Bytes::new(), true);
+}
+
+// ─── HTTP/1.1 Upgrade loopback server ────────────────────────────────────────
+
+/// Metadata captured from an HTTP/1.1 Upgrade request received by the
+/// loopback server.
+#[cfg(feature = "httpupgrade")]
+#[derive(Debug, Default)]
+pub struct HttpUpgradeReqInfo {
+    /// The request path (e.g. `"/upgrade"`).
+    pub path: String,
+    /// All request headers, lower-cased names mapped to their values.
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+/// Spawn a single-accept HTTP/1.1 Upgrade loopback server.
+///
+/// Returns `(addr, req_info_rx)`.  The server:
+///
+/// 1. Accepts one TCP connection.
+/// 2. Reads and parses the upgrade request headers.
+/// 3. Sends [`HttpUpgradeReqInfo`] through the oneshot channel.
+/// 4. Writes `response` verbatim (caller controls the HTTP response line +
+///    headers + blank line).
+/// 5. If `echo = true`, copies all subsequent bytes bidirectionally.
+///
+/// Callers use this to simulate both success (101) and error (200, missing
+/// Upgrade header, etc.) paths without duplicating server logic.
+#[cfg(feature = "httpupgrade")]
+pub async fn spawn_httpupgrade_server(
+    response: &'static str,
+    echo: bool,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<HttpUpgradeReqInfo>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("httpupgrade loopback bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        let (mut tcp, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // Read request headers byte-by-byte until \r\n\r\n.
+        let mut req_buf: Vec<u8> = Vec::new();
+        let mut b = [0u8; 1];
+        loop {
+            let n = tokio::io::AsyncReadExt::read(&mut tcp, &mut b)
+                .await
+                .unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            req_buf.push(b[0]);
+            if req_buf.ends_with(b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        // Simple line-by-line header parsing (no httparse dependency in tests).
+        let req_str = String::from_utf8_lossy(&req_buf);
+        let mut lines = req_str.lines();
+        let path = lines
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .unwrap_or("/")
+            .to_string();
+        let mut headers = std::collections::HashMap::new();
+        for line in lines {
+            if line.is_empty() {
+                break;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+            }
+        }
+
+        let _ = tx.send(HttpUpgradeReqInfo { path, headers });
+
+        // Send the configured HTTP response.
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut tcp, response.as_bytes()).await;
+
+        // Echo bytes bidirectionally if requested.
+        if echo {
+            let (mut r, mut w) = tokio::io::split(tcp);
+            let _ = tokio::io::copy(&mut r, &mut w).await;
+        }
+    });
+
+    (addr, rx)
+}
+
 // ─── WebSocket loopback server ────────────────────────────────────────────────
 
 /// Metadata captured from the WebSocket upgrade request.

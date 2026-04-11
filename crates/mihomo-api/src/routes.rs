@@ -642,6 +642,7 @@ async fn create_proxy_group(
         url: body.url,
         interval: body.interval,
         tolerance: body.tolerance,
+        ..Default::default()
     };
     raw.proxy_groups.get_or_insert_with(Vec::new).push(group);
     apply_raw_to_tunnel(&raw, &state.tunnel)?;

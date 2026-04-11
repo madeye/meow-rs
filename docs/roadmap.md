@@ -99,8 +99,15 @@ YAML schema, struct shapes, error types, and per-layer tests.
 VMess adds significant protocol complexity (AEAD KDF, auth-id replay cache, legacy
 cipher quirks, `vmess-legacy` feature flag) for diminishing returns. Dropped from
 M1 scope; spec preserved in `docs/specs/proxy-vmess.md` as a design record if
-revisited in a future milestone. VLESS's `connect_over` trait introduction now
-carries the weight M1.B-1 was planned to carry.
+revisited in a future milestone.
+
+**`connect_over` trait status (updated 2026-04-11):** `ProxyAdapter::connect_over`
+is implemented in M1.B-3/B-4 (HTTP CONNECT + SOCKS5) — coded and reviewed,
+pending push to main. Direct/Reject/SS/Trojan get a default `Err(NotSupported)`;
+HTTP and SOCKS5 have full implementations + tests.
+**Once M1.B-3/B-4 merges, M1.C-2 (relay) is unblocked and can run in parallel
+with M1.B-2 (VLESS).** VLESS still needs its own `connect_over` override but is
+not a sequencing gate for relay.
 
 **Deferred to M1.5 / M2** (architect recommendation, 2026-04-11):
 

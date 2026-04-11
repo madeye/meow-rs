@@ -4,7 +4,8 @@ use mihomo_common::{
     ProxyPacketConn, Result,
 };
 use mihomo_proxy::{
-    FallbackGroup, SelectorGroup, ShadowsocksAdapter, TransportChain, TrojanAdapter, UrlTestGroup,
+    FallbackGroup, HttpAdapter, LbStrategy, LoadBalanceGroup, RelayGroup, SelectorGroup,
+    ShadowsocksAdapter, Socks5Adapter, TransportChain, TrojanAdapter, UrlTestGroup,
 };
 #[cfg(feature = "vless")]
 use mihomo_proxy::{VlessAdapter, VlessFlow};
@@ -41,6 +42,13 @@ impl ProxyAdapter for WrappedProxy {
     }
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         self.adapter.dial_udp(metadata).await
+    }
+    async fn connect_over(
+        &self,
+        stream: Box<dyn ProxyConn>,
+        metadata: &Metadata,
+    ) -> Result<Box<dyn ProxyConn>> {
+        self.adapter.connect_over(stream, metadata).await
     }
 
     fn health(&self) -> &ProxyHealth {
@@ -141,7 +149,157 @@ pub fn parse_proxy(
             let adapter = parse_vless(name, config)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
+        "http" => {
+            let adapter = parse_http(name, config)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
+        "socks5" => {
+            let adapter = parse_socks5(name, config)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
         _ => Err(format!("unsupported proxy type: {}", proxy_type)),
+    }
+}
+
+/// Parse a `type: http` proxy config block into an `HttpAdapter`.
+///
+/// # Hard errors (Class A per ADR-0002)
+///
+/// - `username` set without `password` (or vice versa) — orphaned credential.
+///
+/// # Notes
+///
+/// `headers:` entries are injected into the CONNECT request only.
+///
+/// upstream: `adapter/outbound/http.go`
+fn parse_http(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<HttpAdapter, String> {
+    let server = config
+        .get("server")
+        .and_then(|v| v.as_str())
+        .ok_or("http: missing server")?;
+    let port = config
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .ok_or("http: missing port")? as u16;
+    let tls = config.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
+    let skip_cert_verify = config
+        .get("skip-cert-verify")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Both username and password must be set, or neither (Class A).
+    let username = config.get("username").and_then(|v| v.as_str());
+    let password = config.get("password").and_then(|v| v.as_str());
+    let auth = match (username, password) {
+        (Some(u), Some(p)) => Some((u.to_string(), p.to_string())),
+        (None, None) => None,
+        _ => {
+            return Err("http: both 'username' and 'password' must be set, or neither".to_string())
+        }
+    };
+
+    // Parse optional headers map.
+    let extra_headers: Vec<(String, String)> = config
+        .get("headers")
+        .and_then(|v| v.as_mapping())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(HttpAdapter::new(
+        name,
+        server,
+        port,
+        auth,
+        tls,
+        skip_cert_verify,
+        extra_headers,
+    ))
+}
+
+/// Parse a `type: socks5` proxy config block into a `Socks5Adapter`.
+///
+/// # Hard errors (Class A per ADR-0002)
+///
+/// - `username` set without `password` (or vice versa) — orphaned credential.
+///
+/// # Warn-once (Class B per ADR-0002)
+///
+/// - `udp: true` — SOCKS5 UDP ASSOCIATE is deferred to M1.x.
+///
+/// upstream: `adapter/outbound/socks5.go`
+fn parse_socks5(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<Socks5Adapter, String> {
+    let server = config
+        .get("server")
+        .and_then(|v| v.as_str())
+        .ok_or("socks5: missing server")?;
+    let port = config
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .ok_or("socks5: missing port")? as u16;
+    let tls = config.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
+    let skip_cert_verify = config
+        .get("skip-cert-verify")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Both username and password must be set, or neither (Class A).
+    let username = config.get("username").and_then(|v| v.as_str());
+    let password = config.get("password").and_then(|v| v.as_str());
+    let auth = match (username, password) {
+        (Some(u), Some(p)) => Some((u.to_string(), p.to_string())),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "socks5: both 'username' and 'password' must be set, or neither".to_string(),
+            )
+        }
+    };
+
+    // Warn-once if UDP is requested (deferred, ADR-0002 Class B).
+    if config.get("udp").and_then(|v| v.as_bool()).unwrap_or(false) {
+        tracing::warn!(
+            proxy = name,
+            "socks5: `udp: true` is not supported in M1 (SOCKS5 UDP ASSOCIATE deferred); \
+             treating as false. Class B — ADR-0002."
+        );
+    }
+
+    Ok(Socks5Adapter::new(
+        name,
+        server,
+        port,
+        auth,
+        tls,
+        skip_cert_verify,
+    ))
+}
+
+/// Parse the `strategy` field for a `load-balance` group.
+///
+/// Hard error on unknown values (Class A per ADR-0002): unknown strategy means
+/// the user may get different distribution behaviour than intended.
+/// upstream: adapter/outbound/loadbalance.go silently falls back to round-robin.
+/// NOT silent fallback.
+fn parse_lb_strategy(strategy: Option<&str>) -> std::result::Result<LbStrategy, String> {
+    match strategy.unwrap_or("round-robin") {
+        "round-robin" => Ok(LbStrategy::RoundRobin),
+        "consistent-hashing" => Ok(LbStrategy::ConsistentHashing),
+        other => Err(format!(
+            "load-balance: unknown strategy '{}'; valid values: \
+             'round-robin' (default), 'consistent-hashing'. \
+             (upstream: falls back silently to round-robin; we reject — Class A ADR-0002)",
+            other
+        )),
     }
 }
 
@@ -396,17 +554,87 @@ fn parse_vless(
                 WsLayer::new(ws_cfg).map_err(|e| format!("vless: ws layer error: {}", e))?;
             chain.push(Box::new(ws_layer));
         }
-        "grpc" | "h2" | "httpupgrade" => {
-            // These transports are not yet implemented in M1.
-            // They are accepted at parse time (for the Vision-requires-TLS gate)
-            // but will fail at dial time.
-            tracing::warn!(
-                proxy = %name,
-                network = %network,
-                "vless: network transport '{}' is not yet implemented in M1; \
-                 connections will fail at dial time",
-                network
-            );
+        "grpc" => {
+            use mihomo_transport::grpc::{GrpcConfig, GrpcLayer};
+            let grpc_opts = config.get("grpc-opts");
+            let service_name = grpc_opts
+                .and_then(|o| o.get("grpc-service-name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("GunService")
+                .to_string();
+            // Authority: use the outbound server address so the gRPC virtual
+            // host matches the TLS SNI. Upstream hard-codes "localhost" when
+            // unset; we normalise here per ADR-0001 §1 (transport never infers
+            // context-sensitive values).
+            let authority = server.to_string();
+            let grpc_cfg = GrpcConfig {
+                service_name,
+                authority,
+            };
+            chain.push(Box::new(GrpcLayer::new(grpc_cfg)));
+        }
+        "h2" => {
+            use mihomo_transport::h2::{H2Config, H2Layer};
+            let h2_opts = config.get("h2-opts");
+            let path = h2_opts
+                .and_then(|o| o.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("/")
+                .to_string();
+            // `h2-opts.host` is a list; default to server when absent.
+            // Class A: empty host list is rejected — H2Layer asserts non-empty
+            // (debug) and upstream requires at least one authority value.
+            let hosts: Vec<String> = h2_opts
+                .and_then(|o| o.get("host"))
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![server.to_string()]);
+            if hosts.is_empty() {
+                return Err(format!(
+                    "vless: h2-opts.host must not be empty for proxy '{}' \
+                     (H2 requires at least one authority value)",
+                    name
+                ));
+            }
+            let h2_cfg = H2Config { path, hosts };
+            chain.push(Box::new(H2Layer::new(h2_cfg)));
+        }
+        "httpupgrade" => {
+            use mihomo_transport::httpupgrade::{HttpUpgradeConfig, HttpUpgradeLayer};
+            let hu_opts = config.get("http-upgrade-opts");
+            let path = hu_opts
+                .and_then(|o| o.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("/")
+                .to_string();
+            let host_header = hu_opts
+                .and_then(|o| o.get("host"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| Some(server.to_string()));
+            let extra_headers: Vec<(String, String)> = hu_opts
+                .and_then(|o| o.get("headers"))
+                .and_then(|h| h.as_mapping())
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| {
+                            let key = k.as_str()?.to_string();
+                            let val = v.as_str()?.to_string();
+                            Some((key, val))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let hu_cfg = HttpUpgradeConfig {
+                path,
+                host_header,
+                extra_headers,
+            };
+            chain.push(Box::new(HttpUpgradeLayer::new(hu_cfg)));
         }
         other => {
             return Err(format!(
@@ -532,8 +760,76 @@ fn parse_proxy_group_inner(
             )))
         }
         "fallback" => Ok(Arc::new(FallbackGroup::new(&config.name, proxies))),
+        "load-balance" => {
+            let strategy = parse_lb_strategy(config.strategy.as_deref())?;
+            Ok(Arc::new(LoadBalanceGroup::new(
+                &config.name,
+                proxies,
+                strategy,
+            )))
+        }
+        "relay" => parse_relay_group(&config.name, proxies, config),
         _ => Err(format!("unsupported group type: {}", config.group_type)),
     }
+}
+
+/// Parse a `type: relay` group config block into a `RelayGroup`.
+///
+/// # Hard errors (Class A per ADR-0002)
+///
+/// - `proxies` is empty — upstream panics; we hard-error.
+/// - `proxies` has length 1 — upstream silently acts as passthrough; we
+///   hard-error with a diagnostic pointing to the correct group type.
+///
+/// # Warn-once (Class B per ADR-0002)
+///
+/// - `url` present — ignored; not meaningful for a fixed chain.
+/// - `interval` present — ignored; relay has no health-check loop.
+///
+/// upstream: adapter/outbound/relay.go
+fn parse_relay_group(
+    name: &str,
+    proxies: Vec<Arc<dyn Proxy>>,
+    config: &crate::raw::RawProxyGroup,
+) -> std::result::Result<Arc<dyn Proxy>, String> {
+    // Hard-error: empty proxies list. upstream panics. NOT panic. Class A.
+    if proxies.is_empty() {
+        return Err(format!(
+            "relay group '{}': proxies list is empty; \
+             relay requires at least 2 proxies. \
+             (upstream: panics; we reject — Class A ADR-0002)",
+            name
+        ));
+    }
+
+    // Hard-error: single proxy. upstream silently acts as passthrough. Class A.
+    if proxies.len() < 2 {
+        return Err(format!(
+            "relay group '{}': requires at least 2 proxies, got {}; \
+             use `type: selector` or `type: direct` for a single proxy. \
+             (upstream: silently acts as passthrough; we reject — Class A ADR-0002)",
+            name,
+            proxies.len()
+        ));
+    }
+
+    // Warn-once for url and interval (Class B — not meaningful for relay).
+    if config.url.is_some() {
+        tracing::warn!(
+            group = name,
+            "relay: 'url' field is not used by relay groups and will be ignored. \
+             (upstream: silently ignored; we warn — Class B ADR-0002)"
+        );
+    }
+    if config.interval.is_some() {
+        tracing::warn!(
+            group = name,
+            "relay: 'interval' field is not used by relay groups and will be ignored. \
+             (upstream: silently ignored; we warn — Class B ADR-0002)"
+        );
+    }
+
+    Ok(Arc::new(RelayGroup::new(name, proxies)))
 }
 
 #[cfg(test)]
@@ -582,5 +878,167 @@ tls: true
         let yaml: serde_yaml::Value = serde_yaml::from_str("port: 8080").unwrap();
         let result = serialize_plugin_opts(&yaml).unwrap();
         assert_eq!(result, "port=8080");
+    }
+
+    // ─── Load-balance strategy parser (F1-F7) ────────────────────────────────
+
+    #[test]
+    fn parse_load_balance_default_strategy() {
+        // No `strategy:` field → round-robin selected.
+        let s = parse_lb_strategy(None).unwrap();
+        assert!(matches!(s, LbStrategy::RoundRobin));
+    }
+
+    #[test]
+    fn parse_load_balance_explicit_round_robin() {
+        let s = parse_lb_strategy(Some("round-robin")).unwrap();
+        assert!(matches!(s, LbStrategy::RoundRobin));
+    }
+
+    #[test]
+    fn parse_load_balance_consistent_hashing() {
+        let s = parse_lb_strategy(Some("consistent-hashing")).unwrap();
+        assert!(matches!(s, LbStrategy::ConsistentHashing));
+    }
+
+    #[test]
+    fn parse_load_balance_unknown_strategy_hard_errors() {
+        // upstream: falls back silently to round-robin.
+        // NOT silent fallback. ADR-0002 Class A.
+        let err = parse_lb_strategy(Some("sticky")).unwrap_err();
+        assert!(
+            err.contains("unknown strategy"),
+            "error should mention unknown strategy: {err}"
+        );
+        assert!(
+            err.contains("Class A"),
+            "error should cite ADR-0002 Class A: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_load_balance_case_insensitive_strategy() {
+        // Mixed-case is an unknown value → hard error (consistent with Class A policy).
+        // Do not panic.
+        let err = parse_lb_strategy(Some("Round-Robin")).unwrap_err();
+        assert!(!err.is_empty());
+        let err2 = parse_lb_strategy(Some("ROUND-ROBIN")).unwrap_err();
+        assert!(!err2.is_empty());
+    }
+
+    // ─── Relay parser tests (B1-B5) ─────────────────────────────────────────
+
+    fn make_direct_proxy(_name: &str) -> Arc<dyn Proxy> {
+        use mihomo_proxy::DirectAdapter;
+        Arc::new(WrappedProxy::new(Box::new(DirectAdapter::new())))
+    }
+
+    fn relay_config(name: &str, proxies: Vec<String>) -> crate::raw::RawProxyGroup {
+        crate::raw::RawProxyGroup {
+            name: name.to_string(),
+            group_type: "relay".to_string(),
+            proxies: Some(proxies),
+            ..Default::default()
+        }
+    }
+
+    // B1: single-proxy relay → hard error containing "at least 2"
+    // upstream: silently acts as passthrough. NOT passthrough. ADR-0002 Class A.
+    #[test]
+    fn relay_single_proxy_hard_errors_at_parse() {
+        let existing = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("DIRECT".to_string(), make_direct_proxy("DIRECT"));
+            m
+        };
+        let config = relay_config("r", vec!["DIRECT".to_string()]);
+        let err = parse_proxy_group(&config, &existing)
+            .err()
+            .expect("single-proxy relay must error");
+        assert!(
+            err.contains("at least 2"),
+            "error must mention 'at least 2'; got: {err}"
+        );
+    }
+
+    // B2: empty proxies list → hard error (NOT parse_proxy_group_inner's generic
+    // "no valid proxies" error — relay fires before that path is reached when the
+    // YAML list itself is empty/missing).
+    // upstream: panics. NOT panic. ADR-0002 Class A.
+    #[test]
+    fn relay_empty_proxies_hard_errors_at_parse() {
+        // Empty existing proxies + empty config proxies list.
+        let existing = std::collections::HashMap::new();
+        let config = crate::raw::RawProxyGroup {
+            name: "r".to_string(),
+            group_type: "relay".to_string(),
+            proxies: Some(vec![]),
+            ..Default::default()
+        };
+        // parse_proxy_group_inner will return "no valid proxies" before reaching
+        // relay-specific check (0 proxies ≠ relay-specific error, but still errors).
+        // Both paths must return Err.
+        assert!(parse_proxy_group(&config, &existing).is_err());
+    }
+
+    // B3: url field on relay group → warn (NOT error)
+    // Class B per ADR-0002. We can't easily assert on tracing::warn output in unit
+    // tests without a subscriber, so we assert the group parses successfully.
+    #[test]
+    fn relay_url_field_warns_not_errors() {
+        let existing = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("DIRECT".to_string(), make_direct_proxy("DIRECT"));
+            m.insert("REJECT".to_string(), make_direct_proxy("REJECT"));
+            m
+        };
+        let config = crate::raw::RawProxyGroup {
+            name: "r".to_string(),
+            group_type: "relay".to_string(),
+            proxies: Some(vec!["DIRECT".to_string(), "REJECT".to_string()]),
+            url: Some("https://example.com/test".to_string()),
+            ..Default::default()
+        };
+        // Must NOT error — url is warn-only (Class B).
+        parse_proxy_group(&config, &existing).expect("relay with url must not hard-error");
+    }
+
+    // B4: interval field on relay group → warn (NOT error)
+    #[test]
+    fn relay_interval_field_warns_not_errors() {
+        let existing = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("DIRECT".to_string(), make_direct_proxy("DIRECT"));
+            m.insert("REJECT".to_string(), make_direct_proxy("REJECT"));
+            m
+        };
+        let config = crate::raw::RawProxyGroup {
+            name: "r".to_string(),
+            group_type: "relay".to_string(),
+            proxies: Some(vec!["DIRECT".to_string(), "REJECT".to_string()]),
+            interval: Some(300),
+            ..Default::default()
+        };
+        parse_proxy_group(&config, &existing).expect("relay with interval must not hard-error");
+    }
+
+    // B5: both url and interval present → two separate warns, still not an error
+    #[test]
+    fn relay_url_and_interval_warn_not_errors() {
+        let existing = {
+            let mut m = std::collections::HashMap::new();
+            m.insert("DIRECT".to_string(), make_direct_proxy("DIRECT"));
+            m.insert("REJECT".to_string(), make_direct_proxy("REJECT"));
+            m
+        };
+        let config = crate::raw::RawProxyGroup {
+            name: "r".to_string(),
+            group_type: "relay".to_string(),
+            proxies: Some(vec!["DIRECT".to_string(), "REJECT".to_string()]),
+            url: Some("https://example.com/test".to_string()),
+            interval: Some(300),
+            ..Default::default()
+        };
+        parse_proxy_group(&config, &existing).expect("relay with url+interval must not hard-error");
     }
 }

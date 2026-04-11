@@ -107,6 +107,64 @@ jobs:
       - name: DNS pre-resolve tests
         run: cargo test --test pre_resolve_test -- --nocapture
 
+      - name: Transport TLS tests
+        run: cargo test -p mihomo-transport --test tls_test -- --nocapture
+
+      - name: Transport WS tests
+        run: cargo test -p mihomo-transport --test ws_test -- --nocapture
+
+      - name: Transport gRPC tests
+        run: cargo test -p mihomo-transport --test grpc_test --features grpc -- --nocapture
+
+      - name: Transport H2 tests
+        run: cargo test -p mihomo-transport --test h2_test --features h2 -- --nocapture
+
+      - name: Transport HTTPUpgrade tests
+        run: cargo test -p mihomo-transport --test httpupgrade_test --features httpupgrade -- --nocapture
+
+      - name: Transport crate invariants
+        run: cargo test -p mihomo-transport --test crate_invariants_test -- --nocapture
+
+      - name: Transport feature matrix (G1-G7)
+        run: |
+          cargo check -p mihomo-transport --no-default-features
+          cargo check -p mihomo-transport --no-default-features --features "tls"
+          cargo check -p mihomo-transport --no-default-features --features "tls,ws"
+          cargo check -p mihomo-transport --no-default-features --features "grpc"
+          cargo check -p mihomo-transport --no-default-features --features "h2"
+          cargo check -p mihomo-transport --no-default-features --features "httpupgrade"
+          cargo check -p mihomo-transport --all-features
+
+      - name: VLESS header unit tests
+        run: cargo test -p mihomo-proxy --lib vless::header -- --nocapture
+
+      - name: VLESS vision unit tests
+        run: cargo test -p mihomo-proxy --lib vless::vision --features "vless-vision" -- --nocapture
+
+      - name: VLESS conn unit tests
+        run: cargo test -p mihomo-proxy --lib vless::conn -- --nocapture
+
+      - name: VLESS config parser tests
+        run: cargo test -p mihomo-config --test vless_config_test -- --nocapture
+
+      - name: VLESS integration tests
+        run: cargo test --test vless_integration -- --nocapture
+
+      - name: VLESS feature matrix (G1-G6)
+        run: |
+          # G1: plain vless, no Vision — vision.rs excluded
+          cargo check -p mihomo-proxy --no-default-features --features vless
+          # G2: vless + Vision
+          cargo check -p mihomo-proxy --no-default-features --features "vless,vless-vision"
+          # G3: all proxy features (default)
+          cargo check -p mihomo-proxy --all-features
+          # G4: transport full-feature set compiles with vless
+          cargo check -p mihomo-transport --all-features
+          # G5: vless-vision feature requires vless (transitive dep check)
+          cargo check -p mihomo-proxy --no-default-features --features "vless-vision"
+          # G6: confirm vless-only build (no Vision) — same as G1, guards cfg-gating
+          cargo check -p mihomo-proxy --no-default-features --features vless
+
   msrv:
     runs-on: ubuntu-latest
     needs: lint
@@ -180,6 +238,39 @@ jobs:
 
       - name: DNS pre-resolve tests
         run: cargo test --test pre_resolve_test -- --nocapture
+
+      - name: Transport TLS tests
+        run: cargo test -p mihomo-transport --test tls_test -- --nocapture
+
+      - name: Transport WS tests
+        run: cargo test -p mihomo-transport --test ws_test -- --nocapture
+
+      - name: Transport gRPC tests
+        run: cargo test -p mihomo-transport --test grpc_test --features grpc -- --nocapture
+
+      - name: Transport H2 tests
+        run: cargo test -p mihomo-transport --test h2_test --features h2 -- --nocapture
+
+      - name: Transport HTTPUpgrade tests
+        run: cargo test -p mihomo-transport --test httpupgrade_test --features httpupgrade -- --nocapture
+
+      - name: Transport crate invariants
+        run: cargo test -p mihomo-transport --test crate_invariants_test -- --nocapture
+
+      - name: VLESS header unit tests
+        run: cargo test -p mihomo-proxy --lib vless::header -- --nocapture
+
+      - name: VLESS vision unit tests
+        run: cargo test -p mihomo-proxy --lib vless::vision --features "vless-vision" -- --nocapture
+
+      - name: VLESS conn unit tests
+        run: cargo test -p mihomo-proxy --lib vless::conn -- --nocapture
+
+      - name: VLESS config parser tests
+        run: cargo test -p mihomo-config --test vless_config_test -- --nocapture
+
+      - name: VLESS integration tests
+        run: cargo test --test vless_integration -- --nocapture
 
   tproxy:
     runs-on: ubuntu-latest

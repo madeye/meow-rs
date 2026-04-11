@@ -42,6 +42,7 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+bytes = { workspace = true }
 
 # tls feature
 tokio-rustls    = { workspace = true, optional = true }
@@ -75,3 +76,15 @@ rcgen        = "0.13"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 regex = { workspace = true }
 base64 = { workspace = true }
+
+[[test]]
+name = "grpc_test"
+required-features = ["grpc"]
+
+[[test]]
+name = "h2_test"
+required-features = ["h2"]
+
+[[test]]
+name = "httpupgrade_test"
+required-features = ["httpupgrade"]

@@ -129,6 +129,7 @@ fn save_roundtrip_with_proxy_groups() {
         url: Some("http://www.gstatic.com/generate_204".into()),
         interval: Some(300),
         tolerance: Some(150),
+        ..Default::default()
     }]);
 
     save_raw_config(path_str, &raw).unwrap();
@@ -219,9 +220,7 @@ fn rebuild_from_raw_with_groups() {
             name: "Select".into(),
             group_type: "select".into(),
             proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
-            url: None,
-            interval: None,
-            tolerance: None,
+            ..Default::default()
         },
         RawProxyGroup {
             name: "Auto".into(),
@@ -230,6 +229,7 @@ fn rebuild_from_raw_with_groups() {
             url: Some("http://test.com".into()),
             interval: Some(300),
             tolerance: Some(100),
+            ..Default::default()
         },
     ]);
     let (proxies, _rules) = rebuild_from_raw(&raw).unwrap();

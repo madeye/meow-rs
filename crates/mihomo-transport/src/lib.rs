@@ -31,6 +31,15 @@ pub mod tls;
 #[cfg(feature = "ws")]
 pub mod ws;
 
+#[cfg(feature = "grpc")]
+pub mod grpc;
+
+#[cfg(feature = "h2")]
+pub mod h2;
+
+#[cfg(feature = "httpupgrade")]
+pub mod httpupgrade;
+
 /// A duplex byte stream — the currency passed between transport layers.
 ///
 /// Blanket-implemented for every `T: AsyncRead + AsyncWrite + Unpin + Send + Sync`,
