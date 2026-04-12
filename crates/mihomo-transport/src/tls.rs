@@ -39,9 +39,9 @@
 //! per distinct value when the `boring-tls` feature is not compiled in.
 //! See issue #32 for the tracking issue.
 
+use std::sync::Arc;
 #[cfg(not(feature = "boring-tls"))]
 use std::collections::HashSet;
-use std::sync::Arc;
 #[cfg(not(feature = "boring-tls"))]
 use std::sync::{Mutex, OnceLock};
 
@@ -378,7 +378,8 @@ impl RustlsInner {
 
         // --- ALPN ---
         if !config.alpn.is_empty() {
-            tls_config.alpn_protocols = config.alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
+            tls_config.alpn_protocols =
+                config.alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
         }
 
         Ok(tls_config)
@@ -394,268 +395,17 @@ impl RustlsInner {
     }
 }
 
-// ─── BoringSSL backend ────────────────────────────────────────────────────────
-
-/// Per-profile ClientHello shaping parameters.
-///
-/// These map directly to the BoringSSL context-builder knobs documented in
-/// the design doc §5.  All strings use OpenSSL cipher/curve/sigalgs syntax.
-#[cfg(feature = "boring-tls")]
-struct FingerprintParams {
-    /// OpenSSL cipher-list string controlling TLS 1.2 cipher order.
-    /// TLS 1.3 ciphers (AES-128-GCM-SHA256, AES-256-GCM-SHA384,
-    /// CHACHA20-POLY1305-SHA256) are always included by BoringSSL and are
-    /// not controlled by this string.
-    cipher_list: &'static str,
-    /// OpenSSL curve-list string (e.g. `"X25519:P-256:P-384"`).
-    curves_list: &'static str,
-    /// Inject GREASE values in ciphers, extensions, and named groups.
-    /// Also enables ECH GREASE automatically.
-    grease: bool,
-    /// Randomise extension order (Chrome behaviour since v106).
-    permute_extensions: bool,
-    /// OpenSSL sigalgs string (`:` separated).
-    sigalgs_list: &'static str,
-}
-
-// ── Profile constants (derived from metacubex/utls u_parrots.go) ─────────────
-//
-// TLS 1.2 cipher strings only — BoringSSL always prepends the three TLS 1.3
-// ciphers (TLS_AES_128_GCM_SHA256 / TLS_AES_256_GCM_SHA384 /
-// TLS_CHACHA20_POLY1305_SHA256) regardless of what set_cipher_list receives.
-// GREASE placeholders are omitted here; set_grease_enabled(true) handles them.
-
-/// Chrome 120 / chrome120 alias.
-/// Reference: u_parrots.go lines 665–736, HelloChrome_120.
-#[cfg(feature = "boring-tls")]
-const CHROME: FingerprintParams = FingerprintParams {
-    cipher_list: "ECDHE-ECDSA-AES128-GCM-SHA256:\
-                  ECDHE-RSA-AES128-GCM-SHA256:\
-                  ECDHE-ECDSA-AES256-GCM-SHA384:\
-                  ECDHE-RSA-AES256-GCM-SHA384:\
-                  ECDHE-ECDSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-AES128-SHA:\
-                  ECDHE-RSA-AES256-SHA:\
-                  AES128-GCM-SHA256:\
-                  AES256-GCM-SHA384:\
-                  AES128-SHA:\
-                  AES256-SHA",
-    curves_list: "X25519:P-256:P-384",
-    grease: true,
-    permute_extensions: true,
-    sigalgs_list: "ecdsa_secp256r1_sha256:\
-                   rsa_pss_rsae_sha256:\
-                   rsa_pkcs1_sha256:\
-                   ecdsa_secp384r1_sha384:\
-                   rsa_pss_rsae_sha384:\
-                   rsa_pkcs1_sha384:\
-                   rsa_pss_rsae_sha512:\
-                   rsa_pkcs1_sha512",
-};
-
-/// Firefox 120 / firefox120 alias.
-/// Reference: u_parrots.go lines ~1197, HelloFirefox_120.
-#[cfg(feature = "boring-tls")]
-const FIREFOX: FingerprintParams = FingerprintParams {
-    cipher_list: "ECDHE-ECDSA-AES128-GCM-SHA256:\
-                  ECDHE-RSA-AES128-GCM-SHA256:\
-                  ECDHE-ECDSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-CHACHA20-POLY1305:\
-                  ECDHE-ECDSA-AES256-GCM-SHA384:\
-                  ECDHE-RSA-AES256-GCM-SHA384:\
-                  ECDHE-ECDSA-AES256-SHA:\
-                  ECDHE-ECDSA-AES128-SHA:\
-                  ECDHE-RSA-AES128-SHA:\
-                  ECDHE-RSA-AES256-SHA:\
-                  AES128-GCM-SHA256:\
-                  AES256-GCM-SHA384:\
-                  AES128-SHA:\
-                  AES256-SHA:\
-                  DES-CBC3-SHA",
-    curves_list: "X25519:P-256:P-384:P-521",
-    grease: false,
-    permute_extensions: false,
-    sigalgs_list: "ecdsa_secp256r1_sha256:\
-                   ecdsa_secp384r1_sha384:\
-                   ecdsa_secp521r1_sha512:\
-                   rsa_pss_rsae_sha256:\
-                   rsa_pss_rsae_sha384:\
-                   rsa_pss_rsae_sha512:\
-                   rsa_pkcs1_sha256:\
-                   rsa_pkcs1_sha384:\
-                   rsa_pkcs1_sha512",
-};
-
-/// Safari 16 / safari16 alias.
-/// Reference: u_parrots.go lines ~1851, HelloSafari_16_0.
-#[cfg(feature = "boring-tls")]
-const SAFARI: FingerprintParams = FingerprintParams {
-    cipher_list: "ECDHE-ECDSA-AES256-GCM-SHA384:\
-                  ECDHE-ECDSA-AES128-GCM-SHA256:\
-                  ECDHE-ECDSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-AES256-GCM-SHA384:\
-                  ECDHE-RSA-AES128-GCM-SHA256:\
-                  ECDHE-RSA-CHACHA20-POLY1305:\
-                  ECDHE-ECDSA-AES256-SHA:\
-                  ECDHE-ECDSA-AES128-SHA:\
-                  ECDHE-RSA-AES256-SHA:\
-                  ECDHE-RSA-AES128-SHA:\
-                  AES256-GCM-SHA384:\
-                  AES128-GCM-SHA256:\
-                  AES256-SHA:\
-                  AES128-SHA:\
-                  ECDHE-ECDSA-3DES-EDE-CBC-SHA:\
-                  ECDHE-RSA-3DES-EDE-CBC-SHA:\
-                  DES-CBC3-SHA",
-    curves_list: "X25519:P-256:P-384",
-    grease: false,
-    permute_extensions: false,
-    sigalgs_list: "ecdsa_secp256r1_sha256:\
-                   rsa_pss_rsae_sha256:\
-                   rsa_pkcs1_sha256:\
-                   ecdsa_secp384r1_sha384:\
-                   ecdsa_secp521r1_sha512:\
-                   rsa_pss_rsae_sha384:\
-                   rsa_pss_rsae_sha512:\
-                   rsa_pkcs1_sha384:\
-                   rsa_pkcs1_sha512:\
-                   rsa_pkcs1_sha1",
-};
-
-/// iOS 14.
-/// Reference: u_parrots.go lines ~1510, HelloIOS_14.
-/// Cipher and curve list is identical to Safari 16; sigalg order differs.
-#[cfg(feature = "boring-tls")]
-const IOS: FingerprintParams = FingerprintParams {
-    cipher_list: "ECDHE-ECDSA-AES256-GCM-SHA384:\
-                  ECDHE-ECDSA-AES128-GCM-SHA256:\
-                  ECDHE-ECDSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-AES256-GCM-SHA384:\
-                  ECDHE-RSA-AES128-GCM-SHA256:\
-                  ECDHE-RSA-CHACHA20-POLY1305:\
-                  ECDHE-ECDSA-AES256-SHA:\
-                  ECDHE-ECDSA-AES128-SHA:\
-                  ECDHE-RSA-AES256-SHA:\
-                  ECDHE-RSA-AES128-SHA:\
-                  AES256-GCM-SHA384:\
-                  AES128-GCM-SHA256:\
-                  AES256-SHA:\
-                  AES128-SHA:\
-                  ECDHE-ECDSA-3DES-EDE-CBC-SHA:\
-                  ECDHE-RSA-3DES-EDE-CBC-SHA:\
-                  DES-CBC3-SHA",
-    curves_list: "X25519:P-256:P-384",
-    grease: false,
-    permute_extensions: false,
-    sigalgs_list: "ecdsa_secp256r1_sha256:\
-                   rsa_pss_rsae_sha256:\
-                   rsa_pkcs1_sha256:\
-                   ecdsa_secp384r1_sha384:\
-                   ecdsa_secp521r1_sha512:\
-                   rsa_pss_rsae_sha384:\
-                   rsa_pss_rsae_sha512:\
-                   rsa_pkcs1_sha384:\
-                   rsa_pkcs1_sha512:\
-                   rsa_pkcs1_sha1",
-};
-
-/// Android 11 OkHttp.
-/// Reference: u_parrots.go lines ~1595, HelloAndroid_11_OkHttp.
-/// No TLS 1.3 ciphers in OkHttp's list; boring still offers them by default.
-/// P-256 precedes X25519 (OkHttp ordering).
-#[cfg(feature = "boring-tls")]
-const ANDROID: FingerprintParams = FingerprintParams {
-    cipher_list: "ECDHE-ECDSA-AES128-GCM-SHA256:\
-                  ECDHE-RSA-AES128-GCM-SHA256:\
-                  ECDHE-ECDSA-AES256-GCM-SHA384:\
-                  ECDHE-RSA-AES256-GCM-SHA384:\
-                  ECDHE-ECDSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-AES128-SHA:\
-                  ECDHE-RSA-AES256-SHA:\
-                  AES128-GCM-SHA256:\
-                  AES256-GCM-SHA384:\
-                  AES128-SHA:\
-                  AES256-SHA",
-    curves_list: "P-256:X25519",
-    grease: false,
-    permute_extensions: false,
-    sigalgs_list: "ecdsa_secp256r1_sha256:\
-                   rsa_pss_rsae_sha256:\
-                   rsa_pkcs1_sha256:\
-                   ecdsa_secp384r1_sha384:\
-                   rsa_pss_rsae_sha384:\
-                   rsa_pkcs1_sha384:\
-                   rsa_pss_rsae_sha512:\
-                   rsa_pkcs1_sha512",
-};
-
-/// Edge 85 (Chrome 83 base).
-/// Reference: u_parrots.go lines ~1641, HelloEdge_85 / HelloChrome_83.
-/// GREASE enabled; extension permutation absent (pre-Chrome-106).
-#[cfg(feature = "boring-tls")]
-const EDGE: FingerprintParams = FingerprintParams {
-    cipher_list: "ECDHE-ECDSA-AES128-GCM-SHA256:\
-                  ECDHE-RSA-AES128-GCM-SHA256:\
-                  ECDHE-ECDSA-AES256-GCM-SHA384:\
-                  ECDHE-RSA-AES256-GCM-SHA384:\
-                  ECDHE-ECDSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-CHACHA20-POLY1305:\
-                  ECDHE-RSA-AES128-SHA:\
-                  ECDHE-RSA-AES256-SHA:\
-                  AES128-GCM-SHA256:\
-                  AES256-GCM-SHA384:\
-                  AES128-SHA:\
-                  AES256-SHA",
-    curves_list: "X25519:P-256:P-384",
-    grease: true,
-    permute_extensions: false,
-    sigalgs_list: "ecdsa_secp256r1_sha256:\
-                   rsa_pss_rsae_sha256:\
-                   rsa_pkcs1_sha256:\
-                   ecdsa_secp384r1_sha384:\
-                   rsa_pss_rsae_sha384:\
-                   rsa_pkcs1_sha384:\
-                   rsa_pss_rsae_sha512:\
-                   rsa_pkcs1_sha512:\
-                   rsa_pkcs1_sha1",
-};
-
-/// Resolve a fingerprint string to its `FingerprintParams`.
-///
-/// Returns `None` for deferred/unknown profiles — caller should fall through
-/// to `warn_fingerprint_once` (not applicable in the boring path, but kept
-/// for exhaustiveness).
-#[cfg(feature = "boring-tls")]
-fn resolve_fingerprint(fp: &str) -> Option<&'static FingerprintParams> {
-    match fp {
-        "chrome" | "chrome120" => Some(&CHROME),
-        "firefox" | "firefox120" => Some(&FIREFOX),
-        "safari" | "safari16" => Some(&SAFARI),
-        "ios" => Some(&IOS),
-        "android" => Some(&ANDROID),
-        "edge" => Some(&EDGE),
-        "random" => {
-            // Weighted random at construction: chrome(6) safari(3) ios(2) firefox(1).
-            // Use a simple modulo on a thread-local random u8.
-            let v: u8 = rand::random();
-            Some(match v % 12 {
-                0..=5 => &CHROME,
-                6..=8 => &SAFARI,
-                9..=10 => &IOS,
-                _ => &FIREFOX,
-            })
-        }
-        _ => None,
-    }
-}
+// ─── BoringSSL backend (stub — task #8 / #9 will flesh this out) ──────────────
 
 #[cfg(feature = "boring-tls")]
 struct BoringInner {
+    // Fields are stubs — consumed by task #8 (fingerprint) and task #9 (ECH).
+    #[allow(dead_code)]
     connector: boring::ssl::SslConnector,
+    #[allow(dead_code)]
     server_name: String,
-    /// Stored for per-connection ECH wiring (task #9).
+    /// Stored for use in connect() once task #9 implements ECH.
+    #[allow(dead_code)]
     ech: Option<EchOpts>,
 }
 
@@ -664,105 +414,18 @@ impl BoringInner {
     fn new(config: &TlsConfig) -> Result<Self> {
         let server_name = config.sni.clone().ok_or_else(|| {
             TransportError::Config(
-                "TlsLayer requires sni to be Some; None is reserved for non-TLS paths.".into(),
+                "TlsLayer requires sni to be Some; None is reserved for non-TLS paths."
+                    .into(),
             )
         })?;
 
-        let mut b = boring::ssl::SslConnector::builder(boring::ssl::SslMethod::tls())
-            .map_err(|e| TransportError::Config(format!("boring TLS init: {}", e)))?;
+        // Minimal connector — cipher list, curves, GREASE, permute-extensions,
+        // ALPN, skip-verify, and client-cert will be wired in task #8.
+        let connector =
+            boring::ssl::SslConnector::builder(boring::ssl::SslMethod::tls())
+                .map_err(|e| TransportError::Config(format!("boring TLS init: {}", e)))?
+                .build();
 
-        // ── Fingerprint shaping ──────────────────────────────────────────────
-        if let Some(fp_str) = &config.fingerprint {
-            if let Some(p) = resolve_fingerprint(fp_str) {
-                b.set_cipher_list(p.cipher_list).map_err(|e| {
-                    TransportError::Config(format!("boring: set_cipher_list: {}", e))
-                })?;
-                b.set_curves_list(p.curves_list).map_err(|e| {
-                    TransportError::Config(format!("boring: set_curves_list: {}", e))
-                })?;
-                b.set_grease_enabled(p.grease);
-                b.set_permute_extensions(p.permute_extensions);
-                b.set_sigalgs_list(p.sigalgs_list).map_err(|e| {
-                    TransportError::Config(format!("boring: set_sigalgs_list: {}", e))
-                })?;
-            } else {
-                // Deferred profile — warn and continue with boring defaults.
-                warn!(
-                    "client-fingerprint=\"{}\" is not yet supported in boring-tls; \
-                     using BoringSSL defaults. \
-                     See docs/specs/ech-utls-design.md §10 for the deferred list.",
-                    fp_str
-                );
-            }
-        }
-
-        // ── ALPN ────────────────────────────────────────────────────────────
-        if !config.alpn.is_empty() {
-            // ALPN wire format: each entry is a length-prefixed byte sequence.
-            let wire: Vec<u8> = config
-                .alpn
-                .iter()
-                .flat_map(|p| {
-                    let b = p.as_bytes();
-                    let mut v = Vec::with_capacity(1 + b.len());
-                    v.push(b.len() as u8);
-                    v.extend_from_slice(b);
-                    v
-                })
-                .collect();
-            b.set_alpn_protos(&wire)
-                .map_err(|e| TransportError::Config(format!("boring: set_alpn_protos: {}", e)))?;
-        }
-
-        // ── Certificate verification ─────────────────────────────────────────
-        if config.skip_cert_verify {
-            warn!(
-                "skip-cert-verify=true: TLS certificate verification is disabled (boring path); \
-                 the connection is NOT authenticated against a trusted CA"
-            );
-            b.set_verify(boring::ssl::SslVerifyMode::NONE);
-        } else {
-            b.set_verify(boring::ssl::SslVerifyMode::PEER);
-            if !config.additional_roots.is_empty() {
-                let cert_store = b.cert_store_mut();
-                for der in &config.additional_roots {
-                    let x509 = boring::x509::X509::from_der(der).map_err(|e| {
-                        TransportError::Config(format!(
-                            "additional_roots: invalid CA cert (boring): {}",
-                            e
-                        ))
-                    })?;
-                    cert_store.add_cert(x509).map_err(|e| {
-                        TransportError::Config(format!(
-                            "additional_roots: add_cert (boring): {}",
-                            e
-                        ))
-                    })?;
-                }
-            }
-        }
-
-        // ── Client certificate (mTLS) ────────────────────────────────────────
-        if let Some(cc) = &config.client_cert {
-            let cert = boring::x509::X509::from_pem(&cc.cert_pem).map_err(|e| {
-                TransportError::Config(format!(
-                    "client_cert.cert_pem: PEM parse error (boring): {}",
-                    e
-                ))
-            })?;
-            let key = boring::pkey::PKey::private_key_from_pem(&cc.key_pem).map_err(|e| {
-                TransportError::Config(format!(
-                    "client_cert.key_pem: PEM parse error (boring): {}",
-                    e
-                ))
-            })?;
-            b.set_certificate(&cert)
-                .map_err(|e| TransportError::Tls(format!("boring: set_certificate: {}", e)))?;
-            b.set_private_key(&key)
-                .map_err(|e| TransportError::Tls(format!("boring: set_private_key: {}", e)))?;
-        }
-
-        let connector = b.build();
         Ok(Self {
             connector,
             server_name,
@@ -770,53 +433,12 @@ impl BoringInner {
         })
     }
 
-    async fn connect(&self, inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
-        let mut cfg = self
-            .connector
-            .configure()
-            .map_err(|e| TransportError::Tls(format!("boring: configure: {}", e)))?;
-
-        // SNI
-        cfg.set_use_server_name_indication(true);
-
-        // ECH inline path — per-connection setup on ConnectConfiguration.
-        if let Some(EchOpts::Config(ech_bytes)) = &self.ech {
-            cfg.set_ech_config_list(ech_bytes).map_err(|e| {
-                TransportError::Config(format!("boring: set_ech_config_list: {}", e))
-            })?;
-            // RFC 9180 §6: ECH requires TLS 1.3.  BoringSSL enforces this
-            // automatically when an ECH config list is set, but we set it
-            // explicitly here so the requirement is visible at the call site.
-            cfg.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_3))
-                .map_err(|e| {
-                    TransportError::Config(format!("boring: set_min_proto_version TLS1.3: {}", e))
-                })?;
-        }
-
-        match tokio_boring::connect(cfg, &self.server_name, inner).await {
-            Ok(tls_stream) => Ok(Box::new(tls_stream)),
-            Err(e) => {
-                // If ECH was active and the server rejected it, include the
-                // ECH retry configs from the server's ech_required alert so
-                // the caller can retry with updated ECH keys.
-                // No automatic retry in v1 — rejection is an error per QA C14.
-                if self.ech.is_some() {
-                    if let Some(retry_configs) = e.ssl().and_then(|ssl| ssl.get_ech_retry_configs())
-                    {
-                        if !retry_configs.is_empty() {
-                            let hex = retry_configs
-                                .iter()
-                                .map(|b| format!("{:02x}", b))
-                                .collect::<String>();
-                            return Err(TransportError::Tls(format!(
-                                "boring TLS handshake (ECH rejected; retry_configs={}): {}",
-                                hex, e
-                            )));
-                        }
-                    }
-                }
-                Err(TransportError::Tls(format!("boring TLS handshake: {}", e)))
-            }
-        }
+    async fn connect(&self, _inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
+        // Full implementation in task #8 (fingerprint) and task #9 (ECH).
+        Err(TransportError::Config(
+            "boring-tls fingerprint/ECH support is not yet implemented; \
+             tasks #8 and #9 will fill this in."
+                .into(),
+        ))
     }
 }
