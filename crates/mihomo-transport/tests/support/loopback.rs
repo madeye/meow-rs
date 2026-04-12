@@ -848,7 +848,42 @@ impl WallClockTimeout {
     }
 }
 
-// ─── ClientHello capture helpers ─────────────────────────────────────────────
+// ─── Cert/Key conversion FFI helpers ─────────────────────────────────────────
+
+/// Convert rustls CertificateDer (DER bytes) to boring::x509::X509.
+///
+/// This requires unsafe FFI to OpenSSL's d2i_X509 function via boring_sys.
+/// Implementation approach:
+/// 1. Use boring_sys::d2i_X509 to parse DER bytes → X509*
+/// 2. Wrap the pointer in boring::x509::X509 via unsafe from_ptr
+///
+/// Deferred pending research into proper boring API usage patterns.
+/// For now, we use the spec-compliant loopback with rustls cert format.
+#[cfg(feature = "boring-tls")]
+fn rustls_cert_to_boring(cert_der: &CertificateDer) -> Result<boring::x509::X509, String> {
+    // TODO: Implement FFI to d2i_X509
+    // For now, use a workaround: rely on test infrastructure using rustls certs
+    eprintln!("rustls_cert_to_boring: FFI implementation deferred");
+    Err("cert conversion not yet implemented".into())
+}
+
+/// Convert rustls PrivateKeyDer (DER bytes) to boring::pkey::PKey.
+///
+/// This requires unsafe FFI to OpenSSL's d2i_PrivateKey function via boring_sys.
+/// Implementation approach:
+/// 1. Match on key_der variant (Pkcs8, Rsa, Ec, etc.)
+/// 2. Use boring_sys::d2i_PrivateKey to parse DER bytes → EVP_PKEY*
+/// 3. Wrap the pointer in boring::pkey::PKey via unsafe from_ptr
+///
+/// Deferred pending research into proper boring API usage patterns.
+#[cfg(feature = "boring-tls")]
+fn rustls_key_to_boring(key_der: &PrivateKeyDer) -> Result<boring::pkey::PKey<boring::pkey::Private>, String> {
+    // TODO: Implement FFI to d2i_PrivateKey
+    eprintln!("rustls_key_to_boring: FFI implementation deferred");
+    Err("key conversion not yet implemented".into())
+}
+
+// ─── ClientHello capture helpers ─────────────────────────────────────────
 
 /// Placeholder for ClientHello byte capture infrastructure.
 ///
@@ -857,9 +892,11 @@ impl WallClockTimeout {
 ///    intercept and log the first TLS record (ClientHello), then replay it for boring.
 /// 2. **Post-handshake extraction**: Use boring's callbacks or introspection APIs
 ///    to extract ClientHello details after the handshake (if available in v5.0.2).
+/// 3. **Manual TLS record parsing**: Read the first few bytes to get record type/length,
+///    extract ClientHello, then create a wrapper that replays the data to boring.
 ///
-/// Implementation deferred to task #12's refinement phase, pending a decision on
-/// which approach works best with boring-sys v5.0.2's public API surface.
+/// Implementation deferred pending research into boring-sys's BIO (Basic I/O)
+/// callbacks or custom stream wrapping patterns.
 
 // ─── BoringSSL loopback servers (fingerprint + ECH tests) ──────────────────────
 
@@ -900,33 +937,30 @@ pub async fn spawn_boring_server(
             Err(_) => return,
         };
 
-        // TODO: Task #12 implementation phase
+        // TODO: Task #12 final implementation phase
         //
-        // 1. Convert rustls cert/key to boring format and build SslContext.
-        //    - rustls::pki_types::CertificateDer → boring::x509::X509
-        //    - rustls::pki_types::PrivateKeyDer → boring::pkey::PKey
-        //    Likely requires unsafe FFI to OpenSSL functions like d2i_X509, d2i_PrivateKey.
+        // 1. Implement cert/key FFI conversion (rustls DER → boring format):
+        //    - Use boring_sys::d2i_X509 to parse certificate DER
+        //    - Use boring_sys::d2i_PrivateKey to parse private key DER
+        //    - Wrap pointers in boring::x509::X509 and boring::pkey::PKey via from_ptr
         //
-        // 2. Configure ALPN protocols on the SslContext if opts.server_alpn is non-empty.
-        //    Use SslContextBuilder::set_alpn_protos(wire_format_bytes).
+        // 2. Build SslContext with converted cert/key
+        //    - boring::ssl::SslContext::builder(tls())
+        //    - set_certificate(cert) and set_private_key(key)
         //
-        // 3. Configure client certificate verification if opts.require_client_cert_ca is set.
-        //    Use SslContextBuilder::set_verify with verify_mode and CA cert chain.
+        // 3. Configure ALPN if opts.server_alpn is non-empty
+        //    - Marshal protocols into wire format (length-prefixed list)
+        //    - ctx_builder.set_alpn_protos(wire_bytes)
         //
-        // 4. Wrap TCP stream with ClientHelloCaptureStream before passing to boring.
-        //    This allows capturing the raw ClientHello bytes for JA3 computation.
+        // 4. Build SslAcceptor and perform TLS handshake
         //
-        // 5. Perform handshake using tokio_boring::SslAcceptor::accept(tcp).
+        // 5. Extract metadata (ALPN negotiated)
         //
-        // 6. Extract metadata from the established connection:
-        //    - server_name: None (boring server doesn't expose client SNI this way)
-        //    - alpn: ssl_ref.selected_alpn_protocol()
-        //    - client_hello_bytes: extracted from captured wrapper
-        //    - peer_certs: ssl_ref.peer_certificates() if client cert was required
+        // 6. Implement ClientHello capture for JA3:
+        //    - Pre-handshake stream wrapper OR
+        //    - Post-handshake extraction via boring callbacks
         //
-        // 7. Send BoringConnInfo through the channel.
-        //
-        // 8. Drain connection until EOF.
+        // 7. Send BoringConnInfo and drain connection
 
         let _ = tx.send(BoringConnInfo::default());
     });
