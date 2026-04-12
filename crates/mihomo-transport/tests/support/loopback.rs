@@ -595,6 +595,8 @@ pub struct BoringConnInfo {
     pub client_hello_bytes: Vec<u8>,
     /// DER-encoded client certificates (empty if no client cert).
     pub peer_certs: Vec<Vec<u8>>,
+    /// True when the server successfully decrypted ECH in this handshake.
+    pub ech_accepted: bool,
 }
 
 /// Configuration for [`spawn_boring_server`].
@@ -610,13 +612,39 @@ pub struct BoringServerOptions {
     pub ech_config: Option<BoringEchConfig>,
 }
 
-/// ECH configuration for [`spawn_boring_server`].
+/// ECH configuration for [`spawn_boring_server`] / [`spawn_ech_server`].
+///
+/// The `keys_handle` keeps the `SSL_ECH_KEYS*` alive until the server context
+/// installs it (via `SSL_CTX_set1_ech_keys`, which increments the ref-count).
+/// After installation the handle can be dropped safely.
 #[cfg(feature = "boring-tls")]
 pub struct BoringEchConfig {
-    /// Raw EncodedECHConfigList bytes (public key).
+    /// Raw EncodedECHConfigList bytes (public key) — give these to the client's
+    /// [`EchOpts::Config`](mihomo_transport::tls::EchOpts::Config).
     pub config_list_bytes: Vec<u8>,
-    /// HPKE private key (DER-encoded).
-    pub private_key_der: Vec<u8>,
+    /// Owning handle for the corresponding `SSL_ECH_KEYS*`.  Freed on drop.
+    pub keys_handle: EchKeysHandle,
+}
+
+/// RAII wrapper for a `*mut SSL_ECH_KEYS` pointer.
+///
+/// Calls `SSL_ECH_KEYS_free` on drop.  Kept alive until
+/// `SSL_CTX_set1_ech_keys` is called (which takes its own ref-counted copy).
+#[cfg(feature = "boring-tls")]
+pub struct EchKeysHandle(pub *mut boring_sys::SSL_ECH_KEYS);
+
+#[cfg(feature = "boring-tls")]
+// SAFETY: `SSL_ECH_KEYS*` is ref-counted and internally synchronised; safe to
+// send across threads as long as no aliases exist (upheld by ownership here).
+unsafe impl Send for EchKeysHandle {}
+
+#[cfg(feature = "boring-tls")]
+impl Drop for EchKeysHandle {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { boring_sys::SSL_ECH_KEYS_free(self.0) };
+        }
+    }
 }
 
 /// JA3 fingerprint hash computation helper.
@@ -708,11 +736,13 @@ pub struct EchKeyPairGenerator;
 
 #[cfg(feature = "boring-tls")]
 impl EchKeyPairGenerator {
-    /// Generate a self-consistent ECH keypair for loopback test.
+    /// Generate a self-consistent ECH keypair for loopback tests.
     ///
-    /// Returns: `(config_list_bytes, private_key_der)` where:
-    /// - `config_list_bytes` is the EncodedECHConfigList wire format (for the client)
-    /// - `private_key_der` is DER-encoded HPKE private key (for the server's BoringEchConfig)
+    /// Returns `(config_list_bytes, keys_handle)` where:
+    /// - `config_list_bytes` — EncodedECHConfigList wire format; pass to
+    ///   [`EchOpts::Config`](mihomo_transport::tls::EchOpts::Config) on the client.
+    /// - `keys_handle` — owning handle for the server's `SSL_ECH_KEYS*`; put into
+    ///   [`BoringEchConfig`] and pass to [`spawn_ech_server`].
     ///
     /// # Implementation
     ///
@@ -724,15 +754,16 @@ impl EchKeyPairGenerator {
     ///
     /// Panics if any of the FFI operations fail (which would indicate a test
     /// configuration error, not a runtime issue).
-    pub fn generate() -> Option<(Vec<u8>, Vec<u8>)> {
+    pub fn generate() -> Option<(Vec<u8>, EchKeysHandle)> {
         unsafe { Self::generate_ech_key_and_config("loopback.test") }
     }
 
     /// FFI-based implementation using boring-sys SSL_ECH_KEYS_* functions.
     ///
-    /// Returns: `(ech_config_list_bytes, ech_key_der)` for client and server respectively.
+    /// Returns: `(ech_config_list_bytes, keys_handle)` — the config bytes for the
+    /// client and an owning handle for the server's SSL_ECH_KEYS*.
     #[cfg(feature = "boring-tls")]
-    unsafe fn generate_ech_key_and_config(public_name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    unsafe fn generate_ech_key_and_config(public_name: &str) -> Option<(Vec<u8>, EchKeysHandle)> {
         use boring_sys::*;
         use std::ffi::CString;
 
@@ -781,9 +812,14 @@ impl EchKeyPairGenerator {
 
         // Add the ECHConfig to the keys structure.
         // SSL_ECH_KEYS_add(keys, is_retry_config, ech_config.ptr, ech_config.len, hpke_key)
+        //
+        // is_retry_config=1 means this config will be:
+        //   (a) included by SSL_ECH_KEYS_marshal_retry_configs → gives the client its ECHConfigList
+        //   (b) required by SSL_CTX_set1_ech_keys (fails with 0 if no retry config exists)
+        //   (c) sent back to the client if ECH decryption fails (retry response)
         if SSL_ECH_KEYS_add(
             keys,
-            0, // is_retry_config = false (this is the primary config)
+            1, // is_retry_config = true
             ech_config.as_ptr(),
             ech_config.len(),
             &hpke_key, // The HPKE key containing the private key
@@ -808,17 +844,16 @@ impl EchKeyPairGenerator {
             std::slice::from_raw_parts(list_ptr, list_len).to_vec();
         OPENSSL_free(list_ptr as *mut _);
 
-        // 5. Extract the private key in DER format for the server (BoringEchConfig).
-        // This requires serializing the EVP_HPKE_KEY to DER.
-        // TODO: Implement private key serialization if boring-sys exposes it.
-        // For now, return the ech_config_list and a placeholder for the private key.
-        // The private key is embedded in the SSL_ECH_KEYS structure; see task #9 for
-        // how to wire this into the server context via SSL_CTX_set1_ech_keys.
-        let private_key_der = Vec::new(); // Placeholder; actual implementation in task #9.
-
-        SSL_ECH_KEYS_free(keys);
-
-        Some((ech_config_list, private_key_der))
+        // 5. Wrap the live SSL_ECH_KEYS* in an EchKeysHandle.
+        //
+        // The handle's Drop impl calls SSL_ECH_KEYS_free.  The caller moves the
+        // handle into BoringEchConfig, which is then passed to spawn_ech_server.
+        // spawn_ech_server calls SSL_CTX_set1_ech_keys (which bumps the ref-count)
+        // before the handle is dropped, so the keys remain valid inside SSL_CTX.
+        //
+        // NOTE: do NOT call SSL_ECH_KEYS_free here — ownership transfers to the
+        // returned EchKeysHandle.
+        Some((ech_config_list, EchKeysHandle(keys)))
     }
 }
 
@@ -850,37 +885,32 @@ impl WallClockTimeout {
 
 // ─── Cert/Key conversion FFI helpers ─────────────────────────────────────────
 
-/// Convert rustls CertificateDer (DER bytes) to boring::x509::X509.
+/// Convert a rustls `CertificateDer` to a `boring::x509::X509`.
 ///
-/// This requires unsafe FFI to OpenSSL's d2i_X509 function via boring_sys.
-/// Implementation approach:
-/// 1. Use boring_sys::d2i_X509 to parse DER bytes → X509*
-/// 2. Wrap the pointer in boring::x509::X509 via unsafe from_ptr
-///
-/// Deferred pending research into proper boring API usage patterns.
-/// For now, we use the spec-compliant loopback with rustls cert format.
+/// Uses `X509::from_der` which calls BoringSSL's `d2i_X509` internally.
 #[cfg(feature = "boring-tls")]
-fn rustls_cert_to_boring(_cert_der: &CertificateDer) -> Result<boring::x509::X509, String> {
-    // TODO: Implement FFI to d2i_X509
-    // For now, use a workaround: rely on test infrastructure using rustls certs
-    eprintln!("rustls_cert_to_boring: FFI implementation deferred");
-    Err("cert conversion not yet implemented".into())
+fn rustls_cert_to_boring(cert_der: &CertificateDer) -> Result<boring::x509::X509, String> {
+    boring::x509::X509::from_der(cert_der.as_ref())
+        .map_err(|e| format!("boring: X509::from_der failed: {e}"))
 }
 
-/// Convert rustls PrivateKeyDer (DER bytes) to boring::pkey::PKey.
+/// Convert a rustls `PrivateKeyDer` to a `boring::pkey::PKey<Private>`.
 ///
-/// This requires unsafe FFI to OpenSSL's d2i_PrivateKey function via boring_sys.
-/// Implementation approach:
-/// 1. Match on key_der variant (Pkcs8, Rsa, Ec, etc.)
-/// 2. Use boring_sys::d2i_PrivateKey to parse DER bytes → EVP_PKEY*
-/// 3. Wrap the pointer in boring::pkey::PKey via unsafe from_ptr
-///
-/// Deferred pending research into proper boring API usage patterns.
+/// Uses `PKey::private_key_from_der` which calls BoringSSL's `d2i_AutoPrivateKey`.
+/// BoringSSL's auto-detect handles PKCS#8 (used by rcgen), PKCS#1 (RSA), and
+/// SEC1 (EC traditional) formats transparently.
 #[cfg(feature = "boring-tls")]
-fn rustls_key_to_boring(_key_der: &PrivateKeyDer) -> Result<boring::pkey::PKey<boring::pkey::Private>, String> {
-    // TODO: Implement FFI to d2i_PrivateKey
-    eprintln!("rustls_key_to_boring: FFI implementation deferred");
-    Err("key conversion not yet implemented".into())
+fn rustls_key_to_boring(
+    key_der: &PrivateKeyDer,
+) -> Result<boring::pkey::PKey<boring::pkey::Private>, String> {
+    let der_bytes: &[u8] = match key_der {
+        PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der(),
+        PrivateKeyDer::Pkcs1(k) => k.secret_pkcs1_der(),
+        PrivateKeyDer::Sec1(k) => k.secret_sec1_der(),
+        _ => return Err("boring: unsupported PrivateKeyDer variant".into()),
+    };
+    boring::pkey::PKey::private_key_from_der(der_bytes)
+        .map_err(|e| format!("boring: PKey::private_key_from_der failed: {e}"))
 }
 
 // ─── ClientHello capture helpers ─────────────────────────────────────────
@@ -919,12 +949,52 @@ fn rustls_key_to_boring(_key_der: &PrivateKeyDer) -> Result<boring::pkey::PKey<b
 /// configuration error, not a runtime issue).
 #[cfg(feature = "boring-tls")]
 pub async fn spawn_boring_server(
-    _opts: BoringServerOptions,
+    opts: BoringServerOptions,
 ) -> (
     std::net::SocketAddr,
     tokio::sync::oneshot::Receiver<BoringConnInfo>,
 ) {
     let (tx, rx) = tokio::sync::oneshot::channel();
+
+    // Build boring SSL acceptor before spawning so errors surface synchronously.
+    // mozilla_intermediate_v5 allows TLS 1.2 + 1.3 (unlike mozilla_intermediate
+    // which disables TLS 1.3 via NO_TLSV1_3).
+    let cert = rustls_cert_to_boring(&opts.cert_der).expect("boring server: cert");
+    let key = rustls_key_to_boring(&opts.key_der).expect("boring server: key");
+
+    let mut builder =
+        boring::ssl::SslAcceptor::mozilla_intermediate_v5(boring::ssl::SslMethod::tls())
+            .expect("boring server: SslAcceptor::mozilla_intermediate_v5");
+    builder
+        .set_certificate(&cert)
+        .expect("boring server: set_certificate");
+    builder
+        .set_private_key(&key)
+        .expect("boring server: set_private_key");
+
+    // ALPN selection callback: pick the first client-offered protocol the server supports.
+    if !opts.server_alpn.is_empty() {
+        let server_protos = opts.server_alpn;
+        builder.set_alpn_select_callback(move |_ssl, client_protocols| {
+            // client_protocols is length-prefixed wire format: [len][proto][len][proto]…
+            let mut pos = 0usize;
+            while pos < client_protocols.len() {
+                let len = client_protocols[pos] as usize;
+                pos += 1;
+                if pos + len > client_protocols.len() {
+                    break;
+                }
+                let proto = &client_protocols[pos..pos + len];
+                if server_protos.iter().any(|s| s.as_slice() == proto) {
+                    return Ok(proto);
+                }
+                pos += len;
+            }
+            Err(boring::ssl::AlpnError::NOACK)
+        });
+    }
+
+    let acceptor = builder.build();
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -932,37 +1002,41 @@ pub async fn spawn_boring_server(
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let (_tcp, _) = match listener.accept().await {
+        let (tcp, _) = match listener.accept().await {
             Ok(s) => s,
             Err(_) => return,
         };
 
-        // TODO: Task #12 final implementation phase
-        //
-        // 1. Implement cert/key FFI conversion (rustls DER → boring format):
-        //    - Use boring_sys::d2i_X509 to parse certificate DER
-        //    - Use boring_sys::d2i_PrivateKey to parse private key DER
-        //    - Wrap pointers in boring::x509::X509 and boring::pkey::PKey via from_ptr
-        //
-        // 2. Build SslContext with converted cert/key
-        //    - boring::ssl::SslContext::builder(tls())
-        //    - set_certificate(cert) and set_private_key(key)
-        //
-        // 3. Configure ALPN if opts.server_alpn is non-empty
-        //    - Marshal protocols into wire format (length-prefixed list)
-        //    - ctx_builder.set_alpn_protos(wire_bytes)
-        //
-        // 4. Build SslAcceptor and perform TLS handshake
-        //
-        // 5. Extract metadata (ALPN negotiated)
-        //
-        // 6. Implement ClientHello capture for JA3:
-        //    - Pre-handshake stream wrapper OR
-        //    - Post-handshake extraction via boring callbacks
-        //
-        // 7. Send BoringConnInfo and drain connection
+        let mut stream = match tokio_boring::accept(&acceptor, tcp).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("boring loopback accept error: {e}");
+                let _ = tx.send(BoringConnInfo::default());
+                return;
+            }
+        };
 
-        let _ = tx.send(BoringConnInfo::default());
+        let info = BoringConnInfo {
+            server_name: stream
+                .ssl()
+                .servername(boring::ssl::NameType::HOST_NAME)
+                .map(|s| s.to_string()),
+            alpn: stream.ssl().selected_alpn_protocol().map(|p| p.to_vec()),
+            client_hello_bytes: vec![],
+            peer_certs: vec![],
+            ech_accepted: false,
+        };
+
+        let _ = tx.send(info);
+
+        // Drain so the client doesn't see a broken-pipe on its write.
+        let mut drain = [0u8; 256];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut stream, &mut drain).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
     });
 
     (addr, rx)
@@ -991,12 +1065,40 @@ pub async fn spawn_ech_server(
     std::net::SocketAddr,
     tokio::sync::oneshot::Receiver<BoringConnInfo>,
 ) {
-    // Expect ech_config to be present; C12–C15 tests always provide it.
-    if opts.ech_config.is_none() {
-        panic!("spawn_ech_server: ech_config must be present for ECH tests");
-    }
+    // Expect ech_config to be present; C13–C15 tests always provide it.
+    let ech_cfg = opts
+        .ech_config
+        .expect("spawn_ech_server: ech_config must be present for ECH tests");
 
     let (tx, rx) = tokio::sync::oneshot::channel();
+
+    // Build boring SSL acceptor before spawning.
+    // mozilla_intermediate_v5 allows TLS 1.3, which ECH requires.
+    let cert = rustls_cert_to_boring(&opts.cert_der).expect("boring ECH server: cert");
+    let key = rustls_key_to_boring(&opts.key_der).expect("boring ECH server: key");
+
+    let mut builder =
+        boring::ssl::SslAcceptor::mozilla_intermediate_v5(boring::ssl::SslMethod::tls())
+            .expect("boring ECH server: SslAcceptor::mozilla_intermediate_v5");
+    builder
+        .set_certificate(&cert)
+        .expect("boring ECH server: set_certificate");
+    builder
+        .set_private_key(&key)
+        .expect("boring ECH server: set_private_key");
+
+    // Install the ECH keys on the SSL_CTX.
+    //
+    // SSL_CTX_set1_ech_keys increments the ref-count on the keys object, so it
+    // remains valid inside the context even after EchKeysHandle is dropped here.
+    // builder derefs to SslContextBuilder, which exposes as_ptr() → *mut SSL_CTX.
+    unsafe {
+        let ret = boring_sys::SSL_CTX_set1_ech_keys(builder.as_ptr(), ech_cfg.keys_handle.0);
+        assert_eq!(ret, 1, "SSL_CTX_set1_ech_keys failed");
+    }
+    // ech_cfg (and its EchKeysHandle) drops here — SSL_CTX holds the ref.
+
+    let acceptor = builder.build();
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -1004,31 +1106,42 @@ pub async fn spawn_ech_server(
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let (_tcp, _) = match listener.accept().await {
+        let (tcp, _) = match listener.accept().await {
             Ok(s) => s,
             Err(_) => return,
         };
 
-        // TODO: Task #9 (ECH implementation) integration
-        //
-        // 1. Build boring::ssl::SslContext and SslAcceptor (same as spawn_boring_server).
-        //
-        // 2. Install ECH configuration on the SslContext:
-        //    - Call SSL_CTX_set1_ech_keys(ctx, keys) where keys is constructed from
-        //      opts.ech_config.private_key_der and opts.ech_config.config_list_bytes.
-        //    - This likely requires unsafe FFI bindings in boring-sys or manual bindings:
-        //      - Create SSL_ECH_KEYS* via SSL_ECH_KEYS_new()
-        //      - Load the private key into the ECH key structure
-        //      - Set the structure on the SslContext
-        //    - Boring automatically enforces TLS 1.3 when ECH is configured.
-        //
-        // 3. Perform the TLS handshake with ClientHelloCaptureStream (same pattern).
-        //
-        // 4. Extract metadata (same as spawn_boring_server).
-        //
-        // 5. Send BoringConnInfo through the channel and drain connection.
+        let mut stream = match tokio_boring::accept(&acceptor, tcp).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("boring ECH loopback accept error: {e}");
+                let _ = tx.send(BoringConnInfo::default());
+                return;
+            }
+        };
 
-        let _ = tx.send(BoringConnInfo::default());
+        let ech_accepted = stream.ssl().ech_accepted();
+        let info = BoringConnInfo {
+            server_name: stream
+                .ssl()
+                .servername(boring::ssl::NameType::HOST_NAME)
+                .map(|s| s.to_string()),
+            alpn: stream.ssl().selected_alpn_protocol().map(|p| p.to_vec()),
+            client_hello_bytes: vec![],
+            peer_certs: vec![],
+            ech_accepted,
+        };
+
+        let _ = tx.send(info);
+
+        // Drain so the client doesn't see a broken-pipe on its write.
+        let mut drain = [0u8; 256];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut stream, &mut drain).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
     });
 
     (addr, rx)
