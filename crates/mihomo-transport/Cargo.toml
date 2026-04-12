@@ -26,6 +26,7 @@ boring-tls = [
     "dep:boring",
     "dep:tokio-boring",
     "dep:boring-sys",
+    "dep:rand",
 ]
 ws = [
     "dep:tokio-tungstenite",
