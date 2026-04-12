@@ -860,7 +860,7 @@ impl WallClockTimeout {
 /// Deferred pending research into proper boring API usage patterns.
 /// For now, we use the spec-compliant loopback with rustls cert format.
 #[cfg(feature = "boring-tls")]
-fn rustls_cert_to_boring(cert_der: &CertificateDer) -> Result<boring::x509::X509, String> {
+fn rustls_cert_to_boring(_cert_der: &CertificateDer) -> Result<boring::x509::X509, String> {
     // TODO: Implement FFI to d2i_X509
     // For now, use a workaround: rely on test infrastructure using rustls certs
     eprintln!("rustls_cert_to_boring: FFI implementation deferred");
@@ -877,7 +877,7 @@ fn rustls_cert_to_boring(cert_der: &CertificateDer) -> Result<boring::x509::X509
 ///
 /// Deferred pending research into proper boring API usage patterns.
 #[cfg(feature = "boring-tls")]
-fn rustls_key_to_boring(key_der: &PrivateKeyDer) -> Result<boring::pkey::PKey<boring::pkey::Private>, String> {
+fn rustls_key_to_boring(_key_der: &PrivateKeyDer) -> Result<boring::pkey::PKey<boring::pkey::Private>, String> {
     // TODO: Implement FFI to d2i_PrivateKey
     eprintln!("rustls_key_to_boring: FFI implementation deferred");
     Err("key conversion not yet implemented".into())
