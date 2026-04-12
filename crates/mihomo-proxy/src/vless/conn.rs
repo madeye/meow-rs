@@ -29,7 +29,7 @@ use super::header::{decode_response, encode_request, Cmd, VlessAddr};
 pub struct VlessConn {
     pub(crate) inner: Box<dyn Stream>,
     /// `true` until the 2-byte response header has been consumed.
-    response_pending: bool,
+    pub(crate) response_pending: bool,
 }
 
 impl VlessConn {
@@ -56,18 +56,6 @@ impl VlessConn {
             inner: stream,
             response_pending: true,
         })
-    }
-
-    /// Consume the response header if not yet done (blocking read).
-    async fn ensure_response_read(&mut self) -> std::result::Result<(), io::Error> {
-        if self.response_pending {
-            decode_response(&mut self.inner)
-                .await
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            self.response_pending = false;
-            tracing::debug!("VLESS: response header consumed");
-        }
-        Ok(())
     }
 }
 

@@ -347,7 +347,10 @@ mod tests {
     /// Build a `VisionConn` wrapping a `RecordingStream`.
     fn vision_over_recorder(written: Arc<Mutex<Vec<Vec<u8>>>>) -> VisionConn {
         let recorder = Box::new(RecordingStream::new(written));
-        let vless = VlessConn { inner: recorder };
+        let vless = VlessConn {
+            inner: recorder,
+            response_pending: false,
+        };
         VisionConn::new(vless)
     }
 
