@@ -213,12 +213,83 @@ fn ja3_hash(ja3_str: &str) -> String {
     format!("{:x}", md5::compute(ja3_str))
 }
 
+/// Extract the signature_algorithms extension (type 0x000D) from a ClientHello record.
+/// Returns a comma-separated hex string of algorithm IDs (e.g., "0x0804,0x0805,..."),
+/// or None if not found or parsing fails.
+fn extract_signature_algorithms(buf: &[u8]) -> Option<String> {
+    if buf.len() < 44 { return None; }
+    if buf[0] != 0x16 { return None; }   // must be TLS Handshake record
+    if buf[5] != 0x01 { return None; }   // must be ClientHello
+
+    let mut p = 9usize; // ClientHello body starts after 5-byte record + 4-byte handshake header
+
+    // Skip protocol_version (2 bytes) and random (32 bytes)
+    if p + 34 > buf.len() { return None; }
+    p += 34;
+
+    // Skip session_id
+    if p >= buf.len() { return None; }
+    let sid_len = buf[p] as usize;
+    p += 1;
+    if p + sid_len > buf.len() { return None; }
+    p += sid_len;
+
+    // Skip cipher_suites
+    if p + 2 > buf.len() { return None; }
+    let cs_len = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
+    p += 2;
+    if p + cs_len > buf.len() { return None; }
+    p += cs_len;
+
+    // Skip compression_methods
+    if p >= buf.len() { return None; }
+    let comp_len = buf[p] as usize;
+    p += 1;
+    if p + comp_len > buf.len() { return None; }
+    p += comp_len;
+
+    // Parse extensions
+    if p + 2 > buf.len() { return None; }
+    let ext_total = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
+    p += 2;
+    let ext_end = p + ext_total;
+
+    while p + 4 <= ext_end && p + 4 <= buf.len() {
+        let ext_type = u16::from_be_bytes([buf[p], buf[p + 1]]);
+        let ext_len = u16::from_be_bytes([buf[p + 2], buf[p + 3]]) as usize;
+        p += 4;
+        if p + ext_len > buf.len() { break; }
+
+        // signature_algorithms extension (type 0x000D)
+        if ext_type == 0x000d && ext_len >= 2 {
+            let alg_list_len = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
+            let mut ap = p + 2;
+            let aend = (p + 2 + alg_list_len).min(buf.len());
+            let mut algs: Vec<String> = Vec::new();
+            while ap + 2 <= aend {
+                let alg = u16::from_be_bytes([buf[ap], buf[ap + 1]]);
+                ap += 2;
+                algs.push(format!("0x{:04x}", alg));
+            }
+            return if !algs.is_empty() {
+                Some(algs.join(","))
+            } else {
+                None
+            };
+        }
+
+        p += ext_len;
+    }
+
+    None
+}
+
 // ─── Test helper ──────────────────────────────────────────────────────────────
 
 /// Spawn a rustls loopback server, connect with the given `TlsConfig` using the
 /// boring backend (fingerprint or ECH must be set), capture JA3, and return
-/// `(connected, ja3_string, ja3_md5)`.
-async fn connect_capture_ja3(config: &TlsConfig) -> (bool, Option<String>, Option<String>) {
+/// `(connected, ja3_string, ja3_md5, raw_clienthello)`.
+async fn connect_capture_ja3(config: &TlsConfig) -> (bool, Option<String>, Option<String>, Option<Vec<u8>>) {
     install_crypto_provider();
     let (cert_der, key_der, _, _) = gen_cert(&["localhost"]);
     let (addr, _conn_rx) = spawn_tls_server(ServerOptions {
@@ -235,10 +306,11 @@ async fn connect_capture_ja3(config: &TlsConfig) -> (bool, Option<String>, Optio
     let layer = TlsLayer::new(config).expect("TlsLayer::new");
     let connected = layer.connect(Box::new(capturer)).await.is_ok();
 
-    let ja3_str = slot.lock().unwrap().as_ref().and_then(|b| parse_ja3(b));
+    let raw_clienthello = slot.lock().unwrap().clone();
+    let ja3_str = raw_clienthello.as_ref().and_then(|b| parse_ja3(b));
     let ja3_md5 = ja3_str.as_deref().map(ja3_hash);
 
-    (connected, ja3_str, ja3_md5)
+    (connected, ja3_str, ja3_md5, raw_clienthello)
 }
 
 // ─── B1: firefox ──────────────────────────────────────────────────────────────
@@ -250,7 +322,7 @@ async fn boring_firefox_connects_and_ja3() {
         fingerprint: Some("firefox".into()),
         ..TlsConfig::new("localhost")
     };
-    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    let (connected, ja3_str, hash, _raw_ch) = connect_capture_ja3(&config).await;
     assert!(connected, "boring firefox profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
@@ -274,7 +346,7 @@ async fn boring_safari_connects_and_ja3() {
         fingerprint: Some("safari".into()),
         ..TlsConfig::new("localhost")
     };
-    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    let (connected, ja3_str, hash, _raw_ch) = connect_capture_ja3(&config).await;
     assert!(connected, "boring safari profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
@@ -296,7 +368,7 @@ async fn boring_ios_connects_and_ja3() {
         fingerprint: Some("ios".into()),
         ..TlsConfig::new("localhost")
     };
-    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    let (connected, ja3_str, hash, _raw_ch) = connect_capture_ja3(&config).await;
     assert!(connected, "boring ios profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
@@ -315,7 +387,7 @@ async fn boring_android_connects_and_ja3() {
         fingerprint: Some("android".into()),
         ..TlsConfig::new("localhost")
     };
-    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    let (connected, ja3_str, hash, _raw_ch) = connect_capture_ja3(&config).await;
     assert!(connected, "boring android profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
@@ -336,7 +408,7 @@ async fn boring_edge_connects_and_ja3() {
         fingerprint: Some("edge".into()),
         ..TlsConfig::new("localhost")
     };
-    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    let (connected, ja3_str, hash, _raw_ch) = connect_capture_ja3(&config).await;
     assert!(connected, "boring edge profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
@@ -358,7 +430,7 @@ async fn boring_chrome_property_check() {
         fingerprint: Some("chrome".into()),
         ..TlsConfig::new("localhost")
     };
-    let (connected, ja3_str, _hash) = connect_capture_ja3(&config).await;
+    let (connected, ja3_str, _hash, _raw_ch) = connect_capture_ja3(&config).await;
     assert!(connected, "boring chrome profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     eprintln!("chrome JA3 (non-deterministic): {}", ja3_str);
@@ -383,7 +455,7 @@ async fn boring_version_pinned_aliases_connect() {
             fingerprint: Some((*alias).into()),
             ..TlsConfig::new("localhost")
         };
-        let (connected, _, _) = connect_capture_ja3(&config).await;
+        let (connected, _, _, _) = connect_capture_ja3(&config).await;
         assert!(connected, "alias '{}' must connect", alias);
     }
 }
@@ -397,7 +469,7 @@ async fn boring_deferred_fingerprint_connects_with_warn() {
         fingerprint: Some("randomized".into()),  // deferred; see design §10
         ..TlsConfig::new("localhost")
     };
-    let (connected, _, _) = connect_capture_ja3(&config).await;
+    let (connected, _, _, _) = connect_capture_ja3(&config).await;
     assert!(connected, "deferred fingerprint must still connect via boring defaults");
 }
 
@@ -466,30 +538,64 @@ async fn boring_ech_connect_path_exercised() {
 }
 
 // ─── C2: All v1 profiles produce distinct JA3 hashes ─────────────────────────
+//
+// Five v1 profiles: firefox, safari, ios, android, edge.
+// ios is an intentional alias for safari in v1; JA3 and sigalgs are identical.
+// See docs/specs/ech-utls-status.md for profile versioning.
 
 #[tokio::test]
 async fn c2_all_profiles_ja3_distinct() {
-    // Reference hashes from task #8 (dev's output)
-    let hashes = vec![
-        ("firefox", "dfe508530f13e5ed9cdf7af72dde2c82"),
-        ("safari", "0bc2e15298a68bc7ea5312a84992b51e"),
-        ("ios", "0bc2e15298a68bc7ea5312a84992b51e"),  // same as safari
-        ("android", "96fc7e74abab428b46cc5f9a556a4b87"),
-        ("edge", "74970fac61e4a224d200b2458ca4dc51"),
-    ];
+    // Compute JA3 hashes for all 5 profiles
+    let profiles = vec!["firefox", "safari", "ios", "android", "edge"];
+    let mut hashes: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
 
-    for (profile, expected_hash) in hashes {
+    for profile in profiles {
         let config = TlsConfig {
             skip_cert_verify: true,
             fingerprint: Some(profile.into()),
             ..TlsConfig::new("localhost")
         };
-        let (connected, _, ja3_hash_opt) = connect_capture_ja3(&config).await;
+        let (connected, _ja3_str, ja3_hash_opt, raw_ch) = connect_capture_ja3(&config).await;
         assert!(connected, "profile '{}' must connect", profile);
-        if let Some(ja3_hash) = ja3_hash_opt {
-            assert_eq!(ja3_hash, expected_hash, "profile '{}' JA3 hash mismatch", profile);
-        } else {
-            panic!("profile '{}' JA3 hash not captured", profile);
+
+        let actual_hash = ja3_hash_opt.expect(&format!("profile '{}' JA3 hash not computed", profile));
+        hashes.insert(profile, actual_hash);
+
+        // Verify sigalgs can be extracted (for future profile differentiation)
+        if let Some(ch_bytes) = raw_ch {
+            let sigalgs = extract_signature_algorithms(&ch_bytes);
+            assert!(sigalgs.is_some(), "profile '{}' must have signature_algorithms extension", profile);
+        }
+    }
+
+    // Pinned expected hashes for the distinct profiles (from task #8)
+    assert_eq!(hashes["firefox"], "dfe508530f13e5ed9cdf7af72dde2c82", "firefox JA3 hash mismatch");
+    assert_eq!(hashes["android"], "96fc7e74abab428b46cc5f9a556a4b87", "android JA3 hash mismatch");
+    assert_eq!(hashes["edge"], "74970fac61e4a224d200b2458ca4dc51", "edge JA3 hash mismatch");
+
+    // ios is an intentional alias for safari in v1: identical JA3 hash and sigalgs
+    let safari_hash = hashes["safari"].clone();
+    let ios_hash = hashes["ios"].clone();
+    assert_eq!(safari_hash, ios_hash,
+        "ios must alias safari (identical JA3): safari={}, ios={}",
+        safari_hash, ios_hash);
+
+    // Assert the 4 unique profiles {firefox, safari, android, edge} are mutually distinct
+    let unique_hashes = vec![
+        ("firefox", hashes["firefox"].clone()),
+        ("safari", hashes["safari"].clone()),
+        ("android", hashes["android"].clone()),
+        ("edge", hashes["edge"].clone()),
+    ];
+    for i in 0..unique_hashes.len() {
+        for j in (i + 1)..unique_hashes.len() {
+            assert_ne!(
+                unique_hashes[i].1, unique_hashes[j].1,
+                "profiles {} and {} must have distinct JA3 hashes: {}={}, {}={}",
+                unique_hashes[i].0, unique_hashes[j].0,
+                unique_hashes[i].0, unique_hashes[i].1,
+                unique_hashes[j].0, unique_hashes[j].1
+            );
         }
     }
 }
@@ -500,7 +606,7 @@ async fn c2_all_profiles_ja3_distinct() {
 async fn c3_random_fingerprint_valid() {
     // Random picks from: chrome(6), safari(3), ios(2), firefox(1)
     // Chrome is property-based (no fixed hash), others have fixed hashes
-    let non_chrome_hashes = vec![
+    let _non_chrome_hashes = vec![
         "dfe508530f13e5ed9cdf7af72dde2c82",  // firefox
         "0bc2e15298a68bc7ea5312a84992b51e",  // safari/ios
         "96fc7e74abab428b46cc5f9a556a4b87",  // android (not in random set but for reference)
@@ -515,7 +621,7 @@ async fn c3_random_fingerprint_valid() {
             fingerprint: Some("random".into()),
             ..TlsConfig::new("localhost")
         };
-        let (connected, _, _) = connect_capture_ja3(&config).await;
+        let (connected, _, _, _) = connect_capture_ja3(&config).await;
         assert!(connected, "random profile must connect");
     }
 }
@@ -530,7 +636,7 @@ async fn c6_fingerprint_with_alpn() {
         alpn: vec!["h2".to_string(), "http/1.1".to_string()],
         ..TlsConfig::new("localhost")
     };
-    let (connected, _, _) = connect_capture_ja3(&config).await;
+    let (connected, _, _, _) = connect_capture_ja3(&config).await;
     assert!(connected, "chrome with ALPN must connect");
 }
 
@@ -544,7 +650,7 @@ async fn c7_fingerprint_with_sni() {
         sni: Some("example.com".to_string()),
         ..TlsConfig::new("localhost")
     };
-    let (connected, _, _) = connect_capture_ja3(&config).await;
+    let (connected, _, _, _) = connect_capture_ja3(&config).await;
     assert!(connected, "firefox with SNI must connect");
 }
 
@@ -557,7 +663,7 @@ async fn c9_fingerprint_with_skip_cert_verify() {
         fingerprint: Some("safari".into()),
         ..TlsConfig::new("localhost")
     };
-    let (connected, _, _) = connect_capture_ja3(&config).await;
+    let (connected, _, _, _) = connect_capture_ja3(&config).await;
     assert!(connected, "safari with skip_cert_verify must connect");
 }
 
