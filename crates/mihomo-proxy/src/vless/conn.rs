@@ -455,7 +455,7 @@ mod tests {
         let mut buf = [0u8; 1];
         let result = tokio::io::AsyncReadExt::read(&mut conn, &mut buf).await;
         assert!(result.is_err(), "version mismatch must return Err on read");
-        let msg = result.err().expect("expected Err").to_string();
+        let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("version") || msg.contains("mismatch"),
             "error must mention version mismatch, got: {}",
@@ -492,7 +492,7 @@ mod tests {
         let mut buf = [0u8; 1];
         let result = tokio::io::AsyncReadExt::read(&mut conn, &mut buf).await;
         assert!(result.is_err(), "EOF after header must return Err on read");
-        let msg = result.err().expect("expected Err").to_string();
+        let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("closed")
                 || msg.contains("eof")
