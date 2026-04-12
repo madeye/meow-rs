@@ -1621,6 +1621,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "maxminddb",
  "mihomo-common",
  "mihomo-dns",

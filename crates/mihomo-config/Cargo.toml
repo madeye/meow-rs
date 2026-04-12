@@ -8,6 +8,7 @@ rust-version.workspace = true
 default = ["vless", "vless-vision"]
 vless = ["mihomo-proxy/vless"]
 vless-vision = ["vless", "mihomo-proxy/vless-vision"]
+boring-tls = ["mihomo-transport/boring-tls"]
 
 [dependencies]
 mihomo-common = { workspace = true }
@@ -26,6 +27,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { workspace = true }
 maxminddb = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

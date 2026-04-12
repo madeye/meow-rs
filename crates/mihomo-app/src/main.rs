@@ -480,11 +480,9 @@ async fn run(config: mihomo_config::Config, config_path: String) -> Result<()> {
 async fn subscription_refresh_loop(
     raw_config: Arc<RwLock<RawConfig>>,
     tunnel: Tunnel,
-    _config_path: String,
+    config_path: String,
 ) {
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-
         let subs_to_refresh: Vec<(String, String)> = {
             let raw = raw_config.read();
             let now = std::time::SystemTime::now()
@@ -495,12 +493,10 @@ async fn subscription_refresh_loop(
                 .as_deref()
                 .unwrap_or(&[])
                 .iter()
-                .filter(|s| {
-                    if let (Some(interval), Some(last)) = (s.interval, s.last_updated) {
-                        now - last >= interval as i64
-                    } else {
-                        false
-                    }
+                .filter(|s| match (s.interval, s.last_updated) {
+                    (_, None) => true, // Never fetched — fetch now
+                    (Some(interval), Some(last)) => now - last >= interval as i64,
+                    (None, Some(_)) => false, // No interval set, already fetched once
                 })
                 .map(|s| (s.name.clone(), s.url.clone()))
                 .collect()
@@ -536,6 +532,8 @@ async fn subscription_refresh_loop(
                             tunnel.update_proxies(new_proxies);
                             tunnel.update_rules(new_rules);
                             info!("Subscription '{}' refreshed successfully", name);
+                            // Persist updated config (with last_updated timestamp)
+                            let _ = mihomo_config::save_raw_config(&config_path, &raw);
                         }
                         Err(e) => error!("Failed to rebuild after refreshing '{}': {}", name, e),
                     }
@@ -543,5 +541,7 @@ async fn subscription_refresh_loop(
                 Err(e) => error!("Failed to refresh subscription '{}': {}", name, e),
             }
         }
+
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
 }

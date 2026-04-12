@@ -395,15 +395,10 @@ fn parse_vless(
         ));
     }
 
-    // ── client-fingerprint: warn + ignore (no uTLS yet) ───────────────────
-    if let Some(fp) = client_fingerprint {
-        tracing::warn!(
-            proxy = %name,
-            fingerprint = %fp,
-            "vless: client-fingerprint is accepted but not yet acted on \
-             (uTLS fingerprinting is tracked as a post-M1 feature)"
-        );
-    }
+    // ── client-fingerprint ──────────────────────────────────────────────
+    // Passed through to TlsConfig.fingerprint; the TLS layer selects the
+    // BoringSSL backend when the `boring-tls` feature is compiled in,
+    // otherwise falls back to rustls with a stub warning.
 
     // ── Flow parsing ──────────────────────────────────────────────────────
     let flow_str = config.get("flow").and_then(|v| v.as_str()).unwrap_or("");
@@ -510,7 +505,60 @@ fn parse_vless(
         };
         let mut tls_cfg = TlsConfig::new(sni);
         tls_cfg.skip_cert_verify = skip_cert_verify;
-        tls_cfg.alpn = alpn;
+        // Default ALPN to http/1.1 for WebSocket transports (required by
+        // many CDNs like Cloudflare to route to the correct backend).
+        tls_cfg.alpn = if alpn.is_empty() && network == "ws" {
+            vec!["http/1.1".to_string()]
+        } else {
+            alpn
+        };
+        tls_cfg.fingerprint = client_fingerprint.map(|s| s.to_string());
+
+        // ── ECH opts ────────────────────────────────────────────────────
+        if let Some(ech_opts) = config.get("ech-opts") {
+            let ech_enabled = ech_opts
+                .get("enable")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if ech_enabled {
+                use mihomo_transport::tls::EchOpts;
+                if let Some(inline_config) = ech_opts.get("config").and_then(|v| v.as_str()) {
+                    // Inline base64-encoded ECH config
+                    use base64::Engine;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(inline_config)
+                        .map_err(|e| format!("vless: ech-opts.config base64 decode: {}", e))?;
+                    tls_cfg.ech = Some(EchOpts::Config(bytes));
+                } else {
+                    // DNS-based: fetch SVCB/HTTPS record for ECH config
+                    let query_name = ech_opts
+                        .get("query-server-name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(server);
+                    match fetch_ech_from_dns(query_name) {
+                        Ok(bytes) => {
+                            tracing::info!(
+                                proxy = %name,
+                                query = %query_name,
+                                len = bytes.len(),
+                                "vless: fetched ECH config from DNS HTTPS record"
+                            );
+                            tls_cfg.ech = Some(EchOpts::Config(bytes));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                proxy = %name,
+                                query = %query_name,
+                                error = %e,
+                                "vless: failed to fetch ECH config from DNS; \
+                                 continuing without ECH"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let tls_layer =
             TlsLayer::new(&tls_cfg).map_err(|e| format!("vless: TLS layer error: {}", e))?;
         chain.push(Box::new(tls_layer));
@@ -830,6 +878,108 @@ fn parse_relay_group(
     }
 
     Ok(Arc::new(RelayGroup::new(name, proxies)))
+}
+
+/// Fetch ECH config bytes from the HTTPS/SVCB DNS record (RR type 65).
+///
+/// Sends a UDP DNS query for the HTTPS record of `name` to 8.8.8.8:53,
+/// parses the SVCB wire format, and extracts parameter key 5 (ECH config).
+fn fetch_ech_from_dns(name: &str) -> std::result::Result<Vec<u8>, String> {
+    use std::net::UdpSocket;
+
+    // Build a minimal DNS query for TYPE65 (HTTPS/SVCB)
+    let mut query = Vec::with_capacity(64);
+    // Header: ID=0xABCD, flags=RD, QDCOUNT=1
+    query.extend_from_slice(&[0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    // QNAME
+    for label in name.split('.') {
+        if label.is_empty() { continue; }
+        query.push(label.len() as u8);
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.push(0); // root label
+    // QTYPE=65 (HTTPS), QCLASS=1 (IN)
+    query.extend_from_slice(&[0x00, 0x41, 0x00, 0x01]);
+
+    let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("dns: bind: {}", e))?;
+    sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| format!("dns: set_timeout: {}", e))?;
+    sock.send_to(&query, "8.8.8.8:53")
+        .map_err(|e| format!("dns: send: {}", e))?;
+
+    let mut buf = [0u8; 4096];
+    let n = sock.recv(&mut buf).map_err(|e| format!("dns: recv: {}", e))?;
+    let resp = &buf[..n];
+
+    if resp.len() < 12 {
+        return Err("dns: response too short".into());
+    }
+
+    let ancount = u16::from_be_bytes([resp[6], resp[7]]) as usize;
+    if ancount == 0 {
+        return Err(format!("dns: no HTTPS record for {}", name));
+    }
+
+    // Skip query section
+    let mut pos = 12;
+    // Skip QNAME
+    while pos < resp.len() {
+        let len = resp[pos] as usize;
+        if len == 0 { pos += 1; break; }
+        if len >= 0xC0 { pos += 2; break; } // compression pointer
+        pos += 1 + len;
+    }
+    pos += 4; // skip QTYPE + QCLASS
+
+    // Parse answer records
+    for _ in 0..ancount {
+        if pos >= resp.len() { break; }
+        // Skip NAME (may be compressed)
+        if resp[pos] >= 0xC0 {
+            pos += 2;
+        } else {
+            while pos < resp.len() {
+                let len = resp[pos] as usize;
+                if len == 0 { pos += 1; break; }
+                pos += 1 + len;
+            }
+        }
+        if pos + 10 > resp.len() { break; }
+        let rtype = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
+        let rdlen = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
+        pos += 10; // skip TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
+
+        if rtype == 65 && pos + rdlen <= resp.len() {
+            // Parse SVCB RDATA
+            let rdata = &resp[pos..pos + rdlen];
+            // Skip SvcPriority (2 bytes)
+            let mut rpos = 2;
+            // Skip TargetName (wire-format domain)
+            if rpos < rdata.len() && rdata[rpos] == 0 {
+                rpos += 1; // root label
+            } else {
+                while rpos < rdata.len() {
+                    let len = rdata[rpos] as usize;
+                    if len == 0 { rpos += 1; break; }
+                    if len >= 0xC0 { rpos += 2; break; }
+                    rpos += 1 + len;
+                }
+            }
+            // Parse SvcParams looking for key 5 (ECH)
+            while rpos + 4 <= rdata.len() {
+                let key = u16::from_be_bytes([rdata[rpos], rdata[rpos + 1]]);
+                let vlen = u16::from_be_bytes([rdata[rpos + 2], rdata[rpos + 3]]) as usize;
+                rpos += 4;
+                if key == 5 && rpos + vlen <= rdata.len() {
+                    return Ok(rdata[rpos..rpos + vlen].to_vec());
+                }
+                rpos += vlen;
+            }
+        }
+        pos += rdlen;
+    }
+
+    Err(format!("dns: HTTPS record for {} has no ECH config (key 5)", name))
 }
 
 #[cfg(test)]

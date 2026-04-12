@@ -21,21 +21,21 @@ use super::header::{decode_response, encode_request, Cmd, VlessAddr};
 
 // ─── VlessConn ────────────────────────────────────────────────────────────────
 
-/// A VLESS TCP connection — request header sent, response header consumed.
+/// A VLESS TCP connection — request header sent, response header consumed lazily.
 ///
-/// Implements `AsyncRead + AsyncWrite` as a transparent passthrough to the
-/// underlying transport stream.
+/// The response header is read on the first `poll_read` call, not during
+/// construction. This matches upstream xray-core behavior where the server
+/// only sends the response after connecting to the destination.
 pub struct VlessConn {
     pub(crate) inner: Box<dyn Stream>,
+    /// `true` until the 2-byte response header has been consumed.
+    response_pending: bool,
 }
 
 impl VlessConn {
     /// Establish a VLESS connection:
-    /// 1. Write the request header (with `cmd = Cmd::Tcp`).
-    /// 2. Read and validate the server's response header.
-    ///
-    /// Returns `Err` if the server's response version ≠ 0x00 (version mismatch
-    /// or server closed the connection — both indicate misconfiguration).
+    /// 1. Write the request header.
+    /// 2. Return immediately — response header is read lazily on first read.
     pub async fn new(
         mut stream: Box<dyn Stream>,
         uuid_bytes: &[u8; 16],
@@ -44,15 +44,30 @@ impl VlessConn {
         dst_port: u16,
         addr: &VlessAddr,
     ) -> Result<Self> {
-        // 1. Write the VLESS request header.
+        // Write the VLESS request header.
         let mut buf = BytesMut::new();
         encode_request(&mut buf, uuid_bytes, flow, cmd, dst_port, addr);
+        tracing::debug!("VLESS: writing {} byte request header", buf.len());
         stream.write_all(&buf).await.map_err(MihomoError::Io)?;
+        stream.flush().await.map_err(MihomoError::Io)?;
+        tracing::debug!("VLESS: request header sent, response will be read lazily");
 
-        // 2. Read and discard the response header.
-        decode_response(&mut stream).await?;
+        Ok(Self {
+            inner: stream,
+            response_pending: true,
+        })
+    }
 
-        Ok(Self { inner: stream })
+    /// Consume the response header if not yet done (blocking read).
+    async fn ensure_response_read(&mut self) -> std::result::Result<(), io::Error> {
+        if self.response_pending {
+            decode_response(&mut self.inner)
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            self.response_pending = false;
+            tracing::debug!("VLESS: response header consumed");
+        }
+        Ok(())
     }
 }
 
@@ -64,6 +79,71 @@ impl AsyncRead for VlessConn {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        // Lazily consume the response header on first read.
+        if self.response_pending {
+            // Use a pinned future to read the 2-byte response header.
+            let inner = &mut self.inner;
+            // We need to read version(1) + addon_length(1).
+            // For simplicity, we do a synchronous-style poll loop here.
+            // Read the two header bytes using poll_read directly.
+            let mut hdr_buf = [0u8; 2];
+            let mut hdr_read = 0;
+            loop {
+                if hdr_read >= 2 {
+                    break;
+                }
+                let mut tmp = ReadBuf::new(&mut hdr_buf[hdr_read..]);
+                match Pin::new(&mut *inner).poll_read(cx, &mut tmp) {
+                    Poll::Ready(Ok(())) => {
+                        let n = tmp.filled().len();
+                        if n == 0 {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "vless: server closed before response header",
+                            )));
+                        }
+                        hdr_read += n;
+                    }
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            let version = hdr_buf[0];
+            let addon_length = hdr_buf[1] as usize;
+            if version != 0x00 {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("vless: version mismatch: expected 0x00, got {:#04x}", version),
+                )));
+            }
+            // Discard addon bytes if any
+            if addon_length > 0 {
+                let mut discard = vec![0u8; addon_length];
+                let mut disc_read = 0;
+                loop {
+                    if disc_read >= addon_length {
+                        break;
+                    }
+                    let mut tmp = ReadBuf::new(&mut discard[disc_read..]);
+                    match Pin::new(&mut *inner).poll_read(cx, &mut tmp) {
+                        Poll::Ready(Ok(())) => {
+                            let n = tmp.filled().len();
+                            if n == 0 {
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::UnexpectedEof,
+                                    "vless: EOF during addon discard",
+                                )));
+                            }
+                            disc_read += n;
+                        }
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+            }
+            self.response_pending = false;
+            tracing::debug!("VLESS: response header consumed lazily");
+        }
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
@@ -114,6 +194,7 @@ impl VlessPacketConn {
         let mut buf = BytesMut::new();
         encode_request(&mut buf, uuid_bytes, None, Cmd::Udp, dst_port, addr);
         stream.write_all(&buf).await.map_err(MihomoError::Io)?;
+        stream.flush().await.map_err(MihomoError::Io)?;
 
         // Read and discard the response header.
         decode_response(&mut stream).await?;

@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+boring-tls = ["mihomo-config/boring-tls"]
+
 [[bin]]
 name = "mihomo"
 path = "src/main.rs"

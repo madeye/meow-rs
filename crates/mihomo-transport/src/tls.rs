@@ -221,6 +221,12 @@ impl TlsLayer {
         // Route to boring when fingerprint or ECH is requested and the feature is present.
         #[cfg(feature = "boring-tls")]
         if config.fingerprint.is_some() || config.ech.is_some() {
+            tracing::debug!(
+                fingerprint = ?config.fingerprint,
+                ech = config.ech.is_some(),
+                sni = ?config.sni,
+                "TLS: using BoringSSL backend"
+            );
             return Ok(Self {
                 backend: TlsBackend::Boring(BoringInner::new(config)?),
             });
@@ -794,7 +800,20 @@ impl BoringInner {
         }
 
         match tokio_boring::connect(cfg, &self.server_name, inner).await {
-            Ok(tls_stream) => Ok(Box::new(tls_stream)),
+            Ok(tls_stream) => {
+                let ech_accepted = tls_stream.ssl().ech_accepted();
+                let version = tls_stream
+                    .ssl()
+                    .version_str();
+                tracing::info!(
+                    sni = %self.server_name,
+                    ech_requested = self.ech.is_some(),
+                    ech_accepted = ech_accepted,
+                    tls_version = %version,
+                    "boring TLS handshake complete"
+                );
+                Ok(Box::new(tls_stream))
+            }
             Err(e) => {
                 // If ECH was active and the server rejected it, include the
                 // ECH retry configs from the server's ech_required alert so
