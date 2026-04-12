@@ -286,7 +286,7 @@ fn test_metadata_pure_clears_extra_fields() {
         process: "curl".to_string(),
         process_path: "/usr/bin/curl".to_string(),
         uid: Some(1000),
-        dscp: 46,
+        dscp: Some(46),
         src_geo_ip: vec!["US".to_string()],
         dst_geo_ip: vec!["DE".to_string()],
         sniff_host: "sniffed.com".to_string(),
@@ -310,7 +310,7 @@ fn test_metadata_pure_clears_extra_fields() {
     assert!(pure.process.is_empty());
     assert!(pure.process_path.is_empty());
     assert!(pure.uid.is_none());
-    assert_eq!(pure.dscp, 0);
+    assert!(pure.dscp.is_none());
     assert!(pure.src_geo_ip.is_empty());
     assert!(pure.dst_geo_ip.is_empty());
     assert!(pure.sniff_host.is_empty());

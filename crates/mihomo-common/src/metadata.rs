@@ -23,7 +23,18 @@ pub struct Metadata {
     #[serde(rename = "processPath")]
     pub process_path: String,
     pub uid: Option<u32>,
-    pub dscp: u8,
+    /// DSCP marking from the IP header (6 bits, 0–63).
+    ///
+    /// `Some(n)` — set by the TProxy listener from the `IP_RECVTOS` cmsg
+    /// (`ip_tos >> 2`).  `None` for all other listener types (HTTP, SOCKS5,
+    /// Mixed) where the DSCP value is not available.
+    ///
+    /// Match semantics: `None` never matches any `DSCP` rule, including
+    /// `DSCP,0`.  This prevents the previous `u8`-default-0 silent misroute
+    /// where every HTTP/SOCKS5 connection matched `DSCP,0`.
+    /// Class A fix per ADR-0002 (upstream: `rules/common/dscp.go`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dscp: Option<u8>,
     #[serde(rename = "sourceGeoIP")]
     pub src_geo_ip: Vec<String>,
     #[serde(rename = "destinationGeoIP")]
@@ -52,7 +63,7 @@ impl Default for Metadata {
             process: String::new(),
             process_path: String::new(),
             uid: None,
-            dscp: 0,
+            dscp: None,
             src_geo_ip: Vec::new(),
             dst_geo_ip: Vec::new(),
             sniff_host: String::new(),
@@ -107,7 +118,7 @@ impl Metadata {
             process: String::new(),
             process_path: String::new(),
             uid: None,
-            dscp: 0,
+            dscp: None,
             src_geo_ip: Vec::new(),
             dst_geo_ip: Vec::new(),
             sniff_host: String::new(),

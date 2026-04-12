@@ -26,6 +26,10 @@ pub enum RuleType {
     And,
     Or,
     Not,
+    DomainWildcard,
+    IpSuffix,
+    IpAsn,
+    SubRule,
 }
 
 impl fmt::Display for RuleType {
@@ -53,6 +57,10 @@ impl fmt::Display for RuleType {
             RuleType::And => write!(f, "AND"),
             RuleType::Or => write!(f, "OR"),
             RuleType::Not => write!(f, "NOT"),
+            RuleType::DomainWildcard => write!(f, "DOMAIN-WILDCARD"),
+            RuleType::IpSuffix => write!(f, "IP-SUFFIX"),
+            RuleType::IpAsn => write!(f, "IP-ASN"),
+            RuleType::SubRule => write!(f, "SUB-RULE"),
         }
     }
 }
