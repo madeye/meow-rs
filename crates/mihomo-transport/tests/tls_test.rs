@@ -356,8 +356,11 @@ async fn tls_client_cert_accepted() {
 }
 
 // ─── A11: tls_fingerprint_warn_once_per_value ────────────────────────────────
-
+//
+// This test only applies when boring-tls is absent. When boring-tls is enabled,
+// fingerprint values route to the Boring backend (no stub warning).
 #[test]
+#[cfg(not(feature = "boring-tls"))]
 fn tls_fingerprint_warn_once_per_value() {
     install_crypto_provider();
 
@@ -388,8 +391,11 @@ fn tls_fingerprint_warn_once_per_value() {
 }
 
 // ─── A12: tls_fingerprint_warn_twice_for_distinct_values ─────────────────────
-
+//
+// This test only applies when boring-tls is absent. When boring-tls is enabled,
+// fingerprint values route to the Boring backend (no stub warning).
 #[test]
+#[cfg(not(feature = "boring-tls"))]
 fn tls_fingerprint_warn_twice_for_distinct_values() {
     install_crypto_provider();
 

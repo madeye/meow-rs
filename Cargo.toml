@@ -112,6 +112,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Parking lot for sync primitives
 parking_lot = "0.12"
 
+# BoringSSL (pulled in by mihomo-transport's boring-tls feature)
+boring      = { version = "5.0.2" }
+tokio-boring = { version = "5.0.0" }
+
 # Workspace crates
 mihomo-common = { path = "crates/mihomo-common" }
 mihomo-trie = { path = "crates/mihomo-trie" }

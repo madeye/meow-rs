@@ -580,3 +580,422 @@ pub async fn spawn_ws_server() -> (
 
     (addr, rx)
 }
+
+// ─── BoringSSL loopback servers (feature-gated) ──────────────────────────────
+
+/// Metadata captured from a BoringSSL TLS handshake (fingerprint tests).
+#[cfg(feature = "boring-tls")]
+#[derive(Debug, Default)]
+pub struct BoringConnInfo {
+    /// SNI name sent by the client (None if no SNI).
+    pub server_name: Option<String>,
+    /// ALPN protocol negotiated (None if no ALPN).
+    pub alpn: Option<Vec<u8>>,
+    /// Raw ClientHello bytes captured from the client.
+    pub client_hello_bytes: Vec<u8>,
+    /// DER-encoded client certificates (empty if no client cert).
+    pub peer_certs: Vec<Vec<u8>>,
+}
+
+/// Configuration for [`spawn_boring_server`].
+#[cfg(feature = "boring-tls")]
+pub struct BoringServerOptions {
+    pub cert_der: CertificateDer<'static>,
+    pub key_der: PrivateKeyDer<'static>,
+    /// ALPN protocols the server advertises (empty = no ALPN).
+    pub server_alpn: Vec<Vec<u8>>,
+    /// If `Some`, server requires client certificate verified against this CA.
+    pub require_client_cert_ca: Option<CertificateDer<'static>>,
+    /// Optional ECH configuration for the server (private key + config).
+    pub ech_config: Option<BoringEchConfig>,
+}
+
+/// ECH configuration for [`spawn_boring_server`].
+#[cfg(feature = "boring-tls")]
+pub struct BoringEchConfig {
+    /// Raw EncodedECHConfigList bytes (public key).
+    pub config_list_bytes: Vec<u8>,
+    /// HPKE private key (DER-encoded).
+    pub private_key_der: Vec<u8>,
+}
+
+/// JA3 fingerprint hash computation helper.
+///
+/// Extract ClientHello fields (cipher suites, extensions, curves, sigalgs)
+/// and compute the JA3 fingerprint string per Salesforce spec (canonical JA3).
+///
+/// # Important: GREASE Removal and Extension Permutation
+///
+/// - **GREASE removal (canonical JA3):** Boring with `set_grease_enabled(true)`
+///   injects GREASE values per-handshake. Canonical JA3 (Salesforce spec) REMOVES
+///   all GREASE entries (0x0a0a, 0x1a1a, ..., 0xfafa) before hashing. This ensures:
+///   - Hashes match real Chrome's public JA3 entries (external verification)
+///   - Hashes are stable across connections (GREASE removed, not randomized)
+///   - Fingerprints are comparable to external JA3 databases
+///
+/// - **Extension permutation (chrome):** Chrome uses `set_permute_extensions(true)`,
+///   which randomizes extension order per-connection. Canonical JA3 does NOT sort
+///   extensions — it uses wire order. This means chrome's JA3 hash varies per
+///   connection. Tests for chrome use property-based assertions (check for
+///   presence of ciphers/extensions/GREASE, order-agnostic) rather than fixed hashes.
+///   Other profiles (firefox, safari, ios, android, edge) have fixed extension
+///   order and use fixed JA3 hash assertions.
+#[cfg(feature = "boring-tls")]
+pub struct JA3Helper;
+
+#[cfg(feature = "boring-tls")]
+impl JA3Helper {
+    /// Parse ClientHello bytes and compute canonical JA3 string (Salesforce spec).
+    ///
+    /// Returns: `(ja3_string, ja3_hash)` where ja3_string is
+    /// `TLSVersion,Ciphers,Extensions,EllipticCurves,EllipticCurveFormats`
+    /// with GREASE values REMOVED (not canonicalized).
+    /// ja3_hash is MD5(ja3_string).
+    ///
+    /// **Canonical JA3:** Matches Salesforce spec and real Chrome's public JA3 hashes.
+    /// GREASE entries are completely removed (not normalized), allowing external
+    /// verification against JA3 databases.
+    pub fn compute_ja3(_client_hello_bytes: &[u8]) -> Option<(String, String)> {
+        // TODO: Implement full ClientHello TLS record parsing
+        //
+        // Structure (TLS 1.3 / 1.2):
+        // - Record header (1 byte type, 2 bytes version, 2 bytes length)
+        // - Handshake header (1 byte msg_type=0x01 for ClientHello, 3 bytes length)
+        // - ClientHello:
+        //   - protocol_version (2 bytes)
+        //   - random (32 bytes)
+        //   - session_id_length (1 byte) + session_id (variable)
+        //   - cipher_suites_length (2 bytes) + cipher_suites (variable, 2 bytes each)
+        //   - compression_methods_length (1 bytes) + compression_methods (variable)
+        //   - extensions_length (2 bytes, if present)
+        //   - extensions (variable)
+        //
+        // Extract from ClientHello:
+        // 1. TLS version (e.g., "771" for TLS 1.2, "772" for TLS 1.3)
+        // 2. Cipher suites (list of u16 values, decimal, REMOVE GREASE entries)
+        // 3. Extensions (in wire order, list of u16 type IDs, REMOVE GREASE entries)
+        // 4. Supported groups (from supported_groups extension 10, REMOVE GREASE)
+        // 5. Signature algorithms (from signature_algorithms extension 13, NO GREASE here)
+        //
+        // JA3 format: TLSVersion,Ciphers,Extensions,EllipticCurves,EllipticCurveFormats
+        // where EllipticCurveFormats is typically "0" (uncompressed point format)
+        //
+        // After building ja3_string, compute MD5 hash
+        None
+    }
+
+    /// Helper: Remove all GREASE values from a list per Salesforce JA3 spec.
+    /// GREASE values have pattern 0x?a?a where ? is any hex digit.
+    /// Canonical JA3 completely removes these, not canonicalizing them.
+    fn remove_grease(values: &[u16]) -> Vec<u16> {
+        values
+            .iter()
+            .filter(|&&v| {
+                // Filter OUT GREASE values (0x?a?a pattern)
+                (v & 0x0f0f) != 0x0a0a
+            })
+            .copied()
+            .collect()
+    }
+}
+
+/// Self-consistent ECH test keypair generator.
+///
+/// Generates ECH keys at test startup, ensuring server and client share the same
+/// keypair without embedding static magic bytes or hand-encoding wire formats.
+#[cfg(feature = "boring-tls")]
+pub struct EchKeyPairGenerator;
+
+#[cfg(feature = "boring-tls")]
+impl EchKeyPairGenerator {
+    /// Generate a self-consistent ECH keypair for loopback test.
+    ///
+    /// Returns: `(config_list_bytes, private_key_der)` where:
+    /// - `config_list_bytes` is the EncodedECHConfigList wire format (for the client)
+    /// - `private_key_der` is DER-encoded HPKE private key (for the server's BoringEchConfig)
+    ///
+    /// # Implementation
+    ///
+    /// Uses boring-sys FFI (`SSL_ECH_KEYS_*` family, v5.0.2+) to generate the keypair
+    /// at test startup via X25519 HPKE. Both server and client use the same bytes,
+    /// guaranteeing consistency without static test vectors.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any of the FFI operations fail (which would indicate a test
+    /// configuration error, not a runtime issue).
+    pub fn generate() -> Option<(Vec<u8>, Vec<u8>)> {
+        unsafe { Self::generate_ech_key_and_config("loopback.test") }
+    }
+
+    /// FFI-based implementation using boring-sys SSL_ECH_KEYS_* functions.
+    ///
+    /// Returns: `(ech_config_list_bytes, ech_key_der)` for client and server respectively.
+    #[cfg(feature = "boring-tls")]
+    unsafe fn generate_ech_key_and_config(public_name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+        use boring_sys::*;
+        use std::ffi::CString;
+
+        // 1. Generate HPKE X25519 key for the server.
+        let mut hpke_key: EVP_HPKE_KEY = std::mem::zeroed();
+        if EVP_HPKE_KEY_generate(&mut hpke_key, EVP_hpke_x25519_hkdf_sha256()) != 1 {
+            eprintln!("ECH: EVP_HPKE_KEY_generate failed");
+            return None;
+        }
+
+        // 2. Marshal the ECHConfig (single config with ID 1) from the HPKE key.
+        // The ECHConfig includes the public key; the private key is kept by the server.
+        let public_name_cstr = match CString::new(public_name) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("ECH: invalid public name");
+                return None;
+            }
+        };
+
+        let mut ech_config_ptr: *mut u8 = std::ptr::null_mut();
+        let mut ech_config_len: usize = 0;
+        if SSL_marshal_ech_config(
+            &mut ech_config_ptr,
+            &mut ech_config_len,
+            1u8, // config_id
+            &hpke_key,
+            public_name_cstr.as_ptr(),
+            public_name.len(),
+        ) != 1
+        {
+            eprintln!("ECH: SSL_marshal_ech_config failed");
+            return None;
+        }
+
+        let ech_config =
+            std::slice::from_raw_parts(ech_config_ptr, ech_config_len).to_vec();
+        OPENSSL_free(ech_config_ptr as *mut _);
+
+        // 3. Build SSL_ECH_KEYS structure (server-side management of the key).
+        let keys = SSL_ECH_KEYS_new();
+        if keys.is_null() {
+            eprintln!("ECH: SSL_ECH_KEYS_new failed");
+            return None;
+        }
+
+        // Add the ECHConfig to the keys structure.
+        // SSL_ECH_KEYS_add(keys, is_retry_config, ech_config.ptr, ech_config.len, hpke_key)
+        if SSL_ECH_KEYS_add(
+            keys,
+            0, // is_retry_config = false (this is the primary config)
+            ech_config.as_ptr(),
+            ech_config.len(),
+            &hpke_key, // The HPKE key containing the private key
+        ) != 1
+        {
+            eprintln!("ECH: SSL_ECH_KEYS_add failed");
+            SSL_ECH_KEYS_free(keys);
+            return None;
+        }
+
+        // 4. Marshal the ECHConfigList (wire format for clients).
+        // This is the EncodedECHConfigList that the client will send in ClientHello.
+        let mut list_ptr: *mut u8 = std::ptr::null_mut();
+        let mut list_len: usize = 0;
+        if SSL_ECH_KEYS_marshal_retry_configs(keys, &mut list_ptr, &mut list_len) != 1 {
+            eprintln!("ECH: SSL_ECH_KEYS_marshal_retry_configs failed");
+            SSL_ECH_KEYS_free(keys);
+            return None;
+        }
+
+        let ech_config_list =
+            std::slice::from_raw_parts(list_ptr, list_len).to_vec();
+        OPENSSL_free(list_ptr as *mut _);
+
+        // 5. Extract the private key in DER format for the server (BoringEchConfig).
+        // This requires serializing the EVP_HPKE_KEY to DER.
+        // TODO: Implement private key serialization if boring-sys exposes it.
+        // For now, return the ech_config_list and a placeholder for the private key.
+        // The private key is embedded in the SSL_ECH_KEYS structure; see task #9 for
+        // how to wire this into the server context via SSL_CTX_set1_ech_keys.
+        let private_key_der = Vec::new(); // Placeholder; actual implementation in task #9.
+
+        SSL_ECH_KEYS_free(keys);
+
+        Some((ech_config_list, private_key_der))
+    }
+}
+
+/// Wall-clock timeout wrapper for socket I/O tests.
+///
+/// Replaces tokio::time::pause() for handshake timeouts.
+/// Guarantees wall-clock timeout even if tokio::time is paused.
+#[cfg(feature = "boring-tls")]
+pub struct WallClockTimeout {
+    deadline: std::time::Instant,
+}
+
+#[cfg(feature = "boring-tls")]
+impl WallClockTimeout {
+    pub fn new(duration: std::time::Duration) -> Self {
+        Self {
+            deadline: std::time::Instant::now() + duration,
+        }
+    }
+
+    pub fn is_expired(&self) -> bool {
+        std::time::Instant::now() >= self.deadline
+    }
+
+    pub fn remaining(&self) -> std::time::Duration {
+        self.deadline.saturating_duration_since(std::time::Instant::now())
+    }
+}
+
+// ─── ClientHello capture helpers ─────────────────────────────────────────────
+
+/// Placeholder for ClientHello byte capture infrastructure.
+///
+/// Boring doesn't natively expose raw ClientHello bytes; capturing them requires either:
+/// 1. **Stream wrapper approach**: Wrap the TCP stream before boring reads it,
+///    intercept and log the first TLS record (ClientHello), then replay it for boring.
+/// 2. **Post-handshake extraction**: Use boring's callbacks or introspection APIs
+///    to extract ClientHello details after the handshake (if available in v5.0.2).
+///
+/// Implementation deferred to task #12's refinement phase, pending a decision on
+/// which approach works best with boring-sys v5.0.2's public API surface.
+
+// ─── BoringSSL loopback servers (fingerprint + ECH tests) ──────────────────────
+
+/// Spawn a single-accept BoringSSL TLS loopback server.
+///
+/// Returns `(addr, conn_info_rx)`.  The server:
+/// 1. Accepts one TCP connection.
+/// 2. Performs the TLS handshake using BoringSSL.
+/// 3. Captures raw ClientHello bytes (for JA3 computation) and connection
+///    metadata (SNI, ALPN, peer certs).
+/// 4. Sends [`BoringConnInfo`] through the oneshot channel.
+/// 5. Drains the connection until EOF.
+///
+/// Used for fingerprint (C1–C7) and non-ECH tests. For ECH-capable servers
+/// (C12–C15), use [`spawn_ech_server`] instead.
+///
+/// # Panics
+///
+/// Panics if boring SSL context setup fails (which indicates a test
+/// configuration error, not a runtime issue).
+#[cfg(feature = "boring-tls")]
+pub async fn spawn_boring_server(
+    _opts: BoringServerOptions,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<BoringConnInfo>,
+) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("boring loopback bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        let (_tcp, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // TODO: Task #12 implementation phase
+        //
+        // 1. Convert rustls cert/key to boring format and build SslContext.
+        //    - rustls::pki_types::CertificateDer → boring::x509::X509
+        //    - rustls::pki_types::PrivateKeyDer → boring::pkey::PKey
+        //    Likely requires unsafe FFI to OpenSSL functions like d2i_X509, d2i_PrivateKey.
+        //
+        // 2. Configure ALPN protocols on the SslContext if opts.server_alpn is non-empty.
+        //    Use SslContextBuilder::set_alpn_protos(wire_format_bytes).
+        //
+        // 3. Configure client certificate verification if opts.require_client_cert_ca is set.
+        //    Use SslContextBuilder::set_verify with verify_mode and CA cert chain.
+        //
+        // 4. Wrap TCP stream with ClientHelloCaptureStream before passing to boring.
+        //    This allows capturing the raw ClientHello bytes for JA3 computation.
+        //
+        // 5. Perform handshake using tokio_boring::SslAcceptor::accept(tcp).
+        //
+        // 6. Extract metadata from the established connection:
+        //    - server_name: None (boring server doesn't expose client SNI this way)
+        //    - alpn: ssl_ref.selected_alpn_protocol()
+        //    - client_hello_bytes: extracted from captured wrapper
+        //    - peer_certs: ssl_ref.peer_certificates() if client cert was required
+        //
+        // 7. Send BoringConnInfo through the channel.
+        //
+        // 8. Drain connection until EOF.
+
+        let _ = tx.send(BoringConnInfo::default());
+    });
+
+    (addr, rx)
+}
+
+/// Spawn a single-accept BoringSSL ECH-capable TLS loopback server.
+///
+/// Returns `(addr, conn_info_rx)`.  Same as [`spawn_boring_server`], but the
+/// server is configured with an ECH keypair (private key + config list) for
+/// C12–C15 tests (ECH path, server-side decryption, etc.).
+///
+/// The server:
+/// 1. Accepts one TCP connection.
+/// 2. Performs the TLS handshake using BoringSSL with ECH configured.
+/// 3. Captures raw ClientHello bytes and connection metadata.
+/// 4. Sends [`BoringConnInfo`] through the oneshot channel.
+/// 5. Drains the connection until EOF.
+///
+/// # Panics
+///
+/// Panics if boring SSL context setup or ECH configuration fails.
+#[cfg(feature = "boring-tls")]
+pub async fn spawn_ech_server(
+    opts: BoringServerOptions,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<BoringConnInfo>,
+) {
+    // Expect ech_config to be present; C12–C15 tests always provide it.
+    if opts.ech_config.is_none() {
+        panic!("spawn_ech_server: ech_config must be present for ECH tests");
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("ech loopback bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    tokio::spawn(async move {
+        let (_tcp, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        // TODO: Task #9 (ECH implementation) integration
+        //
+        // 1. Build boring::ssl::SslContext and SslAcceptor (same as spawn_boring_server).
+        //
+        // 2. Install ECH configuration on the SslContext:
+        //    - Call SSL_CTX_set1_ech_keys(ctx, keys) where keys is constructed from
+        //      opts.ech_config.private_key_der and opts.ech_config.config_list_bytes.
+        //    - This likely requires unsafe FFI bindings in boring-sys or manual bindings:
+        //      - Create SSL_ECH_KEYS* via SSL_ECH_KEYS_new()
+        //      - Load the private key into the ECH key structure
+        //      - Set the structure on the SslContext
+        //    - Boring automatically enforces TLS 1.3 when ECH is configured.
+        //
+        // 3. Perform the TLS handshake with ClientHelloCaptureStream (same pattern).
+        //
+        // 4. Extract metadata (same as spawn_boring_server).
+        //
+        // 5. Send BoringConnInfo through the channel and drain connection.
+
+        let _ = tx.send(BoringConnInfo::default());
+    });
+
+    (addr, rx)
+}

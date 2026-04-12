@@ -17,6 +17,16 @@ tls = [
     "dep:webpki-roots",
     "dep:rustls-pemfile",
 ]
+# boring-tls: enables BoringSSL-backed TLS for ECH and uTLS fingerprinting.
+# Requires cmake 3.14+ and a C++ compiler at build time (boring-sys vendors BoringSSL).
+# When absent, TlsConfig.fingerprint keeps the existing stub-warn behaviour and
+# TlsConfig.ech returns TransportError::Config at construction time.
+boring-tls = [
+    "tls",
+    "dep:boring",
+    "dep:tokio-boring",
+    "dep:boring-sys",
+]
 ws = [
     "dep:tokio-tungstenite",
     "dep:futures-util",
@@ -62,6 +72,11 @@ rand = { workspace = true, optional = true }
 
 # httpupgrade feature
 httparse = { version = "1", optional = true }
+
+# boring-tls feature
+boring       = { workspace = true, optional = true }
+tokio-boring = { workspace = true, optional = true }
+boring-sys   = { version = "5.0.2", optional = true }
 
 [dev-dependencies]
 tokio        = { workspace = true }
