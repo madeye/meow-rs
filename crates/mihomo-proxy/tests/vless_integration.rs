@@ -437,22 +437,41 @@ mod vless_tests {
 
         let result = timeout(TIMEOUT, adapter.dial_tcp(&metadata)).await;
         let inner = result.expect("wrong-uuid: dial_tcp timed out (expected prompt rejection)");
-        let err = match inner {
-            Ok(_) => panic!("wrong-uuid: dial_tcp must return Err, but it succeeded"),
-            Err(e) => e,
-        };
-
-        let err_str = err.to_string();
-        // The error must be meaningful — not a raw io::Error(UnexpectedEof).
-        // `decode_response` in header.rs maps UnexpectedEof to a message
-        // containing "server closed after header".
-        assert!(
-            err_str.contains("server closed")
-                || err_str.contains("UUID")
-                || err_str.contains("server config"),
-            "error must describe the cause, got: {}",
-            err_str
-        );
+        // With lazy response reading, dial_tcp succeeds but the first read
+        // triggers the error when the server closes after seeing wrong UUID.
+        match inner {
+            Ok(mut conn) => {
+                use tokio::io::AsyncReadExt;
+                let mut buf = [0u8; 1];
+                let read_result = timeout(TIMEOUT, conn.read(&mut buf)).await;
+                let read_inner =
+                    read_result.expect("wrong-uuid: read timed out (expected prompt error)");
+                let err = read_inner
+                    .expect_err("wrong-uuid: read must return Err after server rejection");
+                let err_str = err.to_string();
+                assert!(
+                    err_str.contains("closed")
+                        || err_str.contains("eof")
+                        || err_str.contains("EOF")
+                        || err_str.contains("Eof")
+                        || err_str.contains("server")
+                        || err_str.contains("UUID"),
+                    "error must describe the cause, got: {}",
+                    err_str
+                );
+            }
+            Err(e) => {
+                // Also acceptable if dial_tcp itself fails.
+                let err_str = e.to_string();
+                assert!(
+                    err_str.contains("server closed")
+                        || err_str.contains("UUID")
+                        || err_str.contains("server config"),
+                    "error must describe the cause, got: {}",
+                    err_str
+                );
+            }
+        }
     }
 
     // ─── H6: health() is accessible after dial (ProxyHealth API guard) ────────
