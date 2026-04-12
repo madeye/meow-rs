@@ -39,9 +39,9 @@
 //! per distinct value when the `boring-tls` feature is not compiled in.
 //! See issue #32 for the tracking issue.
 
-use std::sync::Arc;
 #[cfg(not(feature = "boring-tls"))]
 use std::collections::HashSet;
+use std::sync::Arc;
 #[cfg(not(feature = "boring-tls"))]
 use std::sync::{Mutex, OnceLock};
 
@@ -378,8 +378,7 @@ impl RustlsInner {
 
         // --- ALPN ---
         if !config.alpn.is_empty() {
-            tls_config.alpn_protocols =
-                config.alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
+            tls_config.alpn_protocols = config.alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
         }
 
         Ok(tls_config)
@@ -665,8 +664,7 @@ impl BoringInner {
     fn new(config: &TlsConfig) -> Result<Self> {
         let server_name = config.sni.clone().ok_or_else(|| {
             TransportError::Config(
-                "TlsLayer requires sni to be Some; None is reserved for non-TLS paths."
-                    .into(),
+                "TlsLayer requires sni to be Some; None is reserved for non-TLS paths.".into(),
             )
         })?;
 
@@ -701,16 +699,19 @@ impl BoringInner {
         // ── ALPN ────────────────────────────────────────────────────────────
         if !config.alpn.is_empty() {
             // ALPN wire format: each entry is a length-prefixed byte sequence.
-            let wire: Vec<u8> = config.alpn.iter().flat_map(|p| {
-                let b = p.as_bytes();
-                let mut v = Vec::with_capacity(1 + b.len());
-                v.push(b.len() as u8);
-                v.extend_from_slice(b);
-                v
-            }).collect();
-            b.set_alpn_protos(&wire).map_err(|e| {
-                TransportError::Config(format!("boring: set_alpn_protos: {}", e))
-            })?;
+            let wire: Vec<u8> = config
+                .alpn
+                .iter()
+                .flat_map(|p| {
+                    let b = p.as_bytes();
+                    let mut v = Vec::with_capacity(1 + b.len());
+                    v.push(b.len() as u8);
+                    v.extend_from_slice(b);
+                    v
+                })
+                .collect();
+            b.set_alpn_protos(&wire)
+                .map_err(|e| TransportError::Config(format!("boring: set_alpn_protos: {}", e)))?;
         }
 
         // ── Certificate verification ─────────────────────────────────────────
@@ -743,25 +744,22 @@ impl BoringInner {
 
         // ── Client certificate (mTLS) ────────────────────────────────────────
         if let Some(cc) = &config.client_cert {
-            let cert =
-                boring::x509::X509::from_pem(&cc.cert_pem).map_err(|e| {
-                    TransportError::Config(format!(
-                        "client_cert.cert_pem: PEM parse error (boring): {}",
-                        e
-                    ))
-                })?;
+            let cert = boring::x509::X509::from_pem(&cc.cert_pem).map_err(|e| {
+                TransportError::Config(format!(
+                    "client_cert.cert_pem: PEM parse error (boring): {}",
+                    e
+                ))
+            })?;
             let key = boring::pkey::PKey::private_key_from_pem(&cc.key_pem).map_err(|e| {
                 TransportError::Config(format!(
                     "client_cert.key_pem: PEM parse error (boring): {}",
                     e
                 ))
             })?;
-            b.set_certificate(&cert).map_err(|e| {
-                TransportError::Tls(format!("boring: set_certificate: {}", e))
-            })?;
-            b.set_private_key(&key).map_err(|e| {
-                TransportError::Tls(format!("boring: set_private_key: {}", e))
-            })?;
+            b.set_certificate(&cert)
+                .map_err(|e| TransportError::Tls(format!("boring: set_certificate: {}", e)))?;
+            b.set_private_key(&key)
+                .map_err(|e| TransportError::Tls(format!("boring: set_private_key: {}", e)))?;
         }
 
         let connector = b.build();
@@ -803,7 +801,8 @@ impl BoringInner {
                 // the caller can retry with updated ECH keys.
                 // No automatic retry in v1 — rejection is an error per QA C14.
                 if self.ech.is_some() {
-                    if let Some(retry_configs) = e.ssl().and_then(|ssl| ssl.get_ech_retry_configs()) {
+                    if let Some(retry_configs) = e.ssl().and_then(|ssl| ssl.get_ech_retry_configs())
+                    {
                         if !retry_configs.is_empty() {
                             let hex = retry_configs
                                 .iter()

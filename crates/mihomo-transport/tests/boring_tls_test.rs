@@ -38,7 +38,13 @@ struct CapturingStream {
 impl CapturingStream {
     fn new(inner: TcpStream) -> (Self, Arc<Mutex<Option<Vec<u8>>>>) {
         let slot = Arc::new(Mutex::new(None));
-        (Self { inner, first_write: slot.clone() }, slot)
+        (
+            Self {
+                inner,
+                first_write: slot.clone(),
+            },
+            slot,
+        )
     }
 }
 
@@ -93,16 +99,24 @@ fn is_grease(v: u16) -> bool {
 /// — each field is a `-`-separated list of decimal integer IDs.
 /// GREASE values and `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` (0x00ff) are excluded.
 fn parse_ja3(buf: &[u8]) -> Option<String> {
-    if buf.len() < 44 { return None; }
-    if buf[0] != 0x16 { return None; }   // must be TLS Handshake record
-    if buf[5] != 0x01 { return None; }   // must be ClientHello
+    if buf.len() < 44 {
+        return None;
+    }
+    if buf[0] != 0x16 {
+        return None;
+    } // must be TLS Handshake record
+    if buf[5] != 0x01 {
+        return None;
+    } // must be ClientHello
 
     let mut p = 9usize; // ClientHello body starts after 5-byte record + 4-byte handshake header
 
     // Read big-endian u16 and advance cursor.
     macro_rules! rd_u16 {
         () => {{
-            if p + 2 > buf.len() { return None; }
+            if p + 2 > buf.len() {
+                return None;
+            }
             let v = u16::from_be_bytes([buf[p], buf[p + 1]]);
             p += 2;
             v
@@ -111,7 +125,9 @@ fn parse_ja3(buf: &[u8]) -> Option<String> {
     // Read one byte and advance.
     macro_rules! rd_u8 {
         () => {{
-            if p >= buf.len() { return None; }
+            if p >= buf.len() {
+                return None;
+            }
             let v = buf[p];
             p += 1;
             v
@@ -121,19 +137,23 @@ fn parse_ja3(buf: &[u8]) -> Option<String> {
     macro_rules! skip {
         ($n:expr) => {{
             let n: usize = $n;
-            if p + n > buf.len() { return None; }
+            if p + n > buf.len() {
+                return None;
+            }
             p += n;
         }};
     }
 
-    let ssl_version = rd_u16!();    // ClientHello.legacy_version
-    skip!(32);                       // 32-byte random
+    let ssl_version = rd_u16!(); // ClientHello.legacy_version
+    skip!(32); // 32-byte random
     let sid_len = rd_u8!() as usize;
     skip!(sid_len);
 
     // Cipher suites
     let cs_len = rd_u16!() as usize;
-    if p + cs_len > buf.len() { return None; }
+    if p + cs_len > buf.len() {
+        return None;
+    }
     let cs_end = p + cs_len;
     let mut ciphers: Vec<String> = Vec::new();
     while p + 2 <= cs_end {
@@ -164,7 +184,9 @@ fn parse_ja3(buf: &[u8]) -> Option<String> {
         let ext_type = u16::from_be_bytes([buf[p], buf[p + 1]]);
         let ext_len = u16::from_be_bytes([buf[p + 2], buf[p + 3]]) as usize;
         p += 4;
-        if p + ext_len > buf.len() { break; }
+        if p + ext_len > buf.len() {
+            break;
+        }
         let data_start = p;
 
         if !is_grease(ext_type) {
@@ -217,39 +239,61 @@ fn ja3_hash(ja3_str: &str) -> String {
 /// Returns a comma-separated hex string of algorithm IDs (e.g., "0x0804,0x0805,..."),
 /// or None if not found or parsing fails.
 fn extract_signature_algorithms(buf: &[u8]) -> Option<String> {
-    if buf.len() < 44 { return None; }
-    if buf[0] != 0x16 { return None; }   // must be TLS Handshake record
-    if buf[5] != 0x01 { return None; }   // must be ClientHello
+    if buf.len() < 44 {
+        return None;
+    }
+    if buf[0] != 0x16 {
+        return None;
+    } // must be TLS Handshake record
+    if buf[5] != 0x01 {
+        return None;
+    } // must be ClientHello
 
     let mut p = 9usize; // ClientHello body starts after 5-byte record + 4-byte handshake header
 
     // Skip protocol_version (2 bytes) and random (32 bytes)
-    if p + 34 > buf.len() { return None; }
+    if p + 34 > buf.len() {
+        return None;
+    }
     p += 34;
 
     // Skip session_id
-    if p >= buf.len() { return None; }
+    if p >= buf.len() {
+        return None;
+    }
     let sid_len = buf[p] as usize;
     p += 1;
-    if p + sid_len > buf.len() { return None; }
+    if p + sid_len > buf.len() {
+        return None;
+    }
     p += sid_len;
 
     // Skip cipher_suites
-    if p + 2 > buf.len() { return None; }
+    if p + 2 > buf.len() {
+        return None;
+    }
     let cs_len = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
     p += 2;
-    if p + cs_len > buf.len() { return None; }
+    if p + cs_len > buf.len() {
+        return None;
+    }
     p += cs_len;
 
     // Skip compression_methods
-    if p >= buf.len() { return None; }
+    if p >= buf.len() {
+        return None;
+    }
     let comp_len = buf[p] as usize;
     p += 1;
-    if p + comp_len > buf.len() { return None; }
+    if p + comp_len > buf.len() {
+        return None;
+    }
     p += comp_len;
 
     // Parse extensions
-    if p + 2 > buf.len() { return None; }
+    if p + 2 > buf.len() {
+        return None;
+    }
     let ext_total = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
     p += 2;
     let ext_end = p + ext_total;
@@ -258,7 +302,9 @@ fn extract_signature_algorithms(buf: &[u8]) -> Option<String> {
         let ext_type = u16::from_be_bytes([buf[p], buf[p + 1]]);
         let ext_len = u16::from_be_bytes([buf[p + 2], buf[p + 3]]) as usize;
         p += 4;
-        if p + ext_len > buf.len() { break; }
+        if p + ext_len > buf.len() {
+            break;
+        }
 
         // signature_algorithms extension (type 0x000D)
         if ext_type == 0x000d && ext_len >= 2 {
@@ -289,7 +335,9 @@ fn extract_signature_algorithms(buf: &[u8]) -> Option<String> {
 /// Spawn a rustls loopback server, connect with the given `TlsConfig` using the
 /// boring backend (fingerprint or ECH must be set), capture JA3, and return
 /// `(connected, ja3_string, ja3_md5, raw_clienthello)`.
-async fn connect_capture_ja3(config: &TlsConfig) -> (bool, Option<String>, Option<String>, Option<Vec<u8>>) {
+async fn connect_capture_ja3(
+    config: &TlsConfig,
+) -> (bool, Option<String>, Option<String>, Option<Vec<u8>>) {
     install_crypto_provider();
     let (cert_der, key_der, _, _) = gen_cert(&["localhost"]);
     let (addr, _conn_rx) = spawn_tls_server(ServerOptions {
@@ -329,12 +377,25 @@ async fn boring_firefox_connects_and_ja3() {
     eprintln!("firefox JA3: {}", ja3_str);
     eprintln!("firefox MD5: {}", hash);
     // ECDHE-RSA-AES128-GCM-SHA256 = 0xc02f = 49199 must be present
-    assert!(ja3_str.contains("49199"), "firefox: cipher c02f (49199) missing");
+    assert!(
+        ja3_str.contains("49199"),
+        "firefox: cipher c02f (49199) missing"
+    );
     // Firefox curves include P-521 (25); X25519 (29) is first
-    assert!(ja3_str.split(',').nth(3).map_or(false, |s| s.starts_with("29")),
-        "firefox: X25519 (29) must be first group");
-    assert!(ja3_str.split(',').nth(3).map_or(false, |s| s.contains("25")),
-        "firefox: P-521 (25) must be in groups");
+    assert!(
+        ja3_str
+            .split(',')
+            .nth(3)
+            .map_or(false, |s| s.starts_with("29")),
+        "firefox: X25519 (29) must be first group"
+    );
+    assert!(
+        ja3_str
+            .split(',')
+            .nth(3)
+            .map_or(false, |s| s.contains("25")),
+        "firefox: P-521 (25) must be in groups"
+    );
 }
 
 // ─── B2: safari ───────────────────────────────────────────────────────────────
@@ -353,10 +414,18 @@ async fn boring_safari_connects_and_ja3() {
     eprintln!("safari JA3: {}", ja3_str);
     eprintln!("safari MD5: {}", hash);
     // ECDHE-ECDSA-AES256-GCM-SHA384 = 0xc02c = 49196 is safari's first cipher
-    assert!(ja3_str.contains("49196"), "safari: cipher c02c (49196) missing");
+    assert!(
+        ja3_str.contains("49196"),
+        "safari: cipher c02c (49196) missing"
+    );
     // Safari does not include P-521 in its curves
-    assert!(!ja3_str.split(',').nth(3).map_or(false, |s| s.contains("25")),
-        "safari: P-521 (25) must NOT be in groups");
+    assert!(
+        !ja3_str
+            .split(',')
+            .nth(3)
+            .map_or(false, |s| s.contains("25")),
+        "safari: P-521 (25) must NOT be in groups"
+    );
 }
 
 // ─── B3: ios ──────────────────────────────────────────────────────────────────
@@ -375,7 +444,10 @@ async fn boring_ios_connects_and_ja3() {
     eprintln!("ios JA3: {}", ja3_str);
     eprintln!("ios MD5: {}", hash);
     // Same cipher ordering as Safari; first cipher is ECDHE-ECDSA-AES256-GCM-SHA384
-    assert!(ja3_str.contains("49196"), "ios: cipher c02c (49196) missing");
+    assert!(
+        ja3_str.contains("49196"),
+        "ios: cipher c02c (49196) missing"
+    );
 }
 
 // ─── B4: android ──────────────────────────────────────────────────────────────
@@ -395,8 +467,11 @@ async fn boring_android_connects_and_ja3() {
     eprintln!("android MD5: {}", hash);
     // Android OkHttp: P-256 (secp256r1 = 23) precedes X25519 (29) in groups
     let groups_field = ja3_str.split(',').nth(3).unwrap_or("");
-    assert!(groups_field.starts_with("23"),
-        "android: P-256 (23) must be first group, got: {}", groups_field);
+    assert!(
+        groups_field.starts_with("23"),
+        "android: P-256 (23) must be first group, got: {}",
+        groups_field
+    );
 }
 
 // ─── B5: edge ─────────────────────────────────────────────────────────────────
@@ -415,10 +490,18 @@ async fn boring_edge_connects_and_ja3() {
     eprintln!("edge JA3: {}", ja3_str);
     eprintln!("edge MD5: {}", hash);
     // Edge 85 has the same TLS 1.2 cipher list as Chrome 83
-    assert!(ja3_str.contains("49199"), "edge: cipher c02f (49199) missing");
+    assert!(
+        ja3_str.contains("49199"),
+        "edge: cipher c02f (49199) missing"
+    );
     // Edge 85 does not include P-521
-    assert!(!ja3_str.split(',').nth(3).map_or(false, |s| s.contains("25")),
-        "edge: P-521 (25) must NOT be in groups");
+    assert!(
+        !ja3_str
+            .split(',')
+            .nth(3)
+            .map_or(false, |s| s.contains("25")),
+        "edge: P-521 (25) must NOT be in groups"
+    );
 }
 
 // ─── B6: chrome (property-based; no pinned hash — permute_extensions varies) ──
@@ -438,11 +521,21 @@ async fn boring_chrome_property_check() {
     assert!(ja3_str.contains("49195"), "chrome: c02b (49195) missing");
     assert!(ja3_str.contains("49199"), "chrome: c02f (49199) missing");
     // X25519 (29) must be first group
-    assert!(ja3_str.split(',').nth(3).map_or(false, |s| s.starts_with("29")),
-        "chrome: X25519 (29) must be first group");
+    assert!(
+        ja3_str
+            .split(',')
+            .nth(3)
+            .map_or(false, |s| s.starts_with("29")),
+        "chrome: X25519 (29) must be first group"
+    );
     // P-521 must NOT be in groups (Chrome 120 only uses X25519 + P-256 + P-384)
-    assert!(!ja3_str.split(',').nth(3).map_or(false, |s| s.contains("25")),
-        "chrome: P-521 (25) must NOT be in groups");
+    assert!(
+        !ja3_str
+            .split(',')
+            .nth(3)
+            .map_or(false, |s| s.contains("25")),
+        "chrome: P-521 (25) must NOT be in groups"
+    );
 }
 
 // ─── B7: chrome120 / firefox120 / safari16 aliases ────────────────────────────
@@ -466,11 +559,14 @@ async fn boring_version_pinned_aliases_connect() {
 async fn boring_deferred_fingerprint_connects_with_warn() {
     let config = TlsConfig {
         skip_cert_verify: true,
-        fingerprint: Some("randomized".into()),  // deferred; see design §10
+        fingerprint: Some("randomized".into()), // deferred; see design §10
         ..TlsConfig::new("localhost")
     };
     let (connected, _, _, _) = connect_capture_ja3(&config).await;
-    assert!(connected, "deferred fingerprint must still connect via boring defaults");
+    assert!(
+        connected,
+        "deferred fingerprint must still connect via boring defaults"
+    );
 }
 
 // ─── B9: TlsLayer::new succeeds with ECH config (no boring-tls absent error) ──
@@ -486,7 +582,11 @@ async fn boring_ech_construction_ok() {
         ..TlsConfig::new("localhost")
     };
     let layer = TlsLayer::new(&config);
-    assert!(layer.is_ok(), "TlsLayer::new must succeed when boring-tls is enabled: {:?}", layer.err());
+    assert!(
+        layer.is_ok(),
+        "TlsLayer::new must succeed when boring-tls is enabled: {:?}",
+        layer.err()
+    );
 }
 
 // ─── B10: set_ech_config_list is called on ConnectConfiguration ───────────────
@@ -558,27 +658,43 @@ async fn c2_all_profiles_ja3_distinct() {
         let (connected, _ja3_str, ja3_hash_opt, raw_ch) = connect_capture_ja3(&config).await;
         assert!(connected, "profile '{}' must connect", profile);
 
-        let actual_hash = ja3_hash_opt.expect(&format!("profile '{}' JA3 hash not computed", profile));
+        let actual_hash =
+            ja3_hash_opt.expect(&format!("profile '{}' JA3 hash not computed", profile));
         hashes.insert(profile, actual_hash);
 
         // Verify sigalgs can be extracted (for future profile differentiation)
         if let Some(ch_bytes) = raw_ch {
             let sigalgs = extract_signature_algorithms(&ch_bytes);
-            assert!(sigalgs.is_some(), "profile '{}' must have signature_algorithms extension", profile);
+            assert!(
+                sigalgs.is_some(),
+                "profile '{}' must have signature_algorithms extension",
+                profile
+            );
         }
     }
 
     // Pinned expected hashes for the distinct profiles (from task #8)
-    assert_eq!(hashes["firefox"], "dfe508530f13e5ed9cdf7af72dde2c82", "firefox JA3 hash mismatch");
-    assert_eq!(hashes["android"], "96fc7e74abab428b46cc5f9a556a4b87", "android JA3 hash mismatch");
-    assert_eq!(hashes["edge"], "74970fac61e4a224d200b2458ca4dc51", "edge JA3 hash mismatch");
+    assert_eq!(
+        hashes["firefox"], "dfe508530f13e5ed9cdf7af72dde2c82",
+        "firefox JA3 hash mismatch"
+    );
+    assert_eq!(
+        hashes["android"], "96fc7e74abab428b46cc5f9a556a4b87",
+        "android JA3 hash mismatch"
+    );
+    assert_eq!(
+        hashes["edge"], "74970fac61e4a224d200b2458ca4dc51",
+        "edge JA3 hash mismatch"
+    );
 
     // ios is an intentional alias for safari in v1: identical JA3 hash and sigalgs
     let safari_hash = hashes["safari"].clone();
     let ios_hash = hashes["ios"].clone();
-    assert_eq!(safari_hash, ios_hash,
+    assert_eq!(
+        safari_hash, ios_hash,
         "ios must alias safari (identical JA3): safari={}, ios={}",
-        safari_hash, ios_hash);
+        safari_hash, ios_hash
+    );
 
     // Assert the 4 unique profiles {firefox, safari, android, edge} are mutually distinct
     let unique_hashes = vec![
@@ -590,11 +706,15 @@ async fn c2_all_profiles_ja3_distinct() {
     for i in 0..unique_hashes.len() {
         for j in (i + 1)..unique_hashes.len() {
             assert_ne!(
-                unique_hashes[i].1, unique_hashes[j].1,
+                unique_hashes[i].1,
+                unique_hashes[j].1,
                 "profiles {} and {} must have distinct JA3 hashes: {}={}, {}={}",
-                unique_hashes[i].0, unique_hashes[j].0,
-                unique_hashes[i].0, unique_hashes[i].1,
-                unique_hashes[j].0, unique_hashes[j].1
+                unique_hashes[i].0,
+                unique_hashes[j].0,
+                unique_hashes[i].0,
+                unique_hashes[i].1,
+                unique_hashes[j].0,
+                unique_hashes[j].1
             );
         }
     }
@@ -607,10 +727,10 @@ async fn c3_random_fingerprint_valid() {
     // Random picks from: chrome(6), safari(3), ios(2), firefox(1)
     // Chrome is property-based (no fixed hash), others have fixed hashes
     let _non_chrome_hashes = vec![
-        "dfe508530f13e5ed9cdf7af72dde2c82",  // firefox
-        "0bc2e15298a68bc7ea5312a84992b51e",  // safari/ios
-        "96fc7e74abab428b46cc5f9a556a4b87",  // android (not in random set but for reference)
-        "74970fac61e4a224d200b2458ca4dc51",  // edge (not in random set but for reference)
+        "dfe508530f13e5ed9cdf7af72dde2c82", // firefox
+        "0bc2e15298a68bc7ea5312a84992b51e", // safari/ios
+        "96fc7e74abab428b46cc5f9a556a4b87", // android (not in random set but for reference)
+        "74970fac61e4a224d200b2458ca4dc51", // edge (not in random set but for reference)
     ];
 
     // Run 20 iterations and just verify connections succeed
@@ -695,7 +815,10 @@ fn c10_fingerprint_dedup_warn() {
 
     // Should warn exactly once for deferred fingerprints
     let warn_count = logs.count_containing(&["uTLS fingerprint spoofing", "not"]);
-    assert_eq!(warn_count, 1, "deferred fingerprint should warn exactly once");
+    assert_eq!(
+        warn_count, 1,
+        "deferred fingerprint should warn exactly once"
+    );
 }
 
 // ─── C11: Invalid fingerprint value error ────────────────────────────────────
@@ -711,7 +834,10 @@ fn c11_invalid_fingerprint_error() {
     let result = TlsLayer::new(&config);
     // Invalid fingerprints still fall through with stub warning, not error
     // The important thing is that it doesn't panic and TlsLayer is created
-    assert!(result.is_ok() || result.is_err(), "must return Result, not panic");
+    assert!(
+        result.is_ok() || result.is_err(),
+        "must return Result, not panic"
+    );
 }
 
 // ─── C12: ECH config parse and setup (valid config) ──────────────────────────
@@ -726,23 +852,25 @@ async fn c12_ech_valid_config_construction() {
     let config = TlsConfig {
         skip_cert_verify: true,
         ech: Some(EchOpts::Config(vec![
-            0x00, 0x20,  // outer_len = 32
-            0x00, 0x01,  // version = 1
-            0x00, 0x18,  // length = 24
-            0x00, 0x1d,  // kem_id = 0x001d (X25519)
-            0x00, 0x10,  // kdf_id = 0x0010
-            0x00, 0x14,  // aead_id = 0x0014
+            0x00, 0x20, // outer_len = 32
+            0x00, 0x01, // version = 1
+            0x00, 0x18, // length = 24
+            0x00, 0x1d, // kem_id = 0x001d (X25519)
+            0x00, 0x10, // kdf_id = 0x0010
+            0x00, 0x14, // aead_id = 0x0014
             // Placeholder key material (24 bytes)
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ])),
         ..TlsConfig::new("localhost")
     };
 
     // TlsLayer::new should succeed when boring-tls is enabled
     let layer = TlsLayer::new(&config);
-    assert!(layer.is_ok() || layer.is_err(), "must return Result, not panic");
+    assert!(
+        layer.is_ok() || layer.is_err(),
+        "must return Result, not panic"
+    );
 }
 
 // ─── C13: ECH loopback — server reports ech_accepted=true ────────────────────
@@ -757,14 +885,13 @@ async fn c13_ech_loopback_accepted() {
 
     // Generate ECH keypair (client config list + server keys handle).
     let (config_list_bytes, keys_handle) =
-        support::loopback::EchKeyPairGenerator::generate()
-            .expect("ECH keypair generation");
+        support::loopback::EchKeyPairGenerator::generate().expect("ECH keypair generation");
 
     // Server cert for the ECH public_name ("loopback.test").
     let (cert_der, key_der, _, _) = gen_cert(&["loopback.test"]);
 
-    let (addr, conn_rx) = support::loopback::spawn_ech_server(
-        support::loopback::BoringServerOptions {
+    let (addr, conn_rx) =
+        support::loopback::spawn_ech_server(support::loopback::BoringServerOptions {
             cert_der,
             key_der,
             server_alpn: vec![],
@@ -773,9 +900,8 @@ async fn c13_ech_loopback_accepted() {
                 config_list_bytes: config_list_bytes.clone(),
                 keys_handle,
             }),
-        },
-    )
-    .await;
+        })
+        .await;
 
     let config = TlsConfig {
         skip_cert_verify: true,
@@ -813,13 +939,12 @@ async fn c14_ech_loopback_inner_sni() {
     install_crypto_provider();
 
     let (config_list_bytes, keys_handle) =
-        support::loopback::EchKeyPairGenerator::generate()
-            .expect("ECH keypair generation");
+        support::loopback::EchKeyPairGenerator::generate().expect("ECH keypair generation");
 
     let (cert_der, key_der, _, _) = gen_cert(&["loopback.test"]);
 
-    let (addr, conn_rx) = support::loopback::spawn_ech_server(
-        support::loopback::BoringServerOptions {
+    let (addr, conn_rx) =
+        support::loopback::spawn_ech_server(support::loopback::BoringServerOptions {
             cert_der,
             key_der,
             server_alpn: vec![],
@@ -828,9 +953,8 @@ async fn c14_ech_loopback_inner_sni() {
                 config_list_bytes: config_list_bytes.clone(),
                 keys_handle,
             }),
-        },
-    )
-    .await;
+        })
+        .await;
 
     let config = TlsConfig {
         skip_cert_verify: true,
@@ -846,7 +970,10 @@ async fn c14_ech_loopback_inner_sni() {
     layer.connect(Box::new(tcp)).await.expect("connect");
 
     let conn_info = conn_rx.await.expect("BoringConnInfo");
-    assert!(conn_info.ech_accepted, "server must report ech_accepted=true");
+    assert!(
+        conn_info.ech_accepted,
+        "server must report ech_accepted=true"
+    );
     assert_eq!(
         conn_info.server_name.as_deref(),
         Some("loopback.test"),
@@ -868,18 +995,16 @@ async fn c15_ech_retry_config_on_mismatch() {
 
     // Server installs keypair A.
     let (server_config_list, server_keys) =
-        support::loopback::EchKeyPairGenerator::generate()
-            .expect("ECH keypair A (server)");
+        support::loopback::EchKeyPairGenerator::generate().expect("ECH keypair A (server)");
 
     // Client uses keypair B — different public key → mismatch.
     let (client_config_list, _client_keys) =
-        support::loopback::EchKeyPairGenerator::generate()
-            .expect("ECH keypair B (client)");
+        support::loopback::EchKeyPairGenerator::generate().expect("ECH keypair B (client)");
 
     let (cert_der, key_der, _, _) = gen_cert(&["loopback.test"]);
 
-    let (addr, _conn_rx) = support::loopback::spawn_ech_server(
-        support::loopback::BoringServerOptions {
+    let (addr, _conn_rx) =
+        support::loopback::spawn_ech_server(support::loopback::BoringServerOptions {
             cert_der,
             key_der,
             server_alpn: vec![],
@@ -888,9 +1013,8 @@ async fn c15_ech_retry_config_on_mismatch() {
                 config_list_bytes: server_config_list,
                 keys_handle: server_keys,
             }),
-        },
-    )
-    .await;
+        })
+        .await;
 
     // Client presents keypair B — server can't decrypt → rejection.
     let config = TlsConfig {

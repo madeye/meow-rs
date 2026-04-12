@@ -799,8 +799,7 @@ impl EchKeyPairGenerator {
             return None;
         }
 
-        let ech_config =
-            std::slice::from_raw_parts(ech_config_ptr, ech_config_len).to_vec();
+        let ech_config = std::slice::from_raw_parts(ech_config_ptr, ech_config_len).to_vec();
         OPENSSL_free(ech_config_ptr as *mut _);
 
         // 3. Build SSL_ECH_KEYS structure (server-side management of the key).
@@ -840,8 +839,7 @@ impl EchKeyPairGenerator {
             return None;
         }
 
-        let ech_config_list =
-            std::slice::from_raw_parts(list_ptr, list_len).to_vec();
+        let ech_config_list = std::slice::from_raw_parts(list_ptr, list_len).to_vec();
         OPENSSL_free(list_ptr as *mut _);
 
         // 5. Wrap the live SSL_ECH_KEYS* in an EchKeysHandle.
@@ -879,7 +877,8 @@ impl WallClockTimeout {
     }
 
     pub fn remaining(&self) -> std::time::Duration {
-        self.deadline.saturating_duration_since(std::time::Instant::now())
+        self.deadline
+            .saturating_duration_since(std::time::Instant::now())
     }
 }
 
