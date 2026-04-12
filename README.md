@@ -114,6 +114,22 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 - Bidirectional TCP relay and UDP NAT session tracking
 - Per-connection traffic statistics with connection lifecycle management
 
+## Benchmarks
+
+Measured on Apple M4, macOS, loopback (`127.0.0.1`). Both binaries use identical config (`mode: direct`, SOCKS5 listener on port 17890, DNS disabled). Proxy relays traffic to a TCP echo server via the DIRECT adapter. Run with `bash bench.sh`.
+
+| Metric | mihomo (Go) | mihomo-rust | Delta |
+|--------|-------------|-------------|-------|
+| Binary size (stripped) | 30.5 MB | 8.9 MB | **-71%** |
+| RSS idle | 25.8 MB | 8.5 MB | **-67%** |
+| RSS under load | 25.8 MB | 8.5 MB | **-67%** |
+| TCP throughput (64 MB) | 33.0 Gbps | 34.4 Gbps | **+4%** |
+| Latency p50 | 132 us | 129 us | **-2%** |
+| Latency p99 | 181 us | 169 us | **-7%** |
+| Connections/sec | 714 | 710 | ~0% |
+
+> Go: [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) v1.19.23 darwin-arm64. Rust: v0.4.0, `--release` with LTO + strip.
+
 ## Architecture
 
 ```

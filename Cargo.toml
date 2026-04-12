@@ -12,7 +12,13 @@ members = [
     "crates/mihomo-api",
     "crates/mihomo-config",
     "crates/mihomo-app",
+    "crates/mihomo-bench",
 ]
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
 
 [workspace.package]
 version = "0.4.0"

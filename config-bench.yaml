@@ -1,0 +1,9 @@
+mixed-port: 17890
+allow-lan: false
+bind-address: "127.0.0.1"
+mode: direct
+log-level: warning
+ipv6: false
+
+dns:
+  enable: false
