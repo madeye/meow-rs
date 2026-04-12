@@ -914,18 +914,13 @@ fn rustls_key_to_boring(
 
 // ─── ClientHello capture helpers ─────────────────────────────────────────
 
-/// Placeholder for ClientHello byte capture infrastructure.
-///
-/// Boring doesn't natively expose raw ClientHello bytes; capturing them requires either:
-/// 1. **Stream wrapper approach**: Wrap the TCP stream before boring reads it,
-///    intercept and log the first TLS record (ClientHello), then replay it for boring.
-/// 2. **Post-handshake extraction**: Use boring's callbacks or introspection APIs
-///    to extract ClientHello details after the handshake (if available in v5.0.2).
-/// 3. **Manual TLS record parsing**: Read the first few bytes to get record type/length,
-///    extract ClientHello, then create a wrapper that replays the data to boring.
-///
-/// Implementation deferred pending research into boring-sys's BIO (Basic I/O)
-/// callbacks or custom stream wrapping patterns.
+// Placeholder for ClientHello byte capture infrastructure.
+//
+// Boring doesn't natively expose raw ClientHello bytes; capturing them requires
+// either a stream wrapper that intercepts the first TLS record before replaying
+// it, post-handshake extraction via boring callbacks, or manual TLS record
+// parsing. Implementation deferred pending research into boring-sys's BIO
+// callbacks or custom stream wrapping patterns.
 
 // ─── BoringSSL loopback servers (fingerprint + ECH tests) ──────────────────────
 
