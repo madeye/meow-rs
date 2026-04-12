@@ -439,7 +439,8 @@ mod tests {
             s.write_all(&[0x01, 0x00]).await.unwrap();
         });
 
-        let result = VlessConn::new(
+        // VlessConn::new succeeds (response is read lazily).
+        let mut conn = VlessConn::new(
             Box::new(client),
             &TEST_UUID,
             None,
@@ -447,9 +448,13 @@ mod tests {
             80,
             &VlessAddr::Ipv4([1, 2, 3, 4]),
         )
-        .await;
+        .await
+        .expect("new succeeds with lazy response");
 
-        assert!(result.is_err(), "version mismatch must return Err");
+        // First read triggers lazy response consumption and must error.
+        let mut buf = [0u8; 1];
+        let result = tokio::io::AsyncReadExt::read(&mut conn, &mut buf).await;
+        assert!(result.is_err(), "version mismatch must return Err on read");
         let msg = result.err().expect("expected Err").to_string();
         assert!(
             msg.contains("version") || msg.contains("mismatch"),
@@ -471,7 +476,8 @@ mod tests {
             drop(s);
         });
 
-        let result = VlessConn::new(
+        // VlessConn::new succeeds (response is read lazily).
+        let mut conn = VlessConn::new(
             Box::new(client),
             &TEST_UUID,
             None,
@@ -479,12 +485,20 @@ mod tests {
             80,
             &VlessAddr::Ipv4([1, 2, 3, 4]),
         )
-        .await;
+        .await
+        .expect("new succeeds with lazy response");
 
-        assert!(result.is_err(), "EOF after header must return Err");
+        // First read triggers lazy response consumption and must error on EOF.
+        let mut buf = [0u8; 1];
+        let result = tokio::io::AsyncReadExt::read(&mut conn, &mut buf).await;
+        assert!(result.is_err(), "EOF after header must return Err on read");
         let msg = result.err().expect("expected Err").to_string();
         assert!(
-            msg.contains("closed") || msg.contains("UUID") || msg.contains("server"),
+            msg.contains("closed")
+                || msg.contains("eof")
+                || msg.contains("EOF")
+                || msg.contains("server")
+                || msg.contains("Eof"),
             "error must give diagnostic, got: {}",
             msg
         );
