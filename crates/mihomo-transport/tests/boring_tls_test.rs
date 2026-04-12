@@ -390,10 +390,7 @@ async fn boring_firefox_connects_and_ja3() {
         "firefox: X25519 (29) must be first group"
     );
     assert!(
-        ja3_str
-            .split(',')
-            .nth(3)
-            .is_some_and(|s| s.contains("25")),
+        ja3_str.split(',').nth(3).is_some_and(|s| s.contains("25")),
         "firefox: P-521 (25) must be in groups"
     );
 }
@@ -420,10 +417,7 @@ async fn boring_safari_connects_and_ja3() {
     );
     // Safari does not include P-521 in its curves
     assert!(
-        !ja3_str
-            .split(',')
-            .nth(3)
-            .is_some_and(|s| s.contains("25")),
+        !ja3_str.split(',').nth(3).is_some_and(|s| s.contains("25")),
         "safari: P-521 (25) must NOT be in groups"
     );
 }
@@ -496,10 +490,7 @@ async fn boring_edge_connects_and_ja3() {
     );
     // Edge 85 does not include P-521
     assert!(
-        !ja3_str
-            .split(',')
-            .nth(3)
-            .is_some_and(|s| s.contains("25")),
+        !ja3_str.split(',').nth(3).is_some_and(|s| s.contains("25")),
         "edge: P-521 (25) must NOT be in groups"
     );
 }
@@ -530,10 +521,7 @@ async fn boring_chrome_property_check() {
     );
     // P-521 must NOT be in groups (Chrome 120 only uses X25519 + P-256 + P-384)
     assert!(
-        !ja3_str
-            .split(',')
-            .nth(3)
-            .is_some_and(|s| s.contains("25")),
+        !ja3_str.split(',').nth(3).is_some_and(|s| s.contains("25")),
         "chrome: P-521 (25) must NOT be in groups"
     );
 }
@@ -658,8 +646,8 @@ async fn c2_all_profiles_ja3_distinct() {
         let (connected, _ja3_str, ja3_hash_opt, raw_ch) = connect_capture_ja3(&config).await;
         assert!(connected, "profile '{}' must connect", profile);
 
-        let actual_hash = ja3_hash_opt
-            .unwrap_or_else(|| panic!("profile '{}' JA3 hash not computed", profile));
+        let actual_hash =
+            ja3_hash_opt.unwrap_or_else(|| panic!("profile '{}' JA3 hash not computed", profile));
         hashes.insert(profile, actual_hash);
 
         // Verify sigalgs can be extracted (for future profile differentiation)
