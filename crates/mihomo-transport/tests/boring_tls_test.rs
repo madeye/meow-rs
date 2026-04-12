@@ -1,0 +1,466 @@
+//! BoringSSL-backed TLS tests: fingerprint profile connections and JA3 capture.
+//!
+//! Required features: `boring-tls`.
+//!
+//! Each named profile test:
+//!   1. Connects to a rustls loopback server using the boring backend.
+//!   2. Captures the raw TLS ClientHello bytes from the first write.
+//!   3. Parses a JA3 string and MD5 hash for QA to pin in C1–C3.
+//!
+//! Chrome is intentionally property-based (no pinned hash) because
+//! `set_permute_extensions(true)` randomises extension order per-handshake.
+
+mod support;
+
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
+
+use mihomo_transport::{
+    tls::{EchOpts, TlsConfig, TlsLayer},
+    Transport,
+};
+use support::loopback::{gen_cert, install_crypto_provider, spawn_tls_server, ServerOptions};
+
+// ─── ClientHello capturer ─────────────────────────────────────────────────────
+
+/// Transparent stream wrapper that saves the first poll_write payload (the TLS
+/// ClientHello record) for JA3 analysis.  All reads and subsequent writes are
+/// forwarded to the inner TcpStream unchanged.
+struct CapturingStream {
+    inner: TcpStream,
+    first_write: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl CapturingStream {
+    fn new(inner: TcpStream) -> (Self, Arc<Mutex<Option<Vec<u8>>>>) {
+        let slot = Arc::new(Mutex::new(None));
+        (Self { inner, first_write: slot.clone() }, slot)
+    }
+}
+
+impl AsyncRead for CapturingStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for CapturingStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        {
+            let mut slot = this.first_write.lock().unwrap();
+            if slot.is_none() && !buf.is_empty() {
+                *slot = Some(buf.to_vec());
+            }
+        }
+        Pin::new(&mut this.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+// ─── JA3 parser ───────────────────────────────────────────────────────────────
+
+/// Returns true for the 16 GREASE values defined in RFC 8701.
+/// GREASE u16s have the same byte in both positions, lower nibble = 0xA.
+fn is_grease(v: u16) -> bool {
+    let lo = (v & 0xff) as u8;
+    let hi = (v >> 8) as u8;
+    lo == hi && (lo & 0x0f) == 0x0a
+}
+
+/// Parse a TLS ClientHello record and return the JA3 fingerprint string.
+///
+/// JA3 format: `SSLVersion,Ciphers,Extensions,EllipticCurves,EllipticCurvePointFormats`
+/// — each field is a `-`-separated list of decimal integer IDs.
+/// GREASE values and `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` (0x00ff) are excluded.
+fn parse_ja3(buf: &[u8]) -> Option<String> {
+    if buf.len() < 44 { return None; }
+    if buf[0] != 0x16 { return None; }   // must be TLS Handshake record
+    if buf[5] != 0x01 { return None; }   // must be ClientHello
+
+    let mut p = 9usize; // ClientHello body starts after 5-byte record + 4-byte handshake header
+
+    // Read big-endian u16 and advance cursor.
+    macro_rules! rd_u16 {
+        () => {{
+            if p + 2 > buf.len() { return None; }
+            let v = u16::from_be_bytes([buf[p], buf[p + 1]]);
+            p += 2;
+            v
+        }};
+    }
+    // Read one byte and advance.
+    macro_rules! rd_u8 {
+        () => {{
+            if p >= buf.len() { return None; }
+            let v = buf[p];
+            p += 1;
+            v
+        }};
+    }
+    // Skip N bytes.
+    macro_rules! skip {
+        ($n:expr) => {{
+            let n: usize = $n;
+            if p + n > buf.len() { return None; }
+            p += n;
+        }};
+    }
+
+    let ssl_version = rd_u16!();    // ClientHello.legacy_version
+    skip!(32);                       // 32-byte random
+    let sid_len = rd_u8!() as usize;
+    skip!(sid_len);
+
+    // Cipher suites
+    let cs_len = rd_u16!() as usize;
+    if p + cs_len > buf.len() { return None; }
+    let cs_end = p + cs_len;
+    let mut ciphers: Vec<String> = Vec::new();
+    while p + 2 <= cs_end {
+        let c = u16::from_be_bytes([buf[p], buf[p + 1]]);
+        p += 2;
+        if !is_grease(c) && c != 0x00ff {
+            ciphers.push(c.to_string());
+        }
+    }
+    p = cs_end;
+
+    // Compression methods
+    let comp_len = rd_u8!() as usize;
+    skip!(comp_len);
+
+    // Extensions (optional per spec, but always present in practice)
+    if p + 2 > buf.len() {
+        return Some(format!("{},{},,,", ssl_version, ciphers.join("-")));
+    }
+    let ext_total = rd_u16!() as usize;
+    let ext_end = p + ext_total;
+
+    let mut extensions: Vec<String> = Vec::new();
+    let mut groups: Vec<String> = Vec::new();
+    let mut point_formats: Vec<String> = Vec::new();
+
+    while p + 4 <= ext_end && p + 4 <= buf.len() {
+        let ext_type = u16::from_be_bytes([buf[p], buf[p + 1]]);
+        let ext_len = u16::from_be_bytes([buf[p + 2], buf[p + 3]]) as usize;
+        p += 4;
+        if p + ext_len > buf.len() { break; }
+        let data_start = p;
+
+        if !is_grease(ext_type) {
+            extensions.push(ext_type.to_string());
+
+            // supported_groups (0x000a)
+            if ext_type == 0x000a && ext_len >= 2 {
+                let groups_len = u16::from_be_bytes([buf[p], buf[p + 1]]) as usize;
+                let mut gp = p + 2;
+                let gend = (p + 2 + groups_len).min(buf.len());
+                while gp + 2 <= gend {
+                    let g = u16::from_be_bytes([buf[gp], buf[gp + 1]]);
+                    gp += 2;
+                    if !is_grease(g) {
+                        groups.push(g.to_string());
+                    }
+                }
+            }
+
+            // ec_point_formats (0x000b)
+            if ext_type == 0x000b && ext_len >= 1 {
+                let pf_len = buf[p] as usize;
+                for i in 0..pf_len {
+                    if p + 1 + i < buf.len() {
+                        point_formats.push(buf[p + 1 + i].to_string());
+                    }
+                }
+            }
+        }
+
+        p = data_start + ext_len;
+    }
+
+    Some(format!(
+        "{},{},{},{},{}",
+        ssl_version,
+        ciphers.join("-"),
+        extensions.join("-"),
+        groups.join("-"),
+        point_formats.join("-"),
+    ))
+}
+
+/// Compute the JA3 MD5 hash from a JA3 string.
+fn ja3_hash(ja3_str: &str) -> String {
+    format!("{:x}", md5::compute(ja3_str))
+}
+
+// ─── Test helper ──────────────────────────────────────────────────────────────
+
+/// Spawn a rustls loopback server, connect with the given `TlsConfig` using the
+/// boring backend (fingerprint or ECH must be set), capture JA3, and return
+/// `(connected, ja3_string, ja3_md5)`.
+async fn connect_capture_ja3(config: &TlsConfig) -> (bool, Option<String>, Option<String>) {
+    install_crypto_provider();
+    let (cert_der, key_der, _, _) = gen_cert(&["localhost"]);
+    let (addr, _conn_rx) = spawn_tls_server(ServerOptions {
+        cert_der,
+        key_der,
+        server_alpn: vec![],
+        require_client_cert_ca: None,
+    })
+    .await;
+
+    let tcp = TcpStream::connect(addr).await.expect("TCP connect");
+    let (capturer, slot) = CapturingStream::new(tcp);
+
+    let layer = TlsLayer::new(config).expect("TlsLayer::new");
+    let connected = layer.connect(Box::new(capturer)).await.is_ok();
+
+    let ja3_str = slot.lock().unwrap().as_ref().and_then(|b| parse_ja3(b));
+    let ja3_md5 = ja3_str.as_deref().map(ja3_hash);
+
+    (connected, ja3_str, ja3_md5)
+}
+
+// ─── B1: firefox ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn boring_firefox_connects_and_ja3() {
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        fingerprint: Some("firefox".into()),
+        ..TlsConfig::new("localhost")
+    };
+    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    assert!(connected, "boring firefox profile must connect");
+    let ja3_str = ja3_str.expect("ClientHello not captured");
+    let hash = hash.unwrap();
+    eprintln!("firefox JA3: {}", ja3_str);
+    eprintln!("firefox MD5: {}", hash);
+    // ECDHE-RSA-AES128-GCM-SHA256 = 0xc02f = 49199 must be present
+    assert!(ja3_str.contains("49199"), "firefox: cipher c02f (49199) missing");
+    // Firefox curves include P-521 (25); X25519 (29) is first
+    assert!(ja3_str.split(',').nth(3).map_or(false, |s| s.starts_with("29")),
+        "firefox: X25519 (29) must be first group");
+    assert!(ja3_str.split(',').nth(3).map_or(false, |s| s.contains("25")),
+        "firefox: P-521 (25) must be in groups");
+}
+
+// ─── B2: safari ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn boring_safari_connects_and_ja3() {
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        fingerprint: Some("safari".into()),
+        ..TlsConfig::new("localhost")
+    };
+    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    assert!(connected, "boring safari profile must connect");
+    let ja3_str = ja3_str.expect("ClientHello not captured");
+    let hash = hash.unwrap();
+    eprintln!("safari JA3: {}", ja3_str);
+    eprintln!("safari MD5: {}", hash);
+    // ECDHE-ECDSA-AES256-GCM-SHA384 = 0xc02c = 49196 is safari's first cipher
+    assert!(ja3_str.contains("49196"), "safari: cipher c02c (49196) missing");
+    // Safari does not include P-521 in its curves
+    assert!(!ja3_str.split(',').nth(3).map_or(false, |s| s.contains("25")),
+        "safari: P-521 (25) must NOT be in groups");
+}
+
+// ─── B3: ios ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn boring_ios_connects_and_ja3() {
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        fingerprint: Some("ios".into()),
+        ..TlsConfig::new("localhost")
+    };
+    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    assert!(connected, "boring ios profile must connect");
+    let ja3_str = ja3_str.expect("ClientHello not captured");
+    let hash = hash.unwrap();
+    eprintln!("ios JA3: {}", ja3_str);
+    eprintln!("ios MD5: {}", hash);
+    // Same cipher ordering as Safari; first cipher is ECDHE-ECDSA-AES256-GCM-SHA384
+    assert!(ja3_str.contains("49196"), "ios: cipher c02c (49196) missing");
+}
+
+// ─── B4: android ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn boring_android_connects_and_ja3() {
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        fingerprint: Some("android".into()),
+        ..TlsConfig::new("localhost")
+    };
+    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    assert!(connected, "boring android profile must connect");
+    let ja3_str = ja3_str.expect("ClientHello not captured");
+    let hash = hash.unwrap();
+    eprintln!("android JA3: {}", ja3_str);
+    eprintln!("android MD5: {}", hash);
+    // Android OkHttp: P-256 (secp256r1 = 23) precedes X25519 (29) in groups
+    let groups_field = ja3_str.split(',').nth(3).unwrap_or("");
+    assert!(groups_field.starts_with("23"),
+        "android: P-256 (23) must be first group, got: {}", groups_field);
+}
+
+// ─── B5: edge ─────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn boring_edge_connects_and_ja3() {
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        fingerprint: Some("edge".into()),
+        ..TlsConfig::new("localhost")
+    };
+    let (connected, ja3_str, hash) = connect_capture_ja3(&config).await;
+    assert!(connected, "boring edge profile must connect");
+    let ja3_str = ja3_str.expect("ClientHello not captured");
+    let hash = hash.unwrap();
+    eprintln!("edge JA3: {}", ja3_str);
+    eprintln!("edge MD5: {}", hash);
+    // Edge 85 has the same TLS 1.2 cipher list as Chrome 83
+    assert!(ja3_str.contains("49199"), "edge: cipher c02f (49199) missing");
+    // Edge 85 does not include P-521
+    assert!(!ja3_str.split(',').nth(3).map_or(false, |s| s.contains("25")),
+        "edge: P-521 (25) must NOT be in groups");
+}
+
+// ─── B6: chrome (property-based; no pinned hash — permute_extensions varies) ──
+
+#[tokio::test]
+async fn boring_chrome_property_check() {
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        fingerprint: Some("chrome".into()),
+        ..TlsConfig::new("localhost")
+    };
+    let (connected, ja3_str, _hash) = connect_capture_ja3(&config).await;
+    assert!(connected, "boring chrome profile must connect");
+    let ja3_str = ja3_str.expect("ClientHello not captured");
+    eprintln!("chrome JA3 (non-deterministic): {}", ja3_str);
+    // Must contain the Chrome 120 cipher suite pair
+    assert!(ja3_str.contains("49195"), "chrome: c02b (49195) missing");
+    assert!(ja3_str.contains("49199"), "chrome: c02f (49199) missing");
+    // X25519 (29) must be first group
+    assert!(ja3_str.split(',').nth(3).map_or(false, |s| s.starts_with("29")),
+        "chrome: X25519 (29) must be first group");
+    // P-521 must NOT be in groups (Chrome 120 only uses X25519 + P-256 + P-384)
+    assert!(!ja3_str.split(',').nth(3).map_or(false, |s| s.contains("25")),
+        "chrome: P-521 (25) must NOT be in groups");
+}
+
+// ─── B7: chrome120 / firefox120 / safari16 aliases ────────────────────────────
+
+#[tokio::test]
+async fn boring_version_pinned_aliases_connect() {
+    for alias in &["chrome120", "firefox120", "safari16"] {
+        let config = TlsConfig {
+            skip_cert_verify: true,
+            fingerprint: Some((*alias).into()),
+            ..TlsConfig::new("localhost")
+        };
+        let (connected, _, _) = connect_capture_ja3(&config).await;
+        assert!(connected, "alias '{}' must connect", alias);
+    }
+}
+
+// ─── B8: unknown (deferred) profile falls back to boring defaults ──────────────
+
+#[tokio::test]
+async fn boring_deferred_fingerprint_connects_with_warn() {
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        fingerprint: Some("randomized".into()),  // deferred; see design §10
+        ..TlsConfig::new("localhost")
+    };
+    let (connected, _, _) = connect_capture_ja3(&config).await;
+    assert!(connected, "deferred fingerprint must still connect via boring defaults");
+}
+
+// ─── B9: TlsLayer::new succeeds with ECH config (no boring-tls absent error) ──
+
+#[tokio::test]
+async fn boring_ech_construction_ok() {
+    // TlsLayer::new must NOT return Err here.  The "ech-opts requires boring-tls"
+    // error only fires on the rustls path (boring-tls absent); since this test
+    // file is compiled with boring-tls, construction must succeed.
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        ech: Some(EchOpts::Config(vec![0x00, 0x04, 0xfe, 0x0d, 0x00, 0x00])),
+        ..TlsConfig::new("localhost")
+    };
+    let layer = TlsLayer::new(&config);
+    assert!(layer.is_ok(), "TlsLayer::new must succeed when boring-tls is enabled: {:?}", layer.err());
+}
+
+// ─── B10: set_ech_config_list is called on ConnectConfiguration ───────────────
+
+#[tokio::test]
+async fn boring_ech_connect_path_exercised() {
+    // Passes ECH bytes through BoringInner::connect so that
+    // cfg.set_ech_config_list() is called on the ConnectConfiguration.
+    // The loopback server doesn't speak ECH so the connection attempt either:
+    // - Fails at the API level if the ECH config is invalid (TransportError::Config)
+    // - Fails during TLS handshake because server doesn't support ECH (TransportError::Tls)
+    // Either outcome is acceptable — the important thing is that we don't panic.
+    install_crypto_provider();
+    let (cert_der, key_der, _, _) = gen_cert(&["localhost"]);
+    let (addr, _conn_rx) = spawn_tls_server(ServerOptions {
+        cert_der,
+        key_der,
+        server_alpn: vec![],
+        require_client_cert_ca: None,
+    })
+    .await;
+
+    let config = TlsConfig {
+        skip_cert_verify: true,
+        // Use a minimal ECH config structure. Note: boring validates the config,
+        // so invalid structures will be rejected at set_ech_config_list() time.
+        // For real tests, use EchKeyPairGenerator::generate() from the loopback harness.
+        ech: Some(EchOpts::Config(vec![0x00, 0x00])),
+        ..TlsConfig::new("localhost")
+    };
+    let tcp = TcpStream::connect(addr).await.expect("TCP connect");
+    let layer = TlsLayer::new(&config).expect("TlsLayer::new");
+    let result = layer.connect(Box::new(tcp)).await;
+
+    // Either a Config error (invalid ECH structure) or Tls error (server doesn't
+    // support ECH) is acceptable. The important assertion is: no panic.
+    match result {
+        Err(mihomo_transport::TransportError::Config(_)) => {
+            // Expected if ECH config is invalid.
+        }
+        Err(mihomo_transport::TransportError::Tls(_)) => {
+            // Expected if server rejects ECH.
+        }
+        Err(e) => panic!("unexpected error variant: {:?}", e),
+        Ok(_) => {
+            // Unlikely but acceptable if something succeeds.
+        }
+    }
+}
