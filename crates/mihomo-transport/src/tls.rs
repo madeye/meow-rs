@@ -781,18 +781,43 @@ impl BoringInner {
         // SNI
         cfg.set_use_server_name_indication(true);
 
-        // ECH config list (task #9 — inline path).
-        // Per-connection setup: set on the ConnectConfiguration before the handshake.
+        // ECH inline path — per-connection setup on ConnectConfiguration.
         if let Some(EchOpts::Config(ech_bytes)) = &self.ech {
             cfg.set_ech_config_list(ech_bytes).map_err(|e| {
                 TransportError::Config(format!("boring: set_ech_config_list: {}", e))
             })?;
+            // RFC 9180 §6: ECH requires TLS 1.3.  BoringSSL enforces this
+            // automatically when an ECH config list is set, but we set it
+            // explicitly here so the requirement is visible at the call site.
+            cfg.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_3))
+                .map_err(|e| {
+                    TransportError::Config(format!("boring: set_min_proto_version TLS1.3: {}", e))
+                })?;
         }
 
-        let tls_stream = tokio_boring::connect(cfg, &self.server_name, inner)
-            .await
-            .map_err(|e| TransportError::Tls(format!("boring TLS handshake: {}", e)))?;
-
-        Ok(Box::new(tls_stream))
+        match tokio_boring::connect(cfg, &self.server_name, inner).await {
+            Ok(tls_stream) => Ok(Box::new(tls_stream)),
+            Err(e) => {
+                // If ECH was active and the server rejected it, include the
+                // ECH retry configs from the server's ech_required alert so
+                // the caller can retry with updated ECH keys.
+                // No automatic retry in v1 — rejection is an error per QA C14.
+                if self.ech.is_some() {
+                    if let Some(retry_configs) = e.ssl().and_then(|ssl| ssl.get_ech_retry_configs()) {
+                        if !retry_configs.is_empty() {
+                            let hex = retry_configs
+                                .iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<String>();
+                            return Err(TransportError::Tls(format!(
+                                "boring TLS handshake (ECH rejected; retry_configs={}): {}",
+                                hex, e
+                            )));
+                        }
+                    }
+                }
+                Err(TransportError::Tls(format!("boring TLS handshake: {}", e)))
+            }
+        }
     }
 }
