@@ -890,15 +890,19 @@ fn fetch_ech_from_dns(name: &str) -> std::result::Result<Vec<u8>, String> {
     // Build a minimal DNS query for TYPE65 (HTTPS/SVCB)
     let mut query = Vec::with_capacity(64);
     // Header: ID=0xABCD, flags=RD, QDCOUNT=1
-    query.extend_from_slice(&[0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    query.extend_from_slice(&[
+        0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
     // QNAME
     for label in name.split('.') {
-        if label.is_empty() { continue; }
+        if label.is_empty() {
+            continue;
+        }
         query.push(label.len() as u8);
         query.extend_from_slice(label.as_bytes());
     }
     query.push(0); // root label
-    // QTYPE=65 (HTTPS), QCLASS=1 (IN)
+                   // QTYPE=65 (HTTPS), QCLASS=1 (IN)
     query.extend_from_slice(&[0x00, 0x41, 0x00, 0x01]);
 
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("dns: bind: {}", e))?;
@@ -908,7 +912,9 @@ fn fetch_ech_from_dns(name: &str) -> std::result::Result<Vec<u8>, String> {
         .map_err(|e| format!("dns: send: {}", e))?;
 
     let mut buf = [0u8; 4096];
-    let n = sock.recv(&mut buf).map_err(|e| format!("dns: recv: {}", e))?;
+    let n = sock
+        .recv(&mut buf)
+        .map_err(|e| format!("dns: recv: {}", e))?;
     let resp = &buf[..n];
 
     if resp.len() < 12 {
@@ -925,26 +931,39 @@ fn fetch_ech_from_dns(name: &str) -> std::result::Result<Vec<u8>, String> {
     // Skip QNAME
     while pos < resp.len() {
         let len = resp[pos] as usize;
-        if len == 0 { pos += 1; break; }
-        if len >= 0xC0 { pos += 2; break; } // compression pointer
+        if len == 0 {
+            pos += 1;
+            break;
+        }
+        if len >= 0xC0 {
+            pos += 2;
+            break;
+        } // compression pointer
         pos += 1 + len;
     }
     pos += 4; // skip QTYPE + QCLASS
 
     // Parse answer records
     for _ in 0..ancount {
-        if pos >= resp.len() { break; }
+        if pos >= resp.len() {
+            break;
+        }
         // Skip NAME (may be compressed)
         if resp[pos] >= 0xC0 {
             pos += 2;
         } else {
             while pos < resp.len() {
                 let len = resp[pos] as usize;
-                if len == 0 { pos += 1; break; }
+                if len == 0 {
+                    pos += 1;
+                    break;
+                }
                 pos += 1 + len;
             }
         }
-        if pos + 10 > resp.len() { break; }
+        if pos + 10 > resp.len() {
+            break;
+        }
         let rtype = u16::from_be_bytes([resp[pos], resp[pos + 1]]);
         let rdlen = u16::from_be_bytes([resp[pos + 8], resp[pos + 9]]) as usize;
         pos += 10; // skip TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
@@ -960,8 +979,14 @@ fn fetch_ech_from_dns(name: &str) -> std::result::Result<Vec<u8>, String> {
             } else {
                 while rpos < rdata.len() {
                     let len = rdata[rpos] as usize;
-                    if len == 0 { rpos += 1; break; }
-                    if len >= 0xC0 { rpos += 2; break; }
+                    if len == 0 {
+                        rpos += 1;
+                        break;
+                    }
+                    if len >= 0xC0 {
+                        rpos += 2;
+                        break;
+                    }
                     rpos += 1 + len;
                 }
             }
@@ -979,7 +1004,10 @@ fn fetch_ech_from_dns(name: &str) -> std::result::Result<Vec<u8>, String> {
         pos += rdlen;
     }
 
-    Err(format!("dns: HTTPS record for {} has no ECH config (key 5)", name))
+    Err(format!(
+        "dns: HTTPS record for {} has no ECH config (key 5)",
+        name
+    ))
 }
 
 #[cfg(test)]

@@ -113,7 +113,10 @@ impl AsyncRead for VlessConn {
             if version != 0x00 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("vless: version mismatch: expected 0x00, got {:#04x}", version),
+                    format!(
+                        "vless: version mismatch: expected 0x00, got {:#04x}",
+                        version
+                    ),
                 )));
             }
             // Discard addon bytes if any

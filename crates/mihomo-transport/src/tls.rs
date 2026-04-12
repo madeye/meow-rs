@@ -802,9 +802,7 @@ impl BoringInner {
         match tokio_boring::connect(cfg, &self.server_name, inner).await {
             Ok(tls_stream) => {
                 let ech_accepted = tls_stream.ssl().ech_accepted();
-                let version = tls_stream
-                    .ssl()
-                    .version_str();
+                let version = tls_stream.ssl().version_str();
                 tracing::info!(
                     sni = %self.server_name,
                     ech_requested = self.ech.is_some(),
