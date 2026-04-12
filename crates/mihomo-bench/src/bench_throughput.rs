@@ -89,8 +89,7 @@ pub async fn bench_throughput(
     // Small messages: single connection, many round-trips
     {
         let label = "4 KB x 10000";
-        let (total_bytes, elapsed) =
-            run_small_messages(proxy, echo, 4 * 1024, 10_000).await?;
+        let (total_bytes, elapsed) = run_small_messages(proxy, echo, 4 * 1024, 10_000).await?;
         let gbps = (total_bytes as f64 * 8.0) / elapsed / 1e9;
         eprintln!("  throughput {}: {:.2} Gbps", label, gbps);
         results.push(ThroughputResult {
@@ -107,8 +106,7 @@ pub async fn bench_throughput(
         let mut total_bytes = 0u64;
         let mut total_elapsed = 0.0f64;
         for _ in 0..10 {
-            let (bytes, elapsed) =
-                run_large_transfer(proxy, echo, 1024 * 1024).await?;
+            let (bytes, elapsed) = run_large_transfer(proxy, echo, 1024 * 1024).await?;
             total_bytes += bytes;
             total_elapsed += elapsed;
         }
@@ -125,8 +123,7 @@ pub async fn bench_throughput(
     // Large single transfer
     {
         let label = "64 MB x 1";
-        let (total_bytes, elapsed) =
-            run_large_transfer(proxy, echo, 64 * 1024 * 1024).await?;
+        let (total_bytes, elapsed) = run_large_transfer(proxy, echo, 64 * 1024 * 1024).await?;
         let gbps = (total_bytes as f64 * 8.0) / elapsed / 1e9;
         eprintln!("  throughput {}: {:.2} Gbps", label, gbps);
         results.push(ThroughputResult {

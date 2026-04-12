@@ -21,8 +21,7 @@ pub fn measure_rss(pid: u32) -> anyhow::Result<u64> {
 /// Sample RSS repeatedly over a duration, return peak.
 pub async fn measure_peak_rss(pid: u32, duration_secs: u64) -> anyhow::Result<u64> {
     let mut peak = 0u64;
-    let deadline =
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(duration_secs);
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(duration_secs);
 
     while tokio::time::Instant::now() < deadline {
         if let Ok(rss) = measure_rss(pid) {

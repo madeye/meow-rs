@@ -65,7 +65,11 @@ Measured on Apple Silicon, macOS, loopback (`127.0.0.1`). Both binaries use iden
 "#,
             fmt_bytes(g.binary_size_bytes),
             fmt_bytes(r.binary_size_bytes),
-            fmt_delta(r.binary_size_bytes as f64, g.binary_size_bytes as f64, false),
+            fmt_delta(
+                r.binary_size_bytes as f64,
+                g.binary_size_bytes as f64,
+                false
+            ),
             fmt_bytes(g.rss_idle_bytes),
             fmt_bytes(r.rss_idle_bytes),
             fmt_delta(r.rss_idle_bytes as f64, g.rss_idle_bytes as f64, false),

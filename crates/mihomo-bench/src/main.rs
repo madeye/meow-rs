@@ -166,13 +166,9 @@ async fn benchmark_target(
             let duration = args.duration;
             async move { bench_memory::measure_peak_rss(pid, duration).await }
         });
-        let cr = bench_connrate::bench_conn_rate(
-            proxy_addr,
-            echo_addr,
-            args.duration,
-            args.concurrency,
-        )
-        .await?;
+        let cr =
+            bench_connrate::bench_conn_rate(proxy_addr, echo_addr, args.duration, args.concurrency)
+                .await?;
         let peak_rss = rss_handle.await?.unwrap_or(0);
         (cr, peak_rss)
     } else {
@@ -220,8 +216,7 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("=== mihomo benchmark suite ===\n");
 
     // Benchmark Rust
-    let rust_results =
-        benchmark_target(&args.rust_binary, &args.config, "rust", &args).await?;
+    let rust_results = benchmark_target(&args.rust_binary, &args.config, "rust", &args).await?;
 
     eprintln!();
 

@@ -3,10 +3,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 /// Minimal SOCKS5 CONNECT client. Returns a stream tunneled to `target` via `proxy`.
-pub async fn socks5_connect(
-    proxy: SocketAddr,
-    target: SocketAddr,
-) -> std::io::Result<TcpStream> {
+pub async fn socks5_connect(proxy: SocketAddr, target: SocketAddr) -> std::io::Result<TcpStream> {
     let mut stream = TcpStream::connect(proxy).await?;
 
     // Auth negotiation: version 5, 1 method, no-auth (0x00)
