@@ -2,3 +2,6 @@
 config.yaml
 config.yaml.bak
 config.yaml.tmp
+config-*.yaml
+Country.mmdb
+Dockerfile.debug

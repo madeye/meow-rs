@@ -1,0 +1,26 @@
+mixed-port: 17890
+socks-port: 17891
+allow-lan: false
+bind-address: "127.0.0.1"
+mode: rule
+log-level: info
+ipv6: false
+external-controller: 127.0.0.1:19090
+secret: ""
+dns:
+  enable: true
+  listen: 127.0.0.1:11053
+  nameserver:
+    - 8.8.8.8
+    - 1.1.1.1
+  fallback:
+    - 8.8.4.4
+    - 1.0.0.1
+subscriptions:
+  - name: "edt"
+    url: "https://edt.maxlv.net/sub?token=248bdc2d49ed816ae4959c78767a2724"
+    interval: 3600
+proxies: []
+proxy-groups: []
+rules:
+  - MATCH,DIRECT

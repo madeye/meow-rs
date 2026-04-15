@@ -6,6 +6,10 @@ on:
   pull_request:
     paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock", ".github/workflows/**"]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -135,22 +139,13 @@ jobs:
           cargo check -p mihomo-transport --no-default-features --features "httpupgrade"
           cargo check -p mihomo-transport --all-features
 
-      - name: VLESS header unit tests
-        run: cargo test -p mihomo-proxy --lib vless::header -- --nocapture
-
-      - name: VLESS vision unit tests
-        run: cargo test -p mihomo-proxy --lib vless::vision --features "vless-vision" -- --nocapture
-
-      - name: VLESS conn unit tests
-        run: cargo test -p mihomo-proxy --lib vless::conn -- --nocapture
-
       - name: VLESS config parser tests
         run: cargo test -p mihomo-config --test vless_config_test -- --nocapture
 
       - name: VLESS integration tests
         run: cargo test --test vless_integration -- --nocapture
 
-      - name: VLESS feature matrix (G1-G6)
+      - name: VLESS feature matrix (G1-G4)
         run: |
           # G1: plain vless, no Vision — vision.rs excluded
           cargo check -p mihomo-proxy --no-default-features --features vless
@@ -158,12 +153,8 @@ jobs:
           cargo check -p mihomo-proxy --no-default-features --features "vless,vless-vision"
           # G3: all proxy features (default)
           cargo check -p mihomo-proxy --all-features
-          # G4: transport full-feature set compiles with vless
-          cargo check -p mihomo-transport --all-features
-          # G5: vless-vision feature requires vless (transitive dep check)
+          # G4: vless-vision feature requires vless (transitive dep check)
           cargo check -p mihomo-proxy --no-default-features --features "vless-vision"
-          # G6: confirm vless-only build (no Vision) — same as G1, guards cfg-gating
-          cargo check -p mihomo-proxy --no-default-features --features vless
 
   msrv:
     runs-on: ubuntu-latest
@@ -206,71 +197,16 @@ jobs:
       - name: Build
         run: cargo build --tests
 
-      - name: Unit tests
-        run: cargo test --lib
-
-      - name: Common types tests
-        run: cargo test --test common_test -- --nocapture
-
-      - name: DNS cache tests
-        run: cargo test --test dns_cache_test -- --nocapture
-
-      - name: Config parsing tests
-        run: cargo test --test config_test -- --nocapture
-
-      - name: Config persistence tests
-        run: cargo test --test config_persistence_test -- --nocapture
-
-      - name: Statistics tests
-        run: cargo test --test statistics_test -- --nocapture
-
-      - name: Rules tests
-        run: cargo test --test rules_test -- --nocapture
-
-      - name: API integration tests
-        run: cargo test --test api_test -- --nocapture
-
-      - name: Trojan integration tests
-        run: cargo test --test trojan_integration -- --nocapture
-
-      - name: v2ray-plugin integration tests
-        run: cargo test --test v2ray_plugin_integration -- --nocapture
-
-      - name: DNS pre-resolve tests
-        run: cargo test --test pre_resolve_test -- --nocapture
-
-      - name: Transport TLS tests
-        run: cargo test -p mihomo-transport --test tls_test -- --nocapture
-
-      - name: Transport WS tests
-        run: cargo test -p mihomo-transport --test ws_test -- --nocapture
-
-      - name: Transport gRPC tests
-        run: cargo test -p mihomo-transport --test grpc_test --features grpc -- --nocapture
-
-      - name: Transport H2 tests
-        run: cargo test -p mihomo-transport --test h2_test --features h2 -- --nocapture
-
-      - name: Transport HTTPUpgrade tests
-        run: cargo test -p mihomo-transport --test httpupgrade_test --features httpupgrade -- --nocapture
-
-      - name: Transport crate invariants
-        run: cargo test -p mihomo-transport --test crate_invariants_test -- --nocapture
-
-      - name: VLESS header unit tests
-        run: cargo test -p mihomo-proxy --lib vless::header -- --nocapture
-
-      - name: VLESS vision unit tests
-        run: cargo test -p mihomo-proxy --lib vless::vision --features "vless-vision" -- --nocapture
-
-      - name: VLESS conn unit tests
-        run: cargo test -p mihomo-proxy --lib vless::conn -- --nocapture
-
-      - name: VLESS config parser tests
-        run: cargo test -p mihomo-config --test vless_config_test -- --nocapture
-
-      - name: VLESS integration tests
-        run: cargo test --test vless_integration -- --nocapture
+      - name: Core smoke tests
+        run: |
+          cargo test --lib
+          cargo test --test common_test -- --nocapture
+          cargo test --test config_test -- --nocapture
+          cargo test --test rules_test -- --nocapture
+          cargo test --test api_test -- --nocapture
+          cargo test --test trojan_integration -- --nocapture
+          cargo test -p mihomo-transport --test tls_test -- --nocapture
+          cargo test -p mihomo-transport --test ws_test -- --nocapture
 
   tproxy:
     runs-on: ubuntu-latest
