@@ -52,6 +52,7 @@ pub struct RawDns {
     pub listen: Option<String>,
     pub enhanced_mode: Option<String>,
     pub fake_ip_range: Option<String>,
+    pub default_nameserver: Option<Vec<String>>,
     pub nameserver: Option<Vec<String>>,
     pub fallback: Option<Vec<String>>,
     pub fake_ip_filter: Option<Vec<String>>,

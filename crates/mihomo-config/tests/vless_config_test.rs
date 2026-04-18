@@ -119,7 +119,7 @@ proxies:
 /// Minimal valid VLESS config (name, type, server, port, uuid) loads without error.
 #[test]
 fn parse_vless_minimal_ok() {
-    let config = load_config_from_str(MINIMAL_VLESS).expect("minimal VLESS must load");
+    let config = load_config_from_str(MINIMAL_VLESS).await.expect("minimal VLESS must load");
     assert!(
         config.proxies.contains_key("test-vless"),
         "proxy 'test-vless' must be registered"
@@ -156,7 +156,7 @@ proxies:
       max-early-data: 2048
       early-data-header-name: Sec-WebSocket-Protocol
 "#;
-    let config = load_config_from_str(yaml).expect("all-fields VLESS must load");
+    let config = load_config_from_str(yaml).await.expect("all-fields VLESS must load");
     assert!(config.proxies.contains_key("full-vless"));
 }
 
@@ -176,7 +176,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
     flow: ""
 "#;
-    load_config_from_str(yaml).expect("flow: empty string must parse OK");
+    load_config_from_str(yaml).await.expect("flow: empty string must parse OK");
 }
 
 // ─── D4: no flow key → ok ─────────────────────────────────────────────────────
@@ -186,7 +186,7 @@ proxies:
 /// Absent `flow:` key is identical to `flow: ""` — no error.
 #[test]
 fn parse_vless_flow_absent_ok() {
-    load_config_from_str(MINIMAL_VLESS).expect("absent flow must parse OK");
+    load_config_from_str(MINIMAL_VLESS).await.expect("absent flow must parse OK");
 }
 
 // ─── D5: flow: xtls-rprx-vision + tls: true → ok ─────────────────────────────
@@ -207,7 +207,7 @@ proxies:
     tls: true
     flow: "xtls-rprx-vision"
 "#;
-    load_config_from_str(yaml).expect("flow: xtls-rprx-vision with tls: true must parse OK");
+    load_config_from_str(yaml).await.expect("flow: xtls-rprx-vision with tls: true must parse OK");
 }
 
 // ─── D6: unknown flow → hard error (proxy skipped) ───────────────────────────
@@ -229,7 +229,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
     flow: "xtls-rprx-unknown"
 "#;
-    let config = load_config_from_str(yaml).expect("config load must succeed (warn-and-skip)");
+    let config = load_config_from_str(yaml).await.expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
         "proxy with unknown flow must be skipped (not registered)"
@@ -254,7 +254,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
     flow: "xtls-rprx-direct"
 "#;
-    let config = load_config_from_str(yaml).expect("config load must succeed (warn-and-skip)");
+    let config = load_config_from_str(yaml).await.expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
         "proxy with xtls-rprx-direct flow must be skipped (deprecated — Class A)"
@@ -279,7 +279,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
     flow: "xtls-rprx-splice"
 "#;
-    let config = load_config_from_str(yaml).expect("config load must succeed (warn-and-skip)");
+    let config = load_config_from_str(yaml).await.expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
         "proxy with xtls-rprx-splice flow must be skipped (deprecated — Class A)"
@@ -305,7 +305,7 @@ proxies:
     reality-opts:
       public-key: abc123
 "#;
-    let config = load_config_from_str(yaml).expect("config load must succeed (warn-and-skip)");
+    let config = load_config_from_str(yaml).await.expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
         "proxy with reality-opts must be skipped (not implemented — Class A)"
@@ -332,7 +332,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
     tls: false
 "#;
-    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml));
+    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml).await);
     result.expect("tls: false must not be a hard error");
     let warn_count = lines
         .iter()
@@ -368,7 +368,7 @@ proxies:
 "#;
 
     // First load
-    let (r1, lines1) = with_warn_capture(|| load_config_from_str(yaml));
+    let (r1, lines1) = with_warn_capture(|| load_config_from_str(yaml).await);
     r1.expect("first load ok");
     let c1 = lines1
         .iter()
@@ -379,7 +379,7 @@ proxies:
         .count();
 
     // Second load
-    let (r2, lines2) = with_warn_capture(|| load_config_from_str(yaml));
+    let (r2, lines2) = with_warn_capture(|| load_config_from_str(yaml).await);
     r2.expect("second load ok");
     let c2 = lines2
         .iter()
@@ -418,7 +418,7 @@ proxies:
     tls: false
     flow: "xtls-rprx-vision"
 "#;
-    let config = load_config_from_str(yaml).expect("config load must succeed (warn-and-skip)");
+    let config = load_config_from_str(yaml).await.expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
         "proxy with vision + no TLS must be skipped (Vision without TLS is a no-op — Class A)"
@@ -446,7 +446,7 @@ proxies:
     network: grpc
     flow: "xtls-rprx-vision"
 "#;
-    load_config_from_str(yaml)
+    load_config_from_str(yaml).await
         .expect("vision + grpc (TLS-enforcing) must parse OK without tls: true");
 }
 
@@ -467,7 +467,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
     encryption: "aes-128-gcm"
 "#;
-    let config = load_config_from_str(yaml).expect("config load must succeed (warn-and-skip)");
+    let config = load_config_from_str(yaml).await.expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
         "proxy with non-none encryption must be skipped"
@@ -490,7 +490,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
     encryption: ""
 "#;
-    load_config_from_str(yaml).expect("encryption: empty string must be accepted");
+    load_config_from_str(yaml).await.expect("encryption: empty string must be accepted");
 }
 
 // ─── D16: mux enabled → warn + ignores ───────────────────────────────────────
@@ -513,7 +513,7 @@ proxies:
     mux:
       enabled: true
 "#;
-    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml));
+    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml).await);
     result.expect("mux enabled must not be a hard error");
     let warn_count = lines
         .iter()
@@ -547,7 +547,7 @@ proxies:
     flow: "xtls-rprx-vision"
     udp: true
 "#;
-    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml));
+    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml).await);
     result.expect("vision + udp must not be a hard error");
     let warn_count = lines
         .iter()
@@ -588,8 +588,8 @@ proxies:
     port: 443
     uuid: b831381d63244d53ad4f8cda48b30811
 "#;
-    load_config_from_str(yaml_dashed).expect("dashed UUID must be accepted");
-    load_config_from_str(yaml_hex).expect("hex-only UUID must be accepted");
+    load_config_from_str(yaml_dashed).await.expect("dashed UUID must be accepted");
+    load_config_from_str(yaml_hex).await.expect("hex-only UUID must be accepted");
 }
 
 // ─── D19: invalid UUID → proxy skipped ───────────────────────────────────────
@@ -608,7 +608,7 @@ proxies:
     port: 443
     uuid: "not-a-uuid"
 "#;
-    let config = load_config_from_str(yaml).expect("config load must succeed (warn-and-skip)");
+    let config = load_config_from_str(yaml).await.expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
         "proxy with invalid uuid must be skipped"
@@ -636,7 +636,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
 "#
     );
-    let config = load_config_from_str(&yaml).expect("config load must succeed (warn-and-skip)");
+    let config = load_config_from_str(&yaml).await.expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
         "proxy with server > 255 bytes must be skipped (Class A)"

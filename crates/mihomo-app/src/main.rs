@@ -75,11 +75,16 @@ fn main() -> Result<()> {
         args.config.clone()
     };
 
-    let config = load_config(&config_path)?;
-    info!("Config loaded from {}", config_path);
-
     if args.test {
-        info!("Configuration test passed");
+        // Validate config only — spin up a minimal runtime for the async load.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            load_config(&config_path).await?;
+            info!("Configuration test passed");
+            Ok::<(), anyhow::Error>(())
+        })?;
         return Ok(());
     }
 
@@ -88,7 +93,11 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
 
-    runtime.block_on(async move { run(config, config_path).await })
+    runtime.block_on(async move {
+        let config = load_config(&config_path).await?;
+        info!("Config loaded from {}", config_path);
+        run(config, config_path).await
+    })
 }
 
 fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {

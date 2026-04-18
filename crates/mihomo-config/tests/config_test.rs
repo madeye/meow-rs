@@ -8,7 +8,7 @@ fn test_minimal_config() {
     let yaml = r#"
 mixed-port: 7890
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.listeners.mixed_port, Some(7890));
     assert!(config.listeners.socks_port.is_none());
     assert!(config.listeners.http_port.is_none());
@@ -23,7 +23,7 @@ mixed-port: 7890
 #[test]
 fn test_general_config_defaults() {
     let yaml = "";
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.general.mode.to_string(), "rule");
     assert_eq!(config.general.log_level, "info");
     assert!(!config.general.ipv6);
@@ -40,7 +40,7 @@ ipv6: true
 allow-lan: true
 bind-address: "0.0.0.0"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.general.mode.to_string(), "global");
     assert_eq!(config.general.log_level, "debug");
     assert!(config.general.ipv6);
@@ -53,7 +53,7 @@ fn test_direct_mode_config() {
     let yaml = r#"
 mode: direct
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.general.mode.to_string(), "direct");
 }
 
@@ -62,7 +62,7 @@ fn test_invalid_mode_defaults_to_rule() {
     let yaml = r#"
 mode: bogus
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.general.mode.to_string(), "rule");
 }
 
@@ -73,7 +73,7 @@ port: 7891
 socks-port: 7892
 mixed-port: 7890
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.listeners.http_port, Some(7891));
     assert_eq!(config.listeners.socks_port, Some(7892));
     assert_eq!(config.listeners.mixed_port, Some(7890));
@@ -86,7 +86,7 @@ allow-lan: true
 bind-address: "0.0.0.0"
 mixed-port: 7890
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.listeners.bind_address, "0.0.0.0");
 }
 
@@ -97,7 +97,7 @@ allow-lan: false
 bind-address: "0.0.0.0"
 mixed-port: 7890
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     // When allow-lan is false, bind_address is forced to 127.0.0.1
     assert_eq!(config.listeners.bind_address, "127.0.0.1");
 }
@@ -108,7 +108,7 @@ fn test_api_config() {
 external-controller: "127.0.0.1:9090"
 secret: "my-secret"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(
         config.api.external_controller.unwrap().to_string(),
         "127.0.0.1:9090"
@@ -119,7 +119,7 @@ secret: "my-secret"
 #[test]
 fn test_api_config_none() {
     let yaml = "";
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.api.external_controller.is_none());
     assert!(config.api.secret.is_none());
 }
@@ -127,7 +127,7 @@ fn test_api_config_none() {
 #[test]
 fn test_dns_disabled_by_default() {
     let yaml = "";
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     // DNS listen addr should be None when DNS is not configured
     assert!(config.dns.listen_addr.is_none());
 }
@@ -142,7 +142,7 @@ dns:
     - "8.8.8.8"
     - "8.8.4.4:53"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.dns.listen_addr.unwrap().to_string(), "0.0.0.0:5353");
 }
 
@@ -159,7 +159,7 @@ dns:
   nameserver:
     - "8.8.8.8"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.dns.resolver.mode().to_string(), "normal");
 }
 
@@ -170,7 +170,7 @@ dns:
   enable: false
   listen: "0.0.0.0:5353"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     // When DNS is disabled, listen_addr should be None
     assert!(config.dns.listen_addr.is_none());
 }
@@ -187,7 +187,7 @@ proxies:
     password: "password123"
     udp: true
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("ss-server"));
 }
 
@@ -203,7 +203,7 @@ proxies:
     sni: "example.com"
     skip-cert-verify: true
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("trojan-server"));
 }
 
@@ -216,7 +216,7 @@ proxies:
     server: "1.2.3.4"
     port: 443
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     // vmess is not yet supported, so it should be skipped
     assert!(!config.proxies.contains_key("vmess-server"));
 }
@@ -229,7 +229,7 @@ rules:
   - "DOMAIN-KEYWORD,facebook,REJECT"
   - "MATCH,DIRECT"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.rules.len(), 3);
 }
 
@@ -240,14 +240,14 @@ rules:
   - "DOMAIN,example.com,DIRECT"
   - "MATCH,DIRECT"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.rules.len(), 2);
 }
 
 #[test]
 fn test_empty_rules() {
     let yaml = "";
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.rules.is_empty());
 }
 
@@ -269,7 +269,7 @@ proxy-groups:
       - ss1
       - DIRECT
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("Proxy"));
 }
 
@@ -292,7 +292,7 @@ proxy-groups:
       - nonexistent-proxy
 "#;
     // Should succeed even with missing proxy reference
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("Proxy"));
 }
 
@@ -334,7 +334,7 @@ rules:
   - "DOMAIN-SUFFIX,google.com,auto"
   - "MATCH,DIRECT"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.listeners.mixed_port, Some(7890));
     assert_eq!(config.general.mode.to_string(), "rule");
     assert!(config.proxies.contains_key("ss-test"));
@@ -362,7 +362,7 @@ proxies:
       mode: http
       host: example.com
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     // The proxy is skipped because the plugin binary doesn't exist
     assert!(!config.proxies.contains_key("ss-missing-plugin"));
 }
@@ -382,7 +382,7 @@ proxies:
     plugin: nonexistent-plugin-binary-xyz
     plugin-opts: "obfs=http;obfs-host=example.com"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     // Skipped because plugin binary doesn't exist, but config parsing succeeds
     assert!(!config.proxies.contains_key("ss-plugin-str"));
 }
@@ -405,7 +405,7 @@ proxies:
       mode: http
       host: bing.com
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("ss-obfs-http"));
 }
 
@@ -424,7 +424,7 @@ proxies:
       mode: tls
       host: gateway.icloud.com
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("ss-obfs-tls"));
 }
 
@@ -442,7 +442,7 @@ proxies:
     plugin: obfs
     plugin-opts: "obfs=tls;obfs-host=cloudflare.com"
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("ss-obfs-str"));
 }
 
@@ -461,7 +461,7 @@ proxies:
     plugin-opts:
       host: example.com
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(!config.proxies.contains_key("ss-obfs-bad"));
 }
 
@@ -482,7 +482,7 @@ proxies:
       mode: http
       host: bing.com
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("ss-simple-obfs"));
 }
 
@@ -502,7 +502,7 @@ proxies:
       obfs: tls
       obfs-host: gateway.icloud.com
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("ss-obfs-sip003-map"));
 }
 
@@ -522,7 +522,7 @@ proxies:
       mode: TLS
       host: cloudflare.com
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("ss-obfs-upper"));
 }
 
@@ -540,7 +540,7 @@ proxies:
     password: "password123"
     plugin: obfs
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(!config.proxies.contains_key("ss-obfs-no-opts"));
 }
 
@@ -560,7 +560,7 @@ proxies:
     plugin-opts:
       mode: http
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.proxies.contains_key("ss-obfs-default-host"));
 }
 
@@ -579,14 +579,14 @@ proxies:
       mode: quic
       host: foo
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     assert!(!config.proxies.contains_key("ss-obfs-bad-mode"));
 }
 
 #[test]
 fn test_invalid_yaml() {
     let yaml = "{{invalid yaml}}";
-    assert!(load_config_from_str(yaml).is_err());
+    assert!(load_config_from_str(yaml).await.is_err());
 }
 
 #[test]
@@ -616,7 +616,7 @@ rules:
         path = list_path.to_string_lossy()
     );
 
-    let config = load_config_from_str(&yaml).unwrap();
+    let config = load_config_from_str(&yaml).await.unwrap();
     // RULE-SET rule + MATCH
     assert_eq!(config.rules.len(), 2);
     assert_eq!(config.rules[0].rule_type().to_string(), "RULE-SET");
@@ -650,7 +650,7 @@ rules:
   - RULE-SET,nonexistent,REJECT
   - MATCH,DIRECT
 "#;
-    let config = load_config_from_str(yaml).unwrap();
+    let config = load_config_from_str(yaml).await.unwrap();
     // Only the MATCH rule survives.
     assert_eq!(config.rules.len(), 1);
     assert_eq!(config.rules[0].rule_type().to_string(), "MATCH");

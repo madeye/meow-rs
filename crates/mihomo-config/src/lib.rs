@@ -51,7 +51,7 @@ pub struct ApiConfig {
     pub secret: Option<String>,
 }
 
-pub fn load_config(path: &str) -> Result<Config, anyhow::Error> {
+pub async fn load_config(path: &str) -> Result<Config, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
     let raw: raw::RawConfig = serde_yaml::from_str(&content)?;
     // Rule-provider cache files live next to config.yaml.
@@ -62,12 +62,12 @@ pub fn load_config(path: &str) -> Result<Config, anyhow::Error> {
             Some(p.to_path_buf())
         }
     });
-    build_config(raw, cache_dir.as_deref())
+    build_config(raw, cache_dir.as_deref()).await
 }
 
-pub fn load_config_from_str(content: &str) -> Result<Config, anyhow::Error> {
+pub async fn load_config_from_str(content: &str) -> Result<Config, anyhow::Error> {
     let raw: raw::RawConfig = serde_yaml::from_str(content)?;
-    build_config(raw, None)
+    build_config(raw, None).await
 }
 
 /// Save a RawConfig back to disk with atomic write (.tmp → rename) and .bak backup.
@@ -280,7 +280,7 @@ fn default_geoip_path() -> PathBuf {
     base.join("mihomo").join("Country.mmdb")
 }
 
-fn build_config(raw: raw::RawConfig, cache_dir: Option<&Path>) -> Result<Config, anyhow::Error> {
+async fn build_config(raw: raw::RawConfig, cache_dir: Option<&Path>) -> Result<Config, anyhow::Error> {
     // General config
     let mode = raw
         .mode
@@ -303,7 +303,7 @@ fn build_config(raw: raw::RawConfig, cache_dir: Option<&Path>) -> Result<Config,
     };
 
     // DNS
-    let dns_config = dns_parser::parse_dns(&raw)?;
+    let dns_config = dns_parser::parse_dns(&raw).await?;
 
     // Proxies and rules via rebuild — pass the resolver so DIRECT can avoid
     // the OS resolver (and the resulting DNS-loop when mihomo is system DNS).

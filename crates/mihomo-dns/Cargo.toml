@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["encrypted"]
+encrypted = ["hickory-resolver/tls-ring", "hickory-resolver/https-ring"]
+
 [dependencies]
 mihomo-common = { workspace = true }
 mihomo-trie = { workspace = true }
@@ -20,6 +24,7 @@ parking_lot = { workspace = true }
 ipnet = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
