@@ -3,5 +3,6 @@ config.yaml
 config.yaml.bak
 config.yaml.tmp
 config-*.yaml
+config-*.yaml.bak
 Country.mmdb
 Dockerfile.debug
