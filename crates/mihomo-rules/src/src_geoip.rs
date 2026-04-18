@@ -18,11 +18,7 @@ pub struct SrcGeoIpRule {
 }
 
 impl SrcGeoIpRule {
-    pub fn new(
-        country: &str,
-        adapter: &str,
-        reader: Arc<maxminddb::Reader<Vec<u8>>>,
-    ) -> Self {
+    pub fn new(country: &str, adapter: &str, reader: Arc<maxminddb::Reader<Vec<u8>>>) -> Self {
         Self {
             country: country.to_uppercase(),
             adapter: adapter.to_string(),

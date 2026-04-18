@@ -19,12 +19,14 @@ impl InPortRule {
     /// upstream: `rules/common/inport.go::NewInPort`
     pub fn new(ports: &str, adapter: &str) -> Result<Self, String> {
         let (lo, hi) = if let Some((l, r)) = ports.split_once('-') {
-            let lo = l.trim().parse::<u16>().map_err(|e| {
-                format!("invalid IN-PORT range start '{}': {}", l.trim(), e)
-            })?;
-            let hi = r.trim().parse::<u16>().map_err(|e| {
-                format!("invalid IN-PORT range end '{}': {}", r.trim(), e)
-            })?;
+            let lo = l
+                .trim()
+                .parse::<u16>()
+                .map_err(|e| format!("invalid IN-PORT range start '{}': {}", l.trim(), e))?;
+            let hi = r
+                .trim()
+                .parse::<u16>()
+                .map_err(|e| format!("invalid IN-PORT range end '{}': {}", r.trim(), e))?;
             if lo > hi {
                 return Err(format!(
                     "invalid IN-PORT range {}-{}: start must be ≤ end",
@@ -33,9 +35,10 @@ impl InPortRule {
             }
             (lo, hi)
         } else {
-            let p = ports.trim().parse::<u16>().map_err(|e| {
-                format!("invalid IN-PORT '{}': {}", ports.trim(), e)
-            })?;
+            let p = ports
+                .trim()
+                .parse::<u16>()
+                .map_err(|e| format!("invalid IN-PORT '{}': {}", ports.trim(), e))?;
             (p, p)
         };
 

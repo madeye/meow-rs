@@ -126,6 +126,9 @@ mod tests {
             uid: Some(1000),
             ..Default::default()
         };
-        assert!(!r.match_metadata(&meta, &helper()), "UID must never match on non-Linux");
+        assert!(
+            !r.match_metadata(&meta, &helper()),
+            "UID must never match on non-Linux"
+        );
     }
 }

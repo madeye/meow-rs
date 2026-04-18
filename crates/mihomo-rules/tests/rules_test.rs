@@ -902,5 +902,9 @@ fn parse_unknown_rule_type_still_errors() {
         Ok(_) => panic!("expected parse error"),
         Err(e) => e,
     };
-    assert!(err.contains("unknown rule type"), "unexpected error: {}", err);
+    assert!(
+        err.contains("unknown rule type"),
+        "unexpected error: {}",
+        err
+    );
 }
