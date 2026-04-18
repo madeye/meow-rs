@@ -5,10 +5,25 @@ use std::net::IpAddr;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NameServerUrl {
-    Udp { addr: HostOrIp, port: u16 },
-    Tcp { addr: HostOrIp, port: u16 },
-    Tls { addr: HostOrIp, port: u16, sni: String },
-    Https { addr: HostOrIp, port: u16, path: String, sni: String },
+    Udp {
+        addr: HostOrIp,
+        port: u16,
+    },
+    Tcp {
+        addr: HostOrIp,
+        port: u16,
+    },
+    Tls {
+        addr: HostOrIp,
+        port: u16,
+        sni: String,
+    },
+    Https {
+        addr: HostOrIp,
+        port: u16,
+        path: String,
+        sni: String,
+    },
 }
 
 /// Either a resolved IP address or a hostname that requires bootstrap resolution.
@@ -33,7 +48,12 @@ impl fmt::Display for NameServerUrl {
             NameServerUrl::Udp { addr, port } => write!(f, "udp://{addr}:{port}"),
             NameServerUrl::Tcp { addr, port } => write!(f, "tcp://{addr}:{port}"),
             NameServerUrl::Tls { addr, port, sni } => write!(f, "tls://{addr}:{port}#{sni}"),
-            NameServerUrl::Https { addr, port, path, sni } => {
+            NameServerUrl::Https {
+                addr,
+                port,
+                path,
+                sni,
+            } => {
                 write!(f, "https://{addr}:{port}{path}#{sni}")
             }
         }
@@ -105,7 +125,11 @@ impl NameServerUrl {
         if let Some(colon) = s_no_frag.find("://") {
             let scheme = &s_no_frag[..colon];
             // Make sure it's actually a scheme (letters only, reasonable length)
-            if scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') && colon <= 20 {
+            if scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+                && colon <= 20
+            {
                 return Err(NameServerParseError::UnsupportedScheme(scheme.to_string()));
             }
         }
@@ -140,14 +164,23 @@ impl NameServerUrl {
             None => (rest, "/dns-query".to_string()),
         };
         // Ensure path starts with /
-        let path = if path.is_empty() { "/dns-query".to_string() } else { path };
+        let path = if path.is_empty() {
+            "/dns-query".to_string()
+        } else {
+            path
+        };
 
         let (addr, port) = parse_host_port(hostport, 443)?;
         let sni = match fragment {
             Some(f) if !f.is_empty() => f.to_string(),
             _ => addr.to_string(),
         };
-        Ok(NameServerUrl::Https { addr, port, path, sni })
+        Ok(NameServerUrl::Https {
+            addr,
+            port,
+            path,
+            sni,
+        })
     }
 }
 
@@ -156,11 +189,16 @@ impl NameServerUrl {
 fn parse_host_port(s: &str, default_port: u16) -> Result<(HostOrIp, u16), NameServerParseError> {
     // IPv6 bracketed form: [::1]:853 or [::1]
     if s.starts_with('[') {
-        let close = s.find(']').ok_or_else(|| NameServerParseError::InvalidHost(s.to_string()))?;
+        let close = s
+            .find(']')
+            .ok_or_else(|| NameServerParseError::InvalidHost(s.to_string()))?;
         let ipv6_str = &s[1..close];
-        let ip: IpAddr = ipv6_str.parse().map_err(|_| NameServerParseError::InvalidHost(s.to_string()))?;
+        let ip: IpAddr = ipv6_str
+            .parse()
+            .map_err(|_| NameServerParseError::InvalidHost(s.to_string()))?;
         let port = if close + 1 < s.len() {
-            let port_str = s[close + 1..].strip_prefix(':')
+            let port_str = s[close + 1..]
+                .strip_prefix(':')
                 .ok_or_else(|| NameServerParseError::InvalidHost(s.to_string()))?;
             parse_port(port_str)?
         } else {
@@ -225,7 +263,9 @@ pub enum NameServerParseError {
     InvalidHost(String),
     #[error("invalid port in nameserver: '{0}'")]
     InvalidPort(String),
-    #[error("encrypted DNS (tls:// / https://) requires the 'encrypted' Cargo feature to be enabled")]
+    #[error(
+        "encrypted DNS (tls:// / https://) requires the 'encrypted' Cargo feature to be enabled"
+    )]
     EncryptedFeatureDisabled,
 }
 
@@ -245,35 +285,65 @@ mod tests {
     #[test]
     fn parse_plain_bare_ip() {
         let url = NameServerUrl::parse("8.8.8.8").unwrap();
-        assert_eq!(url, NameServerUrl::Udp { addr: ip4(8, 8, 8, 8), port: 53 });
+        assert_eq!(
+            url,
+            NameServerUrl::Udp {
+                addr: ip4(8, 8, 8, 8),
+                port: 53
+            }
+        );
     }
 
     // A2
     #[test]
     fn parse_plain_bare_ip_with_port() {
         let url = NameServerUrl::parse("8.8.8.8:5353").unwrap();
-        assert_eq!(url, NameServerUrl::Udp { addr: ip4(8, 8, 8, 8), port: 5353 });
+        assert_eq!(
+            url,
+            NameServerUrl::Udp {
+                addr: ip4(8, 8, 8, 8),
+                port: 5353
+            }
+        );
     }
 
     // A3
     #[test]
     fn parse_udp_scheme() {
         let url = NameServerUrl::parse("udp://1.1.1.1").unwrap();
-        assert_eq!(url, NameServerUrl::Udp { addr: ip4(1, 1, 1, 1), port: 53 });
+        assert_eq!(
+            url,
+            NameServerUrl::Udp {
+                addr: ip4(1, 1, 1, 1),
+                port: 53
+            }
+        );
     }
 
     // A4
     #[test]
     fn parse_udp_scheme_with_port() {
         let url = NameServerUrl::parse("udp://1.1.1.1:5353").unwrap();
-        assert_eq!(url, NameServerUrl::Udp { addr: ip4(1, 1, 1, 1), port: 5353 });
+        assert_eq!(
+            url,
+            NameServerUrl::Udp {
+                addr: ip4(1, 1, 1, 1),
+                port: 5353
+            }
+        );
     }
 
     // A5
     #[test]
     fn parse_tcp_scheme() {
         let url = NameServerUrl::parse("tcp://1.1.1.1:53").unwrap();
-        assert_eq!(url, NameServerUrl::Tcp { addr: ip4(1, 1, 1, 1), port: 53 });
+        assert_eq!(
+            url,
+            NameServerUrl::Tcp {
+                addr: ip4(1, 1, 1, 1),
+                port: 53
+            }
+        );
     }
 
     // A6
@@ -281,14 +351,28 @@ mod tests {
     #[test]
     fn parse_tls_default_port_and_sni() {
         let url = NameServerUrl::parse("tls://dns.google").unwrap();
-        assert_eq!(url, NameServerUrl::Tls { addr: host("dns.google"), port: 853, sni: "dns.google".to_string() });
+        assert_eq!(
+            url,
+            NameServerUrl::Tls {
+                addr: host("dns.google"),
+                port: 853,
+                sni: "dns.google".to_string()
+            }
+        );
     }
 
     // A7
     #[test]
     fn parse_tls_explicit_port() {
         let url = NameServerUrl::parse("tls://dns.google:8853").unwrap();
-        assert_eq!(url, NameServerUrl::Tls { addr: host("dns.google"), port: 8853, sni: "dns.google".to_string() });
+        assert_eq!(
+            url,
+            NameServerUrl::Tls {
+                addr: host("dns.google"),
+                port: 8853,
+                sni: "dns.google".to_string()
+            }
+        );
     }
 
     // A8
@@ -297,7 +381,14 @@ mod tests {
     #[test]
     fn parse_tls_explicit_sni() {
         let url = NameServerUrl::parse("tls://8.8.8.8:853#dns.google").unwrap();
-        assert_eq!(url, NameServerUrl::Tls { addr: ip4(8, 8, 8, 8), port: 853, sni: "dns.google".to_string() });
+        assert_eq!(
+            url,
+            NameServerUrl::Tls {
+                addr: ip4(8, 8, 8, 8),
+                port: 853,
+                sni: "dns.google".to_string()
+            }
+        );
     }
 
     // A9
@@ -318,12 +409,15 @@ mod tests {
     #[test]
     fn parse_https_default_path_and_port() {
         let url = NameServerUrl::parse("https://cloudflare-dns.com").unwrap();
-        assert_eq!(url, NameServerUrl::Https {
-            addr: host("cloudflare-dns.com"),
-            port: 443,
-            path: "/dns-query".to_string(),
-            sni: "cloudflare-dns.com".to_string(),
-        });
+        assert_eq!(
+            url,
+            NameServerUrl::Https {
+                addr: host("cloudflare-dns.com"),
+                port: 443,
+                path: "/dns-query".to_string(),
+                sni: "cloudflare-dns.com".to_string(),
+            }
+        );
     }
 
     // A11
@@ -340,12 +434,15 @@ mod tests {
     #[test]
     fn parse_https_explicit_port_and_path() {
         let url = NameServerUrl::parse("https://1.1.1.1:8443/custom-path").unwrap();
-        assert_eq!(url, NameServerUrl::Https {
-            addr: ip4(1, 1, 1, 1),
-            port: 8443,
-            path: "/custom-path".to_string(),
-            sni: "1.1.1.1".to_string(),
-        });
+        assert_eq!(
+            url,
+            NameServerUrl::Https {
+                addr: ip4(1, 1, 1, 1),
+                port: 8443,
+                path: "/custom-path".to_string(),
+                sni: "1.1.1.1".to_string(),
+            }
+        );
     }
 
     // A13
@@ -354,12 +451,15 @@ mod tests {
     #[test]
     fn parse_https_explicit_sni_on_ip() {
         let url = NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap();
-        assert_eq!(url, NameServerUrl::Https {
-            addr: ip4(1, 1, 1, 1),
-            port: 443,
-            path: "/dns-query".to_string(),
-            sni: "cloudflare-dns.com".to_string(),
-        });
+        assert_eq!(
+            url,
+            NameServerUrl::Https {
+                addr: ip4(1, 1, 1, 1),
+                port: 443,
+                path: "/dns-query".to_string(),
+                sni: "cloudflare-dns.com".to_string(),
+            }
+        );
     }
 
     // A14
@@ -408,7 +508,10 @@ mod tests {
     fn parse_quic_rejected() {
         let err = NameServerUrl::parse("quic://dns.adguard.com").unwrap_err();
         assert!(matches!(err, NameServerParseError::QuicNotSupported));
-        assert!(err.to_string().contains("M1.E-6"), "error message must cite M1.E-6 roadmap item");
+        assert!(
+            err.to_string().contains("M1.E-6"),
+            "error message must cite M1.E-6 roadmap item"
+        );
     }
 
     // A18 — Class A per ADR-0002: silent-drop bug in upstream.
@@ -422,13 +525,19 @@ mod tests {
     // A19
     #[test]
     fn parse_empty_string_errors() {
-        assert!(matches!(NameServerUrl::parse("").unwrap_err(), NameServerParseError::EmptyInput));
+        assert!(matches!(
+            NameServerUrl::parse("").unwrap_err(),
+            NameServerParseError::EmptyInput
+        ));
     }
 
     // A20
     #[test]
     fn parse_invalid_port_errors() {
-        assert!(matches!(NameServerUrl::parse("1.1.1.1:99999").unwrap_err(), NameServerParseError::InvalidPort(_)));
+        assert!(matches!(
+            NameServerUrl::parse("1.1.1.1:99999").unwrap_err(),
+            NameServerParseError::InvalidPort(_)
+        ));
     }
 
     // A21
@@ -436,7 +545,13 @@ mod tests {
     #[test]
     fn parse_bare_hostname_no_scheme() {
         let url = NameServerUrl::parse("dns.google").unwrap();
-        assert_eq!(url, NameServerUrl::Udp { addr: host("dns.google"), port: 53 });
+        assert_eq!(
+            url,
+            NameServerUrl::Udp {
+                addr: host("dns.google"),
+                port: 53
+            }
+        );
         assert_eq!(url.needs_bootstrap(), Some("dns.google"));
     }
 
@@ -496,7 +611,10 @@ mod tests {
     #[test]
     fn parse_tls_without_encrypted_feature_hard_errors() {
         let result = NameServerUrl::parse("tls://8.8.8.8");
-        assert!(result.is_err(), "tls:// without encrypted feature must error");
+        assert!(
+            result.is_err(),
+            "tls:// without encrypted feature must error"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("encrypted"),

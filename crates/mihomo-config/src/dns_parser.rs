@@ -29,8 +29,7 @@ pub async fn parse_dns(raw: &RawConfig) -> Result<DnsConfig, anyhow::Error> {
 
     let main_urls = parse_nameserver_urls(dns.nameserver.as_deref().unwrap_or(&[]))?;
     let fallback_urls = parse_nameserver_urls(dns.fallback.as_deref().unwrap_or(&[]))?;
-    let default_ns_urls =
-        parse_nameserver_urls(dns.default_nameserver.as_deref().unwrap_or(&[]))?;
+    let default_ns_urls = parse_nameserver_urls(dns.default_nameserver.as_deref().unwrap_or(&[]))?;
 
     let mode = match dns.enhanced_mode.as_deref() {
         Some("fake-ip") => {
@@ -44,9 +43,10 @@ pub async fn parse_dns(raw: &RawConfig) -> Result<DnsConfig, anyhow::Error> {
     let listen_addr = dns.listen.as_deref().and_then(|s| s.parse().ok());
     let hosts = build_hosts_trie(raw.hosts.as_ref());
 
-    let resolver = Resolver::new_with_bootstrap(main_urls, fallback_urls, default_ns_urls, mode, hosts)
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let resolver =
+        Resolver::new_with_bootstrap(main_urls, fallback_urls, default_ns_urls, mode, hosts)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     Ok(DnsConfig {
         resolver: Arc::new(resolver),

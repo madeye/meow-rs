@@ -23,15 +23,17 @@ async fn dot_resolves_example_com() {
             .await
             .expect("DoT resolver must build");
     let ip = resolver.resolve_ip("example.com").await;
-    assert!(ip.is_some(), "expected an IPv4/IPv6 answer for example.com via DoT");
+    assert!(
+        ip.is_some(),
+        "expected an IPv4/IPv6 answer for example.com via DoT"
+    );
 }
 
 // E2: DoH resolves example.com via 1.1.1.1/dns-query with Cloudflare SNI.
 #[tokio::test]
 #[ignore]
 async fn doh_resolves_example_com() {
-    let main =
-        vec![NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap()];
+    let main = vec![NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap()];
     let resolver =
         Resolver::new_with_bootstrap(main, vec![], vec![], DnsMode::Normal, DomainTrie::new())
             .await
@@ -51,7 +53,10 @@ async fn dot_bogus_sni_fails_cert_validation() {
             .await
             .expect("resolver builds even with bad SNI");
     let ip = resolver.resolve_ip("example.com").await;
-    assert!(ip.is_none(), "DoT with bogus SNI must fail cert validation; unexpectedly got: {ip:?}");
+    assert!(
+        ip.is_none(),
+        "DoT with bogus SNI must fail cert validation; unexpectedly got: {ip:?}"
+    );
 }
 
 // E4: DoH with bogus SNI fails TLS/HTTP2 certificate validation.
@@ -59,14 +64,16 @@ async fn dot_bogus_sni_fails_cert_validation() {
 #[tokio::test]
 #[ignore]
 async fn doh_bogus_sni_fails_cert_validation() {
-    let main =
-        vec![NameServerUrl::parse("https://1.1.1.1/dns-query#wrong.example").unwrap()];
+    let main = vec![NameServerUrl::parse("https://1.1.1.1/dns-query#wrong.example").unwrap()];
     let resolver =
         Resolver::new_with_bootstrap(main, vec![], vec![], DnsMode::Normal, DomainTrie::new())
             .await
             .expect("resolver builds even with bad SNI");
     let ip = resolver.resolve_ip("example.com").await;
-    assert!(ip.is_none(), "DoH with bogus SNI must fail cert validation; unexpectedly got: {ip:?}");
+    assert!(
+        ip.is_none(),
+        "DoH with bogus SNI must fail cert validation; unexpectedly got: {ip:?}"
+    );
 }
 
 // E5: DoT with a hostname (not IP literal) in nameserver plus bootstrap resolves end-to-end.
@@ -82,5 +89,8 @@ async fn dot_hostname_with_bootstrap_resolves() {
             .await
             .expect("bootstrap + DoT resolver must build");
     let ip = resolver.resolve_ip("example.com").await;
-    assert!(ip.is_some(), "expected an answer via dns.google DoT after bootstrap; got None");
+    assert!(
+        ip.is_some(),
+        "expected an answer via dns.google DoT after bootstrap; got None"
+    );
 }

@@ -72,7 +72,9 @@ fn ttl_from_lookup(lookup: &hickory_resolver::lookup_ip::LookupIp) -> Duration {
 fn host_or_ip_to_addr(addr: &HostOrIp, resolved: &HashMap<String, IpAddr>) -> IpAddr {
     match addr {
         HostOrIp::Ip(ip) => *ip,
-        HostOrIp::Host(h) => *resolved.get(h).expect("bootstrap must resolve all hostnames"),
+        HostOrIp::Host(h) => *resolved
+            .get(h)
+            .expect("bootstrap must resolve all hostnames"),
     }
 }
 
@@ -181,10 +183,8 @@ impl Resolver {
                     };
                     config.add_name_server(NameServerConfig::new(addr, protocol));
                 }
-                let mut builder = TokioResolver::builder_with_config(
-                    config,
-                    TokioConnectionProvider::default(),
-                );
+                let mut builder =
+                    TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
                 let opts = builder.options_mut();
                 opts.timeout = Duration::from_secs(3);
                 opts.attempts = 2;
@@ -197,10 +197,14 @@ impl Resolver {
             for host in &hostnames_needing_bootstrap {
                 match bootstrap_resolver.lookup_ip(host.as_str()).await {
                     Ok(lookup) => {
-                        let ip = lookup.iter().next().ok_or_else(|| BootstrapError::CannotResolve {
-                            host: host.clone(),
-                            source: "no addresses returned".into(),
-                        })?;
+                        let ip =
+                            lookup
+                                .iter()
+                                .next()
+                                .ok_or_else(|| BootstrapError::CannotResolve {
+                                    host: host.clone(),
+                                    source: "no addresses returned".into(),
+                                })?;
                         map.insert(host.clone(), ip);
                     }
                     Err(e) => {
@@ -219,7 +223,10 @@ impl Resolver {
         let fallback = if fallback_urls.is_empty() {
             None
         } else {
-            Some(Self::build_resolver_from_urls(&fallback_urls, &resolved_map))
+            Some(Self::build_resolver_from_urls(
+                &fallback_urls,
+                &resolved_map,
+            ))
         };
 
         Ok(Self {
@@ -448,7 +455,10 @@ mod tests {
 
     #[test]
     fn clamp_ttl_in_range_returns_raw() {
-        assert_eq!(clamp_ttl(Duration::from_secs(120)), Duration::from_secs(120));
+        assert_eq!(
+            clamp_ttl(Duration::from_secs(120)),
+            Duration::from_secs(120)
+        );
     }
 
     #[test]
@@ -510,7 +520,8 @@ mod tests {
         let hosts = DomainTrie::new();
         let err = Resolver::new_with_bootstrap(vec![], vec![], default_ns, DnsMode::Normal, hosts)
             .await
-            .err().expect("expected error");
+            .err()
+            .expect("expected error");
         assert!(
             matches!(err, BootstrapError::DefaultNameserverNotPlain { .. }),
             "expected DefaultNameserverNotPlain, got: {err}"
@@ -521,14 +532,16 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_rejects_https_in_default_ns() {
         let default_ns =
-            vec![
-                NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap(),
-            ];
+            vec![NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap()];
         let hosts = DomainTrie::new();
         let err = Resolver::new_with_bootstrap(vec![], vec![], default_ns, DnsMode::Normal, hosts)
             .await
-            .err().expect("expected error");
-        assert!(matches!(err, BootstrapError::DefaultNameserverNotPlain { .. }));
+            .err()
+            .expect("expected error");
+        assert!(matches!(
+            err,
+            BootstrapError::DefaultNameserverNotPlain { .. }
+        ));
     }
 
     // B7: tcp:// in default_ns is accepted (useful behind middleboxes blocking UDP/53).
@@ -545,12 +558,12 @@ mod tests {
     // B8: encrypted hostname upstream with empty default_ns → DefaultNameserverMissing.
     #[tokio::test]
     async fn bootstrap_missing_when_encrypted_has_hostname() {
-        let main =
-            vec![NameServerUrl::parse("https://cloudflare-dns.com/dns-query").unwrap()];
+        let main = vec![NameServerUrl::parse("https://cloudflare-dns.com/dns-query").unwrap()];
         let hosts = DomainTrie::new();
         let err = Resolver::new_with_bootstrap(main, vec![], vec![], DnsMode::Normal, hosts)
             .await
-            .err().expect("expected error");
+            .err()
+            .expect("expected error");
         assert!(
             matches!(err, BootstrapError::DefaultNameserverMissing { .. }),
             "expected DefaultNameserverMissing, got: {err}"
@@ -575,7 +588,11 @@ mod tests {
         let hosts = DomainTrie::new();
         let err = Resolver::new_with_bootstrap(main, fallback, vec![], DnsMode::Normal, hosts)
             .await
-            .err().expect("expected error");
-        assert!(matches!(err, BootstrapError::DefaultNameserverMissing { .. }));
+            .err()
+            .expect("expected error");
+        assert!(matches!(
+            err,
+            BootstrapError::DefaultNameserverMissing { .. }
+        ));
     }
 }

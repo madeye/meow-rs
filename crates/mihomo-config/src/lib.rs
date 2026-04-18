@@ -280,7 +280,10 @@ fn default_geoip_path() -> PathBuf {
     base.join("mihomo").join("Country.mmdb")
 }
 
-async fn build_config(raw: raw::RawConfig, cache_dir: Option<&Path>) -> Result<Config, anyhow::Error> {
+async fn build_config(
+    raw: raw::RawConfig,
+    cache_dir: Option<&Path>,
+) -> Result<Config, anyhow::Error> {
     // General config
     let mode = raw
         .mode
@@ -445,7 +448,6 @@ mod async_guard_tests {
     fn load_config_from_str_is_async_compile_check() {
         use std::future::Future;
         use std::pin::Pin;
-        let _: Pin<Box<dyn Future<Output = _>>> =
-            Box::pin(super::load_config_from_str(""));
+        let _: Pin<Box<dyn Future<Output = _>>> = Box::pin(super::load_config_from_str(""));
     }
 }
