@@ -73,6 +73,9 @@ jobs:
       - name: DNS cache tests
         run: cargo test --test dns_cache_test -- --nocapture
 
+      - name: DNS upstream unit tests (DoH/DoT parser + bootstrap)
+        run: cargo test -p mihomo-dns --lib -- --nocapture
+
       - name: Config parsing tests
         run: cargo test --test config_test -- --nocapture
 
@@ -152,6 +155,15 @@ jobs:
           # G4: vless-vision feature requires vless (transitive dep check)
           cargo check -p mihomo-proxy --no-default-features --features "vless-vision"
 
+      - name: DNS encrypted feature matrix (D1-D3)
+        run: |
+          # D1: plain UDP/TCP only, no encrypted features
+          cargo check -p mihomo-dns --no-default-features
+          # D2: explicitly enable encrypted features
+          cargo check -p mihomo-dns --no-default-features --features encrypted
+          # D3: default features (= encrypted on)
+          cargo check -p mihomo-dns
+
   msrv:
     runs-on: ubuntu-latest
     needs: lint
@@ -201,6 +213,7 @@ jobs:
           cargo test --test rules_test -- --nocapture
           cargo test --test api_test -- --nocapture
           cargo test --test trojan_integration -- --nocapture
+          cargo test -p mihomo-dns --lib -- --nocapture
           cargo test -p mihomo-transport --test tls_test -- --nocapture
           cargo test -p mihomo-transport --test ws_test -- --nocapture
 

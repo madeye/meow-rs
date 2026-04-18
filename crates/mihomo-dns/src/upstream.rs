@@ -116,16 +116,24 @@ impl NameServerUrl {
     }
 
     fn parse_tls(rest: &str, fragment: Option<&str>) -> Result<Self, NameServerParseError> {
-        let (addr, port) = parse_host_port(rest, 853)?;
-        let sni = match fragment {
-            Some(f) if !f.is_empty() => f.to_string(),
-            // Default SNI = the host string (IP or hostname)
-            _ => addr.to_string(),
-        };
-        Ok(NameServerUrl::Tls { addr, port, sni })
+        #[cfg(not(feature = "encrypted"))]
+        return Err(NameServerParseError::EncryptedFeatureDisabled);
+
+        #[cfg(feature = "encrypted")]
+        {
+            let (addr, port) = parse_host_port(rest, 853)?;
+            let sni = match fragment {
+                Some(f) if !f.is_empty() => f.to_string(),
+                // Default SNI = the host string (IP or hostname)
+                _ => addr.to_string(),
+            };
+            Ok(NameServerUrl::Tls { addr, port, sni })
+        }
     }
 
     fn parse_https(rest: &str, fragment: Option<&str>) -> Result<Self, NameServerParseError> {
+        #[cfg(not(feature = "encrypted"))]
+        return Err(NameServerParseError::EncryptedFeatureDisabled);
         // Split path off the host[:port] portion. Path starts at first '/' after host.
         let (hostport, path) = match rest.find('/') {
             Some(idx) => (&rest[..idx], rest[idx..].to_string()),
@@ -217,6 +225,8 @@ pub enum NameServerParseError {
     InvalidHost(String),
     #[error("invalid port in nameserver: '{0}'")]
     InvalidPort(String),
+    #[error("encrypted DNS (tls:// / https://) requires the 'encrypted' Cargo feature to be enabled")]
+    EncryptedFeatureDisabled,
 }
 
 #[cfg(test)]
@@ -479,5 +489,18 @@ mod tests {
             NameServerParseError::InvalidPort(_) => "invalid port",
             _ => "other",
         };
+    }
+
+    // D4: without the `encrypted` feature, tls:// must hard-error mentioning the feature name.
+    #[cfg(not(feature = "encrypted"))]
+    #[test]
+    fn parse_tls_without_encrypted_feature_hard_errors() {
+        let result = NameServerUrl::parse("tls://8.8.8.8");
+        assert!(result.is_err(), "tls:// without encrypted feature must error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("encrypted"),
+            "error message must mention the 'encrypted' feature, got: {msg}"
+        );
     }
 }

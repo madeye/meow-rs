@@ -101,6 +101,25 @@ where
     (result, cap_clone.captured())
 }
 
+/// Async variant of `with_warn_capture` for use in `#[tokio::test]` tests.
+async fn with_warn_capture_async<Fut, R>(fut: Fut) -> (R, Vec<String>)
+where
+    Fut: std::future::Future<Output = R>,
+{
+    let cap = CapWriter::new();
+    let cap_clone = cap.clone();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(cap)
+        .with_ansi(false)
+        .with_level(true)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _guard = tracing::subscriber::set_default(sub);
+    let result = fut.await;
+    drop(_guard);
+    (result, cap_clone.captured())
+}
+
 // ─── Base YAML helpers ───────────────────────────────────────────────────────
 
 const MINIMAL_VLESS: &str = r#"
@@ -117,8 +136,8 @@ proxies:
 /// D1: `parse_vless_minimal_ok`
 ///
 /// Minimal valid VLESS config (name, type, server, port, uuid) loads without error.
-#[test]
-fn parse_vless_minimal_ok() {
+#[tokio::test]
+async fn parse_vless_minimal_ok() {
     let config = load_config_from_str(MINIMAL_VLESS).await.expect("minimal VLESS must load");
     assert!(
         config.proxies.contains_key("test-vless"),
@@ -131,8 +150,8 @@ fn parse_vless_minimal_ok() {
 /// D2: `parse_vless_all_fields_roundtrip`
 ///
 /// All documented fields parse without error.
-#[test]
-fn parse_vless_all_fields_roundtrip() {
+#[tokio::test]
+async fn parse_vless_all_fields_roundtrip() {
     let yaml = r#"
 proxies:
   - name: full-vless
@@ -165,8 +184,8 @@ proxies:
 /// D3: `parse_vless_flow_empty_string_ok`
 ///
 /// `flow: ""` is equivalent to no flow — must not hard-error.
-#[test]
-fn parse_vless_flow_empty_string_ok() {
+#[tokio::test]
+async fn parse_vless_flow_empty_string_ok() {
     let yaml = r#"
 proxies:
   - name: v
@@ -184,8 +203,8 @@ proxies:
 /// D4: `parse_vless_flow_absent_ok`
 ///
 /// Absent `flow:` key is identical to `flow: ""` — no error.
-#[test]
-fn parse_vless_flow_absent_ok() {
+#[tokio::test]
+async fn parse_vless_flow_absent_ok() {
     load_config_from_str(MINIMAL_VLESS).await.expect("absent flow must parse OK");
 }
 
@@ -195,8 +214,8 @@ fn parse_vless_flow_absent_ok() {
 ///
 /// `flow: "xtls-rprx-vision"` with `tls: true` parses successfully.
 /// Acceptance criterion #5.
-#[test]
-fn parse_vless_flow_vision_ok() {
+#[tokio::test]
+async fn parse_vless_flow_vision_ok() {
     let yaml = r#"
 proxies:
   - name: v
@@ -218,8 +237,8 @@ proxies:
 /// The config loader warns-and-skips (does not crash the full config load).
 /// upstream: `adapter/outbound/vless.go` ignores unknown flows.
 /// NOT accepted — Class A per ADR-0002: unknown flow may skip security processing.
-#[test]
-fn parse_vless_flow_unknown_hard_errors() {
+#[tokio::test]
+async fn parse_vless_flow_unknown_hard_errors() {
     let yaml = r#"
 proxies:
   - name: v
@@ -243,8 +262,8 @@ proxies:
 /// `flow: "xtls-rprx-direct"` → proxy parse error; proxy absent from config.
 /// upstream: `adapter/outbound/vless.go` accepts this as a deprecated alias.
 /// NOT accepted — Class A per ADR-0002: security regression vs Vision.
-#[test]
-fn parse_vless_flow_deprecated_direct_hard_errors() {
+#[tokio::test]
+async fn parse_vless_flow_deprecated_direct_hard_errors() {
     let yaml = r#"
 proxies:
   - name: v
@@ -268,8 +287,8 @@ proxies:
 /// `flow: "xtls-rprx-splice"` → proxy parse error; proxy absent from config.
 /// upstream: `adapter/outbound/vless.go` accepts as deprecated.
 /// NOT accepted — Class A per ADR-0002.
-#[test]
-fn parse_vless_flow_deprecated_splice_hard_errors() {
+#[tokio::test]
+async fn parse_vless_flow_deprecated_splice_hard_errors() {
     let yaml = r#"
 proxies:
   - name: v
@@ -293,8 +312,8 @@ proxies:
 /// `reality-opts:` block → proxy parse error; proxy absent from config.
 /// upstream: `adapter/outbound/vless.go` routes to Reality transport.
 /// NOT silent ignore — Class A per ADR-0002: user assumes Reality, gets plain-TLS.
-#[test]
-fn parse_vless_reality_opts_hard_errors() {
+#[tokio::test]
+async fn parse_vless_reality_opts_hard_errors() {
     let yaml = r#"
 proxies:
   - name: v
@@ -321,8 +340,8 @@ proxies:
 /// Class B per ADR-0002: same destination, absent crypto.
 /// upstream: `adapter/outbound/vless.go` silently passes through.
 /// NOT hard-error — user gets a working connection, just unencrypted.
-#[test]
-fn parse_vless_tls_false_plain_warns_once() {
+#[tokio::test]
+async fn parse_vless_tls_false_plain_warns_once() {
     let yaml = r#"
 proxies:
   - name: v
@@ -332,7 +351,7 @@ proxies:
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
     tls: false
 "#;
-    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml).await);
+    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
     result.expect("tls: false must not be a hard error");
     let warn_count = lines
         .iter()
@@ -355,8 +374,8 @@ proxies:
 /// not suppressed after the first process-lifetime occurrence.
 /// Guards against accidental `std::sync::Once` suppression.
 /// Class B per ADR-0002.
-#[test]
-fn parse_vless_tls_false_no_duplicate_warn() {
+#[tokio::test]
+async fn parse_vless_tls_false_no_duplicate_warn() {
     let yaml = r#"
 proxies:
   - name: v
@@ -368,7 +387,7 @@ proxies:
 "#;
 
     // First load
-    let (r1, lines1) = with_warn_capture(|| load_config_from_str(yaml).await);
+    let (r1, lines1) = with_warn_capture_async(load_config_from_str(yaml)).await;
     r1.expect("first load ok");
     let c1 = lines1
         .iter()
@@ -379,7 +398,7 @@ proxies:
         .count();
 
     // Second load
-    let (r2, lines2) = with_warn_capture(|| load_config_from_str(yaml).await);
+    let (r2, lines2) = with_warn_capture_async(load_config_from_str(yaml)).await;
     r2.expect("second load ok");
     let c2 = lines2
         .iter()
@@ -406,8 +425,8 @@ proxies:
 /// `flow: "xtls-rprx-vision"` with `tls: false` and no TLS-enforcing transport →
 /// proxy parse error; proxy absent from config.
 /// Class A per ADR-0002: Vision without outer TLS is a no-op the user did not intend.
-#[test]
-fn parse_vless_vision_without_tls_hard_errors() {
+#[tokio::test]
+async fn parse_vless_vision_without_tls_hard_errors() {
     let yaml = r#"
 proxies:
   - name: v
@@ -433,8 +452,8 @@ proxies:
 /// gRPC implies TLS at the transport level; the Vision-requires-TLS gate must
 /// accept grpc as a TLS-enforcing network.
 /// Acceptance criterion #9: "or a transport that enforces TLS, such as `network: grpc`".
-#[test]
-fn parse_vless_vision_with_grpc_transport_ok() {
+#[tokio::test]
+async fn parse_vless_vision_with_grpc_transport_ok() {
     let yaml = r#"
 proxies:
   - name: v
@@ -456,8 +475,8 @@ proxies:
 ///
 /// `encryption: "aes-128-gcm"` → proxy parse error; proxy absent from config.
 /// upstream: also errors on non-"none" values — this is a match, not a divergence.
-#[test]
-fn parse_vless_encryption_non_none_hard_errors() {
+#[tokio::test]
+async fn parse_vless_encryption_non_none_hard_errors() {
     let yaml = r#"
 proxies:
   - name: v
@@ -479,8 +498,8 @@ proxies:
 /// D15: `parse_vless_encryption_empty_string_accepted`
 ///
 /// `encryption: ""` is equivalent to `"none"` per spec — must parse OK.
-#[test]
-fn parse_vless_encryption_empty_string_accepted() {
+#[tokio::test]
+async fn parse_vless_encryption_empty_string_accepted() {
     let yaml = r#"
 proxies:
   - name: v
@@ -501,8 +520,8 @@ proxies:
 /// Class B per ADR-0002: Mux.Cool not implemented; same destination, no muxing.
 /// upstream: `adapter/outbound/vless.go` runs Mux.Cool.
 /// NOT hard-error — user gets a working (non-muxed) connection.
-#[test]
-fn parse_vless_mux_enabled_warns_and_ignores() {
+#[tokio::test]
+async fn parse_vless_mux_enabled_warns_and_ignores() {
     let yaml = r#"
 proxies:
   - name: v
@@ -513,7 +532,7 @@ proxies:
     mux:
       enabled: true
 "#;
-    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml).await);
+    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
     result.expect("mux enabled must not be a hard error");
     let warn_count = lines
         .iter()
@@ -534,8 +553,8 @@ proxies:
 /// Class B per ADR-0002 row #7: Vision is TCP-only; UDP uses plain VLESS.
 /// NOT hard-error: crypto and routing are unchanged on the UDP path.
 /// upstream: upstream UDP also silently uses plain VLESS; we warn once at load.
-#[test]
-fn parse_vless_vision_udp_true_warns_once() {
+#[tokio::test]
+async fn parse_vless_vision_udp_true_warns_once() {
     let yaml = r#"
 proxies:
   - name: v
@@ -547,7 +566,7 @@ proxies:
     flow: "xtls-rprx-vision"
     udp: true
 "#;
-    let (result, lines) = with_warn_capture(|| load_config_from_str(yaml).await);
+    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
     result.expect("vision + udp must not be a hard error");
     let warn_count = lines
         .iter()
@@ -568,8 +587,8 @@ proxies:
 ///
 /// UUID in dashed form and hex-only form both parse without error.
 /// guard-rail: accidental rejection of one form would break many real configs.
-#[test]
-fn parse_vless_uuid_hex_and_dashed_both_accepted() {
+#[tokio::test]
+async fn parse_vless_uuid_hex_and_dashed_both_accepted() {
     // Dashed form (standard)
     let yaml_dashed = r#"
 proxies:
@@ -598,8 +617,8 @@ proxies:
 ///
 /// `uuid: "not-a-uuid"` → proxy parse error; proxy absent from config.
 /// guard-rail: an invalid UUID would produce a zeroed or garbage auth ID with no diagnostic.
-#[test]
-fn parse_vless_uuid_invalid_hard_errors() {
+#[tokio::test]
+async fn parse_vless_uuid_invalid_hard_errors() {
     let yaml = r#"
 proxies:
   - name: v
@@ -623,8 +642,8 @@ proxies:
 /// Class A per ADR-0002: wrong destination, no diagnostic on silent truncate.
 /// upstream: `transport/vless/encoding.go` does not enforce this limit.
 /// NOT silent truncation — 256-byte domain in ATYP 0x02 wraps to 0 bytes, wrong destination.
-#[test]
-fn parse_vless_server_domain_over_255_errors() {
+#[tokio::test]
+async fn parse_vless_server_domain_over_255_errors() {
     let long_server = "a".repeat(256);
     let yaml = format!(
         r#"

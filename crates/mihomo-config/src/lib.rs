@@ -435,3 +435,17 @@ mod geoip_context_tests {
         assert!(msg.contains("GeoIP"), "error should mention GeoIP: {}", msg);
     }
 }
+
+#[cfg(test)]
+mod async_guard_tests {
+    // F1: compile-time guard — load_config_from_str must remain async.
+    // This test body pins the future; if load_config_from_str is ever de-async-ified
+    // the `Box::pin(...)` line below will fail to compile with a type error.
+    #[allow(dead_code)]
+    fn load_config_from_str_is_async_compile_check() {
+        use std::future::Future;
+        use std::pin::Pin;
+        let _: Pin<Box<dyn Future<Output = _>>> =
+            Box::pin(super::load_config_from_str(""));
+    }
+}

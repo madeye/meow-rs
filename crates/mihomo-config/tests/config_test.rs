@@ -3,8 +3,8 @@ use mihomo_config::load_config_from_str;
 // Some tests use #[tokio::test] because ShadowsocksAdapter plugin startup
 // internally requires a tokio runtime (tokio::process::Command).
 
-#[test]
-fn test_minimal_config() {
+#[tokio::test]
+async fn test_minimal_config() {
     let yaml = r#"
 mixed-port: 7890
 "#;
@@ -20,8 +20,8 @@ mixed-port: 7890
     assert!(config.proxies.contains_key("REJECT-DROP"));
 }
 
-#[test]
-fn test_general_config_defaults() {
+#[tokio::test]
+async fn test_general_config_defaults() {
     let yaml = "";
     let config = load_config_from_str(yaml).await.unwrap();
     assert_eq!(config.general.mode.to_string(), "rule");
@@ -31,8 +31,8 @@ fn test_general_config_defaults() {
     assert_eq!(config.general.bind_address, "127.0.0.1");
 }
 
-#[test]
-fn test_general_config_custom() {
+#[tokio::test]
+async fn test_general_config_custom() {
     let yaml = r#"
 mode: global
 log-level: debug
@@ -48,8 +48,8 @@ bind-address: "0.0.0.0"
     assert_eq!(config.general.bind_address, "0.0.0.0");
 }
 
-#[test]
-fn test_direct_mode_config() {
+#[tokio::test]
+async fn test_direct_mode_config() {
     let yaml = r#"
 mode: direct
 "#;
@@ -57,8 +57,8 @@ mode: direct
     assert_eq!(config.general.mode.to_string(), "direct");
 }
 
-#[test]
-fn test_invalid_mode_defaults_to_rule() {
+#[tokio::test]
+async fn test_invalid_mode_defaults_to_rule() {
     let yaml = r#"
 mode: bogus
 "#;
@@ -66,8 +66,8 @@ mode: bogus
     assert_eq!(config.general.mode.to_string(), "rule");
 }
 
-#[test]
-fn test_listener_ports() {
+#[tokio::test]
+async fn test_listener_ports() {
     let yaml = r#"
 port: 7891
 socks-port: 7892
@@ -79,8 +79,8 @@ mixed-port: 7890
     assert_eq!(config.listeners.mixed_port, Some(7890));
 }
 
-#[test]
-fn test_listener_bind_address_allow_lan() {
+#[tokio::test]
+async fn test_listener_bind_address_allow_lan() {
     let yaml = r#"
 allow-lan: true
 bind-address: "0.0.0.0"
@@ -90,8 +90,8 @@ mixed-port: 7890
     assert_eq!(config.listeners.bind_address, "0.0.0.0");
 }
 
-#[test]
-fn test_listener_bind_address_no_lan() {
+#[tokio::test]
+async fn test_listener_bind_address_no_lan() {
     let yaml = r#"
 allow-lan: false
 bind-address: "0.0.0.0"
@@ -102,8 +102,8 @@ mixed-port: 7890
     assert_eq!(config.listeners.bind_address, "127.0.0.1");
 }
 
-#[test]
-fn test_api_config() {
+#[tokio::test]
+async fn test_api_config() {
     let yaml = r#"
 external-controller: "127.0.0.1:9090"
 secret: "my-secret"
@@ -116,24 +116,24 @@ secret: "my-secret"
     assert_eq!(config.api.secret.as_deref(), Some("my-secret"));
 }
 
-#[test]
-fn test_api_config_none() {
+#[tokio::test]
+async fn test_api_config_none() {
     let yaml = "";
     let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.api.external_controller.is_none());
     assert!(config.api.secret.is_none());
 }
 
-#[test]
-fn test_dns_disabled_by_default() {
+#[tokio::test]
+async fn test_dns_disabled_by_default() {
     let yaml = "";
     let config = load_config_from_str(yaml).await.unwrap();
     // DNS listen addr should be None when DNS is not configured
     assert!(config.dns.listen_addr.is_none());
 }
 
-#[test]
-fn test_dns_config_enabled() {
+#[tokio::test]
+async fn test_dns_config_enabled() {
     let yaml = r#"
 dns:
   enable: true
@@ -146,8 +146,8 @@ dns:
     assert_eq!(config.dns.listen_addr.unwrap().to_string(), "0.0.0.0:5353");
 }
 
-#[test]
-fn test_dns_config_fakeip_falls_back_to_normal() {
+#[tokio::test]
+async fn test_dns_config_fakeip_falls_back_to_normal() {
     // FakeIP support has been removed; legacy `enhanced-mode: fake-ip` configs
     // must still load (with a warning) and silently fall back to Normal mode.
     let yaml = r#"
@@ -163,8 +163,8 @@ dns:
     assert_eq!(config.dns.resolver.mode().to_string(), "normal");
 }
 
-#[test]
-fn test_dns_config_disabled() {
+#[tokio::test]
+async fn test_dns_config_disabled() {
     let yaml = r#"
 dns:
   enable: false
@@ -175,8 +175,8 @@ dns:
     assert!(config.dns.listen_addr.is_none());
 }
 
-#[test]
-fn test_proxy_parsing_ss() {
+#[tokio::test]
+async fn test_proxy_parsing_ss() {
     let yaml = r#"
 proxies:
   - name: "ss-server"
@@ -191,8 +191,8 @@ proxies:
     assert!(config.proxies.contains_key("ss-server"));
 }
 
-#[test]
-fn test_proxy_parsing_trojan() {
+#[tokio::test]
+async fn test_proxy_parsing_trojan() {
     let yaml = r#"
 proxies:
   - name: "trojan-server"
@@ -207,8 +207,8 @@ proxies:
     assert!(config.proxies.contains_key("trojan-server"));
 }
 
-#[test]
-fn test_unsupported_proxy_type_skipped() {
+#[tokio::test]
+async fn test_unsupported_proxy_type_skipped() {
     let yaml = r#"
 proxies:
   - name: "vmess-server"
@@ -221,8 +221,8 @@ proxies:
     assert!(!config.proxies.contains_key("vmess-server"));
 }
 
-#[test]
-fn test_rule_parsing() {
+#[tokio::test]
+async fn test_rule_parsing() {
     let yaml = r#"
 rules:
   - "DOMAIN-SUFFIX,google.com,DIRECT"
@@ -233,8 +233,8 @@ rules:
     assert_eq!(config.rules.len(), 3);
 }
 
-#[test]
-fn test_rule_parsing_with_comments() {
+#[tokio::test]
+async fn test_rule_parsing_with_comments() {
     let yaml = r#"
 rules:
   - "DOMAIN,example.com,DIRECT"
@@ -244,15 +244,15 @@ rules:
     assert_eq!(config.rules.len(), 2);
 }
 
-#[test]
-fn test_empty_rules() {
+#[tokio::test]
+async fn test_empty_rules() {
     let yaml = "";
     let config = load_config_from_str(yaml).await.unwrap();
     assert!(config.rules.is_empty());
 }
 
-#[test]
-fn test_proxy_group_select() {
+#[tokio::test]
+async fn test_proxy_group_select() {
     let yaml = r#"
 proxies:
   - name: "ss1"
@@ -273,8 +273,8 @@ proxy-groups:
     assert!(config.proxies.contains_key("Proxy"));
 }
 
-#[test]
-fn test_proxy_group_missing_proxy_warn_not_fail() {
+#[tokio::test]
+async fn test_proxy_group_missing_proxy_warn_not_fail() {
     let yaml = r#"
 proxies:
   - name: "ss1"
@@ -296,8 +296,8 @@ proxy-groups:
     assert!(config.proxies.contains_key("Proxy"));
 }
 
-#[test]
-fn test_full_config() {
+#[tokio::test]
+async fn test_full_config() {
     let yaml = r#"
 mixed-port: 7890
 allow-lan: false
@@ -387,8 +387,8 @@ proxies:
     assert!(!config.proxies.contains_key("ss-plugin-str"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_http() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_http() {
     // `plugin: obfs` with mode=http is handled by the built-in simple-obfs
     // implementation — no external binary is required, so the proxy must
     // register successfully.
@@ -409,8 +409,8 @@ proxies:
     assert!(config.proxies.contains_key("ss-obfs-http"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_tls() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_tls() {
     let yaml = r#"
 proxies:
   - name: "ss-obfs-tls"
@@ -428,8 +428,8 @@ proxies:
     assert!(config.proxies.contains_key("ss-obfs-tls"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_string_opts() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_string_opts() {
     // SIP003 string form (`obfs=http;obfs-host=...`) must also be accepted.
     let yaml = r#"
 proxies:
@@ -446,8 +446,8 @@ proxies:
     assert!(config.proxies.contains_key("ss-obfs-str"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_missing_mode() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_missing_mode() {
     // Without `mode`, the built-in obfs config is invalid and the proxy is skipped.
     let yaml = r#"
 proxies:
@@ -465,8 +465,8 @@ proxies:
     assert!(!config.proxies.contains_key("ss-obfs-bad"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_simple_obfs_alias() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_simple_obfs_alias() {
     // The legacy `plugin: simple-obfs` (the SIP003 binary's name) must also
     // route through the built-in implementation.
     let yaml = r#"
@@ -486,8 +486,8 @@ proxies:
     assert!(config.proxies.contains_key("ss-simple-obfs"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_sip003_keys_yaml_map() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_sip003_keys_yaml_map() {
     // YAML map using SIP003-native key names `obfs` / `obfs-host`.
     let yaml = r#"
 proxies:
@@ -506,8 +506,8 @@ proxies:
     assert!(config.proxies.contains_key("ss-obfs-sip003-map"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_uppercase_mode() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_uppercase_mode() {
     // Mode value should be parsed case-insensitively.
     let yaml = r#"
 proxies:
@@ -526,8 +526,8 @@ proxies:
     assert!(config.proxies.contains_key("ss-obfs-upper"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_no_plugin_opts() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_no_plugin_opts() {
     // Built-in obfs requires `mode`; with no plugin-opts at all, the proxy
     // must be skipped instead of accidentally falling back to "external".
     let yaml = r#"
@@ -544,8 +544,8 @@ proxies:
     assert!(!config.proxies.contains_key("ss-obfs-no-opts"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_host_falls_back_to_server() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_host_falls_back_to_server() {
     // If `host` is omitted, the built-in obfs uses the SS server name as
     // the fake Host: / SNI.
     let yaml = r#"
@@ -564,8 +564,8 @@ proxies:
     assert!(config.proxies.contains_key("ss-obfs-default-host"));
 }
 
-#[test]
-fn test_proxy_parsing_ss_with_builtin_obfs_invalid_mode_skipped() {
+#[tokio::test]
+async fn test_proxy_parsing_ss_with_builtin_obfs_invalid_mode_skipped() {
     let yaml = r#"
 proxies:
   - name: "ss-obfs-bad-mode"
@@ -583,14 +583,14 @@ proxies:
     assert!(!config.proxies.contains_key("ss-obfs-bad-mode"));
 }
 
-#[test]
-fn test_invalid_yaml() {
+#[tokio::test]
+async fn test_invalid_yaml() {
     let yaml = "{{invalid yaml}}";
     assert!(load_config_from_str(yaml).await.is_err());
 }
 
-#[test]
-fn test_file_rule_provider_end_to_end() {
+#[tokio::test]
+async fn test_file_rule_provider_end_to_end() {
     // Write a small domain list to a temp file.
     let dir = tempfile::tempdir().unwrap();
     let list_path = dir.path().join("ads.yaml");
@@ -641,8 +641,8 @@ rules:
     assert!(!config.rules[0].match_metadata(&meta_miss, &helper));
 }
 
-#[test]
-fn test_missing_rule_provider_is_skipped() {
+#[tokio::test]
+async fn test_missing_rule_provider_is_skipped() {
     // Referencing an undefined rule-set should warn and skip, not panic.
     let yaml = r#"
 mixed-port: 7890
