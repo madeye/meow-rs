@@ -1,20 +1,36 @@
 # Migration guide: Go mihomo → mihomo-rust
 
-Status: Spec-complete (2026-04-11) — protocol/group sections pre-populated from
-approved specs. "Known-broken" bullets filled in as M1.B/C code lands and soak
-testing runs. Known-good patterns updated after integration testing.
-Owner: pm
-Tracks roadmap item: **M1.H-3**
+Last updated: 2026-04-18. Tracks M1 feature state.
+Owner: pm. Tracks roadmap item: **M1.H-3**.
+Review cadence: updated at each milestone exit.
 
 This document is for operators migrating a working Go mihomo (Clash Meta)
 deployment to mihomo-rust. It covers:
 
-- What config surface is supported, partially supported, or not supported in M1.
-- Known-good patterns (tested, confirmed working).
-- Known-broken patterns (silently wrong or hard error).
+- What config surface is supported, partially supported, or not yet supported in M1.
+- Behavioral divergences and what to do about them.
+- Migration steps for common subscription types.
 - Feature flags equivalent to Go mihomo build tags.
 
 If you are starting fresh (not migrating), read the main README instead.
+
+**Scope note:** Features marked *M1.x*, *M2*, or *M3* are planned but not yet
+shipped. This guide is a snapshot of M1 at release, not a promise about future
+milestones.
+
+---
+
+## Quick compatibility check
+
+Run mihomo-rust with `-t` to validate your config without starting:
+
+```bash
+mihomo -f config.yaml -t
+```
+
+Hard errors (Class A divergences) print the upstream field name and the
+rejection reason. Warnings (Class B) print once at startup and the config
+loads. If `-t` exits 0, the config will load.
 
 ---
 
@@ -38,12 +54,12 @@ cause problems; items marked ~ work with caveats; items marked ✓ work.
 | `proxies:` — Direct, Reject | ✓ | Fully supported. |
 | `proxies:` — VMess | ✗ | Not implemented — use VLESS instead. |
 | `proxies:` — VLESS | ~ | M1.B-2 — see §Protocols. |
-| `proxies:` — HTTP CONNECT outbound | ~ | M1.B-3 — see §Protocols. |
-| `proxies:` — SOCKS5 outbound | ~ | M1.B-4 — see §Protocols. |
+| `proxies:` — HTTP CONNECT outbound | ✓ | Full parity (M1.B-3). |
+| `proxies:` — SOCKS5 outbound | ✓ | Full parity (M1.B-4). |
 | `proxies:` — Hysteria2 / TUIC / WireGuard | ✗ | Deferred to M1.5/M2. |
 | `proxy-groups:` — selector, url-test, fallback | ✓ | Fully supported. |
-| `proxy-groups:` — load-balance | ~ | M1.C-1 — see §Groups. |
-| `proxy-groups:` — relay | ~ | M1.C-2 — see §Groups. |
+| `proxy-groups:` — load-balance | ✓ | round-robin + consistent-hashing (M1.C-1). |
+| `proxy-groups:` — relay | ✓ | Chain multiple outbounds (M1.C-2). |
 | `rules:` — DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD | ✓ | Fully supported. |
 | `rules:` — IP-CIDR, IP-CIDR6 | ✓ | Fully supported. |
 | `rules:` — GEOIP | ✓ | MaxMind MMDB. |
@@ -80,12 +96,23 @@ These fields parse without error but behave differently from Go mihomo:
 
 | Field | Go mihomo | mihomo-rust | Class |
 |-------|-----------|-------------|-------|
-| `secret` not set | API unprotected | API unprotected (but warns at startup) | Same |
-| `authentication: ["user:pass"]` | Accepted | Accepted; malformed entry (no colon) is hard error | A |
-| `skip-auth-prefixes` | Defaults to `[]` | Always includes `127.0.0.1/32` and `::1/128` even if not listed | A |
+| `secret` not set | API unprotected | API unprotected (warns at startup) | Same |
+| `authentication: ["user:pass"]` | Accepted | Malformed entry (no colon) is hard error | A |
+| `authentication: ["user:"]` (empty password) | Accepted silently | Accepted; warn-once | B |
+| `skip-auth-prefixes` | Defaults to `[]` | Always includes `127.0.0.1/32` + `::1/128` | A |
+| `skip-auth-prefixes` with invalid CIDR | Silently dropped | Hard parse error | A |
 | `dns.nameserver: quic://...` | Supported | Hard error with roadmap pointer | A |
-| `dns.nameserver: sdns://...` | Warn-drop | Hard error | A |
+| `dns.nameserver: sdns://...` | Warn-drop (silent) | Hard error | A |
 | `dns.default-nameserver: tls://...` | Allowed (bootstrap loop risk) | Hard error | A |
+| `dns.default-nameserver` absent with encrypted hostname upstream | Fails at first query | Hard error at load | A |
+| `nameserver-policy` entry with all URLs stripped | Runtime panic | Hard parse error at load | A |
+| `fallback-filter` GeoIP/CIDR gates | Only on primary failure | Also on poisoned responses (non-CN IP, bogon) | A |
+| `fallback-filter.geoip: true` with no MMDB | Startup error | Warn-once, gate disabled | B |
+| `nameserver-policy` key with `geosite:` prefix | Resolved via geosite DB | Warn-once, entry skipped | B |
+| `IN-TYPE` with unknown value (e.g. `IN-TYPE,QUIC`) | Silently no-match | Hard parse error | A |
+| `PUT /configs` in-flight connections | Graceful handover | Cold reload, connections dropped + logged | A |
+| `PUT /configs` payload with raw YAML (not base64) | Accepted in some versions | 400 with helpful message | B |
+| `GET /configs` response includes null Option fields | Full struct with nulls | Only non-null fields returned | B |
 | `geodata-mode`, `geodata-loader`, `geoip-matcher` | Valid fields | Ignored with warn-once (M2+) | B |
 
 ### Fields that are silently ignored in Go mihomo but error in mihomo-rust
@@ -96,14 +123,20 @@ security gaps and typo-likely mistakes become hard errors (Class A).
 
 | Mistake | Go mihomo | mihomo-rust |
 |---------|-----------|-------------|
-| Duplicate listener port | Silently overwrites | Hard parse error |
-| Duplicate listener name | Silently overwrites | Hard parse error |
-| Unknown listener type | Silently ignores | Hard parse error |
-| `authentication` entry with no `:` | Silently ignores | Hard parse error |
+| Duplicate listener port | Silently overwrites last | Hard parse error naming both conflicting listeners |
+| Duplicate listener name | Silently overwrites last | Hard parse error |
+| Unknown listener type (e.g. `type: redir`) | Silently ignored | Hard parse error |
+| Shorthand port + `listeners:` entry on same port | Both accepted | Hard parse error (same as duplicate port) |
+| `authentication` entry with no `:` | Silently stored with empty password | Hard parse error |
+| `authentication` entry with empty username (`:pass`) | Silently accepted | Hard parse error |
+| `skip-auth-prefixes` with invalid CIDR | Silently dropped | Hard parse error |
 | Malformed IP in `dns.hosts` | Silently skips | Hard parse error |
-| `.dat` geosite file in discovery path | Loads (protobuf) | Hard error + conversion hint |
+| `.dat` geosite file in discovery path | Loads (protobuf) | Hard error + conversion hint (`convert-geo`) |
 | `sub-rules:` cycle | May panic or loop | Hard parse error |
 | `sub-rules:` reference to undefined block | Runtime no-match | Hard parse error |
+| `nameserver-policy` entry with zero valid nameservers | Runtime panic at first query | Hard parse error at load |
+| `IN-TYPE` with unknown protocol name | Silently no-matches all traffic of that type | Hard parse error |
+| Base64 payload with URL-safe alphabet (`-`, `_`) | Accepted in some dashboard versions | 400 with decode-error message |
 
 ---
 
@@ -443,6 +476,23 @@ using them will produce a clear error at startup.
 
 ---
 
+## mihomo-rust-only features
+
+These exist in mihomo-rust but have no equivalent in Go mihomo. Dashboard
+tools built for Go mihomo will ignore them.
+
+| Feature | Path / Field | Notes |
+|---------|-------------|-------|
+| Prometheus metrics | `GET /metrics` | Native scrape endpoint; Go mihomo has no equivalent (M1.H-2) |
+| Subscription management API | `GET\|POST\|DELETE /api/subscriptions[/:name]` | mihomo-rust-specific |
+| Extended proxy group API | `GET\|POST\|PUT\|DELETE /api/proxy-groups[/:name]` | mihomo-rust-specific |
+| Rule CRUD API | `POST\|PUT\|DELETE /rules[/:index]` | Runtime rule editing |
+
+Keep these under the `/api/` prefix so they do not collide with
+Clash-compatible paths.
+
+---
+
 ## Feature flags (Cargo features)
 
 mihomo-rust uses Cargo feature flags where Go mihomo uses build tags:
@@ -463,6 +513,57 @@ cargo build --release --no-default-features -p mihomo-dns
 
 ---
 
+## Migration steps by subscription type
+
+### Type 1: Standard Clash Meta subscription (SS + VLESS/VMess, rule-set)
+
+Most common format from public providers. Typical issues:
+
+1. **VMess proxies** — replace with VLESS alternatives from your provider, or
+   remove them. mihomo-rust hard-errors on `type: vmess`.
+2. **`enhanced-mode: fake-ip`** — change to `redir-host` or remove the line
+   entirely (default is `redir-host`). Auto-fallback applies but logs a warn.
+3. **`fake-ip-range` / `fake-ip-filter`** — remove; silently ignored but creates
+   log noise.
+4. **GEOSITE rules with `.dat` files** — convert to mrs format:
+   ```bash
+   metacubex convert-geo geosite.dat -o geosite.mrs
+   ```
+5. **`quic://` nameservers** — replace with `tls://` or `https://` equivalents.
+   `quic://` is a hard parse error with a message pointing at the roadmap.
+6. Run `-t` to validate: `mihomo -f config.yaml -t`
+
+### Type 2: Enterprise split-tunnel (nameserver-policy, IN-NAME rules)
+
+1. **Named listeners** — `IN-NAME` / `IN-TYPE` rules require the `listeners:`
+   array (M1.F-1). Shorthand ports (`mixed-port`, `socks-port`) get auto-names
+   (`"mixed"`, `"socks"`) — `IN-NAME,mixed,...` works without changes.
+2. **`nameserver-policy` with `geosite:` keys** — entries like
+   `"geosite:cn": [...]` are skipped with a warn-once until geosite-in-policy
+   integration lands post-M1. Use exact domain or `+.` wildcard patterns instead.
+3. **`authentication:`** — ensure each entry has a colon separating username and
+   password. Entries without a colon are a hard parse error.
+4. **`skip-auth-prefixes:`** — loopback (`127.0.0.1/32`, `::1/128`) is always
+   skipped even if not listed. Invalid CIDRs are a hard parse error.
+
+### Type 3: Transparent proxy (tproxy, Linux)
+
+1. **TUN users** — switch to `tproxy-port`. TUN inbound is a non-goal. Use
+   nftables `TPROXY` target instead of `REDIRECT`.
+2. **`redir-port`** — not supported. Use `tproxy-port`.
+3. **PROCESS-NAME / PROCESS-PATH rules** — platform lookup wired (Linux netlink,
+   macOS libproc) via M1.D-1.
+
+### Type 4: Proxy provider subscription (`proxy-providers:`)
+
+1. **`proxy-providers:`** — supported in M1.H-1 (http + file sources, health-check,
+   `include-all` shorthand).
+2. **`interval:` refresh** — supported in M1.D-5. No config change needed.
+3. **`use:` in proxy groups** — wired in M1.H-1. Until that PR merges, list
+   proxies explicitly in the group's `proxies:` array.
+
+---
+
 ## Known-good patterns
 
 These have been tested against a real subscription and confirmed working:
@@ -478,11 +579,15 @@ These have been tested against a real subscription and confirmed working:
 
 ## Known-broken patterns
 
-*(Fill in as the team discovers them during soak testing.)*
+The following produce hard errors at load time (not silent failures):
 
-- DoQ upstreams — hard error; replace with DoH/DoT.
-- Hysteria2 proxies — hard error; no alternative in M1.
-- `fake-ip` DNS mode — removed; use `redir-host`.
+- **`quic://` nameservers** — hard error; replace with `tls://` or `https://`.
+- **Hysteria2 / TUIC proxies** — hard error (`type: hysteria2` / `type: tuic`); no alternative in M1.
+- **`fake-ip` DNS mode** — warn-once fallback to `redir-host`; see §Removed features.
+- **VMess proxies** — hard error; use `type: vless` instead.
+- **`vless` with `flow: xtls-rprx-direct`** — hard error; use `xtls-rprx-vision`.
+
+*(Additional patterns filled in after M1 soak testing against real subscriptions.)*
 
 ---
 
