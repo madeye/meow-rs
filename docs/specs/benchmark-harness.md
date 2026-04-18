@@ -1,111 +1,107 @@
 # Spec: Benchmark harness vs Go mihomo (M2)
 
-Status: Draft (2026-04-18)
+Status: Draft (2026-04-18, revised with engineer-a prep findings)
 Owner: engineer-a
 Tracks roadmap item: **M2** (benchmark harness)
 Lane: engineer-a (perf measurement chain)
-Blocks: allocator-audit.md, rule-engine-micro-opt.md
-Upstream reference: none — this is a mihomo-rust capability, not a parity feature.
+Blocks: allocator-audit.md (M2.B-2), rule-engine-micro-opt.md (M2.B-2)
+Upstream reference: none — mihomo-rust capability, not a parity feature.
 
-## Motivation
+## Current state
 
-The M2 exit criterion ("measurably lower CPU and RSS than Go mihomo on a shared
-benchmark") requires a reproducible, machine-readable harness that runs both
-implementations under identical load and captures throughput, latency percentiles,
-CPU time, and RSS. Without a baseline run there is nothing to optimize against
-and no way to declare M2 done.
+The bench infrastructure is partially implemented:
+- `crates/mihomo-bench/` — standalone binary that runs both implementations
+- `bench.sh` — orchestration script: builds both binaries, downloads Go mihomo via
+  `gh release download`, runs `mihomo-bench`, writes `target/bench/results.json`
+- `config-bench.yaml` — shared workload config
 
-The harness also serves as a long-term regression guardrail: any future change that
-regresses CPU or RSS beyond a configured threshold fails CI.
+**What is missing:**
+1. No published numbers in `docs/benchmarks/` — results live only in `target/` (gitignored).
+2. No `criterion` microbenchmarks for rule-engine and allocator work — those require
+   in-process benchmarks at the crate level, not the end-to-end harness.
 
-## Scope
+This spec covers both gaps as two sequential sub-items.
 
-In scope:
+## M2.B-1 — Publish benchmark numbers
 
-1. Benchmark driver script at `bench/run.sh` orchestrating both sides.
-2. A shared workload definition: rule-based tunnel config (`bench/config-mihomo-rust.yaml`,
-   `bench/config-go-mihomo.yaml`) and synthetic traffic generator using `wrk2` or
-   `iperf3` for throughput + `wrk` for HTTP latency.
-3. Metric capture: `perf stat` (or `/usr/bin/time -v`) for CPU, `smem`/`/proc/<pid>/status`
-   for RSS peak and steady-state, `wrk`/`wrk2` JSON output for req/s and latency
-   percentiles (p50, p95, p99).
-4. Machine-readable result output: `bench/results/` directory with one JSON file per
-   run, keyed by `{impl, version, date, target}`.
-5. `bench/compare.py` — diff two JSON result files and emit a human-readable table
-   and an exit code 1 if mihomo-rust is worse than Go mihomo on any primary metric
-   by more than the configured threshold (default 5%).
-6. A `bench` CI job (manual `workflow_dispatch` only, not on every PR — benchmark
-   runs are slow and require a dedicated runner or a quiet window).
+Run the existing `bench.sh` on the agreed reference machine, capture the JSON output,
+and commit a snapshot to `docs/benchmarks/`.
 
-Out of scope:
+Deliverables:
+1. `docs/benchmarks/methodology.md` — document the test machine (arch, cores, RAM, OS,
+   kernel version, CPU governor, any NUMA tuning), the Go mihomo version compared
+   against, and the workload (duration, concurrency, scenario descriptions from
+   `config-bench.yaml`).
+2. `docs/benchmarks/baseline-YYYY-MM-DD.json` — the results JSON from one clean run
+   on the reference machine.
+3. A `bench` GitHub Actions job (`workflow_dispatch` only) that:
+   - Builds both binaries
+   - Runs `bench.sh`
+   - Uploads `target/bench/results.json` as a workflow artifact
 
-- Automated CI gating on every PR (reserved for M2 regression check after baseline
-  is established).
-- Protocol-level micro-benchmarks (`cargo bench`) — those belong to the individual
-  crates. This harness measures end-to-end tunnel throughput.
-- Hardware specification enforcement — the harness documents the test machine and
-  warns if metrics are collected on a machine that doesn't match the baseline.
+The baseline numbers are the M2 starting point. If mihomo-rust is already faster, record
+it and note the delta. If Go mihomo is faster, record it as the target.
 
-## Workload definition
+## M2.B-2 — Criterion microbenchmarks
 
-### Tunnel config (both sides)
+Add `criterion` microbenchmarks to the crates that M2.C and M2.D will optimize.
+These are the measurement tool for in-process work; they must exist before the
+optimization passes can claim a quantified win.
 
-- 5 rule entries (DOMAIN-SUFFIX, IP-CIDR, GEOIP, RULE-SET, MATCH) to exercise
-  realistic rule-matching.
-- One `DIRECT` outbound, one `REJECT` outbound, one upstream proxy (Shadowsocks or
-  Trojan over loopback).
-- Snooping DNS mode (mihomo-rust) vs default DNS (Go mihomo) — document the
-  difference in `docs/benchmarks/methodology.md`.
+### mihomo-trie benchmarks (`crates/mihomo-trie/benches/trie_bench.rs`)
 
-### Traffic scenarios
+```rust
+// Measure lookup throughput at N = {100, 1000, 10_000} entries
+criterion_group!(benches, lookup_100, lookup_1000, lookup_10000);
+```
 
-| Scenario | Tool | Duration | Connections | Metric |
-|----------|------|----------|-------------|--------|
-| TCP throughput | iperf3 | 30 s | 1 | Gbps (relay overhead) |
-| HTTP requests | wrk | 60 s | 50 | req/s, p99 latency |
-| Concurrent conns | wrk2 | 60 s | 500 | RSS under load |
+Domains sampled from a realistic distribution (mix of TLDs, subdomains, wildcards).
 
-## Result format
+### mihomo-rules benchmarks (`crates/mihomo-rules/benches/rules_bench.rs`)
 
-```json
-{
-  "impl": "mihomo-rust",
-  "version": "0.4.0",
-  "date": "2026-04-18",
-  "machine": "aarch64, 4 cores, 4 GB RAM",
-  "scenarios": {
-    "tcp_throughput_gbps": 9.3,
-    "http_rps": 42000,
-    "http_p99_ms": 3.2,
-    "rss_peak_mb": 28,
-    "rss_steady_mb": 22,
-    "cpu_user_s": 11.4,
-    "cpu_sys_s": 2.1
-  }
-}
+```rust
+// Measure rule-list scan at N = {50, 200, 500} rules
+// Current: linear scan over Vec<Box<dyn Rule>>
+criterion_group!(benches, rule_scan_50, rule_scan_200, rule_scan_500);
+```
+
+Include both domain-heavy and IP-CIDR-heavy workload mixes.
+
+### mihomo-tunnel UDP benchmarks (`crates/mihomo-tunnel/benches/udp_bench.rs`)
+
+```rust
+// Measure handle_udp fast-path (existing session) throughput
+// Primary target: the format!() key allocation at udp.rs:30
+criterion_group!(benches, udp_fastpath);
 ```
 
 ## Acceptance criteria
 
-1. `bench/run.sh mihomo-rust` and `bench/run.sh go-mihomo` both complete without
-   error and produce valid JSON in `bench/results/`.
-2. `bench/compare.py` correctly identifies regressions and exits non-zero.
-3. A committed baseline run exists at `docs/benchmarks/baseline-2026-XXXX.json`
-   showing mihomo-rust CPU and RSS ≤ Go mihomo (if it doesn't, the baseline is
-   the starting point and the delta is recorded as the M2 improvement target).
-4. `docs/benchmarks/methodology.md` documents the test machine spec, OS, kernel
-   version, and any tuning (CPU governor, NUMA pinning) needed for reproducible
-   results.
-5. The `bench` GitHub Actions job runs successfully on `workflow_dispatch`.
+### M2.B-1
+1. `docs/benchmarks/methodology.md` exists and documents machine + workload.
+2. `docs/benchmarks/baseline-YYYY-MM-DD.json` committed (valid JSON, all scenario keys present).
+3. `bench` CI job runs successfully on `workflow_dispatch` and uploads results artifact.
+
+### M2.B-2
+1. `cargo bench -p mihomo-trie`, `cargo bench -p mihomo-rules`, and
+   `cargo bench -p mihomo-tunnel` all run without error.
+2. Baseline numbers are printed to stdout and can be used as `--save-baseline` reference.
+3. `cargo test --lib` still passes after adding benches.
 
 ## Implementation checklist (engineer-a handoff)
 
-- [ ] Create `bench/` directory structure: `run.sh`, `config-mihomo-rust.yaml`,
-      `config-go-mihomo.yaml`, `compare.py`, `results/.gitkeep`.
+### M2.B-1
 - [ ] Create `docs/benchmarks/methodology.md`.
-- [ ] Add `.github/workflows/bench.yml` with `workflow_dispatch` trigger, `bench`
-      job that installs wrk/wrk2/iperf3, builds both binaries, runs the harness,
-      uploads `bench/results/` as an artifact.
-- [ ] Record and commit the first baseline run.
-- [ ] Add `bench/compare.py` threshold check to the `bench` CI job (exit 1 if
-      mihomo-rust regresses vs the committed baseline by > 5% on primary metrics).
+- [ ] Run `bench.sh` on reference machine; save output to `docs/benchmarks/baseline-YYYY-MM-DD.json`.
+- [ ] Add `.github/workflows/bench.yml` (workflow_dispatch, bench job, artifact upload).
+- [ ] Commit both files.
+
+### M2.B-2
+- [ ] Add `criterion` dev-dependency to `mihomo-trie/Cargo.toml` with `[[bench]]`.
+- [ ] Write `crates/mihomo-trie/benches/trie_bench.rs` with lookup benchmarks.
+- [ ] Add `criterion` dev-dependency to `mihomo-rules/Cargo.toml`.
+- [ ] Write `crates/mihomo-rules/benches/rules_bench.rs` with rule-scan benchmarks.
+- [ ] Add `criterion` dev-dependency to `mihomo-tunnel/Cargo.toml`.
+- [ ] Write `crates/mihomo-tunnel/benches/udp_bench.rs` with UDP fast-path benchmark
+      (isolating the `format!` allocation at `udp.rs:30`).
+- [ ] Run all benches, save baselines as `--save-baseline m2-start`.
