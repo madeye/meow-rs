@@ -208,36 +208,51 @@ pub fn rebuild_from_raw_with_cache_dir(
     Ok((proxies, rules))
 }
 
-/// Scan `raw.rules` for any `GEOIP` entry; if present, lazy-load the Country
-/// MMDB from the default path and build a `ParserContext` carrying the reader.
-/// Fail-fast (returning an error that names the offending rule and the path
-/// we tried) when the scan matches but the load fails.
+/// Scan `raw.rules` for any GeoIP-backed entry (`GEOIP`, `SRC-GEOIP`) or any
+/// ASN-backed entry (`IP-ASN`, `SRC-IP-ASN`); if present, lazy-load the
+/// corresponding MMDB from the default path and build a `ParserContext`
+/// carrying the readers. Fail-fast (returning an error that names the
+/// offending rule and the path we tried) when the scan matches but the
+/// load fails.
 fn build_parser_context(
     raw: &raw::RawConfig,
 ) -> Result<mihomo_rules::ParserContext, anyhow::Error> {
-    build_parser_context_at(raw, default_geoip_path())
+    build_parser_context_at(raw, default_geoip_path(), default_asn_path())
 }
 
 /// Same as [`build_parser_context`] but lets the caller override the mmdb
-/// path — used by tests to avoid depending on the user's `$HOME`.
+/// paths — used by tests to avoid depending on the user's `$HOME`.
 fn build_parser_context_at(
     raw: &raw::RawConfig,
-    path: PathBuf,
+    geoip_path: PathBuf,
+    asn_path: PathBuf,
 ) -> Result<mihomo_rules::ParserContext, anyhow::Error> {
-    let trigger = raw
-        .rules
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .find(|line| line_is_geoip_rule(line));
+    let lines: &[String] = raw.rules.as_deref().unwrap_or(&[]);
 
-    let Some(trigger) = trigger else {
-        return Ok(mihomo_rules::ParserContext::empty());
+    let geoip_trigger = lines.iter().find(|l| line_is_geoip_rule(l));
+    let geoip = match geoip_trigger {
+        Some(trigger) => Some(Arc::new(load_mmdb(&geoip_path, "GeoIP", trigger)?)),
+        None => None,
     };
 
-    let bytes = std::fs::read(&path).map_err(|e| {
+    let asn_trigger = lines.iter().find(|l| line_is_asn_rule(l));
+    let asn = match asn_trigger {
+        Some(trigger) => Some(Arc::new(load_mmdb(&asn_path, "GeoLite2-ASN", trigger)?)),
+        None => None,
+    };
+
+    Ok(mihomo_rules::ParserContext { geoip, asn })
+}
+
+fn load_mmdb(
+    path: &Path,
+    kind: &str,
+    trigger: &str,
+) -> Result<maxminddb::Reader<Vec<u8>>, anyhow::Error> {
+    let bytes = std::fs::read(path).map_err(|e| {
         anyhow::anyhow!(
-            "Failed to load GeoIP database at {}\n  required by rule: {}\n  underlying error: {}",
+            "Failed to load {} database at {}\n  required by rule: {}\n  underlying error: {}",
+            kind,
             path.display(),
             trigger.trim(),
             e
@@ -245,39 +260,57 @@ fn build_parser_context_at(
     })?;
     let reader = maxminddb::Reader::from_source(bytes).map_err(|e| {
         anyhow::anyhow!(
-            "Failed to parse GeoIP database at {}\n  required by rule: {}\n  underlying error: {}",
+            "Failed to parse {} database at {}\n  required by rule: {}\n  underlying error: {}",
+            kind,
             path.display(),
             trigger.trim(),
             e
         )
     })?;
-
-    info!("Loaded GeoIP database from {}", path.display());
-    Ok(mihomo_rules::ParserContext {
-        geoip: Some(Arc::new(reader)),
-    })
+    info!("Loaded {} database from {}", kind, path.display());
+    Ok(reader)
 }
 
-/// True iff `line` (a raw `rules:` entry) is a `GEOIP,...` rule. Comparison
-/// is case-insensitive on the rule type and ignores leading whitespace and
-/// comment lines.
+/// True iff `line` (a raw `rules:` entry) reads the GeoIP Country database.
+/// Covers `GEOIP` and `SRC-GEOIP` — both share the same MMDB reader.
 fn line_is_geoip_rule(line: &str) -> bool {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return false;
     }
     let ty = line.split(',').next().unwrap_or("").trim();
-    ty.eq_ignore_ascii_case("GEOIP")
+    ty.eq_ignore_ascii_case("GEOIP") || ty.eq_ignore_ascii_case("SRC-GEOIP")
+}
+
+/// True iff `line` (a raw `rules:` entry) reads the GeoLite2-ASN database.
+/// Covers `IP-ASN` and `SRC-IP-ASN`.
+fn line_is_asn_rule(line: &str) -> bool {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return false;
+    }
+    let ty = line.split(',').next().unwrap_or("").trim();
+    ty.eq_ignore_ascii_case("IP-ASN") || ty.eq_ignore_ascii_case("SRC-IP-ASN")
 }
 
 /// Default path for the GeoIP Country MMDB, matching upstream mihomo.
 /// Honours `$XDG_CONFIG_HOME` if set, otherwise `$HOME/.config/mihomo`.
 fn default_geoip_path() -> PathBuf {
+    mihomo_config_dir().join("Country.mmdb")
+}
+
+/// Default path for the GeoLite2-ASN MMDB. Same discovery chain as GeoIP,
+/// with the upstream-compatible filename `GeoLite2-ASN.mmdb`.
+fn default_asn_path() -> PathBuf {
+    mihomo_config_dir().join("GeoLite2-ASN.mmdb")
+}
+
+fn mihomo_config_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("mihomo").join("Country.mmdb")
+    base.join("mihomo")
 }
 
 async fn build_config(
@@ -396,6 +429,10 @@ mod geoip_context_tests {
         assert!(!line_is_geoip_rule("GEOSITE,twitter,Proxy"));
     }
 
+    fn nonexistent_asn() -> PathBuf {
+        PathBuf::from("/definitely/not/a/real/path/GeoLite2-ASN.mmdb")
+    }
+
     #[test]
     fn no_geoip_rules_skips_mmdb_load() {
         let raw = raw_with_rules(vec![
@@ -404,15 +441,16 @@ mod geoip_context_tests {
         ]);
         // Point at a path guaranteed not to exist — should be ignored.
         let nonexistent = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
-        let ctx = build_parser_context_at(&raw, nonexistent).unwrap();
+        let ctx = build_parser_context_at(&raw, nonexistent, nonexistent_asn()).unwrap();
         assert!(ctx.geoip.is_none());
+        assert!(ctx.asn.is_none());
     }
 
     #[test]
     fn missing_mmdb_with_geoip_rule_errors_with_path_and_rule() {
         let raw = raw_with_rules(vec!["DOMAIN,example.com,DIRECT", "GEOIP,CN,DIRECT"]);
         let nonexistent = PathBuf::from("/nonexistent-test-path-42/Country.mmdb");
-        let err = build_parser_context_at(&raw, nonexistent.clone())
+        let err = build_parser_context_at(&raw, nonexistent.clone(), nonexistent_asn())
             .expect_err("must fail-fast when mmdb is missing");
         let msg = format!("{}", err);
         assert!(
@@ -432,10 +470,54 @@ mod geoip_context_tests {
         let raw = raw_with_rules(vec!["GEOIP,CN,DIRECT"]);
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), b"not a real mmdb file").unwrap();
-        let err = build_parser_context_at(&raw, tmp.path().to_path_buf())
+        let err = build_parser_context_at(&raw, tmp.path().to_path_buf(), nonexistent_asn())
             .expect_err("garbage bytes must fail to parse as mmdb");
         let msg = format!("{}", err);
         assert!(msg.contains("GeoIP"), "error should mention GeoIP: {}", msg);
+    }
+
+    #[test]
+    fn scanner_matches_src_geoip_rule() {
+        // SRC-GEOIP shares the GeoIP Country database.
+        assert!(line_is_geoip_rule("SRC-GEOIP,AU,DIRECT"));
+        assert!(line_is_geoip_rule("  src-geoip,us,proxy"));
+    }
+
+    #[test]
+    fn scanner_matches_ip_asn_rule() {
+        assert!(line_is_asn_rule("IP-ASN,13335,PROXY"));
+        assert!(line_is_asn_rule("  src-ip-asn,15169,DIRECT"));
+        assert!(!line_is_asn_rule("DOMAIN,example.com,DIRECT"));
+        assert!(!line_is_asn_rule("# IP-ASN,13335,PROXY"));
+        assert!(!line_is_asn_rule("GEOIP,CN,DIRECT"));
+    }
+
+    #[test]
+    fn no_asn_rules_skips_asn_mmdb_load() {
+        let raw = raw_with_rules(vec!["DOMAIN,example.com,DIRECT"]);
+        let nonexistent_geoip = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
+        let ctx = build_parser_context_at(&raw, nonexistent_geoip, nonexistent_asn()).unwrap();
+        assert!(ctx.asn.is_none());
+    }
+
+    #[test]
+    fn missing_asn_mmdb_with_ip_asn_rule_errors_with_path_and_rule() {
+        let raw = raw_with_rules(vec!["IP-ASN,13335,PROXY"]);
+        let nonexistent_geoip = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
+        let asn = PathBuf::from("/nonexistent-test-path-asn/GeoLite2-ASN.mmdb");
+        let err = build_parser_context_at(&raw, nonexistent_geoip, asn.clone())
+            .expect_err("must fail-fast when ASN mmdb is missing");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains(&asn.display().to_string()),
+            "error must name the attempted path: {}",
+            msg
+        );
+        assert!(
+            msg.contains("IP-ASN,13335,PROXY"),
+            "error must name the triggering rule: {}",
+            msg
+        );
     }
 }
 

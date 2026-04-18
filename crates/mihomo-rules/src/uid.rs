@@ -10,6 +10,7 @@
 use mihomo_common::{Metadata, Rule, RuleMatchHelper, RuleType};
 
 pub struct UidRule {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     uid: u32,
     raw: String,
     adapter: String,

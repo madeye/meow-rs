@@ -6,24 +6,35 @@ use crate::domain::DomainRule;
 use crate::domain_keyword::DomainKeywordRule;
 use crate::domain_regex::DomainRegexRule;
 use crate::domain_suffix::DomainSuffixRule;
+use crate::domain_wildcard::DomainWildcardRule;
+use crate::dscp::DscpRule;
 use crate::final_rule::FinalRule;
 use crate::geoip::GeoIpRule;
+use crate::in_port::InPortRule;
+use crate::ip_asn::IpAsnRule;
+use crate::ip_suffix::IpSuffixRule;
 use crate::ipcidr::IpCidrRule;
 use crate::logic::{AndRule, NotRule, OrRule};
 use crate::network::NetworkRule;
 use crate::port::PortRule;
 use crate::process::ProcessRule;
+use crate::process_path::ProcessPathRule;
+use crate::src_geoip::SrcGeoIpRule;
+use crate::uid::UidRule;
 
 /// Shared context for `parse_rule` — carries resources that context-requiring
-/// rule types (today: GEOIP; later: GeoSite, IP-ASN) need in order to build
-/// themselves. Callers that don't use any such rule types can pass
-/// [`ParserContext::empty`].
+/// rule types (GEOIP, SRC-GEOIP, IP-ASN) need in order to build themselves.
+/// Callers that don't use any such rule types can pass [`ParserContext::empty`].
 #[derive(Clone, Debug, Default)]
 pub struct ParserContext {
-    /// Optional GeoIP (Country) MaxMindDB reader, shared across all GEOIP
-    /// rules built through this context. `None` means GEOIP rules cannot be
-    /// constructed and will parse-fail with a "no reader configured" error.
+    /// Optional GeoIP (Country) MaxMindDB reader, shared across all GEOIP and
+    /// SRC-GEOIP rules built through this context. `None` means those rules
+    /// will parse-fail with a "no reader configured" error.
     pub geoip: Option<Arc<maxminddb::Reader<Vec<u8>>>>,
+    /// Optional GeoLite2-ASN MaxMindDB reader for `IP-ASN` rules. `None`
+    /// triggers a parse-time hard-error on any `IP-ASN` payload — silent
+    /// skipping would misroute ASN-gated traffic (Class A per ADR-0002).
+    pub asn: Option<Arc<maxminddb::Reader<Vec<u8>>>>,
 }
 
 impl ParserContext {
@@ -95,6 +106,54 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
             Ok(Box::new(GeoIpRule::new(
                 payload, adapter, no_resolve, reader,
             )))
+        }
+        "SRC-GEOIP" => {
+            let reader = ctx.geoip.clone().ok_or_else(|| {
+                "SRC-GEOIP rule requires a GeoIP database, but none is configured".to_string()
+            })?;
+            Ok(Box::new(SrcGeoIpRule::new(payload, adapter, reader)))
+        }
+        "IN-PORT" => {
+            InPortRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>)
+        }
+        "DSCP" => DscpRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
+        "UID" => UidRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
+        "PROCESS-PATH" => {
+            ProcessPathRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>)
+        }
+        "DOMAIN-WILDCARD" => {
+            DomainWildcardRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>)
+        }
+        "IP-SUFFIX" => {
+            let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
+            IpSuffixRule::new(payload, adapter, false, no_resolve)
+                .map(|r| Box::new(r) as Box<dyn Rule>)
+        }
+        "SRC-IP-SUFFIX" => {
+            let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
+            IpSuffixRule::new(payload, adapter, true, no_resolve)
+                .map(|r| Box::new(r) as Box<dyn Rule>)
+        }
+        "IP-ASN" => {
+            let reader = ctx.asn.clone().ok_or_else(|| {
+                "IP-ASN rule requires an ASN database (GeoLite2-ASN.mmdb); drop the file at \
+                 $XDG_CONFIG_HOME/mihomo/GeoLite2-ASN.mmdb, $HOME/.config/mihomo/GeoLite2-ASN.mmdb, \
+                 or ./mihomo/GeoLite2-ASN.mmdb"
+                    .to_string()
+            })?;
+            let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
+            IpAsnRule::new(payload, adapter, reader, false, no_resolve)
+                .map(|r| Box::new(r) as Box<dyn Rule>)
+        }
+        "SRC-IP-ASN" => {
+            let reader = ctx.asn.clone().ok_or_else(|| {
+                "SRC-IP-ASN rule requires an ASN database (GeoLite2-ASN.mmdb); drop the file at \
+                 $XDG_CONFIG_HOME/mihomo/GeoLite2-ASN.mmdb, $HOME/.config/mihomo/GeoLite2-ASN.mmdb, \
+                 or ./mihomo/GeoLite2-ASN.mmdb"
+                    .to_string()
+            })?;
+            IpAsnRule::new(payload, adapter, reader, true, true)
+                .map(|r| Box::new(r) as Box<dyn Rule>)
         }
         _ => Err(format!("unknown rule type: {}", rule_type)),
     }

@@ -67,7 +67,18 @@ impl ProcessPathRule {
         }
         match &self.mode {
             MatchMode::Glob(re) => re.is_match(process_path),
-            MatchMode::Prefix => process_path.starts_with(self.payload.as_str()),
+            MatchMode::Prefix => {
+                // Exact match, or match on a path-component boundary.
+                // `/usr/bin` matches `/usr/bin/curl` but NOT `/usr/bin-extra`.
+                let payload = self.payload.as_str();
+                if process_path == payload {
+                    return true;
+                }
+                match process_path.strip_prefix(payload) {
+                    Some(rest) => rest.starts_with('/') || rest.starts_with('\\'),
+                    None => false,
+                }
+            }
             MatchMode::Exact => {
                 // Exact match on the filename component (same as PROCESS-NAME fallback).
                 let filename = Path::new(process_path)

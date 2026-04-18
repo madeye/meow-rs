@@ -723,3 +723,184 @@ fn and_rule_should_resolve_ip_recurses_into_children() {
     let and = AndRule::new(vec![Box::new(inner)], "PROXY");
     assert!(and.should_resolve_ip());
 }
+
+// ─── IN-PORT (M1.D-1) ──────────────────────────────────────────────
+
+#[test]
+fn parse_in_port_exact_match() {
+    let r = parse_rule("IN-PORT,7890,DIRECT").unwrap();
+    assert_eq!(r.rule_type(), RuleType::InPort);
+    let m = Metadata {
+        in_port: 7890,
+        ..Default::default()
+    };
+    assert!(r.match_metadata(&m, &helper()));
+}
+
+#[test]
+fn parse_in_port_range_match() {
+    let r = parse_rule("IN-PORT,100-200,PROXY").unwrap();
+    let m = Metadata {
+        in_port: 150,
+        ..Default::default()
+    };
+    assert!(r.match_metadata(&m, &helper()));
+    let m_below = Metadata {
+        in_port: 99,
+        ..Default::default()
+    };
+    assert!(!r.match_metadata(&m_below, &helper()));
+}
+
+#[test]
+fn parse_in_port_zero_never_matches() {
+    // upstream: rules/common/inport.go — in_port 0 means listener didn't populate.
+    // NOT a match on the sentinel zero.
+    let r = parse_rule("IN-PORT,7890,DIRECT").unwrap();
+    let m = Metadata::default(); // in_port: 0
+    assert!(!r.match_metadata(&m, &helper()));
+}
+
+// ─── DSCP (M1.D-1) ─────────────────────────────────────────────────
+
+#[test]
+fn parse_dscp_match_some() {
+    let r = parse_rule("DSCP,46,PROXY").unwrap();
+    assert_eq!(r.rule_type(), RuleType::Dscp);
+    let m = Metadata {
+        dscp: Some(46),
+        ..Default::default()
+    };
+    assert!(r.match_metadata(&m, &helper()));
+}
+
+#[test]
+fn parse_dscp_none_never_matches() {
+    // Class A fix per ADR-0002 — upstream: rules/common/dscp.go.
+    // NOT a match when dscp is None (HTTP/SOCKS5 listener).
+    let r = parse_rule("DSCP,0,DIRECT").unwrap();
+    let m = Metadata::default(); // dscp: None
+    assert!(!r.match_metadata(&m, &helper()));
+}
+
+// ─── UID (M1.D-1) ──────────────────────────────────────────────────
+
+#[test]
+fn parse_uid_succeeds_cross_platform() {
+    // upstream: rules/common/uid.go — UID rules are Linux-only at match time
+    // but parse must succeed on every platform (Class B per ADR-0002).
+    let r = parse_rule("UID,1000,DIRECT").unwrap();
+    assert_eq!(r.rule_type(), RuleType::Uid);
+}
+
+#[test]
+fn parse_uid_none_metadata_never_matches() {
+    let r = parse_rule("UID,1000,DIRECT").unwrap();
+    let m = Metadata {
+        uid: None,
+        ..Default::default()
+    };
+    assert!(!r.match_metadata(&m, &helper()));
+}
+
+// ─── SRC-GEOIP (M1.D-1) — fixture-DB-backed, skipped without reader ─
+
+#[test]
+fn parse_src_geoip_missing_reader_errors() {
+    // Class A per ADR-0002 — upstream: rules/common/geoip.go (isSource path).
+    // NOT a silent pass-through when reader absent.
+    assert!(parse_rule("SRC-GEOIP,AU,PROXY").is_err());
+}
+
+// ─── PROCESS-PATH (M1.D-1) ─────────────────────────────────────────
+
+#[test]
+fn parse_process_path_prefix_match() {
+    // Divergence from upstream exact-match (Class B per ADR-0002).
+    // upstream: rules/common/process.go — exact match only.
+    // NOT exact-only in our impl.
+    let r = parse_rule("PROCESS-PATH,/usr/bin,PROXY").unwrap();
+    assert_eq!(r.rule_type(), RuleType::ProcessPath);
+    let m = Metadata {
+        process_path: "/usr/bin/curl".to_string(),
+        ..Default::default()
+    };
+    assert!(r.match_metadata(&m, &helper()));
+}
+
+#[test]
+fn parse_process_path_different_dir_no_match() {
+    let r = parse_rule("PROCESS-PATH,/usr/bin,PROXY").unwrap();
+    let m = Metadata {
+        process_path: "/usr/local/bin/curl".to_string(),
+        ..Default::default()
+    };
+    assert!(!r.match_metadata(&m, &helper()));
+}
+
+// ─── DOMAIN-WILDCARD (M1.D-6) ──────────────────────────────────────
+
+#[test]
+fn parse_domain_wildcard_single_label() {
+    let r = parse_rule("DOMAIN-WILDCARD,*.example.com,PROXY").unwrap();
+    assert_eq!(r.rule_type(), RuleType::DomainWildcard);
+    assert!(r.match_metadata(&meta("foo.example.com", 443), &helper()));
+}
+
+#[test]
+fn parse_domain_wildcard_no_match_multi_label() {
+    // upstream: rules/common/domain_wildcard.go — `*` is single-label [^.]+.
+    // NOT a match on multi-label hosts.
+    let r = parse_rule("DOMAIN-WILDCARD,*.example.com,PROXY").unwrap();
+    assert!(!r.match_metadata(&meta("foo.bar.example.com", 443), &helper()));
+}
+
+// ─── IP-SUFFIX (M1.D-3) ────────────────────────────────────────────
+
+#[test]
+fn parse_ip_suffix_ipv4_low_byte() {
+    // upstream: rules/common/ipcidr.go — IP-SUFFIX masks low bits.
+    let r = parse_rule("IP-SUFFIX,0.0.0.1/8,PROXY").unwrap();
+    assert_eq!(r.rule_type(), RuleType::IpSuffix);
+    assert!(r.match_metadata(&meta_ip("10.20.30.1", 80), &helper()));
+    assert!(!r.match_metadata(&meta_ip("10.20.30.2", 80), &helper()));
+}
+
+#[test]
+fn parse_ip_suffix_invalid_payload_errors() {
+    // Error message must self-identify as IP-SUFFIX (NOT IP-CIDR).
+    let err = match parse_rule("IP-SUFFIX,not-an-ip,PROXY") {
+        Ok(_) => panic!("expected parse error"),
+        Err(e) => e,
+    };
+    assert!(err.contains("IP-SUFFIX"), "unexpected error: {}", err);
+}
+
+// ─── IP-ASN (M1.D-3) — requires fixture DB, skipped without reader ─
+
+#[test]
+fn parse_ip_asn_missing_reader_hard_errors() {
+    // Class A per ADR-0002 — upstream: rules/common/ipasn.go.
+    // NOT a silent skip when DB missing (we reject at parse).
+    let err = match parse_rule("IP-ASN,13335,PROXY") {
+        Ok(_) => panic!("expected parse error"),
+        Err(e) => e,
+    };
+    assert!(
+        err.contains("GeoLite2-ASN"),
+        "error should name the missing DB file, got: {}",
+        err
+    );
+}
+
+// ─── Parser dispatch guards (I-series) ─────────────────────────────
+
+#[test]
+fn parse_unknown_rule_type_still_errors() {
+    // Guard-rail: the `_ => unknown rule type` arm was not removed.
+    let err = match parse_rule("MADE-UP-RULE,foo,DIRECT") {
+        Ok(_) => panic!("expected parse error"),
+        Err(e) => e,
+    };
+    assert!(err.contains("unknown rule type"), "unexpected error: {}", err);
+}
