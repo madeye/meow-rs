@@ -2,7 +2,7 @@ use crate::raw::{HostsValue, RawConfig};
 use crate::DnsConfig;
 use mihomo_common::DnsMode;
 use mihomo_dns::upstream::NameServerUrl;
-use mihomo_dns::{BootstrapError, Resolver};
+use mihomo_dns::Resolver;
 use mihomo_trie::DomainTrie;
 use std::collections::HashMap;
 use std::net::IpAddr;

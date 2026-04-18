@@ -84,24 +84,7 @@ impl<'a> MakeWriter<'a> for CapWriter {
     }
 }
 
-/// Run `f` with a fresh capturing tracing subscriber; return the captured lines.
-fn with_warn_capture<F, R>(f: F) -> (R, Vec<String>)
-where
-    F: FnOnce() -> R,
-{
-    let cap = CapWriter::new();
-    let cap_clone = cap.clone();
-    let sub = tracing_subscriber::fmt()
-        .with_writer(cap)
-        .with_ansi(false)
-        .with_level(true)
-        .with_max_level(tracing::Level::WARN)
-        .finish();
-    let result = tracing::subscriber::with_default(sub, f);
-    (result, cap_clone.captured())
-}
-
-/// Async variant of `with_warn_capture` for use in `#[tokio::test]` tests.
+/// Capture tracing WARN lines emitted while `fut` runs; return `(result, captured)`.
 async fn with_warn_capture_async<Fut, R>(fut: Fut) -> (R, Vec<String>)
 where
     Fut: std::future::Future<Output = R>,

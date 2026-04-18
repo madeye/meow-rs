@@ -448,6 +448,6 @@ mod async_guard_tests {
     fn load_config_from_str_is_async_compile_check() {
         use std::future::Future;
         use std::pin::Pin;
-        let _: Pin<Box<dyn Future<Output = _>>> = Box::pin(super::load_config_from_str(""));
+        let _fut: Pin<Box<dyn Future<Output = _>>> = Box::pin(super::load_config_from_str(""));
     }
 }
