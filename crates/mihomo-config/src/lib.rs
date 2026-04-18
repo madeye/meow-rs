@@ -3,6 +3,7 @@ pub mod proxy_parser;
 pub mod raw;
 pub mod rule_parser;
 pub mod rule_provider;
+pub mod sub_rules_parser;
 pub mod subscription;
 
 use mihomo_common::{Proxy, Rule, TunnelMode};
@@ -199,11 +200,35 @@ pub fn rebuild_from_raw_with_cache_dir(
         _ => HashMap::new(),
     };
 
-    let rules = rule_parser::parse_rules_with_providers(
+    // Parse sub-rules before top-level rules so that SUB-RULE entries in
+    // `rules:` can resolve against already-built blocks.
+    let sub_rules = match raw.sub_rules.as_ref() {
+        Some(map) if !map.is_empty() => sub_rules_parser::parse_sub_rules(map, &providers, &ctx)?,
+        _ => HashMap::new(),
+    };
+
+    let rules = rule_parser::parse_rules_full(
         raw.rules.as_deref().unwrap_or(&[]),
         &providers,
         &ctx,
+        &sub_rules,
     );
+
+    // Validate: any `SUB-RULE,<name>` in top-level rules must reference a
+    // defined block. `parse_rules_full` warns on unknown blocks; promote
+    // undefined-block to a hard error here (Class A per ADR-0002).
+    if let Some(raw_rules) = raw.rules.as_deref() {
+        for line in raw_rules {
+            if let Some(name) = sub_rules_parser::parse_sub_rule_reference(line) {
+                if !sub_rules.contains_key(&name) {
+                    return Err(anyhow::anyhow!(
+                        "rules: SUB-RULE,{} references undefined sub-rule block",
+                        name
+                    ));
+                }
+            }
+        }
+    }
 
     Ok((proxies, rules))
 }
@@ -395,26 +420,8 @@ mod geoip_context_tests {
 
     fn raw_with_rules(rules: Vec<&str>) -> raw::RawConfig {
         raw::RawConfig {
-            port: None,
-            socks_port: None,
-            mixed_port: None,
-            allow_lan: None,
-            bind_address: None,
-            mode: None,
-            log_level: None,
-            ipv6: None,
-            external_controller: None,
-            secret: None,
-            dns: None,
-            proxies: None,
-            proxy_groups: None,
             rules: Some(rules.into_iter().map(|s| s.to_string()).collect()),
-            rule_providers: None,
-            subscriptions: None,
-            tproxy_port: None,
-            tproxy_sni: None,
-            routing_mark: None,
-            hosts: None,
+            ..Default::default()
         }
     }
 

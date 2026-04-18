@@ -23,9 +23,9 @@ pub fn match_rules(metadata: &Metadata, rules: &[Box<dyn Rule>]) -> Option<Match
     let meta: &Metadata = enriched.as_ref().unwrap_or(metadata);
 
     for rule in rules {
-        if rule.match_metadata(meta, &helper) {
+        if let Some(adapter_name) = rule.match_and_resolve(meta, &helper) {
             return Some(MatchResult {
-                adapter_name: rule.adapter().to_string(),
+                adapter_name,
                 rule_name: format!("{}", rule.rule_type()),
                 rule_payload: rule.payload().to_string(),
             });

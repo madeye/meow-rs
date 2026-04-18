@@ -4,30 +4,13 @@ use std::collections::HashMap;
 
 fn minimal_raw_config() -> RawConfig {
     RawConfig {
-        port: None,
-        socks_port: None,
         mixed_port: Some(7890),
-        allow_lan: None,
-        bind_address: None,
         mode: Some("rule".into()),
-        log_level: None,
-        ipv6: None,
-        external_controller: None,
-        secret: None,
-        dns: None,
-
-        proxies: None,
-        proxy_groups: None,
         rules: Some(vec![
             "DOMAIN,example.com,DIRECT".into(),
             "MATCH,REJECT".into(),
         ]),
-        rule_providers: None,
-        subscriptions: None,
-        tproxy_port: None,
-        tproxy_sni: None,
-        routing_mark: None,
-        hosts: None,
+        ..Default::default()
     }
 }
 
@@ -183,29 +166,7 @@ fn rebuild_from_raw_parses_rules() {
 
 #[test]
 fn rebuild_from_raw_empty_config() {
-    let raw = RawConfig {
-        port: None,
-        socks_port: None,
-        mixed_port: None,
-        allow_lan: None,
-        bind_address: None,
-        mode: None,
-        log_level: None,
-        ipv6: None,
-        external_controller: None,
-        secret: None,
-        dns: None,
-
-        proxies: None,
-        proxy_groups: None,
-        rules: None,
-        rule_providers: None,
-        subscriptions: None,
-        tproxy_port: None,
-        tproxy_sni: None,
-        routing_mark: None,
-        hosts: None,
-    };
+    let raw = RawConfig::default();
     let (proxies, rules) = rebuild_from_raw(&raw).unwrap();
     // Should still have built-in proxies
     assert_eq!(proxies.len(), 3);

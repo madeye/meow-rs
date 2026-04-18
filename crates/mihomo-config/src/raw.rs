@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawConfig {
     pub port: Option<u16>,
@@ -19,6 +19,10 @@ pub struct RawConfig {
     pub proxy_groups: Option<Vec<RawProxyGroup>>,
     pub rules: Option<Vec<String>>,
     pub rule_providers: Option<HashMap<String, RawRuleProvider>>,
+    /// Named sub-rule blocks. Each key is a block name; each value is a
+    /// list of rule strings parsed identically to the top-level `rules:`
+    /// section. Referenced from `rules:` via `SUB-RULE,<name>`.
+    pub sub_rules: Option<HashMap<String, Vec<String>>>,
     pub subscriptions: Option<Vec<RawSubscription>>,
     pub tproxy_port: Option<u16>,
     pub tproxy_sni: Option<bool>,

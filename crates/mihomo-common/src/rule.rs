@@ -86,4 +86,23 @@ pub trait Rule: Send + Sync {
     fn should_find_process(&self) -> bool {
         false
     }
+
+    /// Match against metadata and, on match, return the routing target.
+    ///
+    /// Default: `Some(self.adapter().to_string())` when `match_metadata`
+    /// returns true, else `None`. Override only when the resolved target
+    /// must come from some other source — notably `SUB-RULE`, whose
+    /// target is the matched inner rule's adapter rather than any field
+    /// stored on the outer rule.
+    ///
+    /// upstream: `rules/logic/logic.go::matchSubRules` — returns
+    /// `(bool, adapter)` from the inner rule, not from the SUB-RULE
+    /// wrapper.
+    fn match_and_resolve(&self, metadata: &Metadata, helper: &RuleMatchHelper) -> Option<String> {
+        if self.match_metadata(metadata, helper) {
+            Some(self.adapter().to_string())
+        } else {
+            None
+        }
+    }
 }

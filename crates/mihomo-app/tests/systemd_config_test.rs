@@ -4,29 +4,13 @@ use std::os::unix::fs::PermissionsExt;
 
 fn minimal_raw_config() -> RawConfig {
     RawConfig {
-        port: None,
-        socks_port: None,
         mixed_port: Some(7890),
-        allow_lan: None,
-        bind_address: None,
         mode: Some("rule".into()),
-        log_level: None,
-        ipv6: None,
-        external_controller: None,
-        secret: None,
-        dns: None,
-        proxies: None,
-        proxy_groups: None,
         rules: Some(vec![
             "DOMAIN,example.com,DIRECT".into(),
             "MATCH,REJECT".into(),
         ]),
-        rule_providers: None,
-        subscriptions: None,
-        tproxy_port: None,
-        tproxy_sni: None,
-        routing_mark: None,
-        hosts: None,
+        ..Default::default()
     }
 }
 

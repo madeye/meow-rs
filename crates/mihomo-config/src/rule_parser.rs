@@ -5,19 +5,31 @@ use mihomo_common::Rule;
 use mihomo_rules::{ParserContext, RuleSet, RuleSetRule};
 use tracing::warn;
 
-/// Parse rules with no rule-providers available. Equivalent to
-/// `parse_rules_with_providers` with an empty map.
+use crate::sub_rules_parser::{build_sub_rule_rule, parse_sub_rule_reference, SubRuleBlocks};
+
+/// Parse rules with no rule-providers or sub-rule blocks available.
 pub fn parse_rules(raw_rules: &[String], ctx: &ParserContext) -> Vec<Box<dyn Rule>> {
     parse_rules_with_providers(raw_rules, &HashMap::new(), ctx)
 }
 
 /// Parse the `rules:` block, resolving `RULE-SET,<name>,...` entries against
 /// the supplied provider map and delegating everything else to the core
-/// `mihomo_rules::parse_rule`.
+/// `mihomo_rules::parse_rule`. Sub-rule blocks default to empty.
 pub fn parse_rules_with_providers(
     raw_rules: &[String],
     providers: &HashMap<String, Arc<dyn RuleSet>>,
     ctx: &ParserContext,
+) -> Vec<Box<dyn Rule>> {
+    parse_rules_full(raw_rules, providers, ctx, &HashMap::new())
+}
+
+/// Parse the `rules:` block with full resolver context — providers, ctx,
+/// and pre-resolved sub-rule blocks for `SUB-RULE,<name>` entries.
+pub fn parse_rules_full(
+    raw_rules: &[String],
+    providers: &HashMap<String, Arc<dyn RuleSet>>,
+    ctx: &ParserContext,
+    sub_rules: &SubRuleBlocks,
 ) -> Vec<Box<dyn Rule>> {
     let mut rules: Vec<Box<dyn Rule>> = Vec::new();
     for line in raw_rules {
@@ -25,22 +37,30 @@ pub fn parse_rules_with_providers(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-
-        // Intercept RULE-SET before falling through to the core parser.
-        if let Some(rule_set_rule) = try_parse_rule_set(line, providers) {
-            match rule_set_rule {
-                Ok(r) => rules.push(r),
-                Err(e) => warn!("Failed to parse rule '{}': {}", line, e),
-            }
-            continue;
-        }
-
-        match mihomo_rules::parse_rule(line, ctx) {
+        match parse_one_rule_or_subrule(line, providers, ctx, sub_rules) {
             Ok(rule) => rules.push(rule),
             Err(e) => warn!("Failed to parse rule '{}': {}", line, e),
         }
     }
     rules
+}
+
+/// Parse a single rule line. Handles `RULE-SET,<name>,...`,
+/// `SUB-RULE,<name>`, and delegates everything else to the core
+/// `mihomo_rules::parse_rule`.
+pub fn parse_one_rule_or_subrule(
+    line: &str,
+    providers: &HashMap<String, Arc<dyn RuleSet>>,
+    ctx: &ParserContext,
+    sub_rules: &SubRuleBlocks,
+) -> Result<Box<dyn Rule>, String> {
+    if let Some(result) = try_parse_rule_set(line, providers) {
+        return result;
+    }
+    if let Some(block_name) = parse_sub_rule_reference(line) {
+        return build_sub_rule_rule(&block_name, sub_rules);
+    }
+    mihomo_rules::parse_rule(line, ctx)
 }
 
 /// Returns `Some(...)` only when `line` is a RULE-SET entry; `None` means

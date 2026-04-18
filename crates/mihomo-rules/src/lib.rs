@@ -19,6 +19,7 @@ pub mod process_path;
 pub mod rule_set;
 pub mod rule_set_rule;
 pub mod src_geoip;
+pub mod sub_rule;
 pub mod uid;
 
 pub use parser::{parse_rule, ParserContext};
