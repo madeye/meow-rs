@@ -101,8 +101,23 @@ is a runtime error, not a parse-time error.
 ### Auto-update task
 
 Spawned once at startup when `auto-update: true`. Wakes every
-`auto-update-interval` hours, downloads each configured URL, writes
-to a temp file, and atomically replaces the live file via `rename(2)`.
+`auto-update-interval` hours. On each tick:
+
+1. **Check in-flight guard.** If a download for this DB is already in progress
+   from a previous tick (slow network, large `geosite.mrs`), skip this tick with
+   `debug!("auto-update: {db} refresh already in flight, skipping")`. Do NOT
+   start a second concurrent download — overlapping writes to the temp file can
+   corrupt it. Use a per-DB `AtomicBool` flag set before the request and cleared
+   on completion or error.
+
+2. **Conditional GET.** Before downloading the body, issue a `HEAD` request or
+   a `GET` with `If-Modified-Since: <file mtime>`. If the server returns `304 Not
+   Modified` (or identical `Content-Length` + `Last-Modified`), skip the download.
+   This avoids hammering GitHub's release CDN rate limit (5000 req/h per IP) on
+   short intervals and wastes no bandwidth when files are unchanged.
+
+3. **Download, write temp, rename.** Write the body to a temp file in the same
+   directory as the target, then atomically replace via `rename(2)`.
 
 **Important:** `rename(2)` updates the file on disk but NOT the in-memory DB.
 After each successful file swap, the task MUST explicitly reload the DB into
@@ -145,6 +160,12 @@ Class A or B divergence — it is a feature interaction, not a correctness trade
 7. Upstream-only fields (`geodata-mode`, `geodata-loader`) → parsed without
    error, `warn!` logged once per field.
 8. `auto-update-interval: 0` → hard parse error ("minimum is 1 hour").
+9. Conditional GET: with `auto-update: true`, if the remote file is unchanged
+   (server returns `304` or matching `Content-Length` + `Last-Modified`), no
+   body is downloaded and the existing file is left untouched.
+10. Single in-flight guard: if a download for a given DB is already in progress
+    when the next tick fires, the new tick logs `debug!` and returns without
+    starting a second download.
 
 ## Implementation checklist (engineer handoff — M2)
 
@@ -153,6 +174,9 @@ Class A or B divergence — it is a feature interaction, not a correctness trade
       optional explicit path before discovery chain.
 - [ ] Spawn auto-update task in `main.rs` when `auto-update: true`; wrap each
       DB in `Arc<RwLock<_>>` if not already.
+- [ ] Add per-DB `AtomicBool` in-flight guard; skip tick with `debug!` if set.
+- [ ] Implement conditional GET (`If-Modified-Since` or HEAD + compare headers);
+      skip body download on 304 / unchanged.
 - [ ] Implement atomic file replace (`tempfile` + `rename`).
 - [ ] Warn-once on unrecognised `geodata.*` fields.
 
