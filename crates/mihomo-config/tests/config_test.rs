@@ -655,3 +655,175 @@ rules:
     assert_eq!(config.rules.len(), 1);
     assert_eq!(config.rules[0].rule_type().to_string(), "MATCH");
 }
+
+// ─── SUB-RULE (M1.D-7) ─────────────────────────────────────────────
+
+/// C1 — undefined block → hard parse error (Class A per ADR-0002).
+/// upstream: upstream errors at runtime; we reject at parse.
+#[tokio::test]
+async fn sub_rule_undefined_block_hard_errors() {
+    let yaml = r#"
+mixed-port: 7890
+rules:
+  - SUB-RULE,MISSING
+  - MATCH,DIRECT
+"#;
+    let err = match load_config_from_str(yaml).await {
+        Ok(_) => panic!("expected error"),
+        Err(e) => e,
+    };
+    let msg = format!("{:#}", err);
+    assert!(msg.contains("MISSING"), "unexpected: {}", msg);
+}
+
+/// D1 — cycle (A → B → A) → hard parse error.
+#[tokio::test]
+async fn sub_rule_cycle_hard_errors() {
+    let yaml = r#"
+mixed-port: 7890
+sub-rules:
+  A:
+    - SUB-RULE,B
+  B:
+    - SUB-RULE,A
+rules:
+  - SUB-RULE,A
+  - MATCH,DIRECT
+"#;
+    let err = match load_config_from_str(yaml).await {
+        Ok(_) => panic!("expected error"),
+        Err(e) => e,
+    };
+    let msg = format!("{:#}", err);
+    assert!(msg.contains("cycle"), "unexpected: {}", msg);
+}
+
+/// D2 — self-reference is a degenerate cycle.
+#[tokio::test]
+async fn sub_rule_self_reference_hard_errors() {
+    let yaml = r#"
+mixed-port: 7890
+sub-rules:
+  A:
+    - SUB-RULE,A
+rules:
+  - SUB-RULE,A
+  - MATCH,DIRECT
+"#;
+    let err = match load_config_from_str(yaml).await {
+        Ok(_) => panic!("expected error"),
+        Err(e) => e,
+    };
+    let msg = format!("{:#}", err);
+    assert!(msg.contains("cycle"), "unexpected: {}", msg);
+}
+
+/// D5 — diamond (A → B, A → C, B → D, C → D) is NOT a cycle. Parse succeeds.
+#[tokio::test]
+async fn sub_rule_diamond_not_a_cycle() {
+    let yaml = r#"
+mixed-port: 7890
+sub-rules:
+  A:
+    - SUB-RULE,B
+    - SUB-RULE,C
+  B:
+    - SUB-RULE,D
+  C:
+    - SUB-RULE,D
+  D:
+    - DOMAIN,example.com,DIRECT
+rules:
+  - SUB-RULE,A
+  - MATCH,DIRECT
+"#;
+    let config = load_config_from_str(yaml).await.unwrap();
+    assert_eq!(config.rules.len(), 2);
+    assert_eq!(config.rules[0].rule_type().to_string(), "SUB-RULE");
+    assert_eq!(config.rules[1].rule_type().to_string(), "MATCH");
+}
+
+/// A1/L — block match returns inner rule's target.
+#[tokio::test]
+async fn sub_rule_block_match_returns_inner_target() {
+    use mihomo_common::{Metadata, RuleMatchHelper};
+    let yaml = r#"
+mixed-port: 7890
+sub-rules:
+  STREAMING:
+    - DOMAIN-SUFFIX,netflix.com,Stream
+rules:
+  - SUB-RULE,STREAMING
+  - MATCH,DIRECT
+"#;
+    let config = load_config_from_str(yaml).await.unwrap();
+    let helper = RuleMatchHelper;
+    let m = Metadata {
+        host: "www.netflix.com".into(),
+        dst_port: 443,
+        ..Default::default()
+    };
+    let target = config.rules[0].match_and_resolve(&m, &helper);
+    assert_eq!(target.as_deref(), Some("Stream"));
+}
+
+/// A2/L — block exhaustion returns None so outer loop continues.
+#[tokio::test]
+async fn sub_rule_block_exhaustion_falls_through() {
+    use mihomo_common::{Metadata, RuleMatchHelper};
+    let yaml = r#"
+mixed-port: 7890
+sub-rules:
+  STREAMING:
+    - DOMAIN-SUFFIX,netflix.com,Stream
+rules:
+  - SUB-RULE,STREAMING
+  - MATCH,DIRECT
+"#;
+    let config = load_config_from_str(yaml).await.unwrap();
+    let helper = RuleMatchHelper;
+    let m = Metadata {
+        host: "example.com".into(),
+        dst_port: 443,
+        ..Default::default()
+    };
+    // SUB-RULE with non-matching inner returns None.
+    assert!(config.rules[0].match_and_resolve(&m, &helper).is_none());
+    // MATCH still wins.
+    assert_eq!(
+        config.rules[1].match_and_resolve(&m, &helper).as_deref(),
+        Some("DIRECT")
+    );
+}
+
+/// F3 — forward reference from `rules:` to `sub-rules:` resolves.
+#[tokio::test]
+async fn sub_rules_section_parsed_before_rules_section() {
+    let yaml = r#"
+mixed-port: 7890
+rules:
+  - SUB-RULE,LATER
+  - MATCH,DIRECT
+sub-rules:
+  LATER:
+    - DOMAIN,example.com,DIRECT
+"#;
+    let config = load_config_from_str(yaml).await.unwrap();
+    assert_eq!(config.rules.len(), 2);
+    assert_eq!(config.rules[0].rule_type().to_string(), "SUB-RULE");
+}
+
+/// E1 — empty block is accepted (warn-only per spec Class B).
+#[tokio::test]
+async fn sub_rule_empty_block_accepted() {
+    let yaml = r#"
+mixed-port: 7890
+sub-rules:
+  EMPTY: []
+rules:
+  - SUB-RULE,EMPTY
+  - MATCH,DIRECT
+"#;
+    let config = load_config_from_str(yaml).await.unwrap();
+    assert_eq!(config.rules.len(), 2);
+}
