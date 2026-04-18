@@ -1,9 +1,10 @@
 # Spec: CI quality gates (M2 absorbed items)
 
-Status: Draft (2026-04-18)
+Status: Draft (2026-04-18, updated with ADR-0007 mipsel soft-gate decision)
 Owner: engineer-b
 Tracks roadmap item: **M2** (absorbed CI items from ci-status.md §P1/P2)
 Lane: engineer-b (footprint + infra chain)
+ADR: [`docs/adr/0007-m2-footprint-budget.md`](../adr/0007-m2-footprint-budget.md) §1 — mipsel soft-gate classification
 See also: ci-status.md §Gaps (P1 item 5, P2 items 6/8/9);
           cargo-feature-flags.md §Release CI integration.
 
@@ -105,8 +106,24 @@ Add to the matrix in `release.yml`:
 ```
 
 `cargo-zigbuild` with zig 0.13 already supports this target; no additional
-tooling changes required. The existing `minimal-size-check` step from
-cargo-feature-flags.md applies to this target too.
+tooling changes required.
+
+**Soft-gate behavior (ADR-0007 §1):** mipsel is a **soft target** in M2. The
+`minimal-size-check` step for mipsel MUST emit a warning and continue — it must
+NOT fail the release job. Use `|| true` or a conditional exit code check:
+
+```bash
+# mipsel size check — soft gate (warning only, per ADR-0007 §1)
+SIZE=$(stat -c%s target/mipsel-unknown-linux-musl/release/mihomo)
+BUDGET_BYTES=$((7 * 1024 * 1024))   # 7 MiB
+if [ "$SIZE" -gt "$BUDGET_BYTES" ]; then
+  echo "::warning::mipsel minimal binary ${SIZE} bytes exceeds soft budget ${BUDGET_BYTES}"
+fi
+# Note: no exit 1 — soft gate
+```
+
+aarch64 and x86_64 remain **hard-gated** (release fails if exceeded).
+No functional validation (no QEMU runner) for mipsel regardless of budget pass/fail.
 
 ## Acceptance criteria
 
@@ -117,7 +134,8 @@ cargo-feature-flags.md applies to this target too.
 3. `coverage.yml` runs on schedule, produces `lcov.info`, and uploads to
    Codecov successfully (or exits cleanly with `fail_ci_if_error: false`).
 4. `release.yml` produces a `mihomo-*-mipsel-unknown-linux-musl.tar.gz` artifact
-   on `v*` tag push.
+   on `v*` tag push; mipsel size overrun emits `::warning::` but does NOT fail
+   the release job (soft gate, ADR-0007 §1).
 5. `cargo test --lib` is not changed or broken.
 
 ## Implementation checklist (engineer-b handoff)

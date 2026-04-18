@@ -1,9 +1,10 @@
 # Spec: Benchmark harness vs Go mihomo (M2)
 
-Status: Draft (2026-04-18, revised with engineer-a prep findings)
+Status: Draft (2026-04-18, revised with engineer-a prep findings + ADR-0006)
 Owner: engineer-a
 Tracks roadmap item: **M2** (benchmark harness)
 Lane: engineer-a (perf measurement chain)
+ADR: [`docs/adr/0006-m2-benchmark-workloads.md`](../adr/0006-m2-benchmark-workloads.md) — workload definitions, hardware record format, comparison thresholds
 Blocks: allocator-audit.md (M2.B-2), rule-engine-micro-opt.md (M2.B-2)
 Upstream reference: none — mihomo-rust capability, not a parity feature.
 

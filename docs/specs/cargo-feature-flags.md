@@ -1,9 +1,10 @@
 # Spec: Cargo feature flags + minimal-build size budget (M2)
 
-Status: Draft (2026-04-18, revised with engineer-b prep findings)
+Status: Draft (2026-04-18, updated with ADR-0007 decisions)
 Owner: engineer-b
 Tracks roadmap item: **M2** (Cargo feature flags, minimal-build)
 Lane: engineer-b (footprint + infra chain)
+ADR: [`docs/adr/0007-m2-footprint-budget.md`](../adr/0007-m2-footprint-budget.md)
 Upstream reference: Go mihomo uses build tags; not directly applicable to Rust.
 This is a mihomo-rust capability, not a parity feature.
 
@@ -61,7 +62,13 @@ exist yet.
 | Bundle | Includes |
 |--------|---------|
 | `full` (default) | all features above |
-| `minimal` | `ss`, `transport-tls`, `listener-mixed`, `dns-server` |
+| `minimal` | `ss`, `trojan`, `transport-tls`, `transport-ws`, `listener-mixed`, `dns-server` — REST API always included (not optional) |
+
+**ADR-0007 §1 defines `minimal` as `tls,ws,ss,trojan,api`** — the "minimum useful set
+for a router operator." Dropping TLS would exclude SS+v2ray-plugin+TLS+ws, the
+dominant modern transport pairing for ~95% of router users. Do NOT remove `transport-tls`
+or `transport-ws` from the minimal bundle to chase a smaller binary; revisit in M3
+after profiling real operator usage.
 
 ## Load-bearing deps that must become conditional
 
@@ -79,17 +86,31 @@ overhead for them.
 
 ## Size budget
 
-Target (stripped binary; no UPX):
+Per ADR-0007 §2 (confirmed). Target = stripped binary, no UPX, `minimal` feature set:
 
-| Target | Full build | Minimal build |
-|--------|-----------|---------------|
-| `aarch64-unknown-linux-musl` | no regression vs baseline | ≤ 5 MB (TBD — architect-2 to confirm) |
-| `mipsel-unknown-linux-musl` | no regression vs baseline | ≤ 6 MB (TBD — architect-2 to confirm) |
+| Target | Default build | Minimal build | Gate |
+|--------|--------------|---------------|------|
+| `aarch64-unknown-linux-musl` | ≤ 20 MiB | ≤ 8 MiB | **hard** — release fails if exceeded |
+| `mipsel-unknown-linux-musl` | ≤ 20 MiB | ≤ 7 MiB | **soft** — release emits warning, does not fail |
+| `x86_64-unknown-linux-musl` | ≤ 20 MiB | not gated | informational only |
 
-**Note:** exact budget numbers are pending architect-2 sign-off (Task #25).
-This spec uses placeholder figures; engineer-b should not hard-code them in CI
-until Task #25 closes. The `ci-quality-gates.md §minimal-size-check` step will
-be parameterized once the numbers are confirmed.
+**Budget rationale (ADR-0007 §2):**
+- mipsel 7 MiB: common legacy mipsel router flash is 16 MiB with ~6–8 MiB free
+  after OpenWRT base; 7 MiB fits with overlayfs + config + logs.
+- aarch64 8 MiB: ~8% codegen headroom vs mipsel; aarch64 routers have ≥ 64 MiB
+  storage, leaving room for one additional small-protocol addition before amendment.
+- Default 16–20 MiB: no hard cap on full builds today; track via informational step.
+
+**Step 0 prerequisite (ADR-0007 §Migration step 0):** these budgets are only
+meaningful after engineer-b completes the feature-gating work that makes `ss`,
+`trojan`, `transport-tls`, `transport-ws`, `hickory-server` conditional. Do NOT
+add the CI size-check step until the gating compiles without errors — a 11 MiB
+"minimal" build that ignores features is a false gate.
+
+**Downward amendments** are welcome: if the real post-gating measurement on the
+reference host is below budget (e.g., 6.2 MiB mipsel), open a one-paragraph
+amendment PR to tighten the cap. We commit to the upper bound now; tightening
+costs nothing.
 
 Measure with:
 
@@ -119,12 +140,14 @@ None — new capability.
 
 1. `cargo build --no-default-features --features minimal --target aarch64-unknown-linux-musl`
    compiles without errors.
-2. Stripped minimal binary for `aarch64-musl` meets the architect-confirmed budget.
-3. Stripped minimal binary for `mipsel-musl` meets the architect-confirmed budget.
+2. Stripped minimal binary for `aarch64-musl` is ≤ 8 MiB (hard gate — CI fails if exceeded).
+3. Stripped minimal binary for `mipsel-musl` is ≤ 7 MiB (soft gate — CI emits warning, does not fail).
 4. `cargo test --lib` passes for both `full` (default) and `minimal` feature sets.
 5. `cargo hack --feature-powerset check` passes for `mihomo-proxy`,
    `mihomo-transport`, `mihomo-listener`, and `mihomo-dns` (wired in ci-quality-gates.md).
 6. Binary sizes documented in `docs/benchmarks/binary-size.md`.
+7. Step 0 prerequisite satisfied: `--no-default-features --features minimal` produces a
+   meaningfully smaller binary than default before any CI gate is added.
 
 ## Implementation checklist (engineer-b handoff)
 
