@@ -12,18 +12,11 @@ pub enum AdapterType {
     LoadBalance,
     Relay,
     Shadowsocks,
-    ShadowsocksR,
-    Snell,
     Socks5,
     Http,
-    Vmess,
     Vless,
     Trojan,
-    Hysteria,
     Hysteria2,
-    WireGuard,
-    Tuic,
-    Ssh,
 }
 
 impl fmt::Display for AdapterType {
@@ -38,18 +31,11 @@ impl fmt::Display for AdapterType {
             AdapterType::LoadBalance => write!(f, "LoadBalance"),
             AdapterType::Relay => write!(f, "Relay"),
             AdapterType::Shadowsocks => write!(f, "Shadowsocks"),
-            AdapterType::ShadowsocksR => write!(f, "ShadowsocksR"),
-            AdapterType::Snell => write!(f, "Snell"),
             AdapterType::Socks5 => write!(f, "Socks5"),
             AdapterType::Http => write!(f, "Http"),
-            AdapterType::Vmess => write!(f, "Vmess"),
             AdapterType::Vless => write!(f, "Vless"),
             AdapterType::Trojan => write!(f, "Trojan"),
-            AdapterType::Hysteria => write!(f, "Hysteria"),
             AdapterType::Hysteria2 => write!(f, "Hysteria2"),
-            AdapterType::WireGuard => write!(f, "WireGuard"),
-            AdapterType::Tuic => write!(f, "Tuic"),
-            AdapterType::Ssh => write!(f, "Ssh"),
         }
     }
 }

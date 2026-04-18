@@ -15,18 +15,11 @@ fn test_adapter_type_display() {
         (AdapterType::Fallback, "Fallback"),
         (AdapterType::UrlTest, "URLTest"),
         (AdapterType::Shadowsocks, "Shadowsocks"),
-        (AdapterType::ShadowsocksR, "ShadowsocksR"),
-        (AdapterType::Snell, "Snell"),
         (AdapterType::Socks5, "Socks5"),
         (AdapterType::Http, "Http"),
-        (AdapterType::Vmess, "Vmess"),
         (AdapterType::Vless, "Vless"),
         (AdapterType::Trojan, "Trojan"),
-        (AdapterType::Hysteria, "Hysteria"),
         (AdapterType::Hysteria2, "Hysteria2"),
-        (AdapterType::WireGuard, "WireGuard"),
-        (AdapterType::Tuic, "Tuic"),
-        (AdapterType::Ssh, "Ssh"),
     ];
     for (variant, expected) in cases {
         assert_eq!(variant.to_string(), expected, "AdapterType::{:?}", variant);
