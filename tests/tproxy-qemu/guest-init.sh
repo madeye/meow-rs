@@ -30,7 +30,9 @@ echo "mihomo started (PID $MIHOMO_PID)"
 # --- Wait for TProxy listener to be ready (up to 10s) ---
 READY=0
 for i in $(seq 1 20); do
-    if grep -q "TProxy listener started" /tmp/mihomo.log 2>/dev/null; then
+    # Match both legacy "TProxy listener started" and current
+    # "TProxy listener '<name>' started on <addr>" formats.
+    if grep -qE "TProxy listener( '[^']*')? started" /tmp/mihomo.log 2>/dev/null; then
         READY=1
         echo "TProxy listener ready after $((i * 500))ms"
         break
