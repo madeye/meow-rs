@@ -3,6 +3,11 @@ use mihomo_common::{Metadata, ProxyConn};
 use tokio::io;
 use tracing::{debug, info, warn};
 
+/// Per-direction relay buffer for `copy_bidirectional_with_sizes`. Two of these
+/// live for the full connection lifetime, so on an iOS NE 50MB cap halving
+/// the tokio default (8 KB → 4 KB) saves 8 KB/conn — ~40 MB at 5k conns.
+const RELAY_BUF_SIZE: usize = 4 * 1024;
+
 pub async fn handle_tcp(
     tunnel: &TunnelInner,
     mut conn: Box<dyn ProxyConn>,
@@ -41,7 +46,14 @@ pub async fn handle_tcp(
     match proxy.dial_tcp(&metadata).await {
         Ok(mut remote) => {
             // Bidirectional copy
-            match io::copy_bidirectional(&mut conn, &mut remote).await {
+            match io::copy_bidirectional_with_sizes(
+                &mut conn,
+                &mut remote,
+                RELAY_BUF_SIZE,
+                RELAY_BUF_SIZE,
+            )
+            .await
+            {
                 Ok((up, down)) => {
                     tunnel.stats.add_upload(up as i64);
                     tunnel.stats.add_download(down as i64);
