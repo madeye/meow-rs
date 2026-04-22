@@ -54,7 +54,6 @@ serde_yaml = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 rustls = { workspace = true }
-mimalloc = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]

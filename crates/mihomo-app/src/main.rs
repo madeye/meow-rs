@@ -1,8 +1,3 @@
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dashmap::DashMap;

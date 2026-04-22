@@ -127,9 +127,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Parking lot for sync primitives
 parking_lot = "0.12"
 
-# Global allocator (ADR-0008 — M2 default for all targets)
-mimalloc = { version = "0.1", default-features = false }
-
 # Wait-free read / atomic swap for hot-path rule-set + proxy-provider refreshes
 arc-swap = "1"
 
