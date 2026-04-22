@@ -186,6 +186,16 @@ impl Tunnel {
         self.inner.proxies.read().clone()
     }
 
+    /// Spawn background tasks owned by the tunnel (currently just the UDP NAT
+    /// sweeper). Idempotent callers should only invoke this once per process.
+    pub fn spawn_background_tasks(&self) {
+        udp::spawn_nat_sweeper(
+            &self.inner.nat_table,
+            udp::DEFAULT_UDP_IDLE,
+            udp::DEFAULT_SWEEP_INTERVAL,
+        );
+    }
+
     pub fn rules_info(&self) -> Vec<(String, String, String)> {
         self.inner
             .rules

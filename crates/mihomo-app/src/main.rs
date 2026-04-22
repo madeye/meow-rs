@@ -431,6 +431,7 @@ async fn run(
     tunnel.set_mode(config.general.mode);
     tunnel.update_rules(config.rules);
     tunnel.update_proxies(config.proxies);
+    tunnel.spawn_background_tasks();
 
     // Start DNS server if configured
     if let Some(listen_addr) = config.dns.listen_addr {
