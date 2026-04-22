@@ -109,7 +109,7 @@ pub trait ProxyAdapter: Send + Sync {
     /// Default implementation returns `Err(NotSupported)`.  Override in
     /// adapters that support relay chaining (HTTP CONNECT, SOCKS5, …).
     ///
-    /// upstream: adapter/outbound/<proto>.go — `DialContextWithDialer`
+    /// upstream: `adapter/outbound/<proto>.go` — `DialContextWithDialer`
     async fn connect_over(
         &self,
         _stream: Box<dyn ProxyConn>,

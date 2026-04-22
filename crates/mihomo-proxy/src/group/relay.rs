@@ -1,14 +1,14 @@
 //! Relay proxy group (M1.C-2) — chains multiple outbounds in sequence.
 //!
-//! Traffic flow: client → proxy[0] → proxy[1] → … → proxy[N-1] → target.
+//! Traffic flow: `client → proxy[0] → proxy[1] → … → proxy[N-1] → target`.
 //!
 //! # Dial algorithm
 //!
-//! - proxy[0]: `dial_tcp(meta_for_proxy[1])` — real TCP connect targeting the
+//! - `proxy[0]`: `dial_tcp(meta_for_proxy[1])` — real TCP connect targeting the
 //!   next hop's address.
-//! - proxy[1..N-2]: `connect_over(stream, meta_for_proxy[i+1])` — proxy-level
+//! - `proxy[1..N-2]`: `connect_over(stream, meta_for_proxy[i+1])` — proxy-level
 //!   CONNECT tunnel through the already-established stream.
-//! - proxy[N-1]: `connect_over(stream, final_target)` — final hop connects to
+//! - `proxy[N-1]`: `connect_over(stream, final_target)` — final hop connects to
 //!   the actual target.
 //!
 //! Nested relay-of-relay works transparently: `RelayGroup` implements
