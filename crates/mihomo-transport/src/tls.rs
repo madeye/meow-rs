@@ -391,14 +391,28 @@ impl RustlsInner {
     }
 
     async fn connect(&self, inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
-        let tls_stream = self
+        let mut tls_stream = self
             .connector
             .connect(self.server_name.clone(), inner)
             .await
             .map_err(|e| TransportError::Tls(e.to_string()))?;
+        // Cap the per-connection ciphertext send queue (rustls default is 64 KB
+        // per `DEFAULT_BUFFER_LIMIT` in common_state.rs). 64 KB × thousands of
+        // idle-but-alive flows is the worst-case tail that blows iOS NE's
+        // 50 MB cap under write backpressure; 16 KB is still larger than a
+        // typical TLS record (~16 KB max) so steady-state throughput is
+        // unaffected while backpressure stalls the reader earlier.
+        tls_stream
+            .get_mut()
+            .1
+            .set_buffer_limit(Some(RUSTLS_SEND_BUFFER_LIMIT));
         Ok(Box::new(tls_stream))
     }
 }
+
+/// Cap on the rustls `sendable_tls` ciphertext queue per connection.
+/// See `RustlsInner::connect` for rationale.
+const RUSTLS_SEND_BUFFER_LIMIT: usize = 16 * 1024;
 
 // ─── BoringSSL backend ────────────────────────────────────────────────────────
 
