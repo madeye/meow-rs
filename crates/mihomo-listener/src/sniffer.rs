@@ -350,6 +350,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sniffer_parse_pure_ip_runs_on_ip_host() {
+        // host is a literal IP → parse_pure_ip lets sniff proceed even with the
+        // gate enabled.
+        let cfg = SnifferConfig {
+            enable: true,
+            parse_pure_ip: true,
+            tls_ports: vec![443],
+            ..Default::default()
+        };
+        let rt = make_runtime(cfg);
+        let (mut client, server) = make_stream_pair().await;
+        let hello = build_client_hello("example.com");
+        client.write_all(&hello).await.unwrap();
+
+        let mut meta = make_metadata("93.184.216.34", 443);
+        rt.sniff(&server, &mut meta).await;
+        assert_eq!(meta.sniff_host, "example.com");
+    }
+
+    #[tokio::test]
+    async fn sniffer_parse_pure_ip_disabled_runs_on_domain_host() {
+        // parse_pure_ip = false → the host-already-a-domain short-circuit is
+        // skipped and sniffing runs normally.
+        let cfg = SnifferConfig {
+            enable: true,
+            parse_pure_ip: false,
+            tls_ports: vec![443],
+            ..Default::default()
+        };
+        let rt = make_runtime(cfg);
+        let (mut client, server) = make_stream_pair().await;
+        let hello = build_client_hello("real-sni.example.com");
+        client.write_all(&hello).await.unwrap();
+
+        let mut meta = make_metadata("placeholder.example.com", 443);
+        rt.sniff(&server, &mut meta).await;
+        assert_eq!(meta.sniff_host, "real-sni.example.com");
+    }
+
+    #[test]
+    fn maybe_apply_sniff_disabled_is_noop() {
+        let cfg = SnifferConfig {
+            enable: false,
+            override_destination: true,
+            ..Default::default()
+        };
+        let rt = make_runtime(cfg);
+        let mut meta = make_metadata("1.2.3.4", 443);
+        rt.maybe_apply_sniff("example.com", &mut meta);
+        assert_eq!(meta.sniff_host, "");
+        assert_eq!(meta.host, "1.2.3.4");
+    }
+
+    #[test]
+    fn maybe_apply_sniff_skip_domain_drops_host() {
+        let cfg = SnifferConfig {
+            enable: true,
+            override_destination: true,
+            skip_domain: vec!["+.ads.example.com".to_string()],
+            ..Default::default()
+        };
+        let rt = make_runtime(cfg);
+        let mut meta = make_metadata("1.2.3.4", 80);
+        rt.maybe_apply_sniff("tracker.ads.example.com", &mut meta);
+        assert_eq!(meta.sniff_host, "");
+        assert_eq!(meta.host, "1.2.3.4");
+    }
+
+    #[test]
+    fn maybe_apply_sniff_override_destination_mutates_host() {
+        let cfg = SnifferConfig {
+            enable: true,
+            override_destination: true,
+            ..Default::default()
+        };
+        let rt = make_runtime(cfg);
+        let mut meta = make_metadata("1.2.3.4", 80);
+        rt.maybe_apply_sniff("example.com", &mut meta);
+        assert_eq!(meta.sniff_host, "example.com");
+        assert_eq!(meta.host, "example.com");
+    }
+
+    #[test]
+    fn maybe_apply_sniff_override_false_keeps_host() {
+        let cfg = SnifferConfig {
+            enable: true,
+            override_destination: false,
+            ..Default::default()
+        };
+        let rt = make_runtime(cfg);
+        let mut meta = make_metadata("1.2.3.4", 80);
+        rt.maybe_apply_sniff("example.com", &mut meta);
+        assert_eq!(meta.sniff_host, "example.com");
+        assert_eq!(meta.host, "1.2.3.4");
+    }
+
+    #[tokio::test]
     async fn sniffer_http_port_dispatches_to_http_parser() {
         let cfg = SnifferConfig {
             enable: true,

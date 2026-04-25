@@ -185,4 +185,101 @@ mod tests {
         let header = [0x16u8, 0x03, 0x01, 0x00, 0x05];
         assert_eq!(sniff_tls(&header), None);
     }
+
+    /// Build a ClientHello whose only extension is a non-SNI extension
+    /// (extended_master_secret, type 0x0017, empty data). Sniffing should
+    /// return `None` rather than panicking on the missing SNI.
+    fn build_client_hello_without_sni() -> Vec<u8> {
+        let mut other_ext = Vec::new();
+        other_ext.extend_from_slice(&[0x00, 0x17]);
+        other_ext.extend_from_slice(&[0x00, 0x00]);
+
+        let extensions_len = other_ext.len();
+
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&[0x03, 0x03]);
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0x00);
+        hello.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]);
+        hello.extend_from_slice(&[0x01, 0x00]);
+        hello.extend_from_slice(&(extensions_len as u16).to_be_bytes());
+        hello.extend_from_slice(&other_ext);
+
+        let handshake_len = hello.len();
+        let mut handshake = vec![
+            0x01,
+            ((handshake_len >> 16) & 0xff) as u8,
+            ((handshake_len >> 8) & 0xff) as u8,
+            (handshake_len & 0xff) as u8,
+        ];
+        handshake.extend_from_slice(&hello);
+
+        let record_len = handshake.len();
+        let mut record = Vec::new();
+        record.push(0x16);
+        record.extend_from_slice(&[0x03, 0x01]);
+        record.extend_from_slice(&(record_len as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
+    }
+
+    #[test]
+    fn sniff_tls_no_sni_extension_returns_none() {
+        let data = build_client_hello_without_sni();
+        assert_eq!(sniff_tls(&data), None);
+    }
+
+    #[test]
+    fn sniff_tls_skips_non_host_name_entries() {
+        // SNI extension with a non-zero name_type entry first, then a host_name
+        // entry. Per RFC 6066 §3 only name_type=0 (host_name) is currently
+        // defined, so the parser must skip the unknown entry rather than
+        // misinterpreting it as the hostname.
+        let host = b"target.example.com";
+        // Entry 1: name_type=0x99 (unknown), name="ignored"
+        let unknown = b"ignored";
+        // Entry 2: name_type=0x00 (host_name), name=host
+        let mut list = Vec::new();
+        list.push(0x99);
+        list.extend_from_slice(&(unknown.len() as u16).to_be_bytes());
+        list.extend_from_slice(unknown);
+        list.push(0x00);
+        list.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        list.extend_from_slice(host);
+
+        let mut sni_ext = Vec::new();
+        sni_ext.extend_from_slice(&[0x00, 0x00]);
+        let ext_data_len = (2 + list.len()) as u16;
+        sni_ext.extend_from_slice(&ext_data_len.to_be_bytes());
+        sni_ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        sni_ext.extend_from_slice(&list);
+
+        let extensions_len = sni_ext.len();
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&[0x03, 0x03]);
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0x00);
+        hello.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]);
+        hello.extend_from_slice(&[0x01, 0x00]);
+        hello.extend_from_slice(&(extensions_len as u16).to_be_bytes());
+        hello.extend_from_slice(&sni_ext);
+
+        let handshake_len = hello.len();
+        let mut handshake = vec![
+            0x01,
+            ((handshake_len >> 16) & 0xff) as u8,
+            ((handshake_len >> 8) & 0xff) as u8,
+            (handshake_len & 0xff) as u8,
+        ];
+        handshake.extend_from_slice(&hello);
+
+        let record_len = handshake.len();
+        let mut record = Vec::new();
+        record.push(0x16);
+        record.extend_from_slice(&[0x03, 0x01]);
+        record.extend_from_slice(&(record_len as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+
+        assert_eq!(sniff_tls(&record), Some("target.example.com".to_string()));
+    }
 }

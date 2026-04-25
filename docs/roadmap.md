@@ -1,7 +1,7 @@
 # mihomo-rust Roadmap
 
 Owner: pm
-Last updated: 2026-04-18 (M1 audit — struck through merged items, task refs added)
+Last updated: 2026-04-25 (audit — strike merged M0/M1/M2 items; only M1.E-6, M1.F-4/5, and M3 remain open)
 Source inputs: `docs/vision.md`, `docs/gap-analysis.md`, `docs/ci-status.md`.
 
 This roadmap translates the architect's gap analysis into an ordered work
@@ -28,11 +28,11 @@ pick these up as "fix-it Fridays" while larger M1 specs are drafted.
 | # | Item | Value | Risk | Notes |
 |---|------|:-----:|:----:|-------|
 | ~~M0-1~~ | ~~Enforce REST API `secret` (Bearer auth)~~ | H | L | ~~`AppState.secret` is `#[allow(dead_code)]`; unauth API is a security gap~~ *(merged [178c30f](../../../commit/178c30f))* |
-| M0-2 | Replace `eprintln!` debug in `routes.rs:115` with `tracing::debug!` | L | L | Hot-path log spam |
+| ~~M0-2~~ | ~~Replace `eprintln!` debug in `routes.rs:115` with `tracing::debug!`~~ | L | L | ~~Hot-path log spam~~ *(closed: no `eprintln!` left in `mihomo-api`; routes.rs has been rewritten)* |
 | ~~M0-3~~ | ~~Wire `PROCESS-NAME` lookup (netlink on Linux, `libproc` on macOS)~~ | M | M | ~~Currently a no-op `Box<dyn Fn()>`; rules silently never match~~ *(merged [d89e5fd](../../../commit/d89e5fd))* |
 | ~~M0-4~~ | ~~GEOIP parser + shared `Arc<MaxMindDB>` plumbing~~ | H | M | ~~Today `parse_rule` rejects `GEOIP`; YAML with GEOIP fails to load~~ *(merged [d89e5fd](../../../commit/d89e5fd))* |
 | ~~M0-5~~ | ~~Populate `Resolver` hosts trie from `dns.hosts` config~~ | M | L | ~~Trie allocated, never filled~~ *(merged [d89e5fd](../../../commit/d89e5fd); superseded by M1.E-5 for remaining gaps)* |
-| M0-6 | Wire DNS in-flight dedup (`inflight: DashMap`) | M | L | Allocated but `#[allow(dead_code)]` |
+| ~~M0-6~~ | ~~Wire DNS in-flight dedup (`inflight: DashMap`)~~ | M | L | ~~Allocated but `#[allow(dead_code)]`~~ *(closed: `Resolver::lookup` now uses the inflight map; covered by `inflight_entry_cleared_after_lookup_miss` in `mihomo-dns/src/resolver.rs`)* |
 | ~~M0-7~~ | ~~Verify `AND/OR/NOT` logic rules reachable from top-level parser~~ | M | L | ~~`logic.rs` exists; confirm dispatch, add tests~~ *(confirmed + tested in [8924d49](../../../commit/8924d49))* |
 | ~~M0-8~~ | ~~Prune dead `AdapterType` variants (or mark `#[doc(hidden)]`)~~ | L | L | ~~`RejectDrop`, `Compatible`, `Pass`, `Dns`, `Relay`, `LoadBalance`, unimplemented protos~~ *(merged [3599bdb](../../../commit/3599bdb))* |
 | ~~M0-9~~ | ~~Drop or implement `rule-providers.interval` periodic refresh~~ | M | L | ~~Field accepted and ignored today~~ *(superseded by M1.D-5)* |
@@ -128,8 +128,8 @@ has its own `connect_over` override in 334d55c. All B items are on main.
 | ~~M1.D-1~~ | ~~Finish parser for already-enum'd rule types: `IN-PORT`, `DSCP`, `UID`, `SRC-GEOIP`, `PROCESS-PATH`~~ | M | L | ~~[`docs/specs/rules-parser-completion.md`](specs/rules-parser-completion.md)~~ *(merged [8924d49](../../../commit/8924d49))* | ~~engineer~~ |
 | ~~M1.D-2~~ | ~~`GEOSITE` rule + geosite DB loader (**`mrs` only**, per architect 2026-04-11)~~ | H | M | ~~[`docs/specs/rule-geosite.md`](specs/rule-geosite.md)~~ *(merged [1567670](../../../commit/1567670))* | ~~engineer~~ |
 | ~~M1.D-3~~ | ~~`IP-SUFFIX`, `IP-ASN` (requires ASN MMDB)~~ | M | M | ~~bundled into M1.D-1 spec~~ *(merged [8924d49](../../../commit/8924d49))* | ~~engineer~~ |
-| M1.D-4 | `IN-TYPE`, `IN-NAME`, `IN-USER` (depends on named listeners — see M1.F) | M | M | covered by M1.F-1 (IN-TYPE/IN-NAME) + M1.F-3 (IN-USER); no separate spec | engineer-b (task #16, blocked by #13) |
-| M1.D-5 | Rule provider `inline` type, `mrs` binary format, periodic `interval` refresh | M | M | [`docs/specs/rule-provider-upgrade.md`](specs/rule-provider-upgrade.md) *(draft)* — supersedes M0-9 | engineer-b (task #10) |
+| ~~M1.D-4~~ | ~~`IN-TYPE`, `IN-NAME`, `IN-USER` (depends on named listeners — see M1.F)~~ | M | M | ~~covered by M1.F-1 (IN-TYPE/IN-NAME) + M1.F-3 (IN-USER); no separate spec~~ *(merged [33aeeb4](../../../commit/33aeeb4) IN-TYPE/IN-NAME, [0f315ff](../../../commit/0f315ff) IN-USER)* | ~~engineer-b~~ |
+| ~~M1.D-5~~ | ~~Rule provider `inline` type, `mrs` binary format, periodic `interval` refresh~~ | M | M | ~~[`docs/specs/rule-provider-upgrade.md`](specs/rule-provider-upgrade.md)~~ *(merged [7d32518](../../../commit/7d32518); supersedes M0-9)* | ~~engineer-b~~ |
 | ~~M1.D-6~~ | ~~`DOMAIN-WILDCARD`~~ | L | L | ~~bundled into M1.D-1 spec~~ *(merged [8924d49](../../../commit/8924d49))* | ~~engineer~~ |
 | ~~M1.D-7~~ | ~~`SUB-RULE` (named rule subsets)~~ | M | M | ~~[`docs/specs/sub-rules.md`](specs/sub-rules.md)~~ *(merged [663cf0e](../../../commit/663cf0e))* | ~~engineer~~ |
 
@@ -139,18 +139,18 @@ has its own `connect_over` override in 334d55c. All B items are on main.
 |---|------|:-----:|:----:|------|-------|
 | ~~M1.E-1~~ | ~~DoH and DoT upstream clients (hickory supports both)~~ | H | M | ~~[`docs/specs/dns-doh-dot.md`](specs/dns-doh-dot.md)~~ *(merged [daf53a5](../../../commit/daf53a5))* | ~~engineer~~ |
 | ~~M1.E-2~~ | ~~`default-nameserver` (bootstrap)~~ | H | L | ~~bundled into M1.E-1 spec~~ *(merged [daf53a5](../../../commit/daf53a5))* | ~~engineer~~ |
-| M1.E-3 | `nameserver-policy` (per-domain routing) | H | M | [`docs/specs/dns-nameserver-policy.md`](specs/dns-nameserver-policy.md) *(draft)* | engineer-b (task #11) |
-| M1.E-4 | `fallback-filter` (GeoIP / IP-CIDR / domain gating) | M | M | bundled into M1.E-3 spec | engineer-b (task #11) |
-| M1.E-5 | `hosts` + `use-system-hosts` | M | L | [`docs/specs/dns-hosts.md`](specs/dns-hosts.md) *(draft)* — supersedes M0-5 | engineer-b (task #12) |
+| ~~M1.E-3~~ | ~~`nameserver-policy` (per-domain routing)~~ | H | M | ~~[`docs/specs/dns-nameserver-policy.md`](specs/dns-nameserver-policy.md)~~ *(merged [6b32f04](../../../commit/6b32f04))* | ~~engineer-b~~ |
+| ~~M1.E-4~~ | ~~`fallback-filter` (GeoIP / IP-CIDR / domain gating)~~ | M | M | ~~bundled into M1.E-3 spec~~ *(merged [6b32f04](../../../commit/6b32f04))* | ~~engineer-b~~ |
+| ~~M1.E-5~~ | ~~`hosts` + `use-system-hosts`~~ | M | L | ~~[`docs/specs/dns-hosts.md`](specs/dns-hosts.md); supersedes M0-5~~ *(merged [6b32f04](../../../commit/6b32f04))* | ~~engineer-b~~ |
 | M1.E-6 | DoQ upstream | L | M | defer to M2 unless a user asks | — |
 
 ### M1.F — Inbounds & sniffer
 
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
-| M1.F-1 | Generic `listeners:` named-listener config (prereq for IN-NAME / IN-TYPE) | M | M | [`docs/specs/listeners-unified.md`](specs/listeners-unified.md) *(draft)* | engineer-b (task #13) |
-| M1.F-2 | TLS SNI + HTTP Host sniffer (enables rule matching on port-only flows) | H | M | [`docs/specs/sniffer.md`](specs/sniffer.md) *(draft)* | engineer-b (task #14) |
-| M1.F-3 | `authentication` + `skip-auth-prefixes` + LAN ACLs | M | L | [`docs/specs/inbound-auth-acl.md`](specs/inbound-auth-acl.md) *(draft)* | engineer-b (task #15) |
+| ~~M1.F-1~~ | ~~Generic `listeners:` named-listener config (prereq for IN-NAME / IN-TYPE)~~ | M | M | ~~[`docs/specs/listeners-unified.md`](specs/listeners-unified.md)~~ *(merged [33aeeb4](../../../commit/33aeeb4))* | ~~engineer-b~~ |
+| ~~M1.F-2~~ | ~~TLS SNI + HTTP Host sniffer (enables rule matching on port-only flows)~~ | H | M | ~~[`docs/specs/sniffer.md`](specs/sniffer.md)~~ *(merged [a02943a](../../../commit/a02943a))* | ~~engineer-b~~ |
+| ~~M1.F-3~~ | ~~`authentication` + `skip-auth-prefixes` + LAN ACLs~~ | M | L | ~~[`docs/specs/inbound-auth-acl.md`](specs/inbound-auth-acl.md)~~ *(merged [9b00bff](../../../commit/9b00bff))* | ~~engineer-b~~ |
 | M1.F-4 | Linux `redir` listener (SO_ORIGINAL_DST) | L | M | defer to M1.x or M2 | — |
 | M1.F-5 | Static `tunnel` listener (SS-style port→target) | L | L | defer | — |
 
@@ -160,21 +160,21 @@ has its own `connect_over` override in 334d55c. All B items are on main.
 |---|------|:-----:|:----:|------|-------|
 | ~~M1.G-1~~ | ~~Bearer `secret` auth enforcement (= M0-1, tracked here too)~~ | H | L | ~~trivial, fold into M0-1~~ *(merged [178c30f](../../../commit/178c30f))* | ~~engineer~~ |
 | ~~M1.G-2~~ | ~~`GET /proxies/:name/delay` and `GET /group/:name/delay`~~ | H | L | ~~[`docs/specs/api-delay-endpoints.md`](specs/api-delay-endpoints.md)~~ *(merged [eab429f](../../../commit/eab429f))* | ~~engineer~~ |
-| M1.G-3 | `GET /logs` websocket stream | H | M | [`docs/specs/api-logs-websocket.md`](specs/api-logs-websocket.md) *(draft)* | engineer-a (task #19) |
-| M1.G-4 | `GET /memory` websocket (runtime RSS stream) | M | L | bundled into M1.G-3 spec | engineer-a (task #19) |
-| M1.G-5 | `GET/PUT /providers/rules[/:name]` | M | L | bundled into M1.D-5 spec | engineer-b (task #10) |
-| M1.G-6 | `GET/PUT /providers/proxies[/:name]` + proxy providers impl | H | M | depends on M1.H-1 | engineer-b (task #18, blocked by #17) |
-| M1.G-7 | `DELETE /connections` (bulk) | L | L | bundled into M1.G-3 spec | engineer-a (task #19) |
-| M1.G-8 | `GET /dns/query` (align with upstream; current is POST) | L | L | bundled into M1.G-3 spec | engineer-a (task #19) |
-| M1.G-9 | `POST /cache/dns/flush` | L | L | bundled into M1.G-3 spec | engineer-a (task #19) |
-| M1.G-10 | `PUT /configs` (reload from path/body) | M | M | [`docs/specs/api-config-reload.md`](specs/api-config-reload.md) *(draft)*; M3 = hot-reload | engineer-a (task #20) |
+| ~~M1.G-3~~ | ~~`GET /logs` websocket stream~~ | H | M | ~~[`docs/specs/api-logs-websocket.md`](specs/api-logs-websocket.md)~~ *(merged [413a6f8](../../../commit/413a6f8); WS routed at `routes.rs:137`)* | ~~engineer-a~~ |
+| ~~M1.G-4~~ | ~~`GET /memory` websocket (runtime RSS stream)~~ | M | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8); routed at `routes.rs:138`)* | ~~engineer-a~~ |
+| ~~M1.G-5~~ | ~~`GET/PUT /providers/rules[/:name]`~~ | M | L | ~~bundled into M1.D-5 spec~~ *(merged [7d32518](../../../commit/7d32518); routed at `routes.rs:205`)* | ~~engineer-b~~ |
+| ~~M1.G-6~~ | ~~`GET/PUT /providers/proxies[/:name]` + proxy providers impl~~ | H | M | ~~depends on M1.H-1~~ *(merged [a0e4e26](../../../commit/a0e4e26); routed at `routes.rs:195` with `/healthcheck`)* | ~~engineer-b~~ |
+| ~~M1.G-7~~ | ~~`DELETE /connections` (bulk)~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
+| ~~M1.G-8~~ | ~~`GET /dns/query` (align with upstream; current is POST)~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
+| ~~M1.G-9~~ | ~~`POST /cache/dns/flush`~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
+| ~~M1.G-10~~ | ~~`PUT /configs` (reload from path/body)~~ | M | M | ~~[`docs/specs/api-config-reload.md`](specs/api-config-reload.md); M3 = hot-reload~~ *(merged [9ca423e](../../../commit/9ca423e))* | ~~engineer-a~~ |
 
 ### M1.H — Providers & observability
 
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
-| M1.H-1 | `proxy-providers` (http/file, health-check, include-all) | H | M | [`docs/specs/proxy-providers.md`](specs/proxy-providers.md) *(draft)* | engineer-b (task #17) |
-| M1.H-2 | Prometheus `/metrics` (traffic, conns, rule-match counters, proxy health) | H | L | [`docs/specs/metrics-prometheus.md`](specs/metrics-prometheus.md) *(draft)* | engineer-a (task #21) |
+| ~~M1.H-1~~ | ~~`proxy-providers` (http/file, health-check, include-all)~~ | H | M | ~~[`docs/specs/proxy-providers.md`](specs/proxy-providers.md)~~ *(merged [a0e4e26](../../../commit/a0e4e26))* | ~~engineer-b~~ |
+| ~~M1.H-2~~ | ~~Prometheus `/metrics` (traffic, conns, rule-match counters, proxy health)~~ | H | L | ~~[`docs/specs/metrics-prometheus.md`](specs/metrics-prometheus.md)~~ *(merged [9ca423e](../../../commit/9ca423e))* | ~~engineer-a~~ |
 | ~~M1.H-3~~ | ~~Migration guide from Go mihomo (supported vs intentionally-not fields)~~ | M | L | ~~`docs/migration-from-go-mihomo.md`~~ *(merged [e3e1a50](../../../commit/e3e1a50))* | ~~pm~~ |
 
 ### M1 exit criteria (revised 2026-04-11)
@@ -196,22 +196,23 @@ slow-leak detection moves to M2 profiling if ever needed.
 
 ## M2 — Performance and footprint
 
-Scope frozen after M1 lands. Placeholder order (all items from `vision.md`
-§M2):
+Scope frozen after M1 lands. Status as of 2026-04-25:
 
-1. `geodata:` YAML subsection (`mmdb-path`, `asn-path`, `geosite-path`, `auto-update`, `url.*`) — [`docs/specs/geodata-subsection.md`](specs/geodata-subsection.md) *(design sketch)*.
-2. Benchmark harness vs Go mihomo on identical hardware — `docs/benchmarks/`.
-2. Allocator audit of TCP relay and UDP NAT hot paths.
-3. Cargo feature flags for every optional protocol/transport; minimal-build
-   size budget for `aarch64-musl` and `mipsel-musl`.
-4. Rule-engine micro-optimizations (trie layout, IP-CIDR structure).
-5. Release CI — prebuilt static binaries per `ci-status.md` P1 item 5.
-6. M2 also absorbs: MSRV pin, macOS CI job, `cargo audit` cron, `cargo doc`
-   check, `cargo hack --feature-powerset`, coverage upload (`ci-status.md`
-   §P1/P2).
+1. ~~`geodata:` YAML subsection (`mmdb-path`, `asn-path`, `geosite-path`, `auto-update`, `url.*`) — [`docs/specs/geodata-subsection.md`](specs/geodata-subsection.md).~~ *(merged [db5228f](../../../commit/db5228f) — M2.A)*
+2. ~~Benchmark harness vs Go mihomo on identical hardware — `docs/benchmarks/`.~~ *(merged [9754bdc](../../../commit/9754bdc) criterion harness; [3d3b179](../../../commit/3d3b179) DNS QPS + 10k-rule extension — M2.B)*
+3. ~~Allocator audit of TCP relay and UDP NAT hot paths.~~ *(merged [a4058af](../../../commit/a4058af) zero-alloc UDP NAT; [f191272](../../../commit/f191272) trie early-exit + skip-domain scan — M2.D; [2ceebeb](../../../commit/2ceebeb) reverted mimalloc back to system allocator)*
+4. ~~Cargo feature flags for every optional protocol/transport; minimal-build size budget for `aarch64-musl` and `mipsel-musl`.~~ *(merged [f249a56](../../../commit/f249a56) feature flags + size budget; [10e570c](../../../commit/10e570c) `panic=abort`; [b377939](../../../commit/b377939) `opt-level=z` — M2.E; aarch64 minimal 9.5 → 5.x MB)*
+5. ~~Rule-engine micro-optimizations (trie layout, IP-CIDR structure).~~ *(merged with M2.D in [f191272](../../../commit/f191272))*
+6. Release CI — prebuilt static binaries per `ci-status.md` P1 item 5. *(open)*
+7. ~~MSRV pin, `cargo audit` cron, `cargo doc` check, `cargo hack --feature-powerset`, coverage upload.~~ *(merged [9dd952f](../../../commit/9dd952f) / [280876f](../../../commit/280876f) — M2.F; macOS CI was already on)*
 
 Exit criteria: measurably lower CPU and RSS than Go mihomo on a shared
-benchmark, minimal-build binary under stated size budget.
+benchmark, minimal-build binary under stated size budget. **Bench numbers
+are now produced by the criterion harness; an exit comparison vs Go mihomo
+on shared hardware still needs to be published before declaring M2 done.**
+
+**Still open in M2:** release-CI prebuilt binaries (item 6) and the
+published Go-vs-Rust benchmark comparison.
 
 ---
 

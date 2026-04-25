@@ -75,4 +75,26 @@ mod tests {
         let buf = b"GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n";
         assert_eq!(sniff_http(buf), Some("::1".to_string()));
     }
+
+    #[test]
+    fn sniff_http_ipv6_host_no_port() {
+        // Bracketed IPv6 host without a `:port` suffix is still recognised.
+        let buf = b"GET / HTTP/1.1\r\nHost: [2001:db8::1]\r\n\r\n";
+        assert_eq!(sniff_http(buf), Some("2001:db8::1".to_string()));
+    }
+
+    #[test]
+    fn sniff_http_empty_host_value_returns_none() {
+        // RFC 7230 §5.4 forbids an empty Host value; we drop it rather than
+        // returning an empty `sniff_host`.
+        let buf = b"GET / HTTP/1.1\r\nHost: \r\n\r\n";
+        assert_eq!(sniff_http(buf), None);
+    }
+
+    #[test]
+    fn sniff_http_host_with_surrounding_whitespace() {
+        // Field-value LWS must be trimmed.
+        let buf = b"GET / HTTP/1.1\r\nHost:    example.com   \r\n\r\n";
+        assert_eq!(sniff_http(buf), Some("example.com".to_string()));
+    }
 }
