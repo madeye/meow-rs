@@ -430,7 +430,17 @@ fn build_parser_context_at(
 
     let geoip_trigger = lines.iter().find(|l| line_is_geoip_rule(l));
     let geoip = match geoip_trigger {
-        Some(trigger) => Some(Arc::new(load_mmdb(&geoip_path, "GeoIP", trigger)?)),
+        Some(trigger) => {
+            let reader = load_mmdb(&geoip_path, "GeoIP", trigger)?;
+            let allowed = collect_geoip_countries(lines);
+            let index = mihomo_rules::country_index::CountryIndex::build(&reader, &allowed)
+                .map_err(|e| anyhow::anyhow!("failed to build GeoIP country index: {}", e))?;
+            // Drop the MMDB reader — the index now holds the per-country
+            // ranges we need and per-rule matches go through
+            // `IpRange::contains`, not MMDB.
+            drop(reader);
+            Some(Arc::new(index))
+        }
         None => None,
     };
 
@@ -480,6 +490,34 @@ fn load_mmdb(
     })?;
     info!("Loaded {} database from {}", kind, path.display());
     Ok(reader)
+}
+
+/// Scan raw rule lines and return the set of country codes referenced by
+/// `GEOIP,` / `SRC-GEOIP,` payloads — including occurrences inside logic
+/// rules (`AND`/`OR`/`NOT`). The returned codes are uppercased.
+///
+/// Used to drive a targeted [`CountryIndex`] build so we never allocate
+/// per-country ranges for codes no rule cares about.
+fn collect_geoip_countries(lines: &[String]) -> std::collections::HashSet<String> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    // `\bGEOIP` matches both `GEOIP,CN` and `SRC-GEOIP,CN` because the `-`
+    // before `GEOIP` is a non-word boundary.
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)\bGEOIP\s*,\s*([A-Za-z0-9]+)").expect("compile GEOIP scan regex")
+    });
+    let mut out = std::collections::HashSet::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        for cap in re.captures_iter(line) {
+            out.insert(cap[1].to_ascii_uppercase());
+        }
+    }
+    out
 }
 
 /// True iff `line` (a raw `rules:` entry) reads the GeoIP Country database.
@@ -791,6 +829,30 @@ mod geoip_context_tests {
         assert!(!line_is_geoip_rule(""));
         // Avoid false positives on rule types that happen to contain "GEO".
         assert!(!line_is_geoip_rule("GEOSITE,twitter,Proxy"));
+    }
+
+    #[test]
+    fn collect_geoip_countries_picks_up_top_level_and_logic_rules() {
+        let lines = vec![
+            "GEOIP,CN,DIRECT".to_string(),
+            "  src-geoip,us,Proxy".to_string(),
+            "AND,((GEOIP,JP,Proxy),(DST-PORT,443,Proxy)),Proxy".to_string(),
+            "DOMAIN,example.com,DIRECT".to_string(),
+            "# GEOIP,XX,DIRECT".to_string(),
+        ];
+        let got = collect_geoip_countries(&lines);
+        let want: std::collections::HashSet<String> =
+            ["CN", "US", "JP"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn collect_geoip_countries_ignores_geosite() {
+        let lines = vec![
+            "GEOSITE,cn,DIRECT".to_string(),
+            "DOMAIN,example.com,DIRECT".to_string(),
+        ];
+        assert!(collect_geoip_countries(&lines).is_empty());
     }
 
     fn nonexistent_asn() -> PathBuf {

@@ -1,35 +1,35 @@
 //! SRC-GEOIP rule — GeoIP lookup on the connection's **source** IP.
 //!
-//! Identical to `GeoIpRule` except it reads `Metadata.src_ip` instead of
-//! `dst_ip`.  Reuses the same `Arc<maxminddb::Reader>` from `ParserContext`.
+//! Identical to [`crate::geoip::GeoIpRule`] except it reads `Metadata.src_ip`
+//! instead of `dst_ip`. Like `GEOIP`, the country's CIDR list is materialised
+//! into an `IpRange` Patricia trie at parse time via
+//! [`crate::country_index::CountryIndex`] — match is a Patricia lookup, no
+//! MMDB access on the hot path.
+//!
 //! `no-resolve` is not applicable: the source IP is always an IP address
 //! (TProxy captures the real client IP; no hostname resolution needed).
 //!
 //! upstream: `rules/common/geoip.go::Rule` (`isSource` flag)
 
+use ipnet::{Ipv4Net, Ipv6Net};
 use mihomo_common::{Metadata, Rule, RuleMatchHelper, RuleType};
 use std::net::IpAddr;
-use std::sync::Arc;
+
+use crate::country_index::CountryRanges;
 
 pub struct SrcGeoIpRule {
     country: String,
     adapter: String,
-    reader: Arc<maxminddb::Reader<Vec<u8>>>,
+    ranges: CountryRanges,
 }
 
 impl SrcGeoIpRule {
-    pub fn new(country: &str, adapter: &str, reader: Arc<maxminddb::Reader<Vec<u8>>>) -> Self {
+    pub fn new(country: &str, adapter: &str, ranges: CountryRanges) -> Self {
         Self {
             country: country.to_uppercase(),
             adapter: adapter.to_string(),
-            reader,
+            ranges,
         }
-    }
-
-    fn lookup_country(&self, ip: IpAddr) -> Option<String> {
-        let result = self.reader.lookup(ip).ok()?;
-        let record: maxminddb::geoip2::Country = result.decode().ok()??;
-        Some(record.country.iso_code?.to_string())
     }
 }
 
@@ -39,12 +39,17 @@ impl Rule for SrcGeoIpRule {
     }
 
     fn match_metadata(&self, metadata: &Metadata, _helper: &RuleMatchHelper) -> bool {
-        if let Some(ip) = metadata.src_ip {
-            if let Some(code) = self.lookup_country(ip) {
-                return code.to_uppercase() == self.country;
-            }
+        match metadata.src_ip {
+            Some(IpAddr::V4(v4)) => self
+                .ranges
+                .v4
+                .contains(&Ipv4Net::new(v4, 32).expect("/32 is always valid")),
+            Some(IpAddr::V6(v6)) => self
+                .ranges
+                .v6
+                .contains(&Ipv6Net::new(v6, 128).expect("/128 is always valid")),
+            None => false,
         }
-        false
     }
 
     fn adapter(&self) -> &str {

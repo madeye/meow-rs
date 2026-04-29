@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use mihomo_common::Rule;
 
+use crate::country_index::CountryIndex;
 use crate::domain::DomainRule;
 use crate::domain_keyword::DomainKeywordRule;
 use crate::domain_regex::DomainRegexRule;
@@ -33,10 +34,13 @@ use crate::uid::UidRule;
 /// [`ParserContext::empty`].
 #[derive(Clone, Default)]
 pub struct ParserContext {
-    /// Optional GeoIP (Country) MaxMindDB reader, shared across all GEOIP and
+    /// Optional GeoIP country index — built once from the MMDB at config
+    /// load (see [`CountryIndex::build`]) and shared across all GEOIP /
     /// SRC-GEOIP rules built through this context. `None` means those rules
-    /// will parse-fail with a "no reader configured" error.
-    pub geoip: Option<Arc<maxminddb::Reader<Vec<u8>>>>,
+    /// will parse-fail with a "no GeoIP database configured" error. The
+    /// MMDB Reader itself is dropped after the index is built; per-rule
+    /// matching uses Patricia-trie `IpRange` lookups, not MMDB lookups.
+    pub geoip: Option<Arc<CountryIndex>>,
     /// Optional GeoLite2-ASN MaxMindDB reader for `IP-ASN` rules. `None`
     /// triggers a parse-time hard-error on any `IP-ASN` payload — silent
     /// skipping would misroute ASN-gated traffic (Class A per ADR-0002).
@@ -145,19 +149,21 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
         "NETWORK" => NetworkRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "PROCESS-NAME" => Ok(Box::new(ProcessRule::new(payload, adapter))),
         "GEOIP" => {
-            let reader = ctx.geoip.clone().ok_or_else(|| {
+            let index = ctx.geoip.as_ref().ok_or_else(|| {
                 "GEOIP rule requires a GeoIP database, but none is configured".to_string()
             })?;
             let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
+            let ranges = index.ranges_for(payload);
             Ok(Box::new(GeoIpRule::new(
-                payload, adapter, no_resolve, reader,
+                payload, adapter, no_resolve, ranges,
             )))
         }
         "SRC-GEOIP" => {
-            let reader = ctx.geoip.clone().ok_or_else(|| {
+            let index = ctx.geoip.as_ref().ok_or_else(|| {
                 "SRC-GEOIP rule requires a GeoIP database, but none is configured".to_string()
             })?;
-            Ok(Box::new(SrcGeoIpRule::new(payload, adapter, reader)))
+            let ranges = index.ranges_for(payload);
+            Ok(Box::new(SrcGeoIpRule::new(payload, adapter, ranges)))
         }
         "GEOSITE" => {
             if payload.contains('@') {

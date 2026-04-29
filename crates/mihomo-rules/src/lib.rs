@@ -1,3 +1,4 @@
+pub mod country_index;
 pub mod domain;
 pub mod domain_keyword;
 pub mod domain_regex;

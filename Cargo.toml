@@ -64,6 +64,7 @@ lru = "0.16"
 
 # IP handling
 ipnet = "2"
+iprange = "0.6"
 
 # Crypto
 sha2 = "0.10"

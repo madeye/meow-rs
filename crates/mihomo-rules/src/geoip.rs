@@ -1,33 +1,33 @@
+//! `GEOIP` rule — match on the **destination** IP's country.
+//!
+//! At parse time the country's CIDR list is materialised into an
+//! `IpRange<Ipv4Net>` + `IpRange<Ipv6Net>` Patricia trie via
+//! [`crate::country_index::CountryIndex`]. Match becomes a cheap
+//! `IpRange::contains` — no MMDB lookup, no allocation.
+//!
+//! upstream: `rules/common/geoip.go::Rule` (the `isSource = false` path)
+
+use ipnet::{Ipv4Net, Ipv6Net};
 use mihomo_common::{Metadata, Rule, RuleMatchHelper, RuleType};
 use std::net::IpAddr;
-use std::sync::Arc;
+
+use crate::country_index::CountryRanges;
 
 pub struct GeoIpRule {
     country: String,
     adapter: String,
     no_resolve: bool,
-    reader: Arc<maxminddb::Reader<Vec<u8>>>,
+    ranges: CountryRanges,
 }
 
 impl GeoIpRule {
-    pub fn new(
-        country: &str,
-        adapter: &str,
-        no_resolve: bool,
-        reader: Arc<maxminddb::Reader<Vec<u8>>>,
-    ) -> Self {
+    pub fn new(country: &str, adapter: &str, no_resolve: bool, ranges: CountryRanges) -> Self {
         Self {
             country: country.to_uppercase(),
             adapter: adapter.to_string(),
             no_resolve,
-            reader,
+            ranges,
         }
-    }
-
-    fn lookup_country(&self, ip: IpAddr) -> Option<String> {
-        let result = self.reader.lookup(ip).ok()?;
-        let record: maxminddb::geoip2::Country = result.decode().ok()??;
-        Some(record.country.iso_code?.to_string())
     }
 }
 
@@ -37,12 +37,17 @@ impl Rule for GeoIpRule {
     }
 
     fn match_metadata(&self, metadata: &Metadata, _helper: &RuleMatchHelper) -> bool {
-        if let Some(ip) = metadata.dst_ip {
-            if let Some(code) = self.lookup_country(ip) {
-                return code.to_uppercase() == self.country;
-            }
+        match metadata.dst_ip {
+            Some(IpAddr::V4(v4)) => self
+                .ranges
+                .v4
+                .contains(&Ipv4Net::new(v4, 32).expect("/32 is always valid")),
+            Some(IpAddr::V6(v6)) => self
+                .ranges
+                .v6
+                .contains(&Ipv6Net::new(v6, 128).expect("/128 is always valid")),
+            None => false,
         }
-        false
     }
 
     fn adapter(&self) -> &str {

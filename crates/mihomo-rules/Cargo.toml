@@ -9,6 +9,7 @@ mihomo-common = { workspace = true }
 mihomo-trie = { workspace = true }
 maxminddb = { workspace = true }
 ipnet = { workspace = true }
+iprange = { workspace = true }
 regex = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

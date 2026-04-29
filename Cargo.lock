@@ -1478,6 +1478,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
 
 [[package]]
+name = "iprange"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37209be0ad225457e63814401415e748e2453a5297f9b637338f5fb8afa4ec00"
+dependencies = [
+ "ipnet",
+]
+
+[[package]]
 name = "iri-string"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1918,6 +1927,7 @@ version = "0.5.0"
 dependencies = [
  "criterion",
  "ipnet",
+ "iprange",
  "maxminddb",
  "mihomo-common",
  "mihomo-trie",
