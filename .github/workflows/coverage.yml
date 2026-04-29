@@ -47,8 +47,18 @@ jobs:
         env:
           MIHOMO_REQUIRE_INTEGRATION_BINS: "1"
         run: |
+          # `--include-ignored` runs local-process integration tests (ssserver,
+          # simple-obfs, embedded mock servers). Tests in
+          # crates/mihomo-dns/tests/doh_dot_integration.rs require outbound
+          # internet (Cloudflare/Google DoH/DoT) and are not reachable from
+          # GitHub-hosted runners — skip them by name.
           cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info \
-            -- --include-ignored
+            -- --include-ignored \
+               --skip dot_resolves_example_com \
+               --skip doh_resolves_example_com \
+               --skip dot_bogus_sni_fails_cert_validation \
+               --skip doh_bogus_sni_fails_cert_validation \
+               --skip dot_hostname_with_bootstrap_resolves
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
