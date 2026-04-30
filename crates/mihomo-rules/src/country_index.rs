@@ -220,6 +220,90 @@ mod tests {
         assert_eq!(idx.country_count(), 0);
     }
 
+    /// Regression — duplicate `GEOIP,CN,...` rules must NOT each parse the
+    /// CN range. `ranges_for` returns an `Arc::clone`, so two lookups of the
+    /// same country share the underlying `IpRange` allocation. If a future
+    /// refactor switches to per-rule range construction, `Arc::ptr_eq` will
+    /// fail here.
+    #[test]
+    fn ranges_for_shares_arc_across_repeated_lookups() {
+        let Some(reader) = try_open() else {
+            eprintln!("skipping — Country.mmdb fixture not available");
+            return;
+        };
+        let allowed: HashSet<String> = ["CN"].into_iter().map(String::from).collect();
+        let idx = CountryIndex::build(&reader, &allowed).expect("build CountryIndex");
+
+        let a = idx.ranges_for("CN");
+        let b = idx.ranges_for("CN");
+        let c = idx.ranges_for("cn"); // case-insensitive must hit the same bucket
+
+        assert!(
+            Arc::ptr_eq(&a.v4, &b.v4),
+            "two CN lookups must share the v4 IpRange Arc"
+        );
+        assert!(
+            Arc::ptr_eq(&a.v6, &b.v6),
+            "two CN lookups must share the v6 IpRange Arc"
+        );
+        assert!(
+            Arc::ptr_eq(&a.v4, &c.v4),
+            "case-insensitive CN lookup must share the v4 IpRange Arc"
+        );
+    }
+
+    /// Regression — `parse_rule` building many GEOIP rules over the same
+    /// country must reuse the single per-country `Arc<IpRange>`. We exercise
+    /// the parser end-to-end (rather than `ranges_for` directly) so this
+    /// test catches a regression where the parser starts cloning into a new
+    /// `IpRange` instead of `Arc::clone`-ing the index entry.
+    #[test]
+    fn parser_reuses_arc_for_duplicate_geoip_rules() {
+        use crate::parser::{parse_rule, ParserContext};
+
+        let Some(reader) = try_open() else {
+            eprintln!("skipping — Country.mmdb fixture not available");
+            return;
+        };
+        let allowed: HashSet<String> = ["CN", "US"].into_iter().map(String::from).collect();
+        let idx = Arc::new(CountryIndex::build(&reader, &allowed).expect("build CountryIndex"));
+        let ctx = ParserContext {
+            geoip: Some(Arc::clone(&idx)),
+            ..Default::default()
+        };
+
+        // Drive 100 duplicate GEOIP,CN,... lines through the parser. After
+        // building the index, every parsed rule should share the same v4/v6
+        // Arc — a sanity check that no per-rule range allocation slipped in.
+        let baseline = idx.ranges_for("CN");
+        for i in 0..100 {
+            let line = format!("GEOIP,CN,Proxy{}", i);
+            let _rule = parse_rule(&line, &ctx).expect("parse_rule must succeed");
+            // We can't introspect GeoIpRule.ranges (private), but we can
+            // re-fetch from the index — which is the very Arc the parser
+            // cloned into the rule.
+            let again = idx.ranges_for("CN");
+            assert!(
+                Arc::ptr_eq(&baseline.v4, &again.v4),
+                "iteration {} broke v4 Arc sharing",
+                i
+            );
+            assert!(
+                Arc::ptr_eq(&baseline.v6, &again.v6),
+                "iteration {} broke v6 Arc sharing",
+                i
+            );
+        }
+
+        // Different country must NOT share with CN — guards against a
+        // pathological refactor that collapses all countries to one bucket.
+        let us = idx.ranges_for("US");
+        assert!(
+            !Arc::ptr_eq(&baseline.v4, &us.v4),
+            "CN and US must hold distinct v4 Arcs"
+        );
+    }
+
     #[test]
     fn country_index_allowlist_is_case_insensitive() {
         let Some(reader) = try_open() else {

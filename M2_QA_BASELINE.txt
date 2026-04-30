@@ -1,0 +1,31 @@
+M2 QA Baseline — 2026-04-18 (9e4f102)
+=====================================
+
+Test Results:
+- cargo test --lib: 409 tests PASS
+- cargo test --tests: 215 integration tests PASS
+  * rules_test: 82
+  * trojan_integration: 9
+  * doh_dot_integration: 18
+  * shadowsocks_integration: 29
+  * api_test: 63
+  * pre_resolve_test: 14
+
+Lint & Format:
+- cargo fmt --all -- --check: PASS
+- cargo clippy --all-targets -- -D warnings: PASS
+
+Performance Baseline (cargo test --lib):
+- Real time: 0.35s
+- Max RSS: 106.7 MB
+- Peak memory: 89.7 MB
+
+Benchmarks:
+- No formal benchmarks found; M2 work will define methodology
+
+Non-Negotiables Active:
+1. NO CatchPanic on mihomo-api router
+2. Socket-IO tests use wall-clock tokio::time::timeout (not pause/advance)
+3. All PRs must pass local: fmt + clippy + test --lib
+4. Perf-claiming PRs require before/after numbers + methodology
+5. Footprint-claiming PRs require before/after binary-size numbers

@@ -846,6 +846,35 @@ mod geoip_context_tests {
         assert_eq!(got, want);
     }
 
+    /// Regression — many `GEOIP,CN,...` lines across top-level and logic
+    /// rules must collapse to a single `"CN"` entry, so the downstream
+    /// `CountryIndex::build` walks the MMDB once per *country*, not once per
+    /// *rule*.
+    #[test]
+    fn collect_geoip_countries_deduplicates_repeats() {
+        let mut lines = Vec::new();
+        // 50 repeats each of CN/US/JP/TW, plus mixed-case and SRC-GEOIP.
+        for i in 0..50 {
+            lines.push(format!("GEOIP,CN,Proxy{}", i));
+            lines.push(format!("geoip,us,Proxy{}", i));
+            lines.push(format!("GEOIP,JP,Proxy{}", i));
+            lines.push(format!("SRC-GEOIP,TW,Proxy{}", i));
+            lines.push(format!(
+                "AND,((GEOIP,CN,Proxy),(DST-PORT,443,Proxy)),Proxy{}",
+                i
+            ));
+        }
+        let got = collect_geoip_countries(&lines);
+        let want: std::collections::HashSet<String> = ["CN", "US", "JP", "TW"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            got, want,
+            "duplicate country rules must collapse to one entry per code"
+        );
+    }
+
     #[test]
     fn collect_geoip_countries_ignores_geosite() {
         let lines = vec![
