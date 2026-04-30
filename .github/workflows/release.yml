@@ -29,10 +29,10 @@ jobs:
             # aarch64: hard gate — release fails if minimal binary exceeds 8 MiB
             minimal_budget_bytes: 8388608
             minimal_soft_gate: false
-          - target: mipsel-unknown-linux-musl
-            # mipsel: soft gate — emit warning only, per ADR-0007 §1
-            minimal_budget_bytes: 7340032
-            minimal_soft_gate: true
+          # mipsel-unknown-linux-musl: temporarily disabled — `rust-std` is no
+          # longer published for this target on stable. Re-enable when stable
+          # ships the component again, or when ADR-0007 §1 promotes it to a
+          # nightly/build-std path. Tracked separately from ADR-0007.
     steps:
       - uses: actions/checkout@v4
 
@@ -62,11 +62,12 @@ jobs:
             --no-default-features --features minimal \
             --target ${{ matrix.target }} \
             --bin mihomo
-          # Copy minimal binary aside before default binary overwrites artifact
+          # Copy minimal binary aside before default binary overwrites artifact.
+          # Binary is already stripped via [profile.release] strip = true in
+          # the workspace Cargo.toml — no post-build strip needed (and the
+          # host `strip` cannot read aarch64 ELF anyway).
           cp "target/${{ matrix.target }}/release/mihomo" \
              "target/${{ matrix.target }}/release/mihomo-minimal"
-          llvm-strip "target/${{ matrix.target }}/release/mihomo-minimal" \
-            2>/dev/null || strip "target/${{ matrix.target }}/release/mihomo-minimal"
 
       - name: Minimal binary size check
         if: matrix.minimal_budget_bytes != 0
