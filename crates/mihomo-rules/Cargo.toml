@@ -20,6 +20,10 @@ zstd = { workspace = true }
 name = "rules_bench"
 harness = false
 
+[[bench]]
+name = "iprange_parser_bench"
+harness = false
+
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
