@@ -6,10 +6,30 @@
 //! dropped — every `GEOIP` / `SRC-GEOIP` rule retains only an `Arc` to the
 //! per-country range pair and matches via `IpRange::contains` (no MMDB
 //! lookup, no country-code String allocation on the hot path).
+//!
+//! ## Build-time optimisations
+//!
+//! The MMDB walk yields hundreds of thousands of networks but only ~250
+//! unique country records — every CN network, for instance, points at the
+//! same data offset. The build loop exploits this and the bounded shape
+//! of the rule-driven allowlist to keep the per-record cost tiny:
+//!
+//! * **Decode only `country.iso_code`** via `decode_path`, skipping the
+//!   continent / names / traits sub-maps that `geoip2::Country` would
+//!   otherwise walk.
+//! * **Memoise per data offset** — decoding any given record once and
+//!   reusing the resolved bucket index for every subsequent network that
+//!   points at it.
+//! * **Stack-pack the ISO code** into a fixed-size [`CountryKey`] so the
+//!   allowlist comparison costs no allocations (no `to_ascii_uppercase()`
+//!   String per record, no String-keyed HashMap insert).
+//! * **Index buckets by allowlist position** in a `Vec`, since the rule
+//!   set typically references at most a handful of countries — a linear
+//!   scan beats a HashMap probe at that size and avoids hashing.
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use iprange::IpRange;
-use maxminddb::geoip2;
+use maxminddb::PathElement;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -33,14 +53,48 @@ pub struct CountryIndex {
     by_country: HashMap<String, CountryRanges>,
 }
 
+/// Stack-packed uppercase ASCII country code.
+///
+/// Sized for ISO 3166-1 alpha-2 (2 chars) with headroom for the longer codes
+/// some MMDBs ship (e.g. UN M.49 numerics). Comparison is byte-wise so the
+/// allowlist scan in the hot loop runs without allocating or hashing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CountryKey([u8; 8]);
+
+impl CountryKey {
+    /// Pack `s` into the buffer, uppercasing ASCII letters. Bytes beyond
+    /// `BUF_LEN` are dropped — anything that long isn't a valid GeoIP code.
+    #[inline]
+    fn from_str_upper(s: &str) -> Self {
+        let mut buf = [0u8; 8];
+        let bytes = s.as_bytes();
+        let n = bytes.len().min(buf.len());
+        let mut i = 0;
+        while i < n {
+            buf[i] = bytes[i].to_ascii_uppercase();
+            i += 1;
+        }
+        Self(buf)
+    }
+
+    /// Borrow the packed key as a `&str` (uppercase, trailing NULs stripped).
+    #[inline]
+    fn as_str(&self) -> &str {
+        let len = self.0.iter().position(|&b| b == 0).unwrap_or(self.0.len());
+        // Safe: `from_str_upper` only mutates ASCII letters; non-ASCII bytes
+        // come from a `&str`, so the buffer up to `len` is valid UTF-8.
+        std::str::from_utf8(&self.0[..len]).unwrap_or("")
+    }
+}
+
 impl CountryIndex {
-    /// Walk every record in `reader`, decode as `geoip2::Country`, and bin
-    /// the network into the matching country bucket — but only for ISO
-    /// codes present in `allowed`. Country codes outside the allowlist
-    /// are skipped during the walk so the index never allocates ranges for
-    /// countries no rule cares about. Codes are matched case-insensitively
-    /// (the allowlist is internally uppercased). Networks without an
-    /// `iso_code` are skipped silently — they cannot drive any rule.
+    /// Walk every record in `reader` and bin each network into the
+    /// matching country bucket — but only for ISO codes present in
+    /// `allowed`. Codes outside the allowlist are skipped during the walk
+    /// so the index never allocates ranges for countries no rule cares
+    /// about. Codes are matched case-insensitively (the allowlist is
+    /// internally uppercased). Networks without an `iso_code` are skipped
+    /// silently — they cannot drive any rule.
     pub fn build(
         reader: &maxminddb::Reader<Vec<u8>>,
         allowed: &HashSet<String>,
@@ -48,56 +102,105 @@ impl CountryIndex {
         if allowed.is_empty() {
             return Ok(Self::default());
         }
-        let allowed_upper: HashSet<String> =
-            allowed.iter().map(|c| c.to_ascii_uppercase()).collect();
-        let mut tmp: HashMap<String, (IpRange<Ipv4Net>, IpRange<Ipv6Net>)> = HashMap::new();
+
+        // Pack the allowlist into stack-friendly keys, indexed by position.
+        // The country count is bounded by the rule set (typically ≤ 16),
+        // so a `Vec` + linear scan is faster than a HashMap probe in the
+        // hot loop.
+        let allowed_keys: Vec<CountryKey> = allowed
+            .iter()
+            .map(|s| CountryKey::from_str_upper(s))
+            .collect();
+        if allowed_keys.len() > u16::MAX as usize {
+            return Err(format!(
+                "GeoIP allowlist has {} entries, exceeds {}",
+                allowed_keys.len(),
+                u16::MAX
+            ));
+        }
+        let mut buckets: Vec<(IpRange<Ipv4Net>, IpRange<Ipv6Net>)> =
+            (0..allowed_keys.len()).map(|_| Default::default()).collect();
 
         let iter = reader
             .networks(Default::default())
             .map_err(|e| format!("failed to iterate GeoIP networks: {}", e))?;
+
+        // Path straight to `country.iso_code`, skipping every other field
+        // in the GeoIP2 record (continent, names, traits, …). Borrowed by
+        // `decode_path` on every iteration.
+        let path = [
+            PathElement::Key("country"),
+            PathElement::Key("iso_code"),
+        ];
+
+        // Memoise the resolved bucket per MMDB data offset. Many networks
+        // (often all networks of one country) share a single data record;
+        // caching by offset turns ~10⁶ decodes into ~10² decodes.
+        // `None` ⇒ checked, not in allowlist; `Some(idx)` ⇒ allowed at idx.
+        let mut offset_cache: HashMap<usize, Option<u16>> = HashMap::new();
 
         for result in iter {
             let lookup = match result {
                 Ok(r) => r,
                 Err(_) => continue,
             };
+
+            // Networks with no data record can't drive any rule.
+            let Some(offset) = lookup.offset() else {
+                continue;
+            };
+
+            let bucket_idx = match offset_cache.get(&offset) {
+                Some(&cached) => cached,
+                None => {
+                    let resolved = match lookup.decode_path::<&str>(&path) {
+                        Ok(Some(iso)) => {
+                            let key = CountryKey::from_str_upper(iso);
+                            allowed_keys
+                                .iter()
+                                .position(|k| *k == key)
+                                .map(|idx| idx as u16)
+                        }
+                        _ => None,
+                    };
+                    offset_cache.insert(offset, resolved);
+                    resolved
+                }
+            };
+
+            let Some(bucket_idx) = bucket_idx else {
+                continue;
+            };
+
             let net = match lookup.network() {
                 Ok(n) => n,
                 Err(_) => continue,
             };
-            let record: geoip2::Country = match lookup.decode() {
-                Ok(Some(r)) => r,
-                _ => continue,
-            };
-            let Some(iso) = record.country.iso_code else {
-                continue;
-            };
-            let key = iso.to_ascii_uppercase();
-            if !allowed_upper.contains(&key) {
-                continue;
-            }
-            let entry = tmp.entry(key).or_default();
             let prefix = net.prefix();
+            let bucket = &mut buckets[bucket_idx as usize];
             match net.network() {
                 IpAddr::V4(v4) => {
                     if let Ok(net4) = Ipv4Net::new(v4, prefix) {
-                        entry.0.add(net4);
+                        bucket.0.add(net4);
                     }
                 }
                 IpAddr::V6(v6) => {
                     if let Ok(net6) = Ipv6Net::new(v6, prefix) {
-                        entry.1.add(net6);
+                        bucket.1.add(net6);
                     }
                 }
             }
         }
 
-        let mut by_country = HashMap::with_capacity(tmp.len());
-        for (k, (mut v4, mut v6)) in tmp {
+        let mut by_country = HashMap::with_capacity(allowed_keys.len());
+        for (key, (mut v4, mut v6)) in allowed_keys.iter().zip(buckets) {
+            if v4.is_empty() && v6.is_empty() {
+                continue;
+            }
             v4.simplify();
             v6.simplify();
             by_country.insert(
-                k,
+                key.as_str().to_string(),
                 CountryRanges {
                     v4: Arc::new(v4),
                     v6: Arc::new(v6),
