@@ -20,9 +20,9 @@
 //! * **Memoise per data offset** — decoding any given record once and
 //!   reusing the resolved bucket index for every subsequent network that
 //!   points at it.
-//! * **Stack-pack the ISO code** into a fixed-size [`CountryKey`] so the
-//!   allowlist comparison costs no allocations (no `to_ascii_uppercase()`
-//!   String per record, no String-keyed HashMap insert).
+//! * **Stack-pack the ISO code** into a fixed-size key so the allowlist
+//!   comparison costs no allocations (no `to_ascii_uppercase()` String per
+//!   record, no String-keyed HashMap insert).
 //! * **Index buckets by allowlist position** in a `Vec`, since the rule
 //!   set typically references at most a handful of countries — a linear
 //!   scan beats a HashMap probe at that size and avoids hashing.
@@ -118,8 +118,9 @@ impl CountryIndex {
                 u16::MAX
             ));
         }
-        let mut buckets: Vec<(IpRange<Ipv4Net>, IpRange<Ipv6Net>)> =
-            (0..allowed_keys.len()).map(|_| Default::default()).collect();
+        let mut buckets: Vec<(IpRange<Ipv4Net>, IpRange<Ipv6Net>)> = (0..allowed_keys.len())
+            .map(|_| Default::default())
+            .collect();
 
         let iter = reader
             .networks(Default::default())
@@ -128,10 +129,7 @@ impl CountryIndex {
         // Path straight to `country.iso_code`, skipping every other field
         // in the GeoIP2 record (continent, names, traits, …). Borrowed by
         // `decode_path` on every iteration.
-        let path = [
-            PathElement::Key("country"),
-            PathElement::Key("iso_code"),
-        ];
+        let path = [PathElement::Key("country"), PathElement::Key("iso_code")];
 
         // Memoise the resolved bucket per MMDB data offset. Many networks
         // (often all networks of one country) share a single data record;
