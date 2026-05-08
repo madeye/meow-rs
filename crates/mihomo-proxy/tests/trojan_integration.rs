@@ -3,12 +3,12 @@
 //! Uses an embedded mock Trojan server with a self-signed certificate.
 //! No external binaries required.
 
-use mihomo_common::{Metadata, Network, ProxyAdapter};
+use mihomo_common::{Metadata, MihomoError, Network, ProxyAdapter};
 use mihomo_proxy::TrojanAdapter;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::{timeout, Duration};
 
 const TROJAN_PASSWORD: &str = "test-trojan-password";
@@ -169,6 +169,13 @@ async fn start_mock_trojan_server(
                         let mut target = TcpStream::connect(target_addr).await.unwrap();
                         let _ = tokio::io::copy_bidirectional(&mut tls, &mut target).await;
                     }
+                    0x03 => {
+                        // UDP_ASSOCIATE: pump per-packet frames in both
+                        // directions over the TLS stream.  `target_addr` from
+                        // the request header is informational; each datagram
+                        // names its own destination.
+                        run_mock_udp_associate(tls).await;
+                    }
                     other => {
                         eprintln!("mock trojan: unsupported cmd: {}", other);
                     }
@@ -178,6 +185,140 @@ async fn start_mock_trojan_server(
     });
 
     (addr, handle)
+}
+
+/// Read one SOCKS5 address surfacing IO errors cleanly (the TCP-test
+/// `read_socks5_addr` helper above panics, which is fine inside a steady
+/// stream but noisy when the UDP-relay test tears down the TLS pipe).
+async fn try_read_socks5_addr<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<SocketAddr> {
+    let mut atyp = [0u8; 1];
+    reader.read_exact(&mut atyp).await?;
+    match atyp[0] {
+        0x01 => {
+            let mut ip = [0u8; 4];
+            reader.read_exact(&mut ip).await?;
+            let mut port = [0u8; 2];
+            reader.read_exact(&mut port).await?;
+            Ok(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::from(ip)),
+                u16::from_be_bytes(port),
+            ))
+        }
+        0x04 => {
+            let mut ip = [0u8; 16];
+            reader.read_exact(&mut ip).await?;
+            let mut port = [0u8; 2];
+            reader.read_exact(&mut port).await?;
+            Ok(SocketAddr::new(
+                IpAddr::V6(std::net::Ipv6Addr::from(ip)),
+                u16::from_be_bytes(port),
+            ))
+        }
+        0x03 => {
+            let mut len = [0u8; 1];
+            reader.read_exact(&mut len).await?;
+            let mut domain = vec![0u8; len[0] as usize];
+            reader.read_exact(&mut domain).await?;
+            let mut port = [0u8; 2];
+            reader.read_exact(&mut port).await?;
+            // Best-effort: parse domain as IP literal; otherwise use UNSPEC.
+            let s = String::from_utf8_lossy(&domain);
+            let ip: IpAddr = s.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            Ok(SocketAddr::new(ip, u16::from_be_bytes(port)))
+        }
+        other => Err(std::io::Error::other(format!("unknown ATYP {:#x}", other))),
+    }
+}
+
+/// Read one Trojan UDP frame
+/// (`ATYP | ADDR | PORT | LEN(u16 BE) | CRLF | PAYLOAD`) from the TLS stream
+/// and return the decoded destination plus the payload bytes.
+async fn read_trojan_udp_frame<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+) -> std::io::Result<(SocketAddr, Vec<u8>)> {
+    let addr = try_read_socks5_addr(reader).await?;
+    let mut len_bytes = [0u8; 2];
+    reader.read_exact(&mut len_bytes).await?;
+    let length = u16::from_be_bytes(len_bytes) as usize;
+    let mut crlf = [0u8; 2];
+    reader.read_exact(&mut crlf).await?;
+    if &crlf != b"\r\n" {
+        return Err(std::io::Error::other("trojan udp: missing CRLF"));
+    }
+    let mut payload = vec![0u8; length];
+    reader.read_exact(&mut payload).await?;
+    Ok((addr, payload))
+}
+
+/// Write one Trojan UDP frame to the TLS stream.
+async fn write_trojan_udp_frame<W: AsyncWriteExt + Unpin>(
+    writer: &mut W,
+    addr: SocketAddr,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let mut frame = Vec::with_capacity(payload.len() + 23);
+    match addr.ip() {
+        IpAddr::V4(v4) => {
+            frame.push(0x01);
+            frame.extend_from_slice(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            frame.push(0x04);
+            frame.extend_from_slice(&v6.octets());
+        }
+    }
+    frame.extend_from_slice(&addr.port().to_be_bytes());
+    frame.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    frame.extend_from_slice(b"\r\n");
+    frame.extend_from_slice(payload);
+    writer.write_all(&frame).await?;
+    writer.flush().await
+}
+
+/// Mock UDP_ASSOCIATE handler:
+///   * Reads framed UDP packets from the TLS stream.
+///   * Forwards each payload to the destination over a real UDP socket
+///     (single shared socket, like a Trojan server's "back end").
+///   * Echoes any inbound UDP datagrams back over the TLS stream framed with
+///     the source address.
+async fn run_mock_udp_associate<S>(tls: S)
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+{
+    let (mut tls_r, mut tls_w) = tokio::io::split(tls);
+    let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+
+    // tls -> udp: forward each frame to its named destination.
+    let udp_send = udp.clone();
+    let send_task = tokio::spawn(async move {
+        while let Ok((addr, payload)) = read_trojan_udp_frame(&mut tls_r).await {
+            if udp_send.send_to(&payload, addr).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // udp -> tls: every reply is wrapped back into a frame.
+    let recv_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let (n, peer) = match udp.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            if write_trojan_udp_frame(&mut tls_w, peer, &buf[..n])
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let _ = send_task.await;
+    recv_task.abort();
 }
 
 #[tokio::test]
@@ -279,4 +420,169 @@ async fn test_trojan_tcp_large_payload() {
         .await
         .expect("TCP read_exact failed");
     assert_eq!(buf, payload, "large payload echo mismatch");
+}
+
+// ─── UDP relay tests ─────────────────────────────────────────────────────────
+
+/// UDP echo server: every datagram bounces back to its sender.
+async fn start_udp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = socket.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let (n, peer) = match socket.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            if socket.send_to(&buf[..n], peer).await.is_err() {
+                break;
+            }
+        }
+    });
+    (addr, handle)
+}
+
+#[tokio::test]
+async fn test_trojan_udp_echo() {
+    install_crypto_provider();
+
+    let (cert_der, key_der) = generate_self_signed_cert();
+    let (echo_addr, _echo_handle) = start_udp_echo_server().await;
+    let (trojan_addr, _trojan_handle) = start_mock_trojan_server(cert_der, key_der).await;
+
+    // udp=true so dial_udp succeeds.
+    let adapter = TrojanAdapter::new(
+        "test-trojan-udp",
+        "127.0.0.1",
+        trojan_addr.port(),
+        TROJAN_PASSWORD,
+        "localhost",
+        true,
+        true,
+    );
+
+    // The CMD=0x03 header carries a placeholder destination (the echo server),
+    // but every actual datagram below targets `echo_addr` independently.
+    let metadata = Metadata {
+        network: Network::Udp,
+        dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        dst_port: echo_addr.port(),
+        ..Default::default()
+    };
+
+    let pc = timeout(TIMEOUT, adapter.dial_udp(&metadata))
+        .await
+        .expect("UDP dial timed out")
+        .expect("UDP dial failed");
+
+    // Round-trip a few packets.
+    let payloads: [&[u8]; 3] = [
+        b"hello trojan udp",
+        b"second packet",
+        b"third packet with a slightly longer payload to test framing",
+    ];
+
+    for p in &payloads {
+        let n = timeout(TIMEOUT, pc.write_packet(p, &echo_addr))
+            .await
+            .expect("write_packet timed out")
+            .expect("write_packet failed");
+        assert_eq!(n, p.len());
+
+        let mut buf = vec![0u8; 4096];
+        let (n, from) = timeout(TIMEOUT, pc.read_packet(&mut buf))
+            .await
+            .expect("read_packet timed out")
+            .expect("read_packet failed");
+        assert_eq!(&buf[..n], *p, "UDP echo payload mismatch");
+        // The mock server echoes the *peer* address (the UDP echo server's
+        // local address), so the port must match.  IP may be 127.0.0.1 or
+        // the literal 0.0.0.0 placeholder on some platforms, so check port.
+        assert_eq!(from.port(), echo_addr.port(), "UDP echo source port");
+    }
+}
+
+#[tokio::test]
+async fn test_trojan_udp_multi_destination() {
+    install_crypto_provider();
+
+    let (cert_der, key_der) = generate_self_signed_cert();
+    let (echo_a, _ha) = start_udp_echo_server().await;
+    let (echo_b, _hb) = start_udp_echo_server().await;
+    let (trojan_addr, _trojan_handle) = start_mock_trojan_server(cert_der, key_der).await;
+
+    let adapter = TrojanAdapter::new(
+        "test-trojan-udp-multi",
+        "127.0.0.1",
+        trojan_addr.port(),
+        TROJAN_PASSWORD,
+        "localhost",
+        true,
+        true,
+    );
+
+    let metadata = Metadata {
+        network: Network::Udp,
+        dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        dst_port: echo_a.port(),
+        ..Default::default()
+    };
+
+    let pc = timeout(TIMEOUT, adapter.dial_udp(&metadata))
+        .await
+        .expect("UDP dial timed out")
+        .expect("UDP dial failed");
+
+    // Send to A and B over the same packet conn; the server must route each
+    // datagram to its individual destination.
+    pc.write_packet(b"to-a", &echo_a).await.unwrap();
+    pc.write_packet(b"to-b", &echo_b).await.unwrap();
+
+    // Both echoes should come back; order is not guaranteed.
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        let mut buf = vec![0u8; 1024];
+        let (n, from) = timeout(TIMEOUT, pc.read_packet(&mut buf))
+            .await
+            .expect("read_packet timed out")
+            .expect("read_packet failed");
+        got.push((from.port(), buf[..n].to_vec()));
+    }
+    let expect_a = (echo_a.port(), b"to-a".to_vec());
+    let expect_b = (echo_b.port(), b"to-b".to_vec());
+    assert!(
+        got.contains(&expect_a) && got.contains(&expect_b),
+        "expected echoes from both servers, got {:?}",
+        got
+    );
+}
+
+#[tokio::test]
+async fn test_trojan_udp_disabled_returns_not_supported() {
+    install_crypto_provider();
+
+    // udp=false → dial_udp must reject without opening a TLS connection.
+    let adapter = TrojanAdapter::new(
+        "test-trojan-noudp",
+        "127.0.0.1",
+        1, // unreachable port — proves we never tried to dial
+        TROJAN_PASSWORD,
+        "localhost",
+        true,
+        false,
+    );
+
+    let metadata = Metadata {
+        network: Network::Udp,
+        dst_ip: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        dst_port: 53,
+        ..Default::default()
+    };
+
+    match adapter.dial_udp(&metadata).await {
+        Ok(_) => panic!("dial_udp should fail when udp is disabled"),
+        Err(MihomoError::NotSupported(_)) => {}
+        Err(other) => panic!("expected NotSupported, got {:?}", other),
+    }
 }
