@@ -474,7 +474,7 @@ async fn delete_rule_out_of_range() {
 #[tokio::test]
 async fn reorder_rules() {
     let state = test_state_default();
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -535,7 +535,7 @@ async fn get_proxy_groups_empty() {
 #[tokio::test]
 async fn create_proxy_group_selector() {
     let state = test_state_default();
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -628,7 +628,7 @@ async fn update_proxy_group() {
         ..Default::default()
     }]);
     let state = test_state(raw);
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -685,7 +685,7 @@ async fn delete_proxy_group() {
         "MATCH,REJECT".into(),
     ]);
     let state = test_state(raw);
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -916,7 +916,7 @@ async fn delete_subscription_clears_data() {
     }]);
 
     let state = test_state(raw);
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -943,7 +943,7 @@ async fn delete_subscription_clears_data() {
 #[tokio::test]
 async fn save_config_creates_file() {
     let state = test_state_default();
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -968,7 +968,7 @@ async fn save_config_creates_backup() {
     // Write initial file
     std::fs::write(&state.config_path, "old content").unwrap();
 
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -1001,7 +1001,7 @@ async fn put_proxy_selector_switch() {
     let state = test_state(raw);
 
     // Switch to REJECT
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -1047,7 +1047,7 @@ async fn select_proxy_roundtrip() {
     let state = test_state(raw);
 
     // Select REJECT
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -1062,7 +1062,7 @@ async fn select_proxy_roundtrip() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT, "select failed");
 
     // Read back proxy groups
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::get("/api/proxy-groups")
@@ -1605,7 +1605,7 @@ async fn a1_get_proxy_delay_ok_records_delay() {
     )
     .into_proxy();
     let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = delay_req(
         app,
         format!("/proxies/T/delay?url={}&timeout=1000", url_q()),
@@ -1761,7 +1761,7 @@ async fn d1_group_delay_ok_all_members_reported() {
         DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
     )
     .into_proxy();
-    let group = fallback_group("G", vec![a.clone(), b.clone(), c.clone()]);
+    let group = fallback_group("G", vec![Arc::clone(&a), Arc::clone(&b), Arc::clone(&c)]);
     let state = state_with_proxies(vec![("A", a), ("B", b), ("C", c), ("G", group)]);
     let app = create_router(state);
     let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
@@ -1813,7 +1813,7 @@ async fn d4_group_delay_timeout_hits_504() {
         DialBehavior::SleepThenOk(std::time::Duration::from_millis(500)),
     )
     .into_proxy();
-    let group = fallback_group("G", vec![a.clone(), b.clone()]);
+    let group = fallback_group("G", vec![Arc::clone(&a), Arc::clone(&b)]);
     let state = state_with_proxies(vec![("A", a), ("B", b), ("G", group)]);
     let app = create_router(state);
     let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=50", url_q())).await;
@@ -1834,8 +1834,12 @@ async fn d5_group_delay_records_into_each_member_history() {
         DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
     )
     .into_proxy();
-    let group = fallback_group("G", vec![a.clone(), b.clone()]);
-    let state = state_with_proxies(vec![("A", a.clone()), ("B", b.clone()), ("G", group)]);
+    let group = fallback_group("G", vec![Arc::clone(&a), Arc::clone(&b)]);
+    let state = state_with_proxies(vec![
+        ("A", Arc::clone(&a)),
+        ("B", Arc::clone(&b)),
+        ("G", group),
+    ]);
     let app = create_router(state);
     let _ = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
     assert_eq!(a.delay_history().len(), 1);
@@ -1901,7 +1905,7 @@ async fn c3_get_proxy_delay_correct_auth_200() {
 #[tokio::test]
 async fn c4_get_group_delay_missing_auth_401() {
     let a = TestAdapter::new("A", DialBehavior::InstantOk).into_proxy();
-    let group = fallback_group("G", vec![a.clone()]);
+    let group = fallback_group("G", vec![Arc::clone(&a)]);
     let state = state_with_proxies_and_secret(vec![("A", a), ("G", group)], "hunter2");
     let app = create_router(state);
     let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
@@ -1984,7 +1988,7 @@ async fn e2_group_delay_total_walltime_bounded_by_timeout() {
     let a = TestAdapter::new("A", DialBehavior::InstantOk).into_proxy();
     let b = TestAdapter::new("B", DialBehavior::InstantOk).into_proxy();
     let c = TestAdapter::new("C", DialBehavior::InstantOk).into_proxy();
-    let group = fallback_group("G", vec![a.clone(), b.clone(), c.clone()]);
+    let group = fallback_group("G", vec![Arc::clone(&a), Arc::clone(&b), Arc::clone(&c)]);
     let state = state_with_proxies(vec![("A", a), ("B", b), ("C", c), ("G", group)]);
     let app = create_router(state);
     let start = std::time::Instant::now();
@@ -2060,7 +2064,7 @@ async fn g2_get_group_delay_route_is_singular_group_not_groups() {
         DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
     )
     .into_proxy();
-    let group = fallback_group("G", vec![a.clone()]);
+    let group = fallback_group("G", vec![Arc::clone(&a)]);
     let state = state_with_proxies(vec![("A", a), ("G", group)]);
     let app = create_router(state);
     // Singular form reaches the handler.
@@ -2238,7 +2242,7 @@ async fn delete_connection_by_id_returns_204_and_removes_entry() {
     );
 
     // Verify the connection shows up in GET /connections.
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::get("/connections")
@@ -2254,7 +2258,7 @@ async fn delete_connection_by_id_returns_204_and_removes_entry() {
     assert_eq!(conns[0]["id"], conn_id);
 
     // DELETE the specific connection.
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -2298,7 +2302,7 @@ async fn delete_all_connections_clears_all() {
     stats.track_connection(meta(), "MATCH", "", vec!["DIRECT".to_string()]);
     stats.track_connection(meta(), "MATCH", "", vec!["DIRECT".to_string()]);
 
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()

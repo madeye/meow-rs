@@ -555,9 +555,8 @@ mod tests {
         conn.write_all(&[0xCC, 0xDD]).await.unwrap();
         {
             let w = written.lock().unwrap();
-            let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
             assert!(
-                !combined.is_empty(),
+                w.iter().any(|v| !v.is_empty()),
                 "must write to inner once full ClientHello is assembled"
             );
         }
@@ -604,8 +603,10 @@ mod tests {
         // Supply the last byte.
         conn.write_all(&[0xFE]).await.unwrap();
         let w = written.lock().unwrap();
-        let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
-        assert!(!combined.is_empty(), "must write after all 512 body bytes");
+        assert!(
+            w.iter().any(|v| !v.is_empty()),
+            "must write after all 512 body bytes"
+        );
     }
 
     // ─── C9: padding header precedes ClientHello in output ───────────────────
