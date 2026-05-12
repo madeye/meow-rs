@@ -131,6 +131,34 @@ cargo test --test shadowsocks_integration
 ```
 Docker-based tproxy QEMU test (`bash tests/test_tproxy_qemu.sh`) is CI-only; do not block local work on it.
 
+## Architecture Invariants
+
+These invariants apply to any PR that touches the listed types or subsystems. A PR that violates them must include an ADR amendment or a measured justification in the commit body.
+
+### Footprint / performance axes (ADR-0006, -0007, -0008, -0011)
+
+Four ADRs define the quantitative bar for this codebase:
+
+| ADR | Axis | Gate |
+|-----|------|------|
+| [ADR-0006](docs/adr/0006-performance-targets.md) | Throughput + latency (W1–W5 workloads) | Median ≥ 0.98× baseline at M2 open |
+| [ADR-0007](docs/adr/0007-binary-size-caps.md) | Stripped binary size | Hard caps by profile + target; no breach |
+| [ADR-0008](docs/adr/0008-zero-alloc-invariants.md) | Hot-path allocation count | HP-1/HP-2/HP-3 reproducers never increase |
+| [ADR-0011](docs/adr/0011-m2-footprint-targets.md) | Key-type struct sizes | Per-type targets; byte delta mandatory in commit body |
+
+Any PR touching these types **must** include before/after byte counts (from `-Zprint-type-sizes`) in the commit body:
+
+- `Metadata` (`crates/mihomo-common/src/metadata.rs`) — M2 baseline 272 B struct / heap via SmolStr
+- `ConnectionInfo` (`crates/mihomo-tunnel/src/statistics.rs`) — M2 exit 120 B
+- `UdpSession` (`crates/mihomo-tunnel/src/udp.rs`) — M2 exit 40 B
+- DNS `CacheEntry` / `ReverseEntry` (`crates/mihomo-dns/src/cache.rs`) — M2 exit 72 B per LruEntry slot
+
+Any PR touching relay code (`crates/mihomo-tunnel/src/relay.rs`, `tcp.rs`, or call sites in `mihomo-listener`) must preserve the zero-per-relay-setup-allocation invariant: relay buffers are stack-allocated in the caller's async frame, not heap-allocated per call.
+
+### Benchmark baselines (docs/benchmarks/)
+
+See [docs/benchmarks/index.md](docs/benchmarks/index.md) for a collated table of M2 deltas and pointers to all baseline documents. The full M2 exit gauntlet results live in `docs/benchmarks/m2-exit-summary.md` (produced by QA at M2 close).
+
 ## Key Dependencies
 
 - **Async runtime**: tokio (multi-threaded)
