@@ -10,7 +10,7 @@
 
 **PASS (local scope)** — all locally runnable gates execute successfully. **PENDING (reference-host scope)** — ADR-0006 W1–W5 benchmarks, ADR-0007 binary sizes, and full-scale ADR-0008 dhat audit require the canonical Linux bench host.
 
-**Status**: PASS (local) + PENDING (#45 tproxy QEMU / reference-host bench). No local regressions. Lead regression-fix commit 7c91033 incorporated.
+**Status**: PASS (local) + PENDING (#45 reference-host bench). All local gates including tproxy QEMU (11/11) green at HEAD `7c91033`. Lead regression-fix commit 7c91033 incorporated.
 
 ---
 
