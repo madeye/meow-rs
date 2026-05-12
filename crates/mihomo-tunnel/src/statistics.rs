@@ -1,11 +1,14 @@
 // M2 layout change (ADR-0011 T2):
 //   id: String (24 B heap) → Uuid (16 B inline, −8 B)
+//   metadata: Metadata (272 B inline) → Arc<Metadata> (8 B thin-ptr, −264 B)
+//     Closing a connection drops a refcount, not a 272 B drop chain.
 //   rule: String (24 B) → Arc<str> (16 B fat-ptr, −8 B)
 //   rule_payload: String (24 B) → Arc<str> (16 B fat-ptr, −8 B)
 //   chains: Vec<String> (24 B struct, heap elems) → Vec<Arc<str>> (24 B struct,
 //     ref-counted elems — no per-element allocation for proxy names)
 // Public JSON shape is unchanged: Uuid serialises as hyphenated string via the
 // `serde` feature; Arc<str> and Vec<Arc<str>> serialise as string/array.
+// Arc<Metadata> is serde-skipped so the wrapper type is invisible to the wire format.
 // Breaking change permitted by ADR-0009.
 
 use dashmap::DashMap;
@@ -48,8 +51,9 @@ impl Default for RuleMatchCounters {
 pub struct ConnectionInfo {
     /// 16 B inline UUID; serialises as `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"`.
     pub id: Uuid,
+    /// 8 B thin-ptr; refcount drop on close instead of 272 B drop chain.
     #[serde(skip)]
-    pub metadata: Metadata,
+    pub metadata: Arc<Metadata>,
     pub upload: i64,
     pub download: i64,
     pub start: String,
@@ -98,7 +102,7 @@ impl Statistics {
         let id_str = uuid.to_string();
         let info = ConnectionInfo {
             id: uuid,
-            metadata,
+            metadata: Arc::new(metadata),
             upload: 0,
             download: 0,
             start: chrono_now(),
