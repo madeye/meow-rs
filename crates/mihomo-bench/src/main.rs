@@ -89,11 +89,8 @@ async fn wait_for_udp_port(addr: SocketAddr, timeout: Duration) -> anyhow::Resul
     let deadline = tokio::time::Instant::now() + timeout;
     let sock = UdpSocket::bind("127.0.0.1:0").await?;
 
-    let mut msg = Message::new();
-    msg.set_id(0);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
     let name: Name = "ping.invalid.".parse()?;
     msg.add_query(Query::query(name, RecordType::A));
     let probe = msg.to_bytes()?;

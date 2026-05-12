@@ -18,11 +18,8 @@ pub struct DnsResult {
 }
 
 fn build_query(name: &str, id: u16) -> anyhow::Result<Vec<u8>> {
-    let mut msg = Message::new();
-    msg.set_id(id);
-    msg.set_message_type(MessageType::Query);
-    msg.set_op_code(OpCode::Query);
-    msg.set_recursion_desired(true);
+    let mut msg = Message::new(id, MessageType::Query, OpCode::Query);
+    msg.metadata.recursion_desired = true;
 
     let name: Name = name.parse()?;
     let query = Query::query(name, RecordType::A);

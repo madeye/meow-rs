@@ -1,9 +1,8 @@
 use crate::cache::DnsCache;
 use crate::upstream::{HostOrIp, NameServerUrl};
 use dashmap::DashMap;
-use hickory_proto::xfer::Protocol;
-use hickory_resolver::config::{NameServerConfig, ResolverConfig};
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::TokioResolver;
 use ipnet::IpNet;
 use mihomo_common::DnsMode;
@@ -269,18 +268,23 @@ impl Resolver {
     }
 
     fn build_resolver(servers: &[SocketAddr]) -> TokioResolver {
-        let mut config = ResolverConfig::new();
+        let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
         for &addr in servers {
-            config.add_name_server(NameServerConfig::new(addr, Protocol::Udp));
-            config.add_name_server(NameServerConfig::new(addr, Protocol::Tcp));
+            let mut udp = ConnectionConfig::udp();
+            udp.port = addr.port();
+            let mut tcp = ConnectionConfig::tcp();
+            tcp.port = addr.port();
+            config.add_name_server(NameServerConfig::new(addr.ip(), true, vec![udp, tcp]));
         }
         let mut builder =
-            TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
         let opts = builder.options_mut();
         opts.timeout = Duration::from_secs(5);
         opts.attempts = 2;
         opts.cache_size = 0;
-        builder.build()
+        builder
+            .build()
+            .expect("TokioResolver build is infallible for the static configuration above")
     }
 
     /// Build a `Resolver` from structured `NameServerUrl` lists, running a
@@ -321,61 +325,64 @@ impl Resolver {
         }
 
         // Step 3: Short-circuit if no bootstrap needed.
-        let resolved_map: HashMap<String, IpAddr> = if hostnames_needing_bootstrap.is_empty() {
-            HashMap::new()
-        } else {
-            if default_ns.is_empty() {
-                return Err(BootstrapError::DefaultNameserverMissing {
-                    first_encrypted: first_encrypted_with_hostname.unwrap_or_default(),
-                });
-            }
-
-            // Step 4: Build throwaway bootstrap resolver.
-            let bootstrap_resolver = {
-                let mut config = ResolverConfig::new();
-                for ns in &default_ns {
-                    let addr = url_to_plain_socketaddr(ns);
-                    let protocol = if matches!(ns, NameServerUrl::Tcp { .. }) {
-                        Protocol::Tcp
-                    } else {
-                        Protocol::Udp
-                    };
-                    config.add_name_server(NameServerConfig::new(addr, protocol));
+        let resolved_map: HashMap<String, IpAddr> =
+            if hostnames_needing_bootstrap.is_empty() {
+                HashMap::new()
+            } else {
+                if default_ns.is_empty() {
+                    return Err(BootstrapError::DefaultNameserverMissing {
+                        first_encrypted: first_encrypted_with_hostname.unwrap_or_default(),
+                    });
                 }
-                let mut builder =
-                    TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
-                let opts = builder.options_mut();
-                opts.timeout = Duration::from_secs(3);
-                opts.attempts = 2;
-                opts.cache_size = 0;
-                builder.build()
-            };
 
-            // Resolve sequentially — fail-fast on first failure.
-            let mut map = HashMap::new();
-            for host in &hostnames_needing_bootstrap {
-                match bootstrap_resolver.lookup_ip(host.as_str()).await {
-                    Ok(lookup) => {
-                        let ip =
-                            lookup
-                                .iter()
-                                .next()
-                                .ok_or_else(|| BootstrapError::CannotResolve {
+                // Step 4: Build throwaway bootstrap resolver.
+                let bootstrap_resolver = {
+                    let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
+                    for ns in &default_ns {
+                        let addr = url_to_plain_socketaddr(ns);
+                        let mut cc = if matches!(ns, NameServerUrl::Tcp { .. }) {
+                            ConnectionConfig::tcp()
+                        } else {
+                            ConnectionConfig::udp()
+                        };
+                        cc.port = addr.port();
+                        config.add_name_server(NameServerConfig::new(addr.ip(), true, vec![cc]));
+                    }
+                    let mut builder =
+                        TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
+                    let opts = builder.options_mut();
+                    opts.timeout = Duration::from_secs(3);
+                    opts.attempts = 2;
+                    opts.cache_size = 0;
+                    builder.build().map_err(|e| BootstrapError::CannotResolve {
+                        host: "<bootstrap>".to_string(),
+                        source: Box::new(e),
+                    })?
+                };
+
+                // Resolve sequentially — fail-fast on first failure.
+                let mut map = HashMap::new();
+                for host in &hostnames_needing_bootstrap {
+                    match bootstrap_resolver.lookup_ip(host.as_str()).await {
+                        Ok(lookup) => {
+                            let ip = lookup.iter().next().ok_or_else(|| {
+                                BootstrapError::CannotResolve {
                                     host: host.clone(),
                                     source: "no addresses returned".into(),
-                                })?;
-                        map.insert(host.clone(), ip);
-                    }
-                    Err(e) => {
-                        return Err(BootstrapError::CannotResolve {
-                            host: host.clone(),
-                            source: Box::new(e),
-                        });
+                                }
+                            })?;
+                            map.insert(host.clone(), ip);
+                        }
+                        Err(e) => {
+                            return Err(BootstrapError::CannotResolve {
+                                host: host.clone(),
+                                source: Box::new(e),
+                            });
+                        }
                     }
                 }
-            }
-            map
-        };
+                map
+            };
 
         // Steps 5 & 6: Build main + fallback — one resolver per URL for parallel dispatch.
         let main = main_urls
@@ -421,15 +428,25 @@ impl Resolver {
                 SocketAddr::new(host_or_ip_to_addr(addr, resolved), *port)
             }
         };
+        let port = socket_addr.port();
+        let ip = socket_addr.ip();
         let ns_cfg = match url {
-            NameServerUrl::Udp { .. } => NameServerConfig::new(socket_addr, Protocol::Udp),
-            NameServerUrl::Tcp { .. } => NameServerConfig::new(socket_addr, Protocol::Tcp),
+            NameServerUrl::Udp { .. } => {
+                let mut cc = ConnectionConfig::udp();
+                cc.port = port;
+                NameServerConfig::new(ip, true, vec![cc])
+            }
+            NameServerUrl::Tcp { .. } => {
+                let mut cc = ConnectionConfig::tcp();
+                cc.port = port;
+                NameServerConfig::new(ip, true, vec![cc])
+            }
             NameServerUrl::Tls { sni, .. } => {
                 #[cfg(feature = "encrypted")]
                 {
-                    let mut cfg = NameServerConfig::new(socket_addr, Protocol::Tls);
-                    cfg.tls_dns_name = Some(sni.clone());
-                    cfg
+                    let mut cc = ConnectionConfig::tls(Arc::from(sni.as_str()));
+                    cc.port = port;
+                    NameServerConfig::new(ip, true, vec![cc])
                 }
                 #[cfg(not(feature = "encrypted"))]
                 {
@@ -443,10 +460,12 @@ impl Resolver {
             NameServerUrl::Https { sni, path, .. } => {
                 #[cfg(feature = "encrypted")]
                 {
-                    let mut cfg = NameServerConfig::new(socket_addr, Protocol::Https);
-                    cfg.tls_dns_name = Some(sni.clone());
-                    cfg.http_endpoint = Some(path.clone());
-                    cfg
+                    let mut cc = ConnectionConfig::https(
+                        Arc::from(sni.as_str()),
+                        Some(Arc::from(path.as_str())),
+                    );
+                    cc.port = port;
+                    NameServerConfig::new(ip, true, vec![cc])
                 }
                 #[cfg(not(feature = "encrypted"))]
                 {
@@ -458,15 +477,17 @@ impl Resolver {
                 }
             }
         };
-        let mut config = ResolverConfig::new();
+        let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
         config.add_name_server(ns_cfg);
         let mut builder =
-            TokioResolver::builder_with_config(config, TokioConnectionProvider::default());
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
         let opts = builder.options_mut();
         opts.timeout = Duration::from_secs(5);
         opts.attempts = 2;
         opts.cache_size = 0;
-        builder.build()
+        builder
+            .build()
+            .expect("TokioResolver build is infallible for the static configuration above")
     }
 
     pub async fn resolve_ip(&self, host: &str) -> Option<IpAddr> {

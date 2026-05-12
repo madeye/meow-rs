@@ -30,18 +30,19 @@ use std::collections::HashMap;
 pub(crate) async fn fetch_ech_from_dns(name: &str) -> Result<Vec<u8>, String> {
     let resolver = Resolver::builder_tokio()
         .map_err(|e| format!("ech-dns: build system resolver: {}", e))?
-        .build();
+        .build()
+        .map_err(|e| format!("ech-dns: build system resolver: {}", e))?;
     let lookup = resolver
         .lookup(name, RecordType::HTTPS)
         .await
         .map_err(|e| format!("ech-dns: HTTPS lookup for {}: {}", name, e))?;
 
-    for record in lookup.record_iter() {
-        let svcb = match record.data() {
+    for record in lookup.answers() {
+        let svcb = match &record.data {
             RData::HTTPS(https) => &https.0,
             _ => continue,
         };
-        for (_, value) in svcb.svc_params() {
+        for (_, value) in &svcb.svc_params {
             if let SvcParamValue::EchConfigList(list) = value {
                 if !list.0.is_empty() {
                     return Ok(list.0.clone());
