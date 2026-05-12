@@ -1,14 +1,9 @@
+use crate::relay::{copy_bidirectional_buf, RELAY_BUF_SIZE};
 use crate::statistics::Statistics;
 use crate::tunnel::TunnelInner;
 use mihomo_common::{Metadata, ProxyConn};
 use std::sync::Arc;
-use tokio::io;
 use tracing::{debug, info, warn};
-
-/// Per-direction relay buffer for `copy_bidirectional_with_sizes`. Two of these
-/// live for the full connection lifetime, so on an iOS NE 50MB cap halving
-/// the tokio default (8 KB → 4 KB) saves 8 KB/conn — ~40 MB at 5k conns.
-const RELAY_BUF_SIZE: usize = 4 * 1024;
 
 /// RAII wrapper around `Statistics::track_connection` /
 /// `close_connection`. The previous implementation called
@@ -81,18 +76,15 @@ pub async fn handle_tcp(
         vec![Arc::from(proxy.name())],
     );
 
+    // Declare relay buffers on the future's stack frame — zero per-relay heap
+    // allocation (ADR-0011 T6). Paid once at task-spawn, not at relay-call time.
+    let mut buf_up = [0u8; RELAY_BUF_SIZE];
+    let mut buf_dn = [0u8; RELAY_BUF_SIZE];
+
     // Dial the remote via proxy
     match proxy.dial_tcp(&metadata).await {
         Ok(mut remote) => {
-            // Bidirectional copy
-            match io::copy_bidirectional_with_sizes(
-                &mut conn,
-                &mut remote,
-                RELAY_BUF_SIZE,
-                RELAY_BUF_SIZE,
-            )
-            .await
-            {
+            match copy_bidirectional_buf(&mut conn, &mut remote, &mut buf_up, &mut buf_dn).await {
                 Ok((up, down)) => {
                     tunnel.stats.add_upload(up as i64);
                     tunnel.stats.add_download(down as i64);

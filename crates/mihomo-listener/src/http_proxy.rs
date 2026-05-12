@@ -1,7 +1,7 @@
 use crate::sniffer::SnifferRuntime;
 use base64::Engine;
 use mihomo_common::{AuthConfig, ConnType, Metadata, Network};
-use mihomo_tunnel::Tunnel;
+use mihomo_tunnel::{copy_bidirectional_buf, Tunnel, RELAY_BUF_SIZE};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -41,6 +41,11 @@ async fn handle_http_inner(
     in_name: &str,
     in_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Relay scratch buffers on the future's stack — zero per-relay heap allocation
+    // (ADR-0011 T6). Declared up front so both the CONNECT and plain-HTTP paths share them.
+    let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];
+    let mut relay_buf_dn = [0u8; RELAY_BUF_SIZE];
+
     // Read the HTTP request line and headers byte by byte until we find \r\n\r\n.
     // We avoid BufReader to prevent borrow issues with the stream.
     let mut request_buf = Vec::with_capacity(4096);
@@ -171,13 +176,22 @@ async fn handle_http_inner(
         );
 
         match proxy.dial_tcp(&metadata).await {
-            Ok(mut remote) => match tokio::io::copy_bidirectional(stream, &mut remote).await {
-                Ok((up, down)) => {
-                    inner.stats.add_upload(up as i64);
-                    inner.stats.add_download(down as i64);
+            Ok(mut remote) => {
+                match copy_bidirectional_buf(
+                    stream,
+                    &mut remote,
+                    &mut relay_buf_up,
+                    &mut relay_buf_dn,
+                )
+                .await
+                {
+                    Ok((up, down)) => {
+                        inner.stats.add_upload(up as i64);
+                        inner.stats.add_download(down as i64);
+                    }
+                    Err(e) => debug!("HTTP CONNECT relay error: {}", e),
                 }
-                Err(e) => debug!("HTTP CONNECT relay error: {}", e),
-            },
+            }
             Err(e) => warn!("HTTP CONNECT dial error: {}", e),
         }
 
@@ -260,7 +274,14 @@ async fn handle_http_inner(
                 remote.write_all(rewritten.as_bytes()).await?;
 
                 // Relay bidirectionally
-                match tokio::io::copy_bidirectional(stream, &mut remote).await {
+                match copy_bidirectional_buf(
+                    stream,
+                    &mut remote,
+                    &mut relay_buf_up,
+                    &mut relay_buf_dn,
+                )
+                .await
+                {
                     Ok((up, down)) => {
                         inner.stats.add_upload(up as i64);
                         inner.stats.add_download(down as i64);

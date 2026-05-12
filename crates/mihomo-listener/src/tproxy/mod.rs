@@ -4,7 +4,7 @@ mod orig_dest;
 use crate::sniffer::SnifferRuntime;
 use firewall::FirewallGuard;
 use mihomo_common::{ConnType, Metadata, Network};
-use mihomo_tunnel::Tunnel;
+use mihomo_tunnel::{copy_bidirectional_buf, Tunnel, RELAY_BUF_SIZE};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -211,14 +211,27 @@ async fn handle_tproxy_conn(
         vec![Arc::from(proxy.name())],
     );
 
+    // Relay buffers on the future's stack — zero per-relay heap allocation (ADR-0011 T6).
+    let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];
+    let mut relay_buf_dn = [0u8; RELAY_BUF_SIZE];
+
     match proxy.dial_tcp(&metadata).await {
-        Ok(mut remote) => match tokio::io::copy_bidirectional(&mut stream, &mut remote).await {
-            Ok((up, down)) => {
-                inner.stats.add_upload(up as i64);
-                inner.stats.add_download(down as i64);
+        Ok(mut remote) => {
+            match copy_bidirectional_buf(
+                &mut stream,
+                &mut remote,
+                &mut relay_buf_up,
+                &mut relay_buf_dn,
+            )
+            .await
+            {
+                Ok((up, down)) => {
+                    inner.stats.add_upload(up as i64);
+                    inner.stats.add_download(down as i64);
+                }
+                Err(e) => debug!("TProxy relay error: {}", e),
             }
-            Err(e) => debug!("TProxy relay error: {}", e),
-        },
+        }
         Err(e) => warn!("TProxy dial error: {}", e),
     }
 
