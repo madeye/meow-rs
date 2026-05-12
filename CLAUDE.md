@@ -22,7 +22,7 @@ cargo build --release
 cargo test --lib
 
 # Run specific integration/test suites
-cargo test --test rules_test           # 78 rule matching tests
+cargo test --test rules_test           # 100 rule matching tests
 cargo test --test trojan_integration   # embedded mock server, no external deps
 cargo test --test shadowsocks_integration  # requires ssserver (see below)
 bash tests/test_tproxy_qemu.sh             # Docker-based tproxy e2e tests
@@ -55,11 +55,14 @@ Listeners (HTTP/SOCKS5/Mixed/TProxy)
 
 ### Workspace Crates
 
+The workspace has 12 crates (see also [ADR-0009](docs/adr/0009-cleanup-scope.md) for crate-boundary policy):
+
 | Crate | Purpose |
 |-------|---------|
 | `mihomo-common` | Core traits and types (`ProxyAdapter`, `Rule`, `Metadata`, `ConnContext`) — the "contracts" crate |
 | `mihomo-trie` | Domain trie for efficient pattern matching |
-| `mihomo-proxy` | Proxy protocol implementations (SS, Trojan, Direct, Reject) and groups (Selector, URLTest, Fallback) |
+| `mihomo-transport` | Composable stream-transport layers (TLS, WebSocket, gRPC, HTTP/2, HTTP Upgrade) — protocol-agnostic, no dep on other mihomo crates (see [ADR-0001](docs/adr/0001-mihomo-transport-crate.md)) |
+| `mihomo-proxy` | Proxy protocol implementations (SS, Trojan, VLESS, Direct, Reject) and groups (Selector, URLTest, Fallback) |
 | `mihomo-rules` | Rule matching engine and parser (domain, IP-CIDR, GeoIP, process, logic composition) |
 | `mihomo-dns` | DNS resolver, cache, DNS snooping (IP→domain reverse table), UDP server |
 | `mihomo-tunnel` | Core routing engine: TCP/UDP relay, rule matching dispatch, connection statistics |
@@ -67,6 +70,7 @@ Listeners (HTTP/SOCKS5/Mixed/TProxy)
 | `mihomo-config` | YAML configuration parsing into typed structs |
 | `mihomo-api` | REST API server (Axum) for proxies, rules, connections, configs, traffic, DNS query |
 | `mihomo-app` | CLI entry point (`main.rs`) — wires config → tunnel → listeners → DNS → API |
+| `mihomo-bench` | Standalone benchmark binary (throughput, latency, connection-rate, DNS, memory, binary-size) |
 
 ### Startup Flow
 
