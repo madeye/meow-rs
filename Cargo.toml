@@ -51,7 +51,7 @@ if_not_else = "warn"
 unnecessary_wraps = "warn"
 cloned_instead_of_copied = "warn"
 # Allocation-focused lints (ADR-0010 addendum A §A1) — warn only; fixes land in M2.
-clone_on_ref_ptr = "warn"
+clone_on_ref_ptr = "deny"
 needless_collect = "deny"
 format_push_string = "deny"
 string_add = "deny"
