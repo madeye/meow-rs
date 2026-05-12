@@ -159,6 +159,9 @@ tokio-boring = { version = "5.0.0" }
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 
+# Property testing
+proptest = "1"
+
 # Workspace crates
 # default-features = false on feature-gated crates so each consumer controls
 # which optional protocols/listeners are compiled (M2.E feature-flag infra).

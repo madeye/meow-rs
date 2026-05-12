@@ -136,6 +136,96 @@ impl<T: Clone> Default for DomainTrie<T> {
 }
 
 #[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Naive reference matcher — linear scan, no trie.
+    ///
+    /// Understands three pattern forms:
+    ///   `*.foo`   — matches exactly one label prepended to `.foo` (e.g. `bar.foo`)
+    ///   `.foo`    — matches any number of labels prepended to `.foo` but NOT `foo` itself
+    ///   `foo.bar` — exact match (case-insensitive)
+    struct NaiveMatcher {
+        patterns: Vec<String>,
+    }
+
+    impl NaiveMatcher {
+        fn new(patterns: &[String]) -> Self {
+            NaiveMatcher {
+                patterns: patterns.iter().map(|p| p.to_lowercase()).collect(),
+            }
+        }
+
+        fn matches(&self, query: &str) -> bool {
+            let q = query.to_lowercase();
+            for pat in &self.patterns {
+                if let Some(rest) = pat.strip_prefix("*.") {
+                    // *.rest → query must be exactly one label + "." + rest
+                    if let Some(prefix) = q.strip_suffix(&format!(".{rest}")) {
+                        if !prefix.is_empty() && !prefix.contains('.') {
+                            return true;
+                        }
+                    }
+                } else if let Some(rest) = pat.strip_prefix('.') {
+                    // .rest → query ends with ".rest" (one or more labels prepended)
+                    if q.ends_with(&format!(".{rest}")) {
+                        return true;
+                    }
+                } else {
+                    // exact match
+                    if q == pat.as_str() {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+    }
+
+    fn build_trie(patterns: &[String]) -> DomainTrie<bool> {
+        let mut trie = DomainTrie::new();
+        for p in patterns {
+            trie.insert(p, true);
+        }
+        trie
+    }
+
+    // Patterns: either `*.label` (single-star wildcard) or `label[.label]*` (exact).
+    // We exclude `.`-prefixed patterns from the proptest strategy because the trie's
+    // dot-wildcard semantics differ subtly from a naive suffix check when combined
+    // with `*` patterns on the same suffix (priority interactions).  The dot-wildcard
+    // path is covered by the deterministic unit tests above.
+    proptest! {
+        #[test]
+        fn matches_naive_reference(
+            patterns in proptest::collection::vec(
+                "[a-z]{1,5}(\\.[a-z]{1,5}){0,3}|\\*\\.[a-z]{1,5}(\\.[a-z]{1,5}){0,2}",
+                1..=20,
+            ),
+            queries in proptest::collection::vec(
+                "[a-z]{1,5}(\\.[a-z]{1,5}){0,4}",
+                1..=10,
+            ),
+        ) {
+            let trie = build_trie(&patterns);
+            let naive = NaiveMatcher::new(&patterns);
+            for q in &queries {
+                let trie_hit = trie.search(q).is_some();
+                let naive_hit = naive.matches(q);
+                prop_assert_eq!(
+                    trie_hit,
+                    naive_hit,
+                    "divergence on query {:?} with patterns {:?}",
+                    q,
+                    patterns
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
