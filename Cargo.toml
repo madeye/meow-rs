@@ -53,7 +53,7 @@ cloned_instead_of_copied = "warn"
 # Allocation-focused lints (ADR-0010 addendum A §A1) — warn only; fixes land in M2.
 clone_on_ref_ptr = "warn"
 needless_collect = "warn"
-format_push_string = "warn"
+format_push_string = "deny"
 string_add = "deny"
 useless_format = "deny"
 large_enum_variant = "warn"
