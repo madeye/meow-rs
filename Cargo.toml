@@ -58,7 +58,7 @@ string_add = "deny"
 useless_format = "deny"
 large_enum_variant = "deny"
 large_types_passed_by_value = "deny"
-unnecessary_box_returns = "warn"
+unnecessary_box_returns = "deny"
 vec_init_then_push = "deny"
 # Too noisy or contrary to project style — kept as allow:
 module_name_repetitions = "allow"
