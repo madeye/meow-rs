@@ -2212,3 +2212,273 @@ async fn h6_sleep_then_transport_error_is_503() {
         br#"{"message":"An error occurred in the delay test"}"#
     );
 }
+
+// ── Connection management tests ──────────────────────────────────
+
+/// DELETE /connections/{id} removes the named connection and returns 204.
+#[tokio::test]
+async fn delete_connection_by_id_returns_204_and_removes_entry() {
+    use mihomo_common::{ConnType, Metadata, Network};
+    let state = test_state_default();
+
+    // Inject a synthetic connection directly via the statistics layer so the
+    // test does not require a live proxy dial.
+    let meta = Metadata {
+        network: Network::Tcp,
+        conn_type: ConnType::Http,
+        host: "example.com".to_string(),
+        dst_port: 80,
+        ..Default::default()
+    };
+    let conn_id = state.tunnel.statistics().track_connection(
+        meta,
+        "DOMAIN",
+        "example.com",
+        vec!["DIRECT".to_string()],
+    );
+
+    // Verify the connection shows up in GET /connections.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::get("/connections")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let conns = json["connections"].as_array().unwrap();
+    assert_eq!(conns.len(), 1);
+    assert_eq!(conns[0]["id"], conn_id);
+
+    // DELETE the specific connection.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/connections/{conn_id}"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    // Confirm it is gone.
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/connections")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert!(json["connections"].as_array().unwrap().is_empty());
+}
+
+/// DELETE /connections (no path param) closes every active connection.
+#[tokio::test]
+async fn delete_all_connections_clears_all() {
+    use mihomo_common::{ConnType, Metadata, Network};
+    let state = test_state_default();
+
+    let stats = state.tunnel.statistics();
+    let meta = || Metadata {
+        network: Network::Tcp,
+        conn_type: ConnType::Http,
+        host: "a.test".to_string(),
+        dst_port: 80,
+        ..Default::default()
+    };
+    stats.track_connection(meta(), "MATCH", "", vec!["DIRECT".to_string()]);
+    stats.track_connection(meta(), "MATCH", "", vec!["DIRECT".to_string()]);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/connections")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/connections")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(resp).await;
+    assert!(json["connections"].as_array().unwrap().is_empty());
+}
+
+// ── DNS query endpoint tests ─────────────────────────────────────
+
+/// Build a test state whose resolver has a hosts-trie entry for
+/// `test.local → 192.0.2.1` so DNS query tests get a deterministic answer
+/// without touching the network.
+fn test_state_with_hosts_entry() -> Arc<AppState> {
+    use std::net::IpAddr;
+    let ip: IpAddr = "192.0.2.1".parse().unwrap();
+    let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+    hosts.insert("test.local", vec![ip]);
+
+    let resolver = Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
+    let tunnel = Tunnel::new(resolver);
+    let raw = test_raw_config();
+    let (proxies, rules) = mihomo_config::rebuild_from_raw(&raw).unwrap();
+    tunnel.update_proxies(proxies);
+    tunnel.update_rules(rules);
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.yaml").to_str().unwrap().to_string();
+    std::mem::forget(dir);
+
+    Arc::new(AppState {
+        tunnel,
+        secret: None,
+        config_path,
+        raw_config: Arc::new(RwLock::new(raw)),
+        log_tx: test_log_tx(),
+        proxy_providers: Arc::new(DashMap::new()),
+        rule_providers: Arc::new(RwLock::new(HashMap::new())),
+        listeners: vec![],
+    })
+}
+
+/// POST /dns/query resolves a hosts-trie entry and returns the IP in the
+/// `answer` field.
+#[tokio::test]
+async fn post_dns_query_returns_known_host() {
+    let state = test_state_with_hosts_entry();
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dns/query")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"name":"test.local"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "test.local");
+    assert_eq!(json["answer"], "192.0.2.1");
+}
+
+/// POST /dns/query for an unknown name returns `answer: null`.
+#[tokio::test]
+async fn post_dns_query_unknown_name_returns_null_answer() {
+    let state = test_state_default();
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/dns/query")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(r#"{"name":"no-such-host.invalid"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "no-such-host.invalid");
+    assert!(json["answer"].is_null());
+}
+
+/// GET /dns/query?name=test.local resolves via the hosts trie.
+#[tokio::test]
+async fn get_dns_query_returns_known_host() {
+    let state = test_state_with_hosts_entry();
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/dns/query?name=test.local")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["name"], "test.local");
+    assert_eq!(json["answer"], "192.0.2.1");
+}
+
+// ── DNS cache flush ───────────────────────────────────────────────
+
+/// POST /cache/dns/flush returns 204.
+#[tokio::test]
+async fn flush_dns_cache_returns_no_content() {
+    let state = test_state_default();
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/cache/dns/flush")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+// ── Prometheus metrics ────────────────────────────────────────────
+
+/// GET /metrics returns Prometheus text exposition format.
+/// Checks: correct content-type prefix and presence of the traffic counter
+/// and active-connections gauge metric names.
+#[tokio::test]
+async fn get_metrics_returns_prometheus_text() {
+    let state = test_state_default();
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/metrics")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Content-type must start with text/plain (Prometheus scrape requirement).
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        ct.starts_with("text/plain"),
+        "unexpected content-type: {ct}"
+    );
+
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("mihomo_traffic_bytes"),
+        "missing mihomo_traffic_bytes in metrics output"
+    );
+    assert!(
+        body.contains("mihomo_connections_active"),
+        "missing mihomo_connections_active in metrics output"
+    );
+}
