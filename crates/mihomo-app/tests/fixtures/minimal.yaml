@@ -1,0 +1,14 @@
+mixed-port: 7890
+mode: rule
+log-level: silent
+allow-lan: false
+
+proxies:
+  - name: proxy-out
+    type: http
+    server: 127.0.0.1
+    port: 8080
+
+rules:
+  - DOMAIN,example.com,proxy-out
+  - MATCH,REJECT
