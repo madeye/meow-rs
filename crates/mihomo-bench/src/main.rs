@@ -1,6 +1,7 @@
 mod bench_binary_size;
 mod bench_connrate;
 mod bench_dns;
+mod bench_idle_conns;
 mod bench_latency;
 mod bench_memory;
 mod bench_throughput;
