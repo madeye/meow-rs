@@ -2012,6 +2012,7 @@ dependencies = [
  "base64",
  "libc",
  "mihomo-common",
+ "mihomo-dns",
  "mihomo-trie",
  "mihomo-tunnel",
  "tokio",

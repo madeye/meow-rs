@@ -22,6 +22,8 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+mihomo-dns = { workspace = true }
+mihomo-trie = { workspace = true }
 
 [lints]
 workspace = true
