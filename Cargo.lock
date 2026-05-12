@@ -1871,7 +1871,6 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 name = "mihomo-api"
 version = "0.6.2"
 dependencies = [
- "arc-swap",
  "async-trait",
  "axum",
  "base64",
@@ -1894,7 +1893,6 @@ dependencies = [
  "subtle",
  "sysinfo",
  "tempfile",
- "thiserror 2.0.18",
  "time",
  "tokio",
  "tokio-tungstenite 0.24.0",
@@ -1913,7 +1911,6 @@ dependencies = [
  "dashmap",
  "libc",
  "mihomo-api",
- "mihomo-common",
  "mihomo-config",
  "mihomo-dns",
  "mihomo-listener",
@@ -1958,7 +1955,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -1982,11 +1978,8 @@ dependencies = [
  "regex",
  "reqwest",
  "serde",
- "serde_json",
  "serde_yaml",
- "subtle",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1996,11 +1989,8 @@ dependencies = [
 name = "mihomo-dns"
 version = "0.6.2"
 dependencies = [
- "anyhow",
- "async-trait",
  "dashmap",
  "futures",
- "hickory-proto 0.26.1",
  "hickory-resolver 0.26.1",
  "hickory-server",
  "ipnet",
@@ -2009,7 +1999,6 @@ dependencies = [
  "mihomo-common",
  "mihomo-trie",
  "parking_lot",
- "serde",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
@@ -2020,16 +2009,11 @@ dependencies = [
 name = "mihomo-listener"
 version = "0.6.2"
 dependencies = [
- "anyhow",
  "base64",
- "bytes",
- "futures",
  "libc",
  "mihomo-common",
- "mihomo-dns",
  "mihomo-trie",
  "mihomo-tunnel",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -2038,15 +2022,11 @@ dependencies = [
 name = "mihomo-proxy"
 version = "0.6.2"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64",
  "bytes",
- "dashmap",
  "futures",
- "futures-util",
  "hex",
- "http",
  "libc",
  "mihomo-common",
  "mihomo-dns",
@@ -2054,10 +2034,7 @@ dependencies = [
  "parking_lot",
  "rand 0.9.2",
  "rcgen",
- "regex",
- "reqwest",
  "rustls",
- "serde",
  "serde_json",
  "sha2",
  "shadowsocks",
@@ -2066,7 +2043,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite 0.24.0",
  "tracing",
  "tracing-subscriber",
  "webpki-roots 0.26.11",
@@ -2083,7 +2059,6 @@ dependencies = [
  "mihomo-common",
  "mihomo-trie",
  "regex",
- "serde",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -2104,7 +2079,6 @@ dependencies = [
  "http",
  "httparse",
  "md5",
- "mihomo-common",
  "rand 0.9.2",
  "rcgen",
  "regex",
@@ -2132,7 +2106,6 @@ name = "mihomo-tunnel"
 version = "0.6.2"
 dependencies = [
  "async-trait",
- "bytes",
  "criterion",
  "dashmap",
  "mihomo-common",
@@ -2142,8 +2115,6 @@ dependencies = [
  "mihomo-trie",
  "parking_lot",
  "serde",
- "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",

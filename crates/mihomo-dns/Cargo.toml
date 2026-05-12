@@ -9,23 +9,25 @@ default = ["encrypted", "dns-server"]
 encrypted = ["hickory-resolver/tls-ring", "hickory-resolver/https-ring"]
 dns-server = ["dep:hickory-server"]
 
+# cargo-machete false-positive: hickory-server is optional, backing the
+# `dns-server` feature gate; it has no direct src imports but the `dep:`
+# reference in [features] requires the dep entry to exist.
+[package.metadata.cargo-machete]
+ignored = ["hickory-server"]
+
 [dependencies]
 mihomo-common = { workspace = true }
 mihomo-trie = { workspace = true }
 tokio = { workspace = true }
 hickory-resolver = { workspace = true }
 hickory-server = { workspace = true, optional = true }
-hickory-proto = { workspace = true }
 lru = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
-async-trait = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 ipnet = { workspace = true }
 maxminddb = { workspace = true }
-anyhow = { workspace = true }
-serde = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]

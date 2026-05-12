@@ -14,12 +14,9 @@ tokio = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
-thiserror = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
-bytes = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 
 [[bench]]
 name = "udp_bench"

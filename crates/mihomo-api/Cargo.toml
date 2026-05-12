@@ -20,14 +20,12 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-thiserror = { workspace = true }
 dashmap = { workspace = true }
 futures = { workspace = true }
 parking_lot = { workspace = true }
 subtle = "2"
 sysinfo = "0.32"
 time = { workspace = true }
-arc-swap = "1"
 base64 = "0.22"
 prometheus-client = "0.22"
 

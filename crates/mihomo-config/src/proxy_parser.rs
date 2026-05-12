@@ -686,6 +686,7 @@ fn parse_vless(
 ///
 /// Accepts: `"b831381d-6324-4d53-ad4f-8cda48b30811"` or
 ///          `"b831381d63244d53ad4f8cda48b30811"`.
+#[cfg(feature = "vless")]
 fn parse_uuid(s: &str) -> std::result::Result<[u8; 16], String> {
     let hex: String = s.chars().filter(|c| *c != '-').collect();
     if hex.len() != 32 {
@@ -707,6 +708,7 @@ fn parse_uuid(s: &str) -> std::result::Result<[u8; 16], String> {
 
 /// Convert a YAML `plugin-opts` value to the SIP003 semicolon-separated format.
 /// Accepts either a string (passed through) or a YAML map (serialized as `key=value;...`).
+#[cfg(feature = "ss")]
 fn serialize_plugin_opts(opts: &serde_yaml::Value) -> Option<String> {
     match opts {
         serde_yaml::Value::String(s) => Some(s.clone()),
@@ -916,6 +918,7 @@ fn parse_relay_group(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "ss")]
     #[test]
     fn test_serialize_plugin_opts_map() {
         let yaml: serde_yaml::Value = serde_yaml::from_str(
@@ -934,6 +937,7 @@ tls: true
         assert_eq!(result.matches(';').count(), 2);
     }
 
+    #[cfg(feature = "ss")]
     #[test]
     fn test_serialize_plugin_opts_string_passthrough() {
         let yaml = serde_yaml::Value::String("obfs=http;obfs-host=example.com".to_string());
@@ -941,18 +945,21 @@ tls: true
         assert_eq!(result, "obfs=http;obfs-host=example.com");
     }
 
+    #[cfg(feature = "ss")]
     #[test]
     fn test_serialize_plugin_opts_empty_map() {
         let yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
         assert!(serialize_plugin_opts(&yaml).is_none());
     }
 
+    #[cfg(feature = "ss")]
     #[test]
     fn test_serialize_plugin_opts_null() {
         let yaml = serde_yaml::Value::Null;
         assert!(serialize_plugin_opts(&yaml).is_none());
     }
 
+    #[cfg(feature = "ss")]
     #[test]
     fn test_serialize_plugin_opts_number_value() {
         let yaml: serde_yaml::Value = serde_yaml::from_str("port: 8080").unwrap();

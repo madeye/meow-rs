@@ -1,3 +1,4 @@
+#![cfg(feature = "ss")]
 //! Integration tests for the built-in `v2ray-plugin` transport.
 //!
 //! These tests exercise the real SS + v2ray-plugin server chain:

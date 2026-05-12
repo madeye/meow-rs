@@ -12,7 +12,6 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
-uuid = { workspace = true }
 tracing = { workspace = true }
 httparse = { version = "1", default-features = false }
 ipnet = { workspace = true }

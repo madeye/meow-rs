@@ -1,3 +1,4 @@
+#![cfg(feature = "vless")]
 //! Integration tests for the VLESS outbound proxy adapter (§H, M1.B-2).
 //!
 //! Uses an embedded mock VLESS server over plain TCP — no external binaries

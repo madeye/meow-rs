@@ -14,7 +14,8 @@
 //!
 //! # Crate boundary invariants (enforced by CI)
 //!
-//! * No dependency on `mihomo-proxy`, `mihomo-dns`, or `mihomo-config`.
+//! * No dependency on any other workspace crate (`mihomo-common`, `mihomo-proxy`,
+//!   `mihomo-dns`, `mihomo-config`). This crate is a protocol-agnostic leaf.
 //! * No `anyhow::Error` in any public function signature — only [`TransportError`].
 //! * No server-side code (`accept`/`bind`/`listen`/`TcpListener`) in `src/`.
 //!   Test helpers in `tests/support/` are whitelisted.

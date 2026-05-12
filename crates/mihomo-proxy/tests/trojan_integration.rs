@@ -1,3 +1,4 @@
+#![cfg(feature = "trojan")]
 //! Integration tests for the Trojan adapter.
 //!
 //! Uses an embedded mock Trojan server with a self-signed certificate.

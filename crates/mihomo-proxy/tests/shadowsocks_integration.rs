@@ -1,3 +1,4 @@
+#![cfg(feature = "ss")]
 //! Integration tests for the Shadowsocks adapter.
 //!
 //! Requires `ssserver` (from shadowsocks-rust) to be installed and in PATH.

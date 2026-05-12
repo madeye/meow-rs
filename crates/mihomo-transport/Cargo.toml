@@ -6,8 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "Reusable composable stream-transport layers (TLS, WS, gRPC, H2, HTTPUpgrade) for mihomo-rust"
 
-# ADR-0001: this crate is a leaf — no dep on mihomo-proxy / mihomo-dns / mihomo-config.
-# `cargo tree -p mihomo-transport` must show only `mihomo-common` from our workspace.
+# ADR-0001 + ADR-0009: this crate is a leaf — no dep on any other workspace crate
+# (mihomo-common, mihomo-proxy, mihomo-dns, mihomo-config).
+# `cargo tree -p mihomo-transport` must show no mihomo-* crates.
 
 [features]
 default = ["tls", "ws"]
@@ -48,7 +49,6 @@ httpupgrade = [
 ]
 
 [dependencies]
-mihomo-common = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

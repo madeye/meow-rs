@@ -36,8 +36,13 @@ full = [
 name = "mihomo"
 path = "src/main.rs"
 
+# cargo-machete false-positive: mihomo-proxy has no direct src imports but is
+# required here to forward protocol features (`ss`, `trojan`, `vless`, etc.)
+# to the proxy crate via the [features] table's `mihomo-proxy/<feat>` entries.
+[package.metadata.cargo-machete]
+ignored = ["mihomo-proxy"]
+
 [dependencies]
-mihomo-common = { workspace = true }
 mihomo-config = { workspace = true, default-features = false }
 mihomo-rules = { workspace = true }
 mihomo-tunnel = { workspace = true }

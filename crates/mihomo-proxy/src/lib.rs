@@ -53,6 +53,7 @@ pub use vless_adapter::{VlessAdapter, VlessFlow};
 /// ADR-0001 §1 invariants still hold:
 /// - No adapter constructs `TransportError` variants by hand.
 /// - No `anyhow::Error` crosses the `mihomo-transport` boundary.
+#[cfg(any(feature = "ss", feature = "trojan", feature = "vless"))]
 pub(crate) fn transport_to_proxy_err(
     e: mihomo_transport::TransportError,
 ) -> mihomo_common::MihomoError {
