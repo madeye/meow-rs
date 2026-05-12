@@ -8,3 +8,4 @@ Country.mmdb
 Dockerfile.debug
 dhat-heap.json
 dhat-ad-hoc.json
+dh_out.json
