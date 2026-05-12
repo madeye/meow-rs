@@ -533,7 +533,7 @@ mod tests {
             }
         }
 
-        let cap = CapWriter(captured.clone(), line_buf);
+        let cap = CapWriter(Arc::clone(&captured), line_buf);
         let sub = tracing_subscriber::fmt()
             .with_writer(cap)
             .with_ansi(false)

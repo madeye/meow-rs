@@ -490,8 +490,8 @@ mod tests {
     async fn relay_two_hop_tcp_roundtrip() {
         let a = MockProxy::new("A", "10.0.0.1", 1080, 1);
         let b = MockProxy::new("B", "10.0.0.2", 1080, 2);
-        let a_visits = a.visits.clone();
-        let b_visits = b.visits.clone();
+        let a_visits = Arc::clone(&a.visits);
+        let b_visits = Arc::clone(&b.visits);
 
         let proxies: Vec<Arc<dyn Proxy>> = vec![a, b];
         let group = RelayGroup::new("two-hop", proxies);
@@ -524,9 +524,9 @@ mod tests {
         let a = MockProxy::new("A", "10.0.0.1", 1080, 1);
         let b = MockProxy::new("B", "10.0.0.2", 1080, 2);
         let c = MockProxy::new("C", "10.0.0.3", 1080, 3);
-        let a_visits = a.visits.clone();
-        let b_visits = b.visits.clone();
-        let c_visits = c.visits.clone();
+        let a_visits = Arc::clone(&a.visits);
+        let b_visits = Arc::clone(&b.visits);
+        let c_visits = Arc::clone(&c.visits);
 
         let proxies: Vec<Arc<dyn Proxy>> = vec![a, b, c];
         let group = RelayGroup::new("three-hop", proxies);
@@ -548,7 +548,7 @@ mod tests {
     async fn relay_first_hop_uses_dial_tcp_not_connect_over() {
         let a = MockProxy::new("A", "10.0.0.1", 1080, 1);
         let b = MockProxy::new("B", "10.0.0.2", 1080, 2);
-        let a_visits = a.visits.clone();
+        let a_visits = Arc::clone(&a.visits);
 
         let proxies: Vec<Arc<dyn Proxy>> = vec![a, b];
         let group = RelayGroup::new("guard-dial-tcp", proxies);
@@ -573,8 +573,8 @@ mod tests {
         let a = MockProxy::new("A", "10.0.0.1", 1080, 1);
         let b = MockProxy::new("B", "10.0.0.2", 1080, 2);
         let c = MockProxy::new("C", "10.0.0.3", 1080, 3);
-        let a_visits = a.visits.clone();
-        let b_visits = b.visits.clone();
+        let a_visits = Arc::clone(&a.visits);
+        let b_visits = Arc::clone(&b.visits);
 
         let proxies: Vec<Arc<dyn Proxy>> = vec![a, b, c];
         let group = RelayGroup::new("guard-connect-over", proxies);
@@ -603,9 +603,9 @@ mod tests {
         let a = MockProxy::new("A", "10.0.0.1", 1080, 1);
         let b = MockProxy::new("B", "10.0.0.2", 1081, 2);
         let c = MockProxy::new("C", "10.0.0.3", 1082, 3);
-        let a_host = a.last_dial_host.clone();
-        let b_host = b.last_dial_host.clone();
-        let c_host = c.last_dial_host.clone();
+        let a_host = Arc::clone(&a.last_dial_host);
+        let b_host = Arc::clone(&b.last_dial_host);
+        let c_host = Arc::clone(&c.last_dial_host);
 
         let proxies: Vec<Arc<dyn Proxy>> = vec![a, b, c];
         let group = RelayGroup::new("hop-address-check", proxies);
@@ -881,9 +881,9 @@ mod tests {
         let b = MockProxy::new("B", "10.0.0.2", 1080, 2);
         let c = MockProxy::new("C", "10.0.0.3", 1080, 3);
         let d = MockProxy::new("D", "10.0.0.4", 1080, 4);
-        let b_visits = b.visits.clone();
-        let c_visits = c.visits.clone();
-        let d_visits = d.visits.clone();
+        let b_visits = Arc::clone(&b.visits);
+        let c_visits = Arc::clone(&c.visits);
+        let d_visits = Arc::clone(&d.visits);
 
         let inner_proxies: Vec<Arc<dyn Proxy>> = vec![a, b, c];
         let inner_relay: Arc<dyn Proxy> = Arc::new(RelayGroup::new("inner", inner_proxies));

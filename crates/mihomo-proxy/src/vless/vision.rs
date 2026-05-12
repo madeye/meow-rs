@@ -411,7 +411,7 @@ mod tests {
     #[tokio::test]
     async fn vision_detects_inner_tls_by_first_5_bytes() {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(written.clone());
+        let mut conn = vision_over_recorder(Arc::clone(&written));
 
         // Write exactly 5 bytes: TLS handshake record type + TLS 1.2 version.
         // ClientHello body_len = 0x0001 (1 byte body).
@@ -453,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn vision_passthrough_on_non_tls_first_byte() {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(written.clone());
+        let mut conn = vision_over_recorder(Arc::clone(&written));
 
         // 0x47 = 'G' — first byte of "GET /"
         let data = [0x47u8, 0x45, 0x54, 0x20, 0x2F];
@@ -486,7 +486,7 @@ mod tests {
     #[tokio::test]
     async fn vision_passthrough_on_tls_type_but_wrong_version() {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(written.clone());
+        let mut conn = vision_over_recorder(Arc::clone(&written));
 
         let data = [0x16u8, 0x04, 0x00, 0x00, 0x00]; // TLS type, version major 0x04
         conn.write_all(&data).await.unwrap();
@@ -502,7 +502,7 @@ mod tests {
     #[tokio::test]
     async fn vision_passthrough_on_empty_stream() {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(written.clone());
+        let mut conn = vision_over_recorder(Arc::clone(&written));
 
         // Write only 3 bytes and then nothing more.
         conn.write_all(&[0x16, 0x03, 0x01]).await.unwrap();
@@ -524,7 +524,7 @@ mod tests {
     #[tokio::test]
     async fn vision_reads_full_clienthello_before_sending() {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(written.clone());
+        let mut conn = vision_over_recorder(Arc::clone(&written));
 
         // ClientHello: 5-byte header claiming body_length=4.
         let hdr = [0x16u8, 0x03, 0x01, 0x00, 0x04];
@@ -569,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn vision_clienthello_body_length_from_bytes_3_4() {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(written.clone());
+        let mut conn = vision_over_recorder(Arc::clone(&written));
 
         // body_length = 512 = 0x0200
         let hdr = [0x16u8, 0x03, 0x01, 0x02, 0x00];
@@ -614,7 +614,7 @@ mod tests {
     #[tokio::test]
     async fn vision_sends_padding_then_clienthello_in_order() {
         let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(written.clone());
+        let mut conn = vision_over_recorder(Arc::clone(&written));
 
         let hdr = [0x16u8, 0x03, 0x01, 0x00, 0x02]; // body_len = 2
         conn.write_all(&hdr).await.unwrap();
@@ -685,7 +685,7 @@ mod tests {
             }
         }
 
-        let cap = CapWriter(lines.clone(), line_buf);
+        let cap = CapWriter(Arc::clone(&lines), line_buf);
         let sub = tracing_subscriber::fmt()
             .with_writer(cap)
             .with_ansi(false)

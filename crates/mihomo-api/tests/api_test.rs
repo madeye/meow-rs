@@ -1949,10 +1949,10 @@ async fn e1_group_delay_dials_all_members_concurrently() {
             n,
             DialBehavior::SleepThenOk(std::time::Duration::from_millis(100)),
         );
-        let starts = adapter.dial_starts.clone();
+        let starts = Arc::clone(&adapter.dial_starts);
         starts_vec.push(starts);
         let p = adapter.into_proxy();
-        members.push(p.clone());
+        members.push(Arc::clone(&p));
         named.push((n, p));
     }
     let group = fallback_group("G", members);
@@ -2020,9 +2020,9 @@ async fn e5_group_delay_url_test_no_reselection() {
         DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
     )
     .into_proxy();
-    let group = url_test_group("G", vec![a.clone(), b.clone()]);
+    let group = url_test_group("G", vec![Arc::clone(&a), Arc::clone(&b)]);
     assert_eq!(group.current().as_deref(), Some("A"));
-    let state = state_with_proxies(vec![("A", a), ("B", b), ("G", group.clone())]);
+    let state = state_with_proxies(vec![("A", a), ("B", b), ("G", Arc::clone(&group))]);
     let app = create_router(state);
     let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -2180,7 +2180,7 @@ async fn h5_group_member_bad_status_is_zero() {
     // per-member failures are map-zero, not a top-level error.
     let good = TestAdapter::new("good", DialBehavior::InstantOk).into_proxy();
     let bad = TestAdapter::new("bad", DialBehavior::InstantStatus(500, "Oops")).into_proxy();
-    let group = fallback_group("G", vec![good.clone(), bad.clone()]);
+    let group = fallback_group("G", vec![Arc::clone(&good), Arc::clone(&bad)]);
     let state = state_with_proxies(vec![("good", good), ("bad", bad), ("G", group)]);
     let app = create_router(state);
     let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
