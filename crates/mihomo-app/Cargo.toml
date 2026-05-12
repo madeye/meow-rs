@@ -66,3 +66,6 @@ tempfile = "3"
 serde_yaml = { workspace = true }
 mihomo-config = { workspace = true }
 libc = "0.2"
+
+[lints]
+workspace = true

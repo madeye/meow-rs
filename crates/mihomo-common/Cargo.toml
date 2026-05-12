@@ -26,3 +26,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "net"] }
+
+[lints]
+workspace = true

@@ -33,3 +33,6 @@ futures = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 sysinfo = "0.32"
+
+[lints]
+workspace = true

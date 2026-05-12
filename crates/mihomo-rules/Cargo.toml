@@ -26,3 +26,6 @@ harness = false
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
+
+[lints]
+workspace = true

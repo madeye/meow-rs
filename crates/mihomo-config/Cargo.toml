@@ -42,3 +42,6 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "vless_config_test"
 path = "tests/vless_config_test.rs"
+
+[lints]
+workspace = true

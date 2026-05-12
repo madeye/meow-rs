@@ -31,3 +31,6 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 mihomo-trie = { workspace = true }
 criterion = { workspace = true }
 dashmap = { workspace = true }
+
+[lints]
+workspace = true

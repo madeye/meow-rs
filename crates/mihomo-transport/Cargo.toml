@@ -109,3 +109,6 @@ required-features = ["h2"]
 [[test]]
 name = "httpupgrade_test"
 required-features = ["httpupgrade"]
+
+[lints]
+workspace = true

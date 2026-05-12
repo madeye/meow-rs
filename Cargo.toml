@@ -28,6 +28,27 @@ edition = "2021"
 rust-version = "1.88"
 license = "GPL-3.0"
 
+[workspace.lints.clippy]
+uninlined_format_args = "warn"
+redundant_closure = "warn"
+redundant_clone = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+explicit_iter_loop = "warn"
+needless_pass_by_value = "warn"
+match_same_arms = "warn"
+if_not_else = "warn"
+unnecessary_wraps = "warn"
+cloned_instead_of_copied = "warn"
+# Too noisy or contrary to project style — kept as allow:
+module_name_repetitions = "allow"
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
