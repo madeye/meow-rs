@@ -126,7 +126,7 @@ mod platform {
     }
 
     fn find_pid_by_inode(inode: u64) -> Option<(u32, String, String)> {
-        let needle = format!("socket:[{}]", inode);
+        let needle = format!("socket:[{inode}]");
         for entry in fs::read_dir("/proc").ok()?.flatten() {
             let Some(pid) = entry
                 .file_name()

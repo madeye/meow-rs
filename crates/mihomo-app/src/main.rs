@@ -164,18 +164,18 @@ fn install_service(config_override: Option<&str>, args: &Args) -> Result<()> {
 
     let unit = mihomo_app::generate_systemd_unit(&exe_path, &config_path);
 
-    let service_path = format!("/etc/systemd/system/{}.service", SERVICE_NAME);
+    let service_path = format!("/etc/systemd/system/{SERVICE_NAME}.service");
 
     // Check if running as root
     if !is_root() {
         eprintln!("Root privileges required. Run with sudo:");
-        eprintln!("  sudo {} install -f {}", exe_path, config_path);
+        eprintln!("  sudo {exe_path} install -f {config_path}");
         std::process::exit(1);
     }
 
     // Write service file
     std::fs::write(&service_path, &unit)?;
-    println!("Service file written to {}", service_path);
+    println!("Service file written to {service_path}");
 
     // Reload systemd and enable
     run_cmd("systemctl", &["daemon-reload"])?;
@@ -185,14 +185,14 @@ fn install_service(config_override: Option<&str>, args: &Args) -> Result<()> {
     println!();
     println!("mihomo service installed and started.");
     println!();
-    println!("  Config:  {}", config_path);
-    println!("  Binary:  {}", exe_path);
+    println!("  Config:  {config_path}");
+    println!("  Binary:  {exe_path}");
     println!();
     println!("Commands:");
-    println!("  sudo systemctl status {}", SERVICE_NAME);
-    println!("  sudo systemctl restart {}", SERVICE_NAME);
-    println!("  sudo systemctl stop {}", SERVICE_NAME);
-    println!("  sudo journalctl -u {} -f", SERVICE_NAME);
+    println!("  sudo systemctl status {SERVICE_NAME}");
+    println!("  sudo systemctl restart {SERVICE_NAME}");
+    println!("  sudo systemctl stop {SERVICE_NAME}");
+    println!("  sudo journalctl -u {SERVICE_NAME} -f");
 
     Ok(())
 }
@@ -206,7 +206,7 @@ fn uninstall_service() -> Result<()> {
         std::process::exit(1);
     }
 
-    let service_path = format!("/etc/systemd/system/{}.service", SERVICE_NAME);
+    let service_path = format!("/etc/systemd/system/{SERVICE_NAME}.service");
 
     // Stop and disable
     let _ = run_cmd("systemctl", &["stop", SERVICE_NAME]);
@@ -215,7 +215,7 @@ fn uninstall_service() -> Result<()> {
     // Remove service file
     if std::path::Path::new(&service_path).exists() {
         std::fs::remove_file(&service_path)?;
-        println!("Removed {}", service_path);
+        println!("Removed {service_path}");
     }
 
     run_cmd("systemctl", &["daemon-reload"])?;

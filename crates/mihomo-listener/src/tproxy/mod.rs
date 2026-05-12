@@ -85,7 +85,7 @@ impl TProxyListener {
                 if let Err(e) =
                     handle_tproxy_conn(tunnel, stream, src_addr, listen_addr, sniffer, name).await
                 {
-                    debug!("TProxy connection error from {}: {}", src_addr, e);
+                    debug!("TProxy connection error from {src_addr}: {e}");
                 }
             });
         }
@@ -229,10 +229,10 @@ async fn handle_tproxy_conn(
                     inner.stats.add_upload(up as i64);
                     inner.stats.add_download(down as i64);
                 }
-                Err(e) => debug!("TProxy relay error: {}", e),
+                Err(e) => debug!("TProxy relay error: {e}"),
             }
         }
-        Err(e) => warn!("TProxy dial error: {}", e),
+        Err(e) => warn!("TProxy dial error: {e}"),
     }
 
     inner.stats.close_connection(&conn_id);

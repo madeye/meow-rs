@@ -41,7 +41,7 @@ impl FirewallGuard {
 impl Drop for FirewallGuard {
     fn drop(&mut self) {
         if let Err(e) = self.teardown() {
-            warn!("Failed to teardown firewall rules: {}", e);
+            warn!("Failed to teardown firewall rules: {e}");
         }
     }
 }
@@ -80,7 +80,7 @@ impl PlatformGuard {
             "rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {listen_port}",
         );
 
-        let tmp_path = format!("/tmp/mihomo_tproxy_{}.conf", std::process::id());
+        let tmp_path = format!("/tmp/mihomo_tproxy_{pid}.conf", pid = std::process::id());
         std::fs::write(&tmp_path, &rules)?;
 
         let output = Command::new("pfctl")
@@ -121,10 +121,10 @@ impl PlatformGuard {
             .output()?;
 
         if output.status.success() {
-            info!("pf anchor '{}' flushed", self.anchor);
+            info!("pf anchor '{anchor}' flushed", anchor = self.anchor);
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("pfctl flush anchor failed: {}", stderr);
+            warn!("pfctl flush anchor failed: {stderr}");
         }
         Ok(())
     }
@@ -151,12 +151,12 @@ impl PlatformGuard {
 
         let mut bypass_rules = String::new();
         for ip in bypass_ips {
-            bypass_rules.push_str(&format!("    ip daddr {} accept\n", ip));
+            writeln!(bypass_rules, "    ip daddr {ip} accept").expect("write to String");
         }
 
         // Mark-based bypass for DIRECT connections (SO_MARK set by DirectAdapter)
         let mark_rule = match routing_mark {
-            Some(mark) => format!("    meta mark 0x{:x} accept\n", mark),
+            Some(mark) => format!("    meta mark 0x{mark:x} accept\n"),
             None => String::new(),
         };
 
@@ -202,10 +202,7 @@ impl PlatformGuard {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(io::Error::other(format!(
-                "nft load rules failed: {}",
-                stderr
-            )));
+            return Err(io::Error::other(format!("nft load rules failed: {stderr}")));
         }
 
         info!(
@@ -230,11 +227,11 @@ impl PlatformGuard {
             .args(["delete", "table", "inet", &self.table_name])
             .output()?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("nft delete table failed: {}", stderr);
+        if output.status.success() {
+            info!("nftables table '{name}' deleted", name = self.table_name);
         } else {
-            info!("nftables table '{}' deleted", self.table_name);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("nft delete table failed: {stderr}");
         }
         Ok(())
     }
