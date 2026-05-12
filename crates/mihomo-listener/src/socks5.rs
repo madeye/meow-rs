@@ -2,6 +2,7 @@ use crate::sniffer::SnifferRuntime;
 use mihomo_common::{AuthConfig, ConnType, Metadata, Network};
 use mihomo_tunnel::Tunnel;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
@@ -179,7 +180,7 @@ async fn handle_socks5_inner(
         metadata.pure(),
         &rule_name,
         &rule_payload,
-        vec![proxy.name().to_string()],
+        vec![Arc::from(proxy.name())],
     );
 
     match proxy.dial_tcp(&metadata).await {

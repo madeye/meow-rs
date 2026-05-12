@@ -1,5 +1,6 @@
 use mihomo_common::Metadata;
 use mihomo_tunnel::Statistics;
+use std::sync::Arc;
 
 #[test]
 fn test_statistics_new() {
@@ -55,16 +56,16 @@ fn test_track_connection() {
         metadata,
         "DOMAIN-SUFFIX",
         "google.com",
-        vec!["DIRECT".to_string()],
+        vec![Arc::from("DIRECT")],
     );
 
     assert!(!id.is_empty());
     let conns = stats.active_connections();
     assert_eq!(conns.len(), 1);
-    assert_eq!(conns[0].id, id);
-    assert_eq!(conns[0].rule, "DOMAIN-SUFFIX");
-    assert_eq!(conns[0].rule_payload, "google.com");
-    assert_eq!(conns[0].chains, vec!["DIRECT"]);
+    assert_eq!(conns[0].id.to_string(), id);
+    assert_eq!(&*conns[0].rule, "DOMAIN-SUFFIX");
+    assert_eq!(&*conns[0].rule_payload, "google.com");
+    assert_eq!(&*conns[0].chains[0], "DIRECT");
 }
 
 #[test]
@@ -72,7 +73,7 @@ fn test_close_connection() {
     let stats = Statistics::new();
     let metadata = Metadata::default();
 
-    let id = stats.track_connection(metadata, "MATCH", "", vec!["DIRECT".to_string()]);
+    let id = stats.track_connection(metadata, "MATCH", "", vec![Arc::from("DIRECT")]);
     assert_eq!(stats.active_connections().len(), 1);
 
     stats.close_connection(&id);
@@ -95,15 +96,15 @@ fn test_multiple_connections() {
         Metadata::default(),
         "DOMAIN",
         "a.com",
-        vec!["proxy1".to_string()],
+        vec![Arc::from("proxy1")],
     );
     let id2 = stats.track_connection(
         Metadata::default(),
         "DOMAIN",
         "b.com",
-        vec!["proxy2".to_string()],
+        vec![Arc::from("proxy2")],
     );
-    let id3 = stats.track_connection(Metadata::default(), "MATCH", "", vec!["DIRECT".to_string()]);
+    let id3 = stats.track_connection(Metadata::default(), "MATCH", "", vec![Arc::from("DIRECT")]);
 
     assert_eq!(stats.active_connections().len(), 3);
 
@@ -112,24 +113,24 @@ fn test_multiple_connections() {
 
     // Verify remaining connections
     let conns = stats.active_connections();
-    let ids: Vec<&str> = conns.iter().map(|c| c.id.as_str()).collect();
-    assert!(ids.contains(&id1.as_str()));
-    assert!(!ids.contains(&id2.as_str()));
-    assert!(ids.contains(&id3.as_str()));
+    let ids: Vec<String> = conns.iter().map(|c| c.id.to_string()).collect();
+    assert!(ids.contains(&id1));
+    assert!(!ids.contains(&id2));
+    assert!(ids.contains(&id3));
 }
 
 #[test]
 fn test_connection_unique_ids() {
     let stats = Statistics::new();
-    let id1 = stats.track_connection(Metadata::default(), "MATCH", "", vec!["DIRECT".to_string()]);
-    let id2 = stats.track_connection(Metadata::default(), "MATCH", "", vec!["DIRECT".to_string()]);
+    let id1 = stats.track_connection(Metadata::default(), "MATCH", "", vec![Arc::from("DIRECT")]);
+    let id2 = stats.track_connection(Metadata::default(), "MATCH", "", vec![Arc::from("DIRECT")]);
     assert_ne!(id1, id2, "Connection IDs must be unique");
 }
 
 #[test]
 fn test_connection_has_start_time() {
     let stats = Statistics::new();
-    let _id = stats.track_connection(Metadata::default(), "MATCH", "", vec!["DIRECT".to_string()]);
+    let _id = stats.track_connection(Metadata::default(), "MATCH", "", vec![Arc::from("DIRECT")]);
 
     let conns = stats.active_connections();
     assert!(!conns[0].start.is_empty());
@@ -148,11 +149,11 @@ fn test_connection_chains() {
         Metadata::default(),
         "DOMAIN",
         "example.com",
-        vec!["proxy-group".to_string(), "ss-server".to_string()],
+        vec![Arc::from("proxy-group"), Arc::from("ss-server")],
     );
 
     let conns = stats.active_connections();
     assert_eq!(conns[0].chains.len(), 2);
-    assert_eq!(conns[0].chains[0], "proxy-group");
-    assert_eq!(conns[0].chains[1], "ss-server");
+    assert_eq!(&*conns[0].chains[0], "proxy-group");
+    assert_eq!(&*conns[0].chains[1], "ss-server");
 }

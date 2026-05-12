@@ -1,3 +1,13 @@
+// M2 layout change (ADR-0011 T2):
+//   id: String (24 B heap) → Uuid (16 B inline, −8 B)
+//   rule: String (24 B) → Arc<str> (16 B fat-ptr, −8 B)
+//   rule_payload: String (24 B) → Arc<str> (16 B fat-ptr, −8 B)
+//   chains: Vec<String> (24 B struct, heap elems) → Vec<Arc<str>> (24 B struct,
+//     ref-counted elems — no per-element allocation for proxy names)
+// Public JSON shape is unchanged: Uuid serialises as hyphenated string via the
+// `serde` feature; Arc<str> and Vec<Arc<str>> serialise as string/array.
+// Breaking change permitted by ADR-0009.
+
 use dashmap::DashMap;
 use mihomo_common::Metadata;
 use serde::Serialize;
@@ -36,20 +46,25 @@ impl Default for RuleMatchCounters {
 
 #[derive(Serialize, Clone)]
 pub struct ConnectionInfo {
-    pub id: String,
+    /// 16 B inline UUID; serialises as `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"`.
+    pub id: Uuid,
     #[serde(skip)]
     pub metadata: Metadata,
     pub upload: i64,
     pub download: i64,
     pub start: String,
-    pub chains: Vec<String>,
-    pub rule: String,
-    pub rule_payload: String,
+    /// Proxy chain; ref-counted so proxy-name strings are shared across entries.
+    pub chains: Vec<Arc<str>>,
+    /// Rule type that matched this connection (e.g. `"DOMAIN-SUFFIX"`).
+    pub rule: Arc<str>,
+    /// Rule payload (e.g. the domain pattern). Config-derived, low-cardinality.
+    pub rule_payload: Arc<str>,
 }
 
 pub struct Statistics {
     pub upload_total: AtomicI64,
     pub download_total: AtomicI64,
+    /// Key is the UUID as a hyphenated String for external-API stability.
     pub connections: DashMap<String, ConnectionInfo>,
     pub rule_match: Arc<RuleMatchCounters>,
 }
@@ -77,21 +92,22 @@ impl Statistics {
         metadata: Metadata,
         rule: &str,
         rule_payload: &str,
-        chains: Vec<String>,
+        chains: Vec<Arc<str>>,
     ) -> String {
-        let id = Uuid::new_v4().to_string();
+        let uuid = Uuid::new_v4();
+        let id_str = uuid.to_string();
         let info = ConnectionInfo {
-            id: id.clone(),
+            id: uuid,
             metadata,
             upload: 0,
             download: 0,
             start: chrono_now(),
             chains,
-            rule: rule.to_string(),
-            rule_payload: rule_payload.to_string(),
+            rule: rule.into(),
+            rule_payload: rule_payload.into(),
         };
-        self.connections.insert(id.clone(), info);
-        id
+        self.connections.insert(id_str.clone(), info);
+        id_str
     }
 
     pub fn close_connection(&self, id: &str) {

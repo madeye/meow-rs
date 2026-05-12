@@ -3,6 +3,7 @@ use base64::Engine;
 use mihomo_common::{AuthConfig, ConnType, Metadata, Network};
 use mihomo_tunnel::Tunnel;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
@@ -166,7 +167,7 @@ async fn handle_http_inner(
             metadata.pure(),
             &rule_name,
             &rule_payload,
-            vec![proxy.name().to_string()],
+            vec![Arc::from(proxy.name())],
         );
 
         match proxy.dial_tcp(&metadata).await {
@@ -230,7 +231,7 @@ async fn handle_http_inner(
             metadata.pure(),
             &rule_name,
             &rule_payload,
-            vec![proxy.name().to_string()],
+            vec![Arc::from(proxy.name())],
         );
 
         match proxy.dial_tcp(&metadata).await {

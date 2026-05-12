@@ -208,7 +208,7 @@ async fn handle_tproxy_conn(
         metadata.pure(),
         &rule_name,
         &rule_payload,
-        vec![proxy.name().to_string()],
+        vec![Arc::from(proxy.name())],
     );
 
     match proxy.dial_tcp(&metadata).await {

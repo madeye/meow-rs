@@ -1,6 +1,7 @@
 use crate::statistics::Statistics;
 use crate::tunnel::TunnelInner;
 use mihomo_common::{Metadata, ProxyConn};
+use std::sync::Arc;
 use tokio::io;
 use tracing::{debug, info, warn};
 
@@ -34,7 +35,7 @@ impl<'a> ConnectionGuard<'a> {
         metadata: Metadata,
         rule: &str,
         rule_payload: &str,
-        chains: Vec<String>,
+        chains: Vec<Arc<str>>,
     ) -> Self {
         let id = stats.track_connection(metadata, rule, rule_payload, chains);
         Self { stats, id }
@@ -77,7 +78,7 @@ pub async fn handle_tcp(
         metadata.pure(),
         &rule_name,
         &rule_payload,
-        vec![proxy.name().to_string()],
+        vec![Arc::from(proxy.name())],
     );
 
     // Dial the remote via proxy

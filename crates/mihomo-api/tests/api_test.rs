@@ -2238,7 +2238,7 @@ async fn delete_connection_by_id_returns_204_and_removes_entry() {
         meta,
         "DOMAIN",
         "example.com",
-        vec!["DIRECT".to_string()],
+        vec![Arc::from("DIRECT")],
     );
 
     // Verify the connection shows up in GET /connections.
@@ -2299,8 +2299,8 @@ async fn delete_all_connections_clears_all() {
         dst_port: 80,
         ..Default::default()
     };
-    stats.track_connection(meta(), "MATCH", "", vec!["DIRECT".to_string()]);
-    stats.track_connection(meta(), "MATCH", "", vec!["DIRECT".to_string()]);
+    stats.track_connection(meta(), "MATCH", "", vec![Arc::from("DIRECT")]);
+    stats.track_connection(meta(), "MATCH", "", vec![Arc::from("DIRECT")]);
 
     let app = create_router(Arc::clone(&state));
     let resp = app
