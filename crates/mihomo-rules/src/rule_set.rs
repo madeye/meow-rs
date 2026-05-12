@@ -362,7 +362,7 @@ mod tests {
 
     fn meta_host(host: &str) -> Metadata {
         Metadata {
-            host: host.to_string(),
+            host: host.into(),
             dst_port: 443,
             ..Default::default()
         }

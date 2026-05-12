@@ -26,7 +26,7 @@ async fn pre_resolve_populates_dst_ip_for_ipcidr_rule() {
     tunnel.update_rules(vec![rule]);
 
     let mut md = Metadata {
-        host: "example.test".to_string(),
+        host: "example.test".into(),
         dst_port: 443,
         network: Network::Tcp,
         ..Default::default()
@@ -52,7 +52,7 @@ async fn pre_resolve_skips_when_no_rule_needs_ip() {
     // Empty rules => needs_ip_resolution is false. pre_resolve must not
     // populate dst_ip.
     let mut md = Metadata {
-        host: "example.test".to_string(),
+        host: "example.test".into(),
         dst_port: 443,
         network: Network::Tcp,
         ..Default::default()

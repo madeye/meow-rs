@@ -278,11 +278,11 @@ impl<S: DatagramSend + DatagramReceive + DatagramSocket + Send + Sync + 'static>
 
 fn parse_address(metadata: &Metadata) -> Address {
     if !metadata.host.is_empty() {
-        Address::DomainNameAddress(metadata.host.clone(), metadata.dst_port)
+        Address::DomainNameAddress(metadata.host.to_string(), metadata.dst_port)
     } else if let Some(ip) = metadata.dst_ip {
         Address::SocketAddress(SocketAddr::new(ip, metadata.dst_port))
     } else {
-        Address::DomainNameAddress(metadata.host.clone(), metadata.dst_port)
+        Address::DomainNameAddress(metadata.host.to_string(), metadata.dst_port)
     }
 }
 

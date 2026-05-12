@@ -124,7 +124,7 @@ mod tests {
 
     fn meta_path(path: &str) -> Metadata {
         Metadata {
-            process_path: path.to_string(),
+            process_path: path.into(),
             ..Default::default()
         }
     }

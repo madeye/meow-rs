@@ -65,7 +65,7 @@ mod tests {
 
     fn meta_host(host: &str) -> Metadata {
         Metadata {
-            host: host.to_string(),
+            host: host.into(),
             ..Default::default()
         }
     }
@@ -131,7 +131,7 @@ mod tests {
     fn domain_wildcard_uses_sniff_host() {
         let r = DomainWildcardRule::new("*.example.com", "PROXY").unwrap();
         let mut m = meta_host("fake.com");
-        m.sniff_host = "real.example.com".to_string();
+        m.sniff_host = "real.example.com".into();
         assert!(r.match_metadata(&m, &helper()));
     }
 }

@@ -627,14 +627,14 @@ rules:
     use mihomo_common::{Metadata, RuleMatchHelper};
     let helper = RuleMatchHelper;
     let meta = Metadata {
-        host: "tracker.ads.example".to_string(),
+        host: "tracker.ads.example".into(),
         dst_port: 443,
         ..Default::default()
     };
     assert!(config.rules[0].match_metadata(&meta, &helper));
 
     let meta_miss = Metadata {
-        host: "example.com".to_string(),
+        host: "example.com".into(),
         dst_port: 443,
         ..Default::default()
     };

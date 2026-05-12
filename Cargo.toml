@@ -180,6 +180,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # Heap profiling (optional — used only with --features dhat-heap)
 dhat = "0.3"
 
+# Compact string types (M2 Metadata layout)
+smol_str = { version = "0.3", features = ["serde"] }
+smallvec = { version = "1", features = ["union", "serde"] }
+
 # Property testing
 proptest = "1"
 

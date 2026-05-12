@@ -44,7 +44,7 @@ pub async fn url_test(
     let start = Instant::now();
     let metadata = mihomo_common::Metadata {
         network: mihomo_common::Network::Tcp,
-        host: parsed.host.clone(),
+        host: parsed.host.as_str().into(),
         dst_port: parsed.port,
         ..Default::default()
     };

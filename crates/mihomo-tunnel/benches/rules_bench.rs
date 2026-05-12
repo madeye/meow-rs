@@ -38,7 +38,7 @@ fn build_rules(n: usize) -> Vec<Box<dyn Rule>> {
 fn make_metadata_hit(n: usize) -> Metadata {
     let last_suffix_i = (0..n).rev().find(|&i| i % 3 == 0).unwrap_or(0);
     Metadata {
-        host: format!("host.suffix{last_suffix_i}.example.com"),
+        host: format!("host.suffix{last_suffix_i}.example.com").into(),
         dst_port: 443,
         ..Default::default()
     }
@@ -46,7 +46,7 @@ fn make_metadata_hit(n: usize) -> Metadata {
 
 fn make_metadata_miss() -> Metadata {
     Metadata {
-        host: "nomatch.unknown.invalid".to_string(),
+        host: "nomatch.unknown.invalid".into(),
         dst_port: 80,
         dst_ip: Some("203.0.113.1".parse::<IpAddr>().unwrap()),
         ..Default::default()

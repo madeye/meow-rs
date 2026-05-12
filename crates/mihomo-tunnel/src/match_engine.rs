@@ -153,8 +153,8 @@ fn maybe_enrich_with_process(metadata: &Metadata, rules: &[Box<dyn Rule>]) -> Op
         "match_engine: enriched metadata with process info",
     );
     let mut enriched = metadata.clone();
-    enriched.process = info.name;
-    enriched.process_path = info.path;
+    enriched.process = info.name.into();
+    enriched.process_path = info.path.into();
     if enriched.uid.is_none() {
         enriched.uid = info.uid;
     }
@@ -261,7 +261,7 @@ mod tests {
         ];
         let index = DomainIndex::build(&rules);
         let meta = Metadata {
-            host: "sub.example.com".to_string(),
+            host: "sub.example.com".into(),
             dst_port: 443,
             ..Default::default()
         };
@@ -284,7 +284,7 @@ mod tests {
         ];
         let index = DomainIndex::build(&rules);
         let meta = Metadata {
-            host: "sub.example.com".to_string(),
+            host: "sub.example.com".into(),
             dst_port: 443,
             ..Default::default()
         };
@@ -312,7 +312,7 @@ mod tests {
         ];
         let index = DomainIndex::build(&rules);
         let meta = Metadata {
-            host: "sub.example.com".to_string(),
+            host: "sub.example.com".into(),
             dst_port: 443,
             ..Default::default()
         };

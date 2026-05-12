@@ -157,8 +157,7 @@ async fn handle_tproxy_conn(
         src_port: src_addr.port(),
         dst_ip: Some(orig_dst.ip()),
         dst_port: orig_dst.port(),
-        host: String::new(),
-        in_name: name,
+        in_name: name.into(),
         in_port: listen_addr.port(),
         ..Default::default()
     };
@@ -173,7 +172,7 @@ async fn handle_tproxy_conn(
     let mut hostname = metadata.sniff_host.clone();
     if hostname.is_empty() {
         if let Some(domain) = tunnel.resolver().reverse_lookup(orig_dst.ip()) {
-            hostname = domain;
+            hostname = domain.into();
         }
     }
 

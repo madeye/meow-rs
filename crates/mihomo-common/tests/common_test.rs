@@ -168,7 +168,7 @@ fn test_metadata_default() {
 #[test]
 fn test_metadata_remote_address_with_host() {
     let m = Metadata {
-        host: "example.com".to_string(),
+        host: "example.com".into(),
         dst_port: 443,
         ..Default::default()
     };
@@ -207,7 +207,7 @@ fn test_metadata_remote_address_no_host_no_ip() {
 #[test]
 fn test_metadata_remote_address_host_takes_priority() {
     let m = Metadata {
-        host: "example.com".to_string(),
+        host: "example.com".into(),
         dst_ip: Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
         dst_port: 443,
         ..Default::default()
@@ -238,8 +238,8 @@ fn test_metadata_source_address_no_ip() {
 #[test]
 fn test_metadata_rule_host_sniff_priority() {
     let m = Metadata {
-        host: "original.com".to_string(),
-        sniff_host: "sniffed.com".to_string(),
+        host: "original.com".into(),
+        sniff_host: "sniffed.com".into(),
         ..Default::default()
     };
     assert_eq!(m.rule_host(), "sniffed.com");
@@ -248,7 +248,7 @@ fn test_metadata_rule_host_sniff_priority() {
 #[test]
 fn test_metadata_rule_host_fallback_to_host() {
     let m = Metadata {
-        host: "original.com".to_string(),
+        host: "original.com".into(),
         ..Default::default()
     };
     assert_eq!(m.rule_host(), "original.com");
@@ -275,17 +275,17 @@ fn test_metadata_pure_clears_extra_fields() {
         dst_ip: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
         src_port: 1234,
         dst_port: 443,
-        host: "example.com".to_string(),
-        process: "curl".to_string(),
-        process_path: "/usr/bin/curl".to_string(),
+        host: "example.com".into(),
+        process: "curl".into(),
+        process_path: "/usr/bin/curl".into(),
         uid: Some(1000),
         dscp: Some(46),
-        src_geo_ip: vec!["US".to_string()],
-        dst_geo_ip: vec!["DE".to_string()],
-        sniff_host: "sniffed.com".to_string(),
-        in_name: "mixed-in".to_string(),
+        src_geo_ip: vec!["US".into()],
+        dst_geo_ip: vec!["DE".into()],
+        sniff_host: "sniffed.com".into(),
+        in_name: "mixed-in".into(),
         in_port: 7890,
-        special_proxy: "special".to_string(),
+        special_proxy: "special".into(),
         ..Default::default()
     };
 
@@ -317,7 +317,7 @@ fn test_metadata_display_with_host() {
     let m = Metadata {
         src_ip: Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
         src_port: 1234,
-        host: "example.com".to_string(),
+        host: "example.com".into(),
         dst_port: 443,
         ..Default::default()
     };
@@ -352,7 +352,7 @@ fn test_metadata_json_roundtrip() {
         dst_ip: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))),
         src_port: 5000,
         dst_port: 53,
-        host: "dns.google".to_string(),
+        host: "dns.google".into(),
         ..Default::default()
     };
 

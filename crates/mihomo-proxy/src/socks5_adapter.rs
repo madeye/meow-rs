@@ -551,7 +551,7 @@ mod tests {
 
     fn meta_with_host(host: &str, port: u16) -> Metadata {
         Metadata {
-            host: host.to_string(),
+            host: host.into(),
             dst_port: port,
             ..Default::default()
         }
@@ -559,7 +559,6 @@ mod tests {
 
     fn meta_with_ipv4(ip: Ipv4Addr, port: u16) -> Metadata {
         Metadata {
-            host: String::new(),
             dst_ip: Some(IpAddr::V4(ip)),
             dst_port: port,
             ..Default::default()
@@ -683,7 +682,7 @@ mod tests {
 
         // Metadata has BOTH host and dst_ip.
         let meta = Metadata {
-            host: "example.com".to_string(),
+            host: "example.com".into(),
             dst_ip: Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
             dst_port: 80,
             ..Default::default()

@@ -2230,7 +2230,7 @@ async fn delete_connection_by_id_returns_204_and_removes_entry() {
     let meta = Metadata {
         network: Network::Tcp,
         conn_type: ConnType::Http,
-        host: "example.com".to_string(),
+        host: "example.com".into(),
         dst_port: 80,
         ..Default::default()
     };
@@ -2295,7 +2295,7 @@ async fn delete_all_connections_clears_all() {
     let meta = || Metadata {
         network: Network::Tcp,
         conn_type: ConnType::Http,
-        host: "a.test".to_string(),
+        host: "a.test".into(),
         dst_port: 80,
         ..Default::default()
     };

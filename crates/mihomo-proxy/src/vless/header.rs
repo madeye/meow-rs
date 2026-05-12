@@ -69,7 +69,7 @@ impl VlessAddr {
 pub(crate) fn addr_from_metadata(m: &Metadata) -> VlessAddr {
     if !m.host.is_empty() {
         // Metadata hosts are already validated (or we fail at encode time at worst).
-        VlessAddr::Domain(m.host.clone())
+        VlessAddr::Domain(m.host.to_string())
     } else if let Some(ip) = m.dst_ip {
         match ip {
             std::net::IpAddr::V4(v4) => VlessAddr::Ipv4(v4.octets()),

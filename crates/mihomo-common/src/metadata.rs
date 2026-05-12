@@ -1,7 +1,14 @@
 use crate::{ConnType, DnsMode, Network};
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+
+// M2 layout change (ADR-0011 T1/T4/T5):
+//   String fields → SmolStr (inline ≤23 B, heap-backed above that)
+//   Vec<String> geo-IP fields → Vec<SmolStr> (same 24-B struct, cheaper elements)
+//   Option<String> in_user → Option<SmolStr>
+// Breaking change permitted per ADR-0009 §"Public-API stability stance".
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Metadata {
@@ -16,12 +23,12 @@ pub struct Metadata {
     pub src_port: u16,
     #[serde(rename = "destinationPort")]
     pub dst_port: u16,
-    pub host: String,
+    pub host: SmolStr,
     #[serde(rename = "dnsMode")]
     pub dns_mode: DnsMode,
-    pub process: String,
+    pub process: SmolStr,
     #[serde(rename = "processPath")]
-    pub process_path: String,
+    pub process_path: SmolStr,
     pub uid: Option<u32>,
     /// DSCP marking from the IP header (6 bits, 0–63).
     ///
@@ -36,20 +43,20 @@ pub struct Metadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dscp: Option<u8>,
     #[serde(rename = "sourceGeoIP")]
-    pub src_geo_ip: Vec<String>,
+    pub src_geo_ip: Vec<SmolStr>,
     #[serde(rename = "destinationGeoIP")]
-    pub dst_geo_ip: Vec<String>,
+    pub dst_geo_ip: Vec<SmolStr>,
     #[serde(rename = "sniffHost")]
-    pub sniff_host: String,
+    pub sniff_host: SmolStr,
     #[serde(rename = "inboundName")]
-    pub in_name: String,
+    pub in_name: SmolStr,
     #[serde(rename = "inboundPort")]
     pub in_port: u16,
     /// Authenticated username; `None` when auth was skipped or not configured.
     #[serde(rename = "inboundUser", skip_serializing_if = "Option::is_none")]
-    pub in_user: Option<String>,
+    pub in_user: Option<SmolStr>,
     #[serde(rename = "specialProxy")]
-    pub special_proxy: String,
+    pub special_proxy: SmolStr,
 }
 
 impl Default for Metadata {
@@ -61,19 +68,19 @@ impl Default for Metadata {
             dst_ip: None,
             src_port: 0,
             dst_port: 0,
-            host: String::new(),
+            host: SmolStr::default(),
             dns_mode: DnsMode::Normal,
-            process: String::new(),
-            process_path: String::new(),
+            process: SmolStr::default(),
+            process_path: SmolStr::default(),
             uid: None,
             dscp: None,
             src_geo_ip: Vec::new(),
             dst_geo_ip: Vec::new(),
-            sniff_host: String::new(),
-            in_name: String::new(),
+            sniff_host: SmolStr::default(),
+            in_name: SmolStr::default(),
             in_port: 0,
             in_user: None,
-            special_proxy: String::new(),
+            special_proxy: SmolStr::default(),
         }
     }
 }
@@ -119,17 +126,17 @@ impl Metadata {
             dst_port: self.dst_port,
             host: self.host.clone(),
             dns_mode: self.dns_mode,
-            process: String::new(),
-            process_path: String::new(),
+            process: SmolStr::default(),
+            process_path: SmolStr::default(),
             uid: None,
             dscp: None,
             src_geo_ip: Vec::new(),
             dst_geo_ip: Vec::new(),
-            sniff_host: String::new(),
-            in_name: String::new(),
+            sniff_host: SmolStr::default(),
+            in_name: SmolStr::default(),
             in_port: 0,
             in_user: None,
-            special_proxy: String::new(),
+            special_proxy: SmolStr::default(),
         }
     }
 }

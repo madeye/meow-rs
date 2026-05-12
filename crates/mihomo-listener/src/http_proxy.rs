@@ -126,11 +126,11 @@ async fn handle_http_inner(
             conn_type: ConnType::Https,
             src_ip: Some(src_addr.ip()),
             src_port: src_addr.port(),
-            host: host.clone(),
+            host: host.as_str().into(),
             dst_port: port,
-            in_name: in_name.to_string(),
+            in_name: in_name.into(),
             in_port,
-            in_user: in_user.clone(),
+            in_user: in_user.as_deref().map(Into::into),
             ..Default::default()
         };
 
@@ -191,11 +191,11 @@ async fn handle_http_inner(
             conn_type: ConnType::Http,
             src_ip: Some(src_addr.ip()),
             src_port: src_addr.port(),
-            host: host.clone(),
+            host: host.as_str().into(),
             dst_port: port,
-            in_name: in_name.to_string(),
+            in_name: in_name.into(),
             in_port,
-            in_user,
+            in_user: in_user.as_deref().map(Into::into),
             ..Default::default()
         };
 

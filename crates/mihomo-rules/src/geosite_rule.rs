@@ -92,7 +92,7 @@ mod tests {
 
     fn meta_host(host: &str) -> Metadata {
         Metadata {
-            host: host.to_string(),
+            host: host.into(),
             ..Default::default()
         }
     }
@@ -197,7 +197,7 @@ mod tests {
         let db = db_with(&[("cn", &["baidu.com"])]);
         let r = GeoSiteRule::new("cn", "DIRECT", Some(db), false);
         let mut m = meta_host("fake.com");
-        m.sniff_host = "baidu.com".to_string();
+        m.sniff_host = "baidu.com".into();
         assert!(r.match_metadata(&m, &helper()));
     }
 }

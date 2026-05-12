@@ -47,7 +47,7 @@ mod tests {
 
     fn meta_with_name(in_name: &str) -> Metadata {
         Metadata {
-            in_name: in_name.to_string(),
+            in_name: in_name.into(),
             ..Default::default()
         }
     }

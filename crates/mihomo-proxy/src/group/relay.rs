@@ -41,7 +41,7 @@ fn metadata_for_proxy(proxy: &Arc<dyn Proxy>) -> Metadata {
         let host = &addr[..colon];
         let port = addr[colon + 1..].parse::<u16>().unwrap_or(0);
         Metadata {
-            host: host.to_string(),
+            host: host.into(),
             dst_port: port,
             ..Default::default()
         }
@@ -49,7 +49,7 @@ fn metadata_for_proxy(proxy: &Arc<dyn Proxy>) -> Metadata {
         // Addr with no port (e.g. DIRECT ""). Relay treats it as port 0;
         // DIRECT's connect_over ignores the metadata anyway.
         Metadata {
-            host: addr.to_string(),
+            host: addr.into(),
             dst_port: 0,
             ..Default::default()
         }
@@ -430,7 +430,7 @@ mod tests {
         }
 
         async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-            *self.last_dial_host.lock() = Some(metadata.host.clone());
+            *self.last_dial_host.lock() = Some(metadata.host.to_string());
             if let Some(err) = self.dial_fail_with.lock().take() {
                 return Err(err);
             }
@@ -450,7 +450,7 @@ mod tests {
             stream: Box<dyn ProxyConn>,
             metadata: &Metadata,
         ) -> Result<Box<dyn ProxyConn>> {
-            *self.last_dial_host.lock() = Some(metadata.host.clone());
+            *self.last_dial_host.lock() = Some(metadata.host.to_string());
             self.visits.lock().push(self.marker);
             if let Some(err) = self.fail_with.lock().take() {
                 return Err(err);

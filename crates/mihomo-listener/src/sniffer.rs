@@ -100,9 +100,9 @@ impl SnifferRuntime {
             return;
         }
         debug!("sniffer: {} → {}", metadata, host);
-        metadata.sniff_host = host.to_string();
+        metadata.sniff_host = host.into();
         if self.cfg.override_destination {
-            metadata.host = host.to_string();
+            metadata.host = host.into();
         }
     }
 }
@@ -120,7 +120,7 @@ mod tests {
             network: Network::Tcp,
             conn_type: ConnType::Socks5,
             dst_port: port,
-            host: host.to_string(),
+            host: host.into(),
             ..Default::default()
         }
     }

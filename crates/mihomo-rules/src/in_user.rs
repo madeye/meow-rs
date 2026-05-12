@@ -50,7 +50,7 @@ mod tests {
 
     fn meta_with_user(in_user: Option<&str>) -> Metadata {
         Metadata {
-            in_user: in_user.map(str::to_string),
+            in_user: in_user.map(Into::into),
             ..Default::default()
         }
     }

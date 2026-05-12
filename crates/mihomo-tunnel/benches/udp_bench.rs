@@ -23,7 +23,7 @@ fn make_dst() -> SocketAddr {
 
 fn make_metadata() -> Metadata {
     Metadata {
-        host: "example.com".to_string(),
+        host: "example.com".into(),
         dst_port: 53,
         dst_ip: Some("93.184.216.34".parse().unwrap()),
         src_ip: Some("127.0.0.1".parse().unwrap()),

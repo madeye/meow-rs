@@ -342,7 +342,7 @@ mod tests {
 
     fn make_metadata(host: &str, port: u16) -> Metadata {
         Metadata {
-            host: host.to_string(),
+            host: host.into(),
             dst_port: port,
             ..Default::default()
         }

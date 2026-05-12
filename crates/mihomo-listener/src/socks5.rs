@@ -147,10 +147,10 @@ async fn handle_socks5_inner(
         src_port: src_addr.port(),
         dst_ip,
         dst_port,
-        host,
-        in_name: in_name.to_string(),
+        host: host.into(),
+        in_name: in_name.into(),
         in_port,
-        in_user,
+        in_user: in_user.as_deref().map(Into::into),
         ..Default::default()
     };
 

@@ -27,7 +27,7 @@ fn helper() -> RuleMatchHelper {
 
 fn meta(host: &str, dst_port: u16) -> Metadata {
     Metadata {
-        host: host.to_string(),
+        host: host.into(),
         dst_port,
         ..Default::default()
     }
@@ -72,7 +72,7 @@ fn domain_no_match_different() {
 fn domain_uses_sniff_host() {
     let r = DomainRule::new("real.com", "Proxy");
     let mut m = meta("fake.com", 443);
-    m.sniff_host = "real.com".to_string();
+    m.sniff_host = "real.com".into();
     assert!(r.match_metadata(&m, &helper()));
 }
 
@@ -351,7 +351,7 @@ fn network_invalid() {
 fn process_match() {
     let r = ProcessRule::new("chrome", "Proxy");
     let mut m = meta("", 443);
-    m.process = "chrome".to_string();
+    m.process = "chrome".into();
     assert!(r.match_metadata(&m, &helper()));
 }
 
@@ -359,7 +359,7 @@ fn process_match() {
 fn process_case_insensitive() {
     let r = ProcessRule::new("Chrome", "Proxy");
     let mut m = meta("", 443);
-    m.process = "chrome".to_string();
+    m.process = "chrome".into();
     assert!(r.match_metadata(&m, &helper()));
 }
 
@@ -367,7 +367,7 @@ fn process_case_insensitive() {
 fn process_no_match() {
     let r = ProcessRule::new("chrome", "Proxy");
     let mut m = meta("", 443);
-    m.process = "firefox".to_string();
+    m.process = "firefox".into();
     assert!(!r.match_metadata(&m, &helper()));
 }
 
@@ -610,7 +610,7 @@ fn parse_process_name() {
     let r = parse_rule("PROCESS-NAME,firefox,Proxy").unwrap();
     assert_eq!(r.rule_type(), RuleType::ProcessName);
     let mut m = meta("", 80);
-    m.process = "firefox".to_string();
+    m.process = "firefox".into();
     assert!(r.match_metadata(&m, &helper()));
 }
 
@@ -822,7 +822,7 @@ fn parse_process_path_prefix_match() {
     let r = parse_rule("PROCESS-PATH,/usr/bin,PROXY").unwrap();
     assert_eq!(r.rule_type(), RuleType::ProcessPath);
     let m = Metadata {
-        process_path: "/usr/bin/curl".to_string(),
+        process_path: "/usr/bin/curl".into(),
         ..Default::default()
     };
     assert!(r.match_metadata(&m, &helper()));
@@ -832,7 +832,7 @@ fn parse_process_path_prefix_match() {
 fn parse_process_path_different_dir_no_match() {
     let r = parse_rule("PROCESS-PATH,/usr/bin,PROXY").unwrap();
     let m = Metadata {
-        process_path: "/usr/local/bin/curl".to_string(),
+        process_path: "/usr/local/bin/curl".into(),
         ..Default::default()
     };
     assert!(!r.match_metadata(&m, &helper()));
