@@ -6,3 +6,5 @@ config-*.yaml
 config-*.yaml.bak
 Country.mmdb
 Dockerfile.debug
+dhat-heap.json
+dhat-ad-hoc.json
