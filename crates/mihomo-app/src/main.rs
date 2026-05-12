@@ -1,3 +1,9 @@
+// dhat heap profiling — only active when compiled with --features dhat-heap.
+// The profiler writes dh_out.json on process exit; parse with dhat-viewer.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dashmap::DashMap;
@@ -55,6 +61,11 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // dhat profiler guard — must be the first local, lives for the duration of main().
+    // Writes dh_out.json on drop. Active only when compiled with --features dhat-heap.
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     let args = Args::parse();
 
     // Handle subcommands before initializing logging/runtime

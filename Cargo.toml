@@ -22,6 +22,14 @@ codegen-units = 1
 panic = "abort"
 opt-level = "z"
 
+# Profile for dhat heap profiling — keeps debug symbols, no strip, no LTO.
+[profile.dhat]
+inherits = "release"
+lto = false
+strip = false
+debug = 1
+opt-level = 1
+
 [workspace.package]
 version = "0.6.2"
 edition = "2021"
@@ -168,6 +176,9 @@ tokio-boring = { version = "5.0.0" }
 
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
+
+# Heap profiling (optional — used only with --features dhat-heap)
+dhat = "0.3"
 
 # Property testing
 proptest = "1"

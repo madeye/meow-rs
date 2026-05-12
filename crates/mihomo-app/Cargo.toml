@@ -7,6 +7,8 @@ rust-version.workspace = true
 [features]
 default = ["full"]
 boring-tls = ["mihomo-config/boring-tls"]
+# Heap profiling via dhat crate — swaps global allocator; never enable in production.
+dhat-heap = ["dhat"]
 
 # Protocol features — forwarded to mihomo-proxy and mihomo-config
 ss = ["mihomo-config/ss", "mihomo-proxy/ss"]
@@ -60,6 +62,7 @@ parking_lot = { workspace = true }
 dashmap = { workspace = true }
 rustls = { workspace = true }
 libc = "0.2"
+dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
