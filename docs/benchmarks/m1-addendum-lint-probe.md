@@ -1,14 +1,19 @@
 # M1 Addendum A2 — Allocation Lint Probe
 
-## Reference
+## Reference: commit 9419421578f808c59db37fc7ec056a8971a741b9
 
 Platform: aarch64-apple-darwin (Apple Silicon), macOS 25.4.0, Rust stable 1.88  
-Workspace: mihomo-rust, commit `5f01d37484b96685073f5f60620271a0a170db82`  
+Workspace: mihomo-rust, commit `9419421578f808c59db37fc7ec056a8971a741b9`  
 Tool: `cargo clippy --all-targets 2>&1`
 
 This document records the ADR-0010 addendum A §A1 lint probe: nine allocation-focused lints
 added to `[workspace.lints.clippy]` at `warn` level in task #38 (M1.lints-alloc), then
 probed across the entire workspace to establish a zero-hit baseline before M2 changes land.
+
+Note: the initial probe (at commit `5f01d37`) revealed pre-existing `clone_on_ref_ptr` and
+`format_push_string` hits across test and bench compilation units. These were remediated in
+task #44 (M1.fix-clone-on-ref-ptr, commit `9419421`). The probe results below reflect the
+post-fix state — the true M2 open baseline.
 
 ---
 

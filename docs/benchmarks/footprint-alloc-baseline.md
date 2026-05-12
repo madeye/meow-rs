@@ -1,9 +1,9 @@
 # Allocation Baseline — M2 Starting Line
 
-## Reference
+## Reference: commit 9419421578f808c59db37fc7ec056a8971a741b9
 
 Platform: aarch64-apple-darwin (Apple Silicon), macOS 25.4.0, Rust stable 1.88  
-Binary: release build, commit `5f01d37484b96685073f5f60620271a0a170db82`
+Binary: release build, commit `9419421578f808c59db37fc7ec056a8971a741b9`
 
 ---
 
