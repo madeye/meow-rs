@@ -105,7 +105,7 @@ pub async fn download_and_replace(url: &str, dest: &Path) -> Result<(), anyhow::
     let resp = client.get(url).send().await?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(anyhow!("HTTP {} fetching {}", status, url));
+        return Err(anyhow!("HTTP {status} fetching {url}"));
     }
     let bytes = resp.bytes().await?;
 

@@ -91,7 +91,7 @@ pub async fn bench_throughput(
         let label = "4 KB x 10000";
         let (total_bytes, elapsed) = run_small_messages(proxy, echo, 4 * 1024, 10_000).await?;
         let gbps = (total_bytes as f64 * 8.0) / elapsed / 1e9;
-        eprintln!("  throughput {}: {:.2} Gbps", label, gbps);
+        eprintln!("  throughput {label}: {gbps:.2} Gbps");
         results.push(ThroughputResult {
             label: label.to_string(),
             total_bytes,
@@ -111,7 +111,7 @@ pub async fn bench_throughput(
             total_elapsed += elapsed;
         }
         let gbps = (total_bytes as f64 * 8.0) / total_elapsed / 1e9;
-        eprintln!("  throughput {}: {:.2} Gbps", label, gbps);
+        eprintln!("  throughput {label}: {gbps:.2} Gbps");
         results.push(ThroughputResult {
             label: label.to_string(),
             total_bytes,
@@ -125,7 +125,7 @@ pub async fn bench_throughput(
         let label = "64 MB x 1";
         let (total_bytes, elapsed) = run_large_transfer(proxy, echo, 64 * 1024 * 1024).await?;
         let gbps = (total_bytes as f64 * 8.0) / elapsed / 1e9;
-        eprintln!("  throughput {}: {:.2} Gbps", label, gbps);
+        eprintln!("  throughput {label}: {gbps:.2} Gbps");
         results.push(ThroughputResult {
             label: label.to_string(),
             total_bytes,

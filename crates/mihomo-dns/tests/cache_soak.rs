@@ -30,7 +30,7 @@ fn env_u64(key: &str, default: u64) -> u64 {
 
 fn rss_bytes(sys: &mut System, pid: Pid) -> u64 {
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
-    sys.process(pid).map(|p| p.memory()).unwrap_or(0)
+    sys.process(pid).map_or(0, sysinfo::Process::memory)
 }
 
 #[test]
@@ -43,8 +43,7 @@ fn dns_cache_does_not_leak_under_unique_ip_stream() {
 
     let total_inserts = secs * rate;
     println!(
-        "soak: {}s @ {}/s = {} inserts, forward_cap={}, rss_budget={}MB",
-        secs, rate, total_inserts, cap, rss_budget_mb
+        "soak: {secs}s @ {rate}/s = {total_inserts} inserts, forward_cap={cap}, rss_budget={rss_budget_mb}MB"
     );
 
     let cache = DnsCache::new(cap);
@@ -115,15 +114,12 @@ fn dns_cache_does_not_leak_under_unique_ip_stream() {
     let rev_len = cache.reverse_len();
 
     println!("\n── soak summary ───────────────────────────────────────────");
-    println!("inserts attempted: {}", counter);
-    println!("forward_len:       {} (cap={})", fwd_len, cap);
-    println!("reverse_len:       {} (peak={})", rev_len, peak_reverse);
+    println!("inserts attempted: {counter}");
+    println!("forward_len:       {fwd_len} (cap={cap})");
+    println!("reverse_len:       {rev_len} (peak={peak_reverse})");
     println!("rss baseline:      {} MB", baseline / 1024 / 1024);
     println!("rss final:         {} MB", final_rss / 1024 / 1024);
-    println!(
-        "rss growth:        {:+} MB (budget {} MB)",
-        growth_mb, rss_budget_mb
-    );
+    println!("rss growth:        {growth_mb:+} MB (budget {rss_budget_mb} MB)");
 
     // ── Hard assertions ──────────────────────────────────────────────
     // Forward cache must respect its declared LRU cap.

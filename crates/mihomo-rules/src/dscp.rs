@@ -27,10 +27,7 @@ impl DscpRule {
             .parse()
             .map_err(|e| format!("invalid DSCP value '{}': {}", dscp.trim(), e))?;
         if value > 63 {
-            return Err(format!(
-                "invalid DSCP value {}: must be 0–63 (6 bits)",
-                value
-            ));
+            return Err(format!("invalid DSCP value {value}: must be 0–63 (6 bits)"));
         }
         Ok(Self {
             value,

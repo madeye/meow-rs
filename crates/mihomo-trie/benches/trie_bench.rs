@@ -52,7 +52,7 @@ fn bench_trie_search(c: &mut Criterion) {
             b.iter(|| {
                 let mut t = DomainTrie::new();
                 for i in 0..black_box(n) {
-                    t.insert(&format!("host{}.example.com", i), i as u32);
+                    t.insert(&format!("host{i}.example.com"), i as u32);
                 }
                 black_box(t)
             });

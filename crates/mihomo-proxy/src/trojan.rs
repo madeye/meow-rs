@@ -78,7 +78,7 @@ impl TrojanAdapter {
 
         Self {
             name: name.to_string(),
-            addr_str: format!("{}:{}", server, port),
+            addr_str: format!("{server}:{port}"),
             hex_password,
             support_udp: udp,
             health: ProxyHealth::new(),
@@ -216,7 +216,7 @@ async fn read_socks5_addr<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Soc
                 .map_err(MihomoError::Io)?;
             let port = u16::from_be_bytes(port);
             let domain_str = std::str::from_utf8(&domain)
-                .map_err(|e| MihomoError::Proxy(format!("trojan udp: bad domain utf8: {}", e)))?;
+                .map_err(|e| MihomoError::Proxy(format!("trojan udp: bad domain utf8: {e}")))?;
             // Try IP-literal first; otherwise fall back to UNSPECIFIED so the
             // tunnel still has a usable SocketAddr without a DNS round-trip.
             if let Ok(ip) = domain_str.parse::<IpAddr>() {
@@ -227,8 +227,7 @@ async fn read_socks5_addr<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Soc
         }
         other => {
             return Err(MihomoError::Proxy(format!(
-                "trojan udp: unknown ATYP {:#x}",
-                other
+                "trojan udp: unknown ATYP {other:#x}"
             )))
         }
     })
@@ -276,8 +275,7 @@ impl ProxyPacketConn for TrojanPacketConn {
             .map_err(MihomoError::Io)?;
         if &crlf != b"\r\n" {
             return Err(MihomoError::Proxy(format!(
-                "trojan udp: expected CRLF, got {:?}",
-                crlf
+                "trojan udp: expected CRLF, got {crlf:?}"
             )));
         }
 

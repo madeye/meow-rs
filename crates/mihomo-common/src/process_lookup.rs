@@ -128,14 +128,16 @@ mod platform {
     fn find_pid_by_inode(inode: u64) -> Option<(u32, String, String)> {
         let needle = format!("socket:[{}]", inode);
         for entry in fs::read_dir("/proc").ok()?.flatten() {
-            let pid: u32 = match entry.file_name().to_str().and_then(|s| s.parse().ok()) {
-                Some(p) => p,
-                None => continue,
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<u32>().ok())
+            else {
+                continue;
             };
             let fd_dir: PathBuf = entry.path().join("fd");
-            let rd = match fs::read_dir(&fd_dir) {
-                Ok(r) => r,
-                Err(_) => continue,
+            let Ok(rd) = fs::read_dir(&fd_dir) else {
+                continue;
             };
             for fd in rd.flatten() {
                 if let Ok(link) = fs::read_link(fd.path()) {
@@ -187,14 +189,12 @@ mod platform {
                 continue;
             }
             let pid = pid as i32;
-            let info = match pidinfo::<BSDInfo>(pid, 0) {
-                Ok(info) => info,
-                Err(_) => continue,
+            let Ok(info) = pidinfo::<BSDInfo>(pid, 0) else {
+                continue;
             };
             let fd_count = info.pbi_nfiles as usize;
-            let fds = match listpidinfo::<ListFDs>(pid, fd_count) {
-                Ok(fds) => fds,
-                Err(_) => continue,
+            let Ok(fds) = listpidinfo::<ListFDs>(pid, fd_count) else {
+                continue;
             };
             for fd in fds {
                 if fd.proc_fdtype != ProcFDType::Socket as u32 {
@@ -211,7 +211,7 @@ mod platform {
                 trace!(pid, "process_lookup: matched socket via libproc");
                 let name = pidpath(pid)
                     .ok()
-                    .and_then(|p| p.rsplit('/').next().map(|s| s.to_string()))
+                    .and_then(|p| p.rsplit('/').next().map(std::string::ToString::to_string))
                     .unwrap_or_default();
                 let path = pidpath(pid).unwrap_or_default();
                 let uid = unsafe {

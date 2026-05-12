@@ -74,7 +74,7 @@ impl DnsServer {
         // Only handle A (1) and AAAA (28) queries
         if qtype != 1 && qtype != 28 {
             // Forward as-is or return NXDOMAIN
-            return Self::build_nxdomain(id, data);
+            return Ok(Self::build_nxdomain(id, data));
         }
 
         // Check hosts trie first. If the domain is present in the hosts table
@@ -87,10 +87,10 @@ impl DnsServer {
             } else {
                 all_ips.iter().find(|ip| ip.is_ipv6()).copied()
             };
-            return match ip {
+            return Ok(match ip {
                 Some(addr) => Self::build_response(id, data, &domain, qtype, addr),
                 None => Self::build_noerror_empty(id, data),
-            };
+            });
         }
 
         // Resolve using our resolver (cache + upstream).
@@ -100,10 +100,10 @@ impl DnsServer {
             resolver.lookup_ipv6(&domain).await
         };
 
-        match ip {
+        Ok(match ip {
             Some(addr) => Self::build_response(id, data, &domain, qtype, addr),
             None => Self::build_nxdomain(id, data),
-        }
+        })
     }
 
     fn parse_question(
@@ -143,7 +143,7 @@ impl DnsServer {
         _domain: &str,
         qtype: u16,
         addr: std::net::IpAddr,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Vec<u8> {
         let mut response = Vec::with_capacity(512);
 
         // Header
@@ -181,13 +181,10 @@ impl DnsServer {
             }
         }
 
-        Ok(response)
+        response
     }
 
-    fn build_nxdomain(
-        id: u16,
-        query: &[u8],
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    fn build_nxdomain(id: u16, query: &[u8]) -> Vec<u8> {
         let mut response = Vec::with_capacity(512);
 
         // Header
@@ -209,15 +206,12 @@ impl DnsServer {
             response.extend_from_slice(&query[question_start..pos]);
         }
 
-        Ok(response)
+        response
     }
 
     /// NOERROR with zero answers: hosts entry matched but no IPs of the queried
     /// address family. Clients must not retry on an empty-answer NOERROR.
-    fn build_noerror_empty(
-        id: u16,
-        query: &[u8],
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    fn build_noerror_empty(id: u16, query: &[u8]) -> Vec<u8> {
         let mut response = Vec::with_capacity(512);
 
         // Header: NOERROR (rcode=0), QR=1, RD=1, RA=1
@@ -239,6 +233,6 @@ impl DnsServer {
             response.extend_from_slice(&query[question_start..pos]);
         }
 
-        Ok(response)
+        response
     }
 }

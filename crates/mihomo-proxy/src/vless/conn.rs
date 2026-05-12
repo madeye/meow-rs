@@ -101,10 +101,7 @@ impl AsyncRead for VlessConn {
             if version != 0x00 {
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!(
-                        "vless: version mismatch: expected 0x00, got {:#04x}",
-                        version
-                    ),
+                    format!("vless: version mismatch: expected 0x00, got {version:#04x}"),
                 )));
             }
             // Discard addon bytes if any
@@ -458,8 +455,7 @@ mod tests {
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("version") || msg.contains("mismatch"),
-            "error must mention version mismatch, got: {}",
-            msg
+            "error must mention version mismatch, got: {msg}"
         );
     }
 
@@ -499,8 +495,7 @@ mod tests {
                 || msg.contains("EOF")
                 || msg.contains("server")
                 || msg.contains("Eof"),
-            "error must give diagnostic, got: {}",
-            msg
+            "error must give diagnostic, got: {msg}"
         );
     }
 

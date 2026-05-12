@@ -106,7 +106,7 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
 
     let parts: Vec<&str> = line.splitn(4, ',').collect();
     if parts.len() < 2 {
-        return Err(format!("invalid rule: {}", line));
+        return Err(format!("invalid rule: {line}"));
     }
 
     let rule_type = parts[0].trim();
@@ -118,7 +118,7 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
     }
 
     if parts.len() < 3 {
-        return Err(format!("rule needs at least 3 parts: {}", line));
+        return Err(format!("rule needs at least 3 parts: {line}"));
     }
 
     let payload = parts[1].trim();
@@ -131,18 +131,18 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
         "DOMAIN-KEYWORD" => Ok(Box::new(DomainKeywordRule::new(payload, adapter))),
         "DOMAIN-REGEX" => DomainRegexRule::new(payload, adapter)
             .map(|r| Box::new(r) as Box<dyn Rule>)
-            .map_err(|e| format!("invalid regex: {}", e)),
+            .map_err(|e| format!("invalid regex: {e}")),
         "IP-CIDR" | "IP-CIDR6" => {
             let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
             IpCidrRule::new(payload, adapter, false, no_resolve)
                 .map(|r| Box::new(r) as Box<dyn Rule>)
-                .map_err(|e| format!("invalid CIDR: {}", e))
+                .map_err(|e| format!("invalid CIDR: {e}"))
         }
         "SRC-IP-CIDR" => {
             let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
             IpCidrRule::new(payload, adapter, true, no_resolve)
                 .map(|r| Box::new(r) as Box<dyn Rule>)
-                .map_err(|e| format!("invalid CIDR: {}", e))
+                .map_err(|e| format!("invalid CIDR: {e}"))
         }
         "SRC-PORT" => PortRule::new(payload, adapter, true).map(|r| Box::new(r) as Box<dyn Rule>),
         "DST-PORT" => PortRule::new(payload, adapter, false).map(|r| Box::new(r) as Box<dyn Rule>),
@@ -224,7 +224,7 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
             IpAsnRule::new(payload, adapter, reader, true, true)
                 .map(|r| Box::new(r) as Box<dyn Rule>)
         }
-        _ => Err(format!("unknown rule type: {}", rule_type)),
+        _ => Err(format!("unknown rule type: {rule_type}")),
     }
 }
 
@@ -243,8 +243,7 @@ fn parse_logic_rule(
     let rest = rest.trim_start();
     if !rest.starts_with('(') {
         return Err(format!(
-            "{} rule: expected '(' after rule type, got: {}",
-            rule_type, rest
+            "{rule_type} rule: expected '(' after rule type, got: {rest}"
         ));
     }
     // Find the matching ')' for the outer group-list parenthesis.
@@ -263,20 +262,20 @@ fn parse_logic_rule(
             _ => {}
         }
     }
-    let end = end.ok_or_else(|| format!("{} rule: unbalanced parentheses", rule_type))?;
+    let end = end.ok_or_else(|| format!("{rule_type} rule: unbalanced parentheses"))?;
     let inner = &rest[1..end];
     let tail = rest[end + 1..].trim_start();
     let adapter = tail
         .strip_prefix(',')
-        .ok_or_else(|| format!("{} rule: expected ',ADAPTER' after payload", rule_type))?
+        .ok_or_else(|| format!("{rule_type} rule: expected ',ADAPTER' after payload"))?
         .trim();
     if adapter.is_empty() {
-        return Err(format!("{} rule: missing adapter", rule_type));
+        return Err(format!("{rule_type} rule: missing adapter"));
     }
 
-    let groups = split_logic_groups(inner).map_err(|e| format!("{} rule: {}", rule_type, e))?;
+    let groups = split_logic_groups(inner).map_err(|e| format!("{rule_type} rule: {e}"))?;
     if groups.is_empty() {
-        return Err(format!("{} rule: empty payload", rule_type));
+        return Err(format!("{rule_type} rule: empty payload"));
     }
 
     let mut inner_rules: Vec<Box<dyn Rule>> = Vec::with_capacity(groups.len());
@@ -320,10 +319,10 @@ fn split_logic_groups(inner: &str) -> Result<Vec<String>, String> {
         }
         let Some(&(_, c)) = chars.peek() else { break };
         if c != '(' {
-            return Err(format!("expected '(' starting a group, got '{}'", c));
+            return Err(format!("expected '(' starting a group, got '{c}'"));
         }
         chars.next(); // consume '('
-        let start = chars.peek().map(|&(i, _)| i).unwrap_or(inner.len());
+        let start = chars.peek().map_or(inner.len(), |&(i, _)| i);
         let mut depth = 1i32;
         let mut end: Option<usize> = None;
         for (i, c) in chars.by_ref() {
@@ -356,7 +355,7 @@ fn splice_inner_adapter(entry: &str) -> String {
     if let Some((ty, _)) = entry.split_once(',') {
         let upper = ty.trim().to_ascii_uppercase();
         if matches!(upper.as_str(), "AND" | "OR" | "NOT") {
-            return format!("{},{}", entry, PLACEHOLDER);
+            return format!("{entry},{PLACEHOLDER}");
         }
     }
     let parts: Vec<&str> = entry.splitn(3, ',').collect();
@@ -500,7 +499,7 @@ mod tests {
         let err = parse_rule("NOT,((DOMAIN,a.com),(DOMAIN,b.com)),DIRECT", &ctx())
             .err()
             .expect("NOT with multiple inner rules must error");
-        assert!(err.contains("NOT"), "unexpected error: {}", err);
+        assert!(err.contains("NOT"), "unexpected error: {err}");
     }
 
     #[test]
@@ -514,11 +513,10 @@ mod tests {
     #[test]
     fn test_parse_geoip_without_reader_errors() {
         let result = parse_rule("GEOIP,CN,Proxy", &ctx());
-        let err = match result {
-            Ok(_) => panic!("GEOIP parsing must error when no reader is configured"),
-            Err(e) => e,
+        let Err(err) = result else {
+            panic!("GEOIP parsing must error when no reader is configured");
         };
-        assert!(err.contains("GEOIP"), "unexpected error: {}", err);
+        assert!(err.contains("GEOIP"), "unexpected error: {err}");
     }
 
     // ─── GEOSITE (M1.D-2) ───────────────────────────────────────────
@@ -546,7 +544,7 @@ mod tests {
         let err = parse_rule("GEOSITE,,DIRECT", &ctx())
             .err()
             .expect("GEOSITE with empty category must error");
-        assert!(err.contains("GEOSITE"), "unexpected error: {}", err);
+        assert!(err.contains("GEOSITE"), "unexpected error: {err}");
     }
 
     /// G4 — missing target (no adapter slot) hard-errors.
@@ -557,8 +555,7 @@ mod tests {
             .expect("GEOSITE without target must error");
         assert!(
             err.contains("rule needs at least 3 parts"),
-            "unexpected error: {}",
-            err
+            "unexpected error: {err}"
         );
     }
 

@@ -241,6 +241,7 @@ async fn query_pool(resolvers: &[TokioResolver], host: &str) -> Option<(Vec<IpAd
 }
 
 impl Resolver {
+    #[allow(clippy::needless_pass_by_value)] // Vec<SocketAddr> is conventional for public constructors
     pub fn new(
         main_servers: Vec<SocketAddr>,
         fallback_servers: Vec<SocketAddr>,
@@ -516,7 +517,7 @@ impl Resolver {
             return ips.iter().find(|ip| ip.is_ipv4()).copied();
         }
         let ips = self.lookup_actual_all(host).await?;
-        ips.into_iter().find(|ip| ip.is_ipv4())
+        ips.into_iter().find(std::net::IpAddr::is_ipv4)
     }
 
     pub async fn lookup_ipv6(&self, host: &str) -> Option<IpAddr> {
@@ -529,7 +530,7 @@ impl Resolver {
             return ips.iter().find(|ip| ip.is_ipv6()).copied();
         }
         let ips = self.lookup_actual_all(host).await?;
-        ips.into_iter().find(|ip| ip.is_ipv6())
+        ips.into_iter().find(std::net::IpAddr::is_ipv6)
     }
 
     /// Returns all IPs for `host` from the hosts trie (respecting `use_hosts`),

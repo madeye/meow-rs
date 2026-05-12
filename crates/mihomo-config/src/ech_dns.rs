@@ -29,13 +29,13 @@ use std::collections::HashMap;
 
 pub(crate) async fn fetch_ech_from_dns(name: &str) -> Result<Vec<u8>, String> {
     let resolver = Resolver::builder_tokio()
-        .map_err(|e| format!("ech-dns: build system resolver: {}", e))?
+        .map_err(|e| format!("ech-dns: build system resolver: {e}"))?
         .build()
-        .map_err(|e| format!("ech-dns: build system resolver: {}", e))?;
+        .map_err(|e| format!("ech-dns: build system resolver: {e}"))?;
     let lookup = resolver
         .lookup(name, RecordType::HTTPS)
         .await
-        .map_err(|e| format!("ech-dns: HTTPS lookup for {}: {}", name, e))?;
+        .map_err(|e| format!("ech-dns: HTTPS lookup for {name}: {e}"))?;
 
     for record in lookup.answers() {
         let svcb = match &record.data {
@@ -52,8 +52,7 @@ pub(crate) async fn fetch_ech_from_dns(name: &str) -> Result<Vec<u8>, String> {
     }
 
     Err(format!(
-        "ech-dns: no ECH config (SvcParam key 5) in HTTPS record for {}",
-        name
+        "ech-dns: no ECH config (SvcParam key 5) in HTTPS record for {name}"
     ))
 }
 
@@ -88,7 +87,7 @@ pub async fn preresolve_ech(proxies: &mut [HashMap<String, Value>]) {
 
         let enabled = ech_map
             .get(Value::String("enable".into()))
-            .and_then(|v| v.as_bool())
+            .and_then(serde_yaml::Value::as_bool)
             .unwrap_or(false);
         if !enabled {
             continue;

@@ -64,9 +64,9 @@ fn build_geoip_config(codes: &[&str], rules_per_country: usize) -> Vec<String> {
         // arm of the parser without changing the index lookup.
         let adapter = if i % 2 == 0 { "DIRECT" } else { "Proxy" };
         if i % 4 == 0 {
-            out.push(format!("GEOIP,{},{},no-resolve", cc, adapter));
+            out.push(format!("GEOIP,{cc},{adapter},no-resolve"));
         } else {
-            out.push(format!("GEOIP,{},{}", cc, adapter));
+            out.push(format!("GEOIP,{cc},{adapter}"));
         }
     }
     out

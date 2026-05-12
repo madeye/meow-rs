@@ -77,8 +77,7 @@ impl PlatformGuard {
             ));
         }
         rules.push_str(&format!(
-            "rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {port}\n",
-            port = listen_port,
+            "rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {listen_port}\n",
         ));
 
         let tmp_path = format!("/tmp/mihomo_tproxy_{}.conf", std::process::id());
@@ -93,8 +92,7 @@ impl PlatformGuard {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(io::Error::other(format!(
-                "pfctl load anchor failed: {}",
-                stderr
+                "pfctl load anchor failed: {stderr}"
             )));
         }
 
@@ -122,11 +120,11 @@ impl PlatformGuard {
             .args(["-a", &self.anchor, "-F", "all"])
             .output()?;
 
-        if !output.status.success() {
+        if output.status.success() {
+            info!("pf anchor '{}' flushed", self.anchor);
+        } else {
             let stderr = String::from_utf8_lossy(&output.stderr);
             warn!("pfctl flush anchor failed: {}", stderr);
-        } else {
-            info!("pf anchor '{}' flushed", self.anchor);
         }
         Ok(())
     }

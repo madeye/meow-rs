@@ -289,7 +289,7 @@ mod tests {
         let bytes = b"NOTMRS...";
         match parse_header(bytes) {
             Err(MrsError::WrongFormat) => {}
-            other => panic!("expected WrongFormat, got {:?}", other),
+            other => panic!("expected WrongFormat, got {other:?}"),
         }
     }
 
@@ -299,7 +299,7 @@ mod tests {
         let bytes = b"MRS!";
         match parse_header(bytes) {
             Err(MrsError::Truncated { .. }) => {}
-            other => panic!("expected Truncated, got {:?}", other),
+            other => panic!("expected Truncated, got {other:?}"),
         }
     }
 
@@ -312,7 +312,7 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_be_bytes());
         match parse_header(&bytes) {
             Err(MrsError::UnsupportedVersion(99)) => {}
-            other => panic!("expected UnsupportedVersion(99), got {:?}", other),
+            other => panic!("expected UnsupportedVersion(99), got {other:?}"),
         }
     }
 

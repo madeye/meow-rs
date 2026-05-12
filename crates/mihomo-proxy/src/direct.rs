@@ -72,7 +72,7 @@ impl DirectAdapter {
                 .await
                 .map_err(MihomoError::Io)?
                 .next()
-                .ok_or_else(|| MihomoError::Dns(format!("direct: no address for {}", addr)));
+                .ok_or_else(|| MihomoError::Dns(format!("direct: no address for {addr}")));
         }
 
         Err(MihomoError::Proxy(

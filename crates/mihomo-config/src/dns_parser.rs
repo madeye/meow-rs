@@ -74,7 +74,7 @@ pub async fn parse_dns(
         Some(build_fallback_filter(
             dns.fallback_filter.as_ref(),
             mmdb_path,
-        )?)
+        ))
     };
 
     let resolver = Resolver::new_with_bootstrap(
@@ -163,10 +163,9 @@ fn build_nameserver_policy(
 
         if resolvers.is_empty() {
             return Err(anyhow::anyhow!(
-                "nameserver-policy entry '{}' has no valid nameservers after skipping \
+                "nameserver-policy entry '{key}' has no valid nameservers after skipping \
                 unsupported entries (Class A per ADR-0002 — DNS leakage risk for \
-                internal/corporate domains)",
-                key
+                internal/corporate domains)"
             ));
         }
 
@@ -185,9 +184,8 @@ fn build_nameserver_policy(
 
 /// Returns the hostname that would need bootstrap resolution, if any.
 fn needs_hostname_bootstrap(url: &NameServerUrl) -> Option<&str> {
-    let addr = match url {
-        NameServerUrl::Tls { addr, .. } | NameServerUrl::Https { addr, .. } => addr,
-        _ => return None,
+    let (NameServerUrl::Tls { addr, .. } | NameServerUrl::Https { addr, .. }) = url else {
+        return None;
     };
     match addr {
         HostOrIp::Host(h) => Some(h.as_str()),
@@ -202,7 +200,7 @@ fn needs_hostname_bootstrap(url: &NameServerUrl) -> Option<&str> {
 fn build_fallback_filter(
     raw: Option<&crate::raw::RawFallbackFilter>,
     explicit_mmdb_path: Option<&std::path::Path>,
-) -> Result<FallbackFilter, anyhow::Error> {
+) -> FallbackFilter {
     let geoip = raw.and_then(|f| f.geoip).unwrap_or(true);
     let geoip_code = raw
         .and_then(|f| f.geoip_code.clone())
@@ -235,9 +233,8 @@ fn build_fallback_filter(
 
     // Attempt to load GeoIP MMDB for the geoip gate.
     let geoip_reader = if geoip {
-        let mmdb_path = explicit_mmdb_path
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(crate::default_geoip_path);
+        let mmdb_path =
+            explicit_mmdb_path.map_or_else(crate::default_geoip_path, std::path::PathBuf::from);
         match std::fs::read(&mmdb_path)
             .map_err(|e| format!("{e}"))
             .and_then(|b| maxminddb::Reader::from_source(b).map_err(|e| format!("{e}")))
@@ -260,13 +257,13 @@ fn build_fallback_filter(
 
     let geoip_enabled = geoip && geoip_reader.is_some();
 
-    Ok(FallbackFilter {
+    FallbackFilter {
         geoip_enabled,
         geoip_code,
         ipcidr,
         domain,
         geoip_reader,
-    })
+    }
 }
 
 /// Build the hosts trie from `dns.hosts` config entries.
@@ -288,9 +285,8 @@ fn build_hosts_trie(
                 Ok(ip) => ips.push(ip),
                 Err(e) => {
                     return Err(anyhow::anyhow!(
-                        "dns.hosts: invalid IP '{}' for host '{}': {} \
-                        (Class A per ADR-0002 — malformed hosts entries are almost certainly typos)",
-                        s, host, e
+                        "dns.hosts: invalid IP '{s}' for host '{host}': {e} \
+                        (Class A per ADR-0002 — malformed hosts entries are almost certainly typos)"
                     ));
                 }
             }
@@ -352,13 +348,11 @@ fn parse_system_hosts() -> Vec<(String, Vec<IpAddr>)> {
             continue;
         }
         let mut parts = line.split_whitespace();
-        let ip_str = match parts.next() {
-            Some(s) => s,
-            None => continue,
+        let Some(ip_str) = parts.next() else {
+            continue;
         };
-        let ip: IpAddr = match ip_str.parse() {
-            Ok(ip) => ip,
-            Err(_) => continue,
+        let Ok(ip) = ip_str.parse::<IpAddr>() else {
+            continue;
         };
         for hostname in parts {
             let domain = hostname.trim_end_matches('.').to_lowercase();
@@ -374,7 +368,7 @@ fn parse_system_hosts() -> Vec<(String, Vec<IpAddr>)> {
 /// Convert `*.example.com` → `+.example.com` for DomainTrie wildcard semantics.
 fn normalize_hosts_wildcard(s: &str) -> String {
     if let Some(rest) = s.strip_prefix("*.") {
-        format!("+.{}", rest)
+        format!("+.{rest}")
     } else {
         s.to_string()
     }
@@ -389,7 +383,7 @@ mod tests {
         HostsValue::One(s.to_string())
     }
     fn many(ss: &[&str]) -> HostsValue {
-        HostsValue::Many(ss.iter().map(|s| s.to_string()).collect())
+        HostsValue::Many(ss.iter().map(std::string::ToString::to_string).collect())
     }
 
     #[test]
@@ -553,7 +547,7 @@ mod tests {
     // Fallback-filter defaults when no raw config provided.
     #[test]
     fn build_fallback_filter_defaults() {
-        let ff = build_fallback_filter(None, None).unwrap();
+        let ff = build_fallback_filter(None, None);
         assert_eq!(ff.geoip_code, "CN");
         assert!(ff.ipcidr.is_empty());
         assert!(ff.domain.search("anything").is_none());
@@ -569,7 +563,7 @@ mod tests {
             ipcidr: Some(vec!["240.0.0.0/4".to_string()]),
             domain: None,
         };
-        let ff = build_fallback_filter(Some(&raw), None).unwrap();
+        let ff = build_fallback_filter(Some(&raw), None);
         let bogon: IpAddr = "240.1.2.3".parse().unwrap();
         let clean: IpAddr = "8.8.8.8".parse().unwrap();
         assert!(ff.ip_gated(&[bogon]));
@@ -587,7 +581,7 @@ mod tests {
             ipcidr: None,
             domain: Some(vec!["+.google.cn".to_string()]),
         };
-        let ff = build_fallback_filter(Some(&raw), None).unwrap();
+        let ff = build_fallback_filter(Some(&raw), None);
         assert!(ff.domain_gated("www.google.cn"));
         assert!(ff.domain_gated("google.cn"));
         assert!(!ff.domain_gated("www.google.com"));

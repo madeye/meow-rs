@@ -33,9 +33,8 @@ pub async fn url_test(
     expected: Option<&str>,
     timeout: Duration,
 ) -> Result<u16, UrlTestError> {
-    let parsed = match ParsedUrl::parse(url) {
-        Some(p) => p,
-        None => return Err(UrlTestError::Transport(format!("invalid url: {url}"))),
+    let Some(parsed) = ParsedUrl::parse(url) else {
+        return Err(UrlTestError::Transport(format!("invalid url: {url}")));
     };
     let ranges = match parse_expected(expected) {
         Ok(r) => r,

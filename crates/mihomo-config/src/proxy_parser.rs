@@ -9,10 +9,10 @@ use mihomo_proxy::ShadowsocksAdapter;
 use mihomo_proxy::TrojanAdapter;
 use mihomo_proxy::{
     FallbackGroup, HttpAdapter, LbStrategy, LoadBalanceGroup, RelayGroup, SelectorGroup,
-    Socks5Adapter, TransportChain, UrlTestGroup,
+    Socks5Adapter, UrlTestGroup,
 };
 #[cfg(feature = "vless")]
-use mihomo_proxy::{VlessAdapter, VlessFlow};
+use mihomo_proxy::{TransportChain, VlessAdapter, VlessFlow};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -99,7 +99,7 @@ pub fn parse_proxy(
                 .ok_or("missing server")?;
             let port = config
                 .get("port")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_yaml::Value::as_u64)
                 .ok_or("missing port")? as u16;
             let password = config
                 .get("password")
@@ -109,7 +109,10 @@ pub fn parse_proxy(
                 .get("cipher")
                 .and_then(|v| v.as_str())
                 .ok_or("missing cipher")?;
-            let udp = config.get("udp").and_then(|v| v.as_bool()).unwrap_or(false);
+            let udp = config
+                .get("udp")
+                .and_then(serde_yaml::Value::as_bool)
+                .unwrap_or(false);
             let plugin = config.get("plugin").and_then(|v| v.as_str());
             let plugin_opts_str = config.get("plugin-opts").and_then(serialize_plugin_opts);
 
@@ -123,7 +126,7 @@ pub fn parse_proxy(
                 plugin,
                 plugin_opts_str.as_deref(),
             )
-            .map_err(|e| format!("ss: {}", e))?;
+            .map_err(|e| format!("ss: {e}"))?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
         #[cfg(feature = "trojan")]
@@ -134,7 +137,7 @@ pub fn parse_proxy(
                 .ok_or("missing server")?;
             let port = config
                 .get("port")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_yaml::Value::as_u64)
                 .ok_or("missing port")? as u16;
             let password = config
                 .get("password")
@@ -143,9 +146,12 @@ pub fn parse_proxy(
             let sni = config.get("sni").and_then(|v| v.as_str()).unwrap_or("");
             let skip_verify = config
                 .get("skip-cert-verify")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_yaml::Value::as_bool)
                 .unwrap_or(false);
-            let udp = config.get("udp").and_then(|v| v.as_bool()).unwrap_or(false);
+            let udp = config
+                .get("udp")
+                .and_then(serde_yaml::Value::as_bool)
+                .unwrap_or(false);
 
             let adapter = TrojanAdapter::new(name, server, port, password, sni, skip_verify, udp);
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
@@ -163,7 +169,7 @@ pub fn parse_proxy(
             let adapter = parse_socks5(name, config)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
-        _ => Err(format!("unsupported proxy type: {}", proxy_type)),
+        _ => Err(format!("unsupported proxy type: {proxy_type}")),
     }
 }
 
@@ -188,12 +194,15 @@ fn parse_http(
         .ok_or("http: missing server")?;
     let port = config
         .get("port")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_yaml::Value::as_u64)
         .ok_or("http: missing port")? as u16;
-    let tls = config.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
+    let tls = config
+        .get("tls")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
     let skip_cert_verify = config
         .get("skip-cert-verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_yaml::Value::as_bool)
         .unwrap_or(false);
 
     // Both username and password must be set, or neither (Class A).
@@ -250,12 +259,15 @@ fn parse_socks5(
         .ok_or("socks5: missing server")?;
     let port = config
         .get("port")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_yaml::Value::as_u64)
         .ok_or("socks5: missing port")? as u16;
-    let tls = config.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
+    let tls = config
+        .get("tls")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
     let skip_cert_verify = config
         .get("skip-cert-verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_yaml::Value::as_bool)
         .unwrap_or(false);
 
     // Both username and password must be set, or neither (Class A).
@@ -272,7 +284,11 @@ fn parse_socks5(
     };
 
     // Warn-once if UDP is requested (deferred, ADR-0002 Class B).
-    if config.get("udp").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if config
+        .get("udp")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false)
+    {
         tracing::warn!(
             proxy = name,
             "socks5: `udp: true` is not supported in M1 (SOCKS5 UDP ASSOCIATE deferred); \
@@ -301,10 +317,9 @@ fn parse_lb_strategy(strategy: Option<&str>) -> std::result::Result<LbStrategy, 
         "round-robin" => Ok(LbStrategy::RoundRobin),
         "consistent-hashing" => Ok(LbStrategy::ConsistentHashing),
         other => Err(format!(
-            "load-balance: unknown strategy '{}'; valid values: \
+            "load-balance: unknown strategy '{other}'; valid values: \
              'round-robin' (default), 'consistent-hashing'. \
-             (upstream: falls back silently to round-robin; we reject — Class A ADR-0002)",
-            other
+             (upstream: falls back silently to round-robin; we reject — Class A ADR-0002)"
         )),
     }
 }
@@ -338,13 +353,13 @@ fn parse_vless(
         .ok_or("vless: missing server")?;
     let port = config
         .get("port")
-        .and_then(|v| v.as_u64())
+        .and_then(serde_yaml::Value::as_u64)
         .ok_or("vless: missing port")? as u16;
     let uuid_str = config
         .get("uuid")
         .and_then(|v| v.as_str())
         .ok_or("vless: missing uuid")?;
-    let uuid_bytes = parse_uuid(uuid_str).map_err(|e| format!("vless: {}", e))?;
+    let uuid_bytes = parse_uuid(uuid_str).map_err(|e| format!("vless: {e}"))?;
 
     // Validate server domain length (Class A — wrong destination with no diagnostic).
     if server.len() > 255 {
@@ -356,11 +371,17 @@ fn parse_vless(
         ));
     }
 
-    let udp = config.get("udp").and_then(|v| v.as_bool()).unwrap_or(false);
-    let tls = config.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
+    let udp = config
+        .get("udp")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+    let tls = config
+        .get("tls")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
     let skip_cert_verify = config
         .get("skip-cert-verify")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_yaml::Value::as_bool)
         .unwrap_or(false);
     let servername = config
         .get("servername")
@@ -372,7 +393,7 @@ fn parse_vless(
         .and_then(|v| v.as_sequence())
         .unwrap_or(&vec![])
         .iter()
-        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
         .collect();
     let network = config
         .get("network")
@@ -395,9 +416,8 @@ fn parse_vless(
         .unwrap_or("none");
     if !encryption.is_empty() && encryption != "none" {
         return Err(format!(
-            "vless: encryption '{}' is not supported; VLESS uses no body cipher \
-             (set `encryption: none` or omit the field)",
-            encryption
+            "vless: encryption '{encryption}' is not supported; VLESS uses no body cipher \
+             (set `encryption: none` or omit the field)"
         ));
     }
 
@@ -431,10 +451,9 @@ fn parse_vless(
             // upstream: adapter/outbound/vless.go — accepts deprecated flows.
             // NOT warn-ignore — security regression vs Vision if user assumes Vision protection.
             return Err(format!(
-                "vless: flow '{}' is deprecated and insecure; \
+                "vless: flow '{flow_str}' is deprecated and insecure; \
                  use `flow: xtls-rprx-vision` instead. \
-                 (upstream: adapter/outbound/vless.go accepts this; we reject — Class A ADR-0002)",
-                flow_str
+                 (upstream: adapter/outbound/vless.go accepts this; we reject — Class A ADR-0002)"
             ));
         }
 
@@ -443,9 +462,8 @@ fn parse_vless(
             // upstream: adapter/outbound/vless.go ignores unknown flows.
             // NOT warn-ignore — unknown flow value may silently degrade security.
             return Err(format!(
-                "vless: unknown flow '{}'; valid values: '' or 'xtls-rprx-vision'. \
-                 (upstream: ignores unknown flows; we reject — Class A ADR-0002)",
-                other
+                "vless: unknown flow '{other}'; valid values: '' or 'xtls-rprx-vision'. \
+                 (upstream: ignores unknown flows; we reject — Class A ADR-0002)"
             ));
         }
     };
@@ -477,7 +495,7 @@ fn parse_vless(
     if let Some(mux) = config.get("mux") {
         let mux_enabled = mux
             .get("enabled")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_yaml::Value::as_bool)
             .unwrap_or(false);
         if mux_enabled {
             tracing::warn!(
@@ -507,7 +525,7 @@ fn parse_vless(
         let sni = if servername.is_empty() {
             server.to_string()
         } else {
-            servername.clone()
+            servername
         };
         let mut tls_cfg = TlsConfig::new(sni);
         tls_cfg.skip_cert_verify = skip_cert_verify;
@@ -518,7 +536,7 @@ fn parse_vless(
         } else {
             alpn
         };
-        tls_cfg.fingerprint = client_fingerprint.map(|s| s.to_string());
+        tls_cfg.fingerprint = client_fingerprint.map(std::string::ToString::to_string);
 
         // ── ECH opts ────────────────────────────────────────────────────
         // DNS-sourced ECH (`enable: true` without `config:`) is resolved by
@@ -530,7 +548,7 @@ fn parse_vless(
         if let Some(ech_opts) = config.get("ech-opts") {
             let ech_enabled = ech_opts
                 .get("enable")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_yaml::Value::as_bool)
                 .unwrap_or(false);
             if ech_enabled {
                 use mihomo_transport::tls::EchOpts;
@@ -538,14 +556,14 @@ fn parse_vless(
                     use base64::Engine;
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(inline_config)
-                        .map_err(|e| format!("vless: ech-opts.config base64 decode: {}", e))?;
+                        .map_err(|e| format!("vless: ech-opts.config base64 decode: {e}"))?;
                     tls_cfg.ech = Some(EchOpts::Config(bytes));
                 }
             }
         }
 
         let tls_layer =
-            TlsLayer::new(&tls_cfg).map_err(|e| format!("vless: TLS layer error: {}", e))?;
+            TlsLayer::new(&tls_cfg).map_err(|e| format!("vless: TLS layer error: {e}"))?;
         chain.push(Box::new(tls_layer));
     }
 
@@ -566,16 +584,15 @@ fn parse_vless(
                 .and_then(|o| o.get("headers"))
                 .and_then(|h| h.get("Host"))
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| server.to_string());
+                .map_or_else(|| server.to_string(), std::string::ToString::to_string);
             let max_early_data = ws_opts
                 .and_then(|o| o.get("max-early-data"))
-                .and_then(|v| v.as_u64())
+                .and_then(serde_yaml::Value::as_u64)
                 .unwrap_or(0) as usize;
             let early_data_header_name = ws_opts
                 .and_then(|o| o.get("early-data-header-name"))
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(std::string::ToString::to_string);
             let ws_cfg = WsConfig {
                 path,
                 host_header: Some(host_header),
@@ -584,7 +601,7 @@ fn parse_vless(
                 early_data_header_name,
             };
             let ws_layer =
-                WsLayer::new(ws_cfg).map_err(|e| format!("vless: ws layer error: {}", e))?;
+                WsLayer::new(ws_cfg).map_err(|e| format!("vless: ws layer error: {e}"))?;
             chain.push(Box::new(ws_layer));
         }
         "grpc" => {
@@ -620,17 +637,18 @@ fn parse_vless(
             let hosts: Vec<String> = h2_opts
                 .and_then(|o| o.get("host"))
                 .and_then(|v| v.as_sequence())
-                .map(|seq| {
-                    seq.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_else(|| vec![server.to_string()]);
+                .map_or_else(
+                    || vec![server.to_string()],
+                    |seq| {
+                        seq.iter()
+                            .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
+                            .collect()
+                    },
+                );
             if hosts.is_empty() {
                 return Err(format!(
-                    "vless: h2-opts.host must not be empty for proxy '{}' \
-                     (H2 requires at least one authority value)",
-                    name
+                    "vless: h2-opts.host must not be empty for proxy '{name}' \
+                     (H2 requires at least one authority value)"
                 ));
             }
             let h2_cfg = H2Config { path, hosts };
@@ -647,7 +665,7 @@ fn parse_vless(
             let host_header = hu_opts
                 .and_then(|o| o.get("host"))
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .or_else(|| Some(server.to_string()));
             let extra_headers: Vec<(String, String)> = hu_opts
                 .and_then(|o| o.get("headers"))
@@ -671,8 +689,7 @@ fn parse_vless(
         }
         other => {
             return Err(format!(
-                "vless: unsupported network '{}'; valid values: tcp, ws, grpc, h2, httpupgrade",
-                other
+                "vless: unsupported network '{other}'; valid values: tcp, ws, grpc, h2, httpupgrade"
             ));
         }
     }
@@ -699,9 +716,9 @@ fn parse_uuid(s: &str) -> std::result::Result<[u8; 16], String> {
     let mut bytes = [0u8; 16];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let byte_str = std::str::from_utf8(chunk)
-            .map_err(|_| format!("invalid uuid '{}': non-UTF8 chars", s))?;
+            .map_err(|_| format!("invalid uuid '{s}': non-UTF8 chars"))?;
         bytes[i] = u8::from_str_radix(byte_str, 16)
-            .map_err(|_| format!("invalid uuid '{}': invalid hex char at byte {}", s, i))?;
+            .map_err(|_| format!("invalid uuid '{s}': invalid hex char at byte {i}"))?;
     }
     Ok(bytes)
 }
@@ -723,7 +740,7 @@ fn serialize_plugin_opts(opts: &serde_yaml::Value) -> Option<String> {
                         serde_yaml::Value::Number(n) => n.to_string(),
                         _ => return None,
                     };
-                    Some(format!("{}={}", key, val))
+                    Some(format!("{key}={val}"))
                 })
                 .collect();
             if parts.is_empty() {
@@ -877,10 +894,9 @@ fn parse_relay_group(
     // Hard-error: empty proxies list. upstream panics. NOT panic. Class A.
     if proxies.is_empty() {
         return Err(format!(
-            "relay group '{}': proxies list is empty; \
+            "relay group '{name}': proxies list is empty; \
              relay requires at least 2 proxies. \
-             (upstream: panics; we reject — Class A ADR-0002)",
-            name
+             (upstream: panics; we reject — Class A ADR-0002)"
         ));
     }
 

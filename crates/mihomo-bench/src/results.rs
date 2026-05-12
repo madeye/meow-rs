@@ -52,7 +52,7 @@ fn fmt_dns_rows_rust_only(rust: Option<&DnsResult>) -> String {
 
 fn fmt_bytes(b: u64) -> String {
     let mb = b as f64 / (1024.0 * 1024.0);
-    format!("{:.1} MB", mb)
+    format!("{mb:.1} MB")
 }
 
 fn fmt_delta(rust: f64, go: f64, _higher_is_better: bool) -> String {
@@ -61,7 +61,7 @@ fn fmt_delta(rust: f64, go: f64, _higher_is_better: bool) -> String {
     }
     let pct = ((rust - go) / go) * 100.0;
     let sign = if pct > 0.0 { "+" } else { "" };
-    format!("{}{:.0}%", sign, pct)
+    format!("{sign}{pct:.0}%")
 }
 
 pub fn render_markdown(report: &ComparisonReport) -> String {

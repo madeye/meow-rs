@@ -8,11 +8,11 @@ fn build_rules(n: usize) -> Vec<Box<dyn Rule>> {
     for i in 0..n {
         match i % 3 {
             0 => rules.push(Box::new(DomainSuffixRule::new(
-                &format!("suffix{}.example.com", i),
+                &format!("suffix{i}.example.com"),
                 "DIRECT",
             ))),
             1 => rules.push(Box::new(DomainSuffixRule::new(
-                &format!("other{}.net", i),
+                &format!("other{i}.net"),
                 "Proxy",
             ))),
             _ => {
@@ -32,7 +32,7 @@ fn make_metadata_hit(n: usize) -> Metadata {
     // Rules are built i % 3 == 0 → DomainSuffix. Find the last such i < n.
     let last_suffix_i = (0..n).rev().find(|&i| i % 3 == 0).unwrap_or(0);
     Metadata {
-        host: format!("host.suffix{}.example.com", last_suffix_i),
+        host: format!("host.suffix{last_suffix_i}.example.com"),
         dst_port: 443,
         ..Default::default()
     }

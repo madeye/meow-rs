@@ -62,8 +62,7 @@ sniffer:
     let err = expect_load_err(yaml).await;
     assert!(
         err.contains("sniff"),
-        "error must mention `sniff`: got {}",
-        err
+        "error must mention `sniff`: got {err}"
     );
 }
 
@@ -83,8 +82,7 @@ sniffer:
     let err = expect_load_err(yaml).await;
     assert!(
         err.contains("no ports"),
-        "error must mention 'no ports': got {}",
-        err
+        "error must mention 'no ports': got {err}"
     );
 }
 
@@ -221,7 +219,7 @@ sniffer:
       ports: [443]
 "#;
     let err = expect_load_err(yaml).await;
-    assert!(err.contains("timeout"), "got: {}", err);
+    assert!(err.contains("timeout"), "got: {err}");
 }
 
 #[tokio::test]
@@ -235,7 +233,7 @@ sniffer:
       ports: [443]
 "#;
     let err = expect_load_err(yaml).await;
-    assert!(err.contains("timeout"), "got: {}", err);
+    assert!(err.contains("timeout"), "got: {err}");
 }
 
 // ─── S13: custom timeout in range ────────────────────────────────────────

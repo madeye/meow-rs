@@ -114,9 +114,7 @@ impl WsLayer {
             "",
             "",
         )
-        .map_err(|e| {
-            TransportError::Config(format!("ws: invalid header in extra_headers: {}", e))
-        })?;
+        .map_err(|e| TransportError::Config(format!("ws: invalid header in extra_headers: {e}")))?;
 
         let host_in_extra = config
             .extra_headers
@@ -323,9 +321,8 @@ fn begin_upgrade(state: &mut PendingState) -> UpgradeRx {
 /// Returns `Poll::Ready(Ok(()))` when `inner` has been replaced with
 /// `WsInner::Connected`.
 fn poll_upgrade(inner: &mut WsInner, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-    let rx = match inner {
-        WsInner::Upgrading(rx) => rx,
-        _ => unreachable!("poll_upgrade called outside Upgrading state"),
+    let WsInner::Upgrading(rx) = inner else {
+        unreachable!("poll_upgrade called outside Upgrading state")
     };
     match Pin::new(rx).poll(cx) {
         Poll::Pending => Poll::Pending,
@@ -403,7 +400,6 @@ impl AsyncRead for WsStream {
                                 let _ = Pin::new(&mut state.ws).start_send(Message::Pong(payload));
                             }
                         }
-                        Some(Ok(Message::Pong(_))) => { /* ignore */ }
                         Some(Ok(Message::Close(_))) => {
                             return Poll::Ready(Ok(())); // EOF
                         }
@@ -413,9 +409,9 @@ impl AsyncRead for WsStream {
                                 "ws: unexpected text frame",
                             )));
                         }
-                        Some(Ok(Message::Frame(_))) => {
-                            // Raw frames are not expected on the client read
-                            // path; treat as noise and poll for the next frame.
+                        Some(Ok(Message::Pong(_) | Message::Frame(_))) => {
+                            // Pong replies and raw frames are noise on the read
+                            // path; ignore and poll for the next frame.
                         }
                     }
                 }

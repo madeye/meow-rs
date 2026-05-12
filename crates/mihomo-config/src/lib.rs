@@ -122,8 +122,8 @@ pub async fn load_config_from_str(content: &str) -> Result<Config, anyhow::Error
 /// Save a RawConfig back to disk with atomic write (.tmp → rename) and .bak backup.
 pub fn save_raw_config(path: &str, raw: &raw::RawConfig) -> Result<(), anyhow::Error> {
     let yaml = serde_yaml::to_string(raw)?;
-    let tmp_path = format!("{}.tmp", path);
-    let bak_path = format!("{}.bak", path);
+    let tmp_path = format!("{path}.tmp");
+    let bak_path = format!("{path}.bak");
     std::fs::write(&tmp_path, yaml)?;
     if std::path::Path::new(path).exists() {
         // Keep one backup
@@ -280,8 +280,7 @@ fn rebuild_from_raw_impl(
             if let Some(name) = sub_rules_parser::parse_sub_rule_reference(line) {
                 if !sub_rules.contains_key(&name) {
                     return Err(anyhow::anyhow!(
-                        "rules: SUB-RULE,{} references undefined sub-rule block",
-                        name
+                        "rules: SUB-RULE,{name} references undefined sub-rule block"
                     ));
                 }
             }
@@ -313,10 +312,7 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
             let enable = rs.enable.unwrap_or(false);
             let timeout_ms = rs.timeout.unwrap_or(100);
             if !(1..=60000).contains(&timeout_ms) {
-                anyhow::bail!(
-                    "sniffer.timeout must be between 1 and 60000 ms, got {}",
-                    timeout_ms
-                );
+                anyhow::bail!("sniffer.timeout must be between 1 and 60000 ms, got {timeout_ms}");
             }
 
             // Parse per-protocol port lists.
@@ -410,9 +406,9 @@ fn build_parser_context_with_geo(
     let asn_path = geo.asn_path.clone().unwrap_or_else(default_asn_path);
     build_parser_context_at(
         raw,
-        geoip_path,
-        asn_path,
-        mihomo_rules::geosite::default_geosite_candidates(),
+        &geoip_path,
+        &asn_path,
+        &mihomo_rules::geosite::default_geosite_candidates(),
         geo.geosite_path.as_deref(),
     )
 }
@@ -421,9 +417,9 @@ fn build_parser_context_with_geo(
 /// paths — used by tests and by the M2 `geodata:` config path overrides.
 fn build_parser_context_at(
     raw: &raw::RawConfig,
-    geoip_path: PathBuf,
-    asn_path: PathBuf,
-    geosite_candidates: Vec<PathBuf>,
+    geoip_path: &Path,
+    asn_path: &Path,
+    geosite_candidates: &[PathBuf],
     geosite_explicit: Option<&Path>,
 ) -> Result<mihomo_rules::ParserContext, anyhow::Error> {
     let lines: &[String] = raw.rules.as_deref().unwrap_or(&[]);
@@ -431,10 +427,10 @@ fn build_parser_context_at(
     let geoip_trigger = lines.iter().find(|l| line_is_geoip_rule(l));
     let geoip = match geoip_trigger {
         Some(trigger) => {
-            let reader = load_mmdb(&geoip_path, "GeoIP", trigger)?;
+            let reader = load_mmdb(geoip_path, "GeoIP", trigger)?;
             let allowed = collect_geoip_countries(lines);
             let index = mihomo_rules::country_index::CountryIndex::build(&reader, &allowed)
-                .map_err(|e| anyhow::anyhow!("failed to build GeoIP country index: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("failed to build GeoIP country index: {e}"))?;
             // Drop the MMDB reader — the index now holds the per-country
             // ranges we need and per-rule matches go through
             // `IpRange::contains`, not MMDB.
@@ -446,13 +442,13 @@ fn build_parser_context_at(
 
     let asn_trigger = lines.iter().find(|l| line_is_asn_rule(l));
     let asn = match asn_trigger {
-        Some(trigger) => Some(Arc::new(load_mmdb(&asn_path, "GeoLite2-ASN", trigger)?)),
+        Some(trigger) => Some(Arc::new(load_mmdb(asn_path, "GeoLite2-ASN", trigger)?)),
         None => None,
     };
 
     let geosite_trigger = lines.iter().any(|l| line_is_geosite_rule(l));
     let geosite = if geosite_trigger {
-        mihomo_rules::geosite::discover_and_load_at(geosite_explicit, &geosite_candidates)
+        mihomo_rules::geosite::discover_and_load_at(geosite_explicit, geosite_candidates)
     } else {
         None
     };
@@ -588,8 +584,7 @@ fn parse_listener_type(s: &str) -> Result<ListenerType, anyhow::Error> {
         "socks5" => Ok(ListenerType::Socks5),
         "tproxy" => Ok(ListenerType::TProxy),
         other => anyhow::bail!(
-            "unknown listener type '{}'; expected mixed, http, socks5, or tproxy",
-            other
+            "unknown listener type '{other}'; expected mixed, http, socks5, or tproxy"
         ),
     }
 }
@@ -615,15 +610,12 @@ fn build_named_listeners(
      -> Result<(), anyhow::Error> {
         if let Some(existing) = used_ports.get(&port) {
             anyhow::bail!(
-                "port {} already used by listener '{}' (duplicate port, Class A per ADR-0002)",
-                port,
-                existing
+                "port {port} already used by listener '{existing}' (duplicate port, Class A per ADR-0002)"
             );
         }
         if !used_names.insert(name.to_string()) {
             anyhow::bail!(
-                "listener name '{}' already defined (duplicate name, Class A per ADR-0002)",
-                name
+                "listener name '{name}' already defined (duplicate name, Class A per ADR-0002)"
             );
         }
         used_ports.insert(port, name.to_string());
@@ -717,10 +709,10 @@ async fn build_config(
 
     // Load proxy providers (async: may HTTP-fetch provider files).
     let proxy_providers = if let Some(raw_pp) = raw.proxy_providers.as_ref() {
-        if !raw_pp.is_empty() {
-            proxy_provider::load_proxy_providers(raw_pp, cache_dir).await
-        } else {
+        if raw_pp.is_empty() {
             HashMap::new()
+        } else {
+            proxy_provider::load_proxy_providers(raw_pp, cache_dir).await
         }
     } else {
         HashMap::new()
@@ -783,7 +775,7 @@ async fn build_config(
         raw.authentication.as_deref(),
         raw.skip_auth_prefixes.as_deref(),
     )
-    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     let auth = Arc::new(auth);
 
     info!(
@@ -815,7 +807,12 @@ mod geoip_context_tests {
 
     fn raw_with_rules(rules: Vec<&str>) -> raw::RawConfig {
         raw::RawConfig {
-            rules: Some(rules.into_iter().map(|s| s.to_string()).collect()),
+            rules: Some(
+                rules
+                    .into_iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+            ),
             ..Default::default()
         }
     }
@@ -841,8 +838,10 @@ mod geoip_context_tests {
             "# GEOIP,XX,DIRECT".to_string(),
         ];
         let got = collect_geoip_countries(&lines);
-        let want: std::collections::HashSet<String> =
-            ["CN", "US", "JP"].iter().map(|s| s.to_string()).collect();
+        let want: std::collections::HashSet<String> = ["CN", "US", "JP"]
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         assert_eq!(got, want);
     }
 
@@ -855,19 +854,18 @@ mod geoip_context_tests {
         let mut lines = Vec::new();
         // 50 repeats each of CN/US/JP/TW, plus mixed-case and SRC-GEOIP.
         for i in 0..50 {
-            lines.push(format!("GEOIP,CN,Proxy{}", i));
-            lines.push(format!("geoip,us,Proxy{}", i));
-            lines.push(format!("GEOIP,JP,Proxy{}", i));
-            lines.push(format!("SRC-GEOIP,TW,Proxy{}", i));
+            lines.push(format!("GEOIP,CN,Proxy{i}"));
+            lines.push(format!("geoip,us,Proxy{i}"));
+            lines.push(format!("GEOIP,JP,Proxy{i}"));
+            lines.push(format!("SRC-GEOIP,TW,Proxy{i}"));
             lines.push(format!(
-                "AND,((GEOIP,CN,Proxy),(DST-PORT,443,Proxy)),Proxy{}",
-                i
+                "AND,((GEOIP,CN,Proxy),(DST-PORT,443,Proxy)),Proxy{i}"
             ));
         }
         let got = collect_geoip_countries(&lines);
         let want: std::collections::HashSet<String> = ["CN", "US", "JP", "TW"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(
             got, want,
@@ -902,9 +900,9 @@ mod geoip_context_tests {
         let nonexistent = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
         let ctx = build_parser_context_at(
             &raw,
-            nonexistent,
-            nonexistent_asn(),
-            nonexistent_geosite(),
+            &nonexistent,
+            &nonexistent_asn(),
+            &nonexistent_geosite(),
             None,
         )
         .unwrap();
@@ -918,22 +916,20 @@ mod geoip_context_tests {
         let nonexistent = PathBuf::from("/nonexistent-test-path-42/Country.mmdb");
         let err = build_parser_context_at(
             &raw,
-            nonexistent.clone(),
-            nonexistent_asn(),
-            nonexistent_geosite(),
+            &nonexistent,
+            &nonexistent_asn(),
+            &nonexistent_geosite(),
             None,
         )
         .expect_err("must fail-fast when mmdb is missing");
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(
             msg.contains("/nonexistent-test-path-42/Country.mmdb"),
-            "error must name the attempted path: {}",
-            msg
+            "error must name the attempted path: {msg}"
         );
         assert!(
             msg.contains("GEOIP,CN,DIRECT"),
-            "error must name the triggering rule: {}",
-            msg
+            "error must name the triggering rule: {msg}"
         );
     }
 
@@ -944,14 +940,14 @@ mod geoip_context_tests {
         std::fs::write(tmp.path(), b"not a real mmdb file").unwrap();
         let err = build_parser_context_at(
             &raw,
-            tmp.path().to_path_buf(),
-            nonexistent_asn(),
-            nonexistent_geosite(),
+            tmp.path(),
+            &nonexistent_asn(),
+            &nonexistent_geosite(),
             None,
         )
         .expect_err("garbage bytes must fail to parse as mmdb");
-        let msg = format!("{}", err);
-        assert!(msg.contains("GeoIP"), "error should mention GeoIP: {}", msg);
+        let msg = format!("{err}");
+        assert!(msg.contains("GeoIP"), "error should mention GeoIP: {msg}");
     }
 
     #[test]
@@ -976,9 +972,9 @@ mod geoip_context_tests {
         let nonexistent_geoip = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
         let ctx = build_parser_context_at(
             &raw,
-            nonexistent_geoip,
-            nonexistent_asn(),
-            nonexistent_geosite(),
+            &nonexistent_geoip,
+            &nonexistent_asn(),
+            &nonexistent_geosite(),
             None,
         )
         .unwrap();
@@ -990,24 +986,17 @@ mod geoip_context_tests {
         let raw = raw_with_rules(vec!["IP-ASN,13335,PROXY"]);
         let nonexistent_geoip = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
         let asn = PathBuf::from("/nonexistent-test-path-asn/GeoLite2-ASN.mmdb");
-        let err = build_parser_context_at(
-            &raw,
-            nonexistent_geoip,
-            asn.clone(),
-            nonexistent_geosite(),
-            None,
-        )
-        .expect_err("must fail-fast when ASN mmdb is missing");
-        let msg = format!("{}", err);
+        let err =
+            build_parser_context_at(&raw, &nonexistent_geoip, &asn, &nonexistent_geosite(), None)
+                .expect_err("must fail-fast when ASN mmdb is missing");
+        let msg = format!("{err}");
         assert!(
             msg.contains(&asn.display().to_string()),
-            "error must name the attempted path: {}",
-            msg
+            "error must name the attempted path: {msg}"
         );
         assert!(
             msg.contains("IP-ASN,13335,PROXY"),
-            "error must name the triggering rule: {}",
-            msg
+            "error must name the triggering rule: {msg}"
         );
     }
 }

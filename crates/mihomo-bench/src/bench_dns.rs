@@ -42,7 +42,7 @@ async fn send_dns_query(
     // 2s timeout per query
     tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buf))
         .await
-        .map_err(|_| anyhow::anyhow!("DNS query timeout for {}", name))??;
+        .map_err(|_| anyhow::anyhow!("DNS query timeout for {name}"))??;
 
     Ok(start.elapsed())
 }
@@ -53,7 +53,7 @@ pub async fn bench_dns(dns_addr: SocketAddr, duration_secs: u64) -> anyhow::Resu
 
     // Cached domains: small set, 50% of traffic will hit these
     let cached_domains: Vec<String> = (0..WARMUP_DOMAINS)
-        .map(|i| format!("bench-cache-{}.example.com.", i))
+        .map(|i| format!("bench-cache-{i}.example.com."))
         .collect();
 
     // Unique domains: generate fresh names so they're cache misses
@@ -65,15 +65,15 @@ pub async fn bench_dns(dns_addr: SocketAddr, duration_secs: u64) -> anyhow::Resu
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
 
     // Warmup: prime the cache with WARMUP_DOMAINS entries
-    eprintln!("  [dns] warming up cache ({} domains)...", WARMUP_DOMAINS);
+    eprintln!("  [dns] warming up cache ({WARMUP_DOMAINS} domains)...");
     for (i, domain) in cached_domains.iter().enumerate() {
         if let Err(e) = send_dns_query(&socket, dns_addr, domain, i as u16).await {
-            eprintln!("  [dns] warmup error for {}: {}", domain, e);
+            eprintln!("  [dns] warmup error for {domain}: {e}");
         }
     }
 
     // Benchmark: TOTAL_QUERIES total, alternating hit/miss
-    eprintln!("  [dns] running {} queries...", TOTAL_QUERIES);
+    eprintln!("  [dns] running {TOTAL_QUERIES} queries...");
     let mut latencies: Vec<f64> = Vec::with_capacity(TOTAL_QUERIES);
     let mut cache_hit_queries = 0usize;
     let mut cache_miss_queries = 0usize;
@@ -92,7 +92,7 @@ pub async fn bench_dns(dns_addr: SocketAddr, duration_secs: u64) -> anyhow::Resu
         } else {
             // Cache miss: unique domain
             cache_miss_queries += 1;
-            format!("bench-miss-{}-{}.example.com.", miss_base, completed)
+            format!("bench-miss-{miss_base}-{completed}.example.com.")
         };
 
         match send_dns_query(&socket, dns_addr, &domain, query_id).await {
@@ -100,7 +100,7 @@ pub async fn bench_dns(dns_addr: SocketAddr, duration_secs: u64) -> anyhow::Resu
                 latencies.push(elapsed.as_secs_f64() * 1e6);
             }
             Err(e) => {
-                eprintln!("  [dns] query error: {}", e);
+                eprintln!("  [dns] query error: {e}");
             }
         }
 

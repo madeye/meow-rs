@@ -34,7 +34,7 @@ impl FromStr for RuleSetBehavior {
             "domain" => Ok(Self::Domain),
             "ipcidr" | "ip-cidr" => Ok(Self::IpCidr),
             "classical" => Ok(Self::Classical),
-            other => Err(format!("unknown rule-set behavior: {}", other)),
+            other => Err(format!("unknown rule-set behavior: {other}")),
         }
     }
 }
@@ -63,7 +63,7 @@ impl FromStr for RuleSetFormat {
             "yaml" => Ok(Self::Yaml),
             "text" => Ok(Self::Text),
             "mrs" => Ok(Self::Mrs),
-            other => Err(format!("unsupported rule-set format: {}", other)),
+            other => Err(format!("unsupported rule-set format: {other}")),
         }
     }
 }
@@ -112,18 +112,18 @@ pub fn build_rule_set_from_mrs(
     let payload = decompress_payload(compressed).map_err(|e| e.to_string())?;
     match hdr.type_tag {
         TYPE_DOMAIN => {
-            let entries = parse_string_list_payload(&payload).map_err(|e| e.to_string())?;
+            let entries = parse_string_list_payload(&payload)?;
             Ok(Box::new(DomainRuleSet::from_entries(&entries)))
         }
         TYPE_IPCIDR => {
-            let entries = parse_ipcidr_payload(&payload).map_err(|e| e.to_string())?;
+            let entries = parse_ipcidr_payload(&payload)?;
             Ok(Box::new(IpCidrRuleSet::from_entries(&entries)))
         }
         TYPE_CLASSICAL => {
-            let entries = parse_string_list_payload(&payload).map_err(|e| e.to_string())?;
+            let entries = parse_string_list_payload(&payload)?;
             Ok(Box::new(ClassicalRuleSet::from_entries(&entries, ctx)))
         }
-        other => Err(format!("mrs: unsupported type tag {}", other)),
+        other => Err(format!("mrs: unsupported type tag {other}")),
     }
 }
 
@@ -137,10 +137,10 @@ fn parse_string_list_payload(decompressed: &[u8]) -> Result<Vec<String>, String>
         let len = u16::from_be_bytes([decompressed[pos], decompressed[pos + 1]]) as usize;
         pos += 2;
         if pos + len > decompressed.len() {
-            return Err(format!("mrs: truncated string entry at offset {}", pos));
+            return Err(format!("mrs: truncated string entry at offset {pos}"));
         }
         let s = std::str::from_utf8(&decompressed[pos..pos + len])
-            .map_err(|e| format!("mrs: invalid UTF-8: {}", e))?;
+            .map_err(|e| format!("mrs: invalid UTF-8: {e}"))?;
         entries.push(s.to_string());
         pos += len;
     }
@@ -159,7 +159,7 @@ fn parse_ipcidr_payload(decompressed: &[u8]) -> Result<Vec<String>, String> {
         let addr_len = match family {
             4 => 4usize,
             16 => 16usize,
-            other => return Err(format!("mrs: unknown ip family {}", other)),
+            other => return Err(format!("mrs: unknown ip family {other}")),
         };
         if pos + addr_len + 1 > decompressed.len() {
             return Err("mrs: truncated ip address".to_string());
@@ -173,13 +173,13 @@ fn parse_ipcidr_payload(decompressed: &[u8]) -> Result<Vec<String>, String> {
                 .try_into()
                 .map_err(|_| "mrs: bad ipv4".to_string())?;
             let addr = std::net::Ipv4Addr::from(arr);
-            format!("{}/{}", addr, prefix_len)
+            format!("{addr}/{prefix_len}")
         } else {
             let arr: [u8; 16] = addr_bytes
                 .try_into()
                 .map_err(|_| "mrs: bad ipv6".to_string())?;
             let addr = std::net::Ipv6Addr::from(arr);
-            format!("{}/{}", addr, prefix_len)
+            format!("{addr}/{prefix_len}")
         };
         entries.push(cidr);
     }

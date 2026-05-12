@@ -62,7 +62,7 @@ pub fn parse_sub_rules(
                 continue;
             }
             let rule = parse_one_rule_or_subrule(line, providers, ctx, &resolved)
-                .map_err(|e| anyhow!("sub-rule '{}': {}", block_name, e))?;
+                .map_err(|e| anyhow!("sub-rule '{block_name}': {e}"))?;
             rules.push(rule);
         }
         resolved.insert(block_name, Arc::new(rules));
@@ -82,9 +82,7 @@ fn build_reference_graph(
             if let Some(target) = parse_sub_rule_reference(line) {
                 if !raw.contains_key(&target) {
                     return Err(anyhow!(
-                        "sub-rule block '{}' references undefined block '{}'",
-                        name,
-                        target
+                        "sub-rule block '{name}' references undefined block '{target}'"
                     ));
                 }
                 refs.push(target);
@@ -164,8 +162,7 @@ fn topo_order_with_cycle_check(
             Some(State::Fresh) => {}
             None => {
                 return Err(anyhow!(
-                    "sub-rule block '{}' not defined (internal error)",
-                    node
+                    "sub-rule block '{node}' not defined (internal error)"
                 ));
             }
         }
@@ -193,7 +190,7 @@ pub fn build_sub_rule_rule(
 ) -> Result<Box<dyn Rule>, String> {
     let block = resolved
         .get(block_name)
-        .ok_or_else(|| format!("sub-rule '{}' not defined", block_name))?;
+        .ok_or_else(|| format!("sub-rule '{block_name}' not defined"))?;
     Ok(Box::new(SubRuleRule::new(block_name, Arc::clone(block))))
 }
 
@@ -207,7 +204,9 @@ mod tests {
             .map(|(k, v)| {
                 (
                     k.to_string(),
-                    v.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    v.iter()
+                        .map(std::string::ToString::to_string)
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect()
@@ -254,14 +253,10 @@ mod tests {
         let raw_map = raw(&[("A", &["SUB-RULE,B"]), ("B", &["SUB-RULE,A"])]);
         let graph = build_reference_graph(&raw_map).unwrap();
         let err = topo_order_with_cycle_check(&raw_map, &graph).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(msg.contains("cycle"), "unexpected: {}", msg);
+        let msg = format!("{err}");
+        assert!(msg.contains("cycle"), "unexpected: {msg}");
         // Path must include both A and B.
-        assert!(
-            msg.contains("A") && msg.contains("B"),
-            "unexpected: {}",
-            msg
-        );
+        assert!(msg.contains("A") && msg.contains("B"), "unexpected: {msg}");
     }
 
     #[test]
@@ -269,7 +264,7 @@ mod tests {
         let raw_map = raw(&[("A", &["SUB-RULE,A"])]);
         let graph = build_reference_graph(&raw_map).unwrap();
         let err = topo_order_with_cycle_check(&raw_map, &graph).unwrap_err();
-        assert!(format!("{}", err).contains("cycle"));
+        assert!(format!("{err}").contains("cycle"));
     }
 
     #[test]
@@ -281,15 +276,15 @@ mod tests {
         ]);
         let graph = build_reference_graph(&raw_map).unwrap();
         let err = topo_order_with_cycle_check(&raw_map, &graph).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(msg.contains("cycle"), "unexpected: {}", msg);
+        let msg = format!("{err}");
+        assert!(msg.contains("cycle"), "unexpected: {msg}");
     }
 
     #[test]
     fn undefined_block_reference_errors() {
         let raw_map = raw(&[("A", &["SUB-RULE,MISSING"])]);
         let err = build_reference_graph(&raw_map).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(msg.contains("MISSING"), "unexpected: {}", msg);
+        let msg = format!("{err}");
+        assert!(msg.contains("MISSING"), "unexpected: {msg}");
     }
 }

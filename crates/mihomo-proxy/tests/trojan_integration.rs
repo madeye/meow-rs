@@ -38,9 +38,8 @@ async fn start_tcp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
         loop {
-            let (mut stream, _) = match listener.accept().await {
-                Ok(s) => s,
-                Err(_) => break,
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
             };
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
@@ -100,7 +99,7 @@ async fn read_socks5_addr<R: AsyncReadExt + Unpin>(reader: &mut R) -> SocketAddr
             let ip = if domain_str == "localhost" {
                 IpAddr::V4(Ipv4Addr::LOCALHOST)
             } else {
-                panic!("mock server cannot resolve domain: {}", domain_str);
+                panic!("mock server cannot resolve domain: {domain_str}");
             };
             SocketAddr::new(ip, u16::from_be_bytes(port))
         }
@@ -126,19 +125,15 @@ async fn start_mock_trojan_server(
 
     let handle = tokio::spawn(async move {
         loop {
-            let (tcp, _) = match listener.accept().await {
-                Ok(s) => s,
-                Err(_) => break,
+            let Ok((tcp, _)) = listener.accept().await else {
+                break;
             };
             let acceptor = acceptor.clone();
             let expected_hex = expected_hex.clone();
             tokio::spawn(async move {
-                let mut tls = match acceptor.accept(tcp).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("mock trojan: TLS accept error: {}", e);
-                        return;
-                    }
+                let Ok(mut tls) = acceptor.accept(tcp).await else {
+                    eprintln!("mock trojan: TLS accept error");
+                    return;
                 };
 
                 // Read Trojan header: 56-byte hex password
@@ -178,7 +173,7 @@ async fn start_mock_trojan_server(
                         run_mock_udp_associate(tls).await;
                     }
                     other => {
-                        eprintln!("mock trojan: unsupported cmd: {}", other);
+                        eprintln!("mock trojan: unsupported cmd: {other}");
                     }
                 }
             });
@@ -229,7 +224,7 @@ async fn try_read_socks5_addr<R: AsyncReadExt + Unpin>(
             let ip: IpAddr = s.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
             Ok(SocketAddr::new(ip, u16::from_be_bytes(port)))
         }
-        other => Err(std::io::Error::other(format!("unknown ATYP {:#x}", other))),
+        other => Err(std::io::Error::other(format!("unknown ATYP {other:#x}"))),
     }
 }
 
@@ -305,9 +300,8 @@ where
     let recv_task = tokio::spawn(async move {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let (n, peer) = match udp.recv_from(&mut buf).await {
-                Ok(v) => v,
-                Err(_) => break,
+            let Ok((n, peer)) = udp.recv_from(&mut buf).await else {
+                break;
             };
             if write_trojan_udp_frame(&mut tls_w, peer, &buf[..n])
                 .await
@@ -432,9 +426,8 @@ async fn start_udp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let (n, peer) = match socket.recv_from(&mut buf).await {
-                Ok(v) => v,
-                Err(_) => break,
+            let Ok((n, peer)) = socket.recv_from(&mut buf).await else {
+                break;
             };
             if socket.send_to(&buf[..n], peer).await.is_err() {
                 break;
@@ -554,8 +547,7 @@ async fn test_trojan_udp_multi_destination() {
     let expect_b = (echo_b.port(), b"to-b".to_vec());
     assert!(
         got.contains(&expect_a) && got.contains(&expect_b),
-        "expected echoes from both servers, got {:?}",
-        got
+        "expected echoes from both servers, got {got:?}"
     );
 }
 
@@ -584,6 +576,6 @@ async fn test_trojan_udp_disabled_returns_not_supported() {
     match adapter.dial_udp(&metadata).await {
         Ok(_) => panic!("dial_udp should fail when udp is disabled"),
         Err(MihomoError::NotSupported(_)) => {}
-        Err(other) => panic!("expected NotSupported, got {:?}", other),
+        Err(other) => panic!("expected NotSupported, got {other:?}"),
     }
 }

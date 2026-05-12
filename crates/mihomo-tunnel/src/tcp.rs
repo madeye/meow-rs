@@ -56,12 +56,9 @@ pub async fn handle_tcp(
     tunnel.pre_resolve(&mut metadata).await;
 
     // Match rules to find the right proxy
-    let (proxy, rule_name, rule_payload) = match tunnel.resolve_proxy(&metadata) {
-        Some(v) => v,
-        None => {
-            warn!("no matching rule for {}", metadata.remote_address());
-            return;
-        }
+    let Some((proxy, rule_name, rule_payload)) = tunnel.resolve_proxy(&metadata) else {
+        warn!("no matching rule for {}", metadata.remote_address());
+        return;
     };
 
     info!(

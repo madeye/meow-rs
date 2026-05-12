@@ -11,7 +11,7 @@ impl NetworkRule {
         let net = match network.to_lowercase().as_str() {
             "tcp" => NetType::Tcp,
             "udp" => NetType::Udp,
-            _ => return Err(format!("unknown network: {}", network)),
+            _ => return Err(format!("unknown network: {network}")),
         };
         Ok(Self {
             network: net,

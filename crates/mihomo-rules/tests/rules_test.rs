@@ -869,11 +869,10 @@ fn parse_ip_suffix_ipv4_low_byte() {
 #[test]
 fn parse_ip_suffix_invalid_payload_errors() {
     // Error message must self-identify as IP-SUFFIX (NOT IP-CIDR).
-    let err = match parse_rule("IP-SUFFIX,not-an-ip,PROXY") {
-        Ok(_) => panic!("expected parse error"),
-        Err(e) => e,
+    let Err(err) = parse_rule("IP-SUFFIX,not-an-ip,PROXY") else {
+        panic!("expected parse error");
     };
-    assert!(err.contains("IP-SUFFIX"), "unexpected error: {}", err);
+    assert!(err.contains("IP-SUFFIX"), "unexpected error: {err}");
 }
 
 // ─── IP-ASN (M1.D-3) — requires fixture DB, skipped without reader ─
@@ -882,14 +881,12 @@ fn parse_ip_suffix_invalid_payload_errors() {
 fn parse_ip_asn_missing_reader_hard_errors() {
     // Class A per ADR-0002 — upstream: rules/common/ipasn.go.
     // NOT a silent skip when DB missing (we reject at parse).
-    let err = match parse_rule("IP-ASN,13335,PROXY") {
-        Ok(_) => panic!("expected parse error"),
-        Err(e) => e,
+    let Err(err) = parse_rule("IP-ASN,13335,PROXY") else {
+        panic!("expected parse error");
     };
     assert!(
         err.contains("GeoLite2-ASN"),
-        "error should name the missing DB file, got: {}",
-        err
+        "error should name the missing DB file, got: {err}"
     );
 }
 
@@ -898,15 +895,10 @@ fn parse_ip_asn_missing_reader_hard_errors() {
 #[test]
 fn parse_unknown_rule_type_still_errors() {
     // Guard-rail: the `_ => unknown rule type` arm was not removed.
-    let err = match parse_rule("MADE-UP-RULE,foo,DIRECT") {
-        Ok(_) => panic!("expected parse error"),
-        Err(e) => e,
+    let Err(err) = parse_rule("MADE-UP-RULE,foo,DIRECT") else {
+        panic!("expected parse error");
     };
-    assert!(
-        err.contains("unknown rule type"),
-        "unexpected error: {}",
-        err
-    );
+    assert!(err.contains("unknown rule type"), "unexpected error: {err}");
 }
 
 // ─── GEOSITE (M1.D-2) ──────────────────────────────────────────────
@@ -967,11 +959,10 @@ fn parse_geosite_at_suffix_stripped_and_rule_still_matches() {
 
 #[test]
 fn parse_geosite_empty_category_hard_errors() {
-    let err = match parse_rule("GEOSITE,,DIRECT") {
-        Ok(_) => panic!("expected parse error"),
-        Err(e) => e,
+    let Err(err) = parse_rule("GEOSITE,,DIRECT") else {
+        panic!("expected parse error");
     };
-    assert!(err.contains("GEOSITE"), "unexpected: {}", err);
+    assert!(err.contains("GEOSITE"), "unexpected: {err}");
 }
 
 #[test]

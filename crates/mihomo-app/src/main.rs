@@ -306,12 +306,12 @@ fn install_service(config_override: Option<&str>, args: &Args) -> Result<()> {
         log_dir = log_dir.display(),
     );
 
-    let plist_path = launch_agents.join(format!("{}.plist", LAUNCHD_LABEL));
+    let plist_path = launch_agents.join(format!("{LAUNCHD_LABEL}.plist"));
 
     // Bootout existing service if loaded (ignore errors)
     let uid = unsafe { libc::getuid() };
-    let domain_target = format!("gui/{}", uid);
-    let service_target = format!("gui/{}/{}", uid, LAUNCHD_LABEL);
+    let domain_target = format!("gui/{uid}");
+    let service_target = format!("gui/{uid}/{LAUNCHD_LABEL}");
     let _ = std::process::Command::new("launchctl")
         .args(["bootout", &service_target])
         .output();
@@ -330,12 +330,12 @@ fn install_service(config_override: Option<&str>, args: &Args) -> Result<()> {
     println!("mihomo service installed and started.");
     println!();
     println!("  Config:  {}", dest_config.display());
-    println!("  Binary:  {}", exe_path);
+    println!("  Binary:  {exe_path}");
     println!("  Logs:    {}/mihomo.log", log_dir.display());
     println!();
     println!("Commands:");
-    println!("  {} status", exe_path);
-    println!("  launchctl kickstart -k {}", service_target);
+    println!("  {exe_path} status");
+    println!("  launchctl kickstart -k {service_target}");
     println!("  tail -f {}/mihomo.log", log_dir.display());
 
     Ok(())
@@ -344,11 +344,11 @@ fn install_service(config_override: Option<&str>, args: &Args) -> Result<()> {
 #[cfg(target_os = "macos")]
 fn uninstall_service() -> Result<()> {
     let (app_support, _log_dir, launch_agents) = macos_dirs()?;
-    let plist_path = launch_agents.join(format!("{}.plist", LAUNCHD_LABEL));
+    let plist_path = launch_agents.join(format!("{LAUNCHD_LABEL}.plist"));
 
     // Bootout the service (ignore errors if not loaded)
     let uid = unsafe { libc::getuid() };
-    let service_target = format!("gui/{}/{}", uid, LAUNCHD_LABEL);
+    let service_target = format!("gui/{uid}/{LAUNCHD_LABEL}");
     let _ = std::process::Command::new("launchctl")
         .args(["bootout", &service_target])
         .output();
@@ -374,7 +374,7 @@ fn uninstall_service() -> Result<()> {
 #[cfg(target_os = "macos")]
 fn service_status() -> Result<()> {
     let uid = unsafe { libc::getuid() };
-    let service_target = format!("gui/{}/{}", uid, LAUNCHD_LABEL);
+    let service_target = format!("gui/{uid}/{LAUNCHD_LABEL}");
     let output = std::process::Command::new("launchctl")
         .args(["print", &service_target])
         .output()?;
@@ -382,7 +382,7 @@ fn service_status() -> Result<()> {
     if output.status.success() {
         print!("{}", String::from_utf8_lossy(&output.stdout));
     } else {
-        println!("Service {} is not loaded.", LAUNCHD_LABEL);
+        println!("Service {LAUNCHD_LABEL} is not loaded.");
         if !output.stderr.is_empty() {
             eprint!("{}", String::from_utf8_lossy(&output.stderr));
         }
@@ -515,12 +515,18 @@ async fn run(
     // Build shared SnifferRuntime from config (once per startup).
     let sniffer_runtime = Arc::new(SnifferRuntime::new(config.sniffer));
     let auth = config.auth;
+    // Suppress unused-variable warnings: sniffer_runtime and auth are
+    // consumed only inside feature-gated listener blocks below.
+    let _ = (&sniffer_runtime, &auth);
 
     // Start listeners
     use mihomo_config::ListenerType;
 
     for nl in &config.listeners.named {
         let addr: SocketAddr = format!("{}:{}", nl.listen, nl.port).parse()?;
+        // Suppress unused-variable warning: addr is consumed only inside
+        // feature-gated match arms below.
+        let _ = addr;
         match nl.listener_type {
             ListenerType::Mixed | ListenerType::Http | ListenerType::Socks5 => {
                 #[cfg(feature = "listener-mixed")]

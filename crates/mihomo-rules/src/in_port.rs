@@ -29,8 +29,7 @@ impl InPortRule {
                 .map_err(|e| format!("invalid IN-PORT range end '{}': {}", r.trim(), e))?;
             if lo > hi {
                 return Err(format!(
-                    "invalid IN-PORT range {}-{}: start must be ≤ end",
-                    lo, hi
+                    "invalid IN-PORT range {lo}-{hi}: start must be ≤ end"
                 ));
             }
             (lo, hi)

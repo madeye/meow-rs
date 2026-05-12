@@ -52,8 +52,7 @@ fn obfs_server_available() -> bool {
 /// skipped when their helper binaries are missing.
 fn require_integration_bins() -> bool {
     std::env::var("MIHOMO_REQUIRE_INTEGRATION_BINS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// Helper that either skips with a message (local dev) or hard-fails the test
@@ -61,9 +60,9 @@ fn require_integration_bins() -> bool {
 #[track_caller]
 fn skip_or_fail(reason: &str) {
     if require_integration_bins() {
-        panic!("{} (MIHOMO_REQUIRE_INTEGRATION_BINS=1)", reason);
+        panic!("{reason} (MIHOMO_REQUIRE_INTEGRATION_BINS=1)");
     }
-    eprintln!("SKIP: {}", reason);
+    eprintln!("SKIP: {reason}");
 }
 
 /// Start a TCP echo server that reads data and writes it back.
@@ -72,9 +71,8 @@ async fn start_tcp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
         loop {
-            let (mut stream, _) = match listener.accept().await {
-                Ok(s) => s,
-                Err(_) => break,
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
             };
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
@@ -100,9 +98,8 @@ async fn start_udp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let handle = tokio::spawn(async move {
         let mut buf = [0u8; 65536];
         loop {
-            let (n, peer) = match socket.recv_from(&mut buf).await {
-                Ok(r) => r,
-                Err(_) => break,
+            let Ok((n, peer)) = socket.recv_from(&mut buf).await else {
+                break;
             };
             let _ = socket.send_to(&buf[..n], peer).await;
         }
@@ -153,7 +150,7 @@ async fn start_ssserver_inner(
 
     // Wait for ssserver to be ready by attempting TCP connections
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", ss_port))
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{ss_port}"))
             .await
             .is_ok()
         {

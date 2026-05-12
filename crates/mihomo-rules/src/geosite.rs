@@ -292,7 +292,7 @@ mod tests {
         std::fs::write(&path, build_fixture()).unwrap();
 
         let candidates = vec![
-            path.clone(),
+            path,
             PathBuf::from("/definitely/not/a/real/path/geosite.mrs"),
         ];
         let db = discover_and_load_from(&candidates).expect("DB should load");

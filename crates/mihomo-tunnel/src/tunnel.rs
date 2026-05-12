@@ -95,14 +95,13 @@ impl TunnelInner {
                             .rule_match
                             .increment(m.rule_type.as_str(), action);
                         let proxies = self.proxies.read();
-                        let proxy = proxies
-                            .get(&m.adapter_name)
-                            .cloned()
-                            .map(|p| p as Arc<dyn ProxyAdapter>)
-                            .unwrap_or_else(|| {
+                        let proxy = proxies.get(&m.adapter_name).cloned().map_or_else(
+                            || {
                                 debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
                                 self.direct.clone() as Arc<dyn ProxyAdapter>
-                            });
+                            },
+                            |p| p as Arc<dyn ProxyAdapter>,
+                        );
                         Some((proxy, m.rule_type.to_string(), m.rule_payload))
                     }
                     None => {

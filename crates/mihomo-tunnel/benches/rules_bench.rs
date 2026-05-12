@@ -16,11 +16,11 @@ fn build_rules(n: usize) -> Vec<Box<dyn Rule>> {
     for i in 0..n {
         match i % 3 {
             0 => rules.push(Box::new(DomainSuffixRule::new(
-                &format!("suffix{}.example.com", i),
+                &format!("suffix{i}.example.com"),
                 "DIRECT",
             ))),
             1 => rules.push(Box::new(DomainSuffixRule::new(
-                &format!("other{}.net", i),
+                &format!("other{i}.net"),
                 "Proxy",
             ))),
             _ => {
@@ -38,7 +38,7 @@ fn build_rules(n: usize) -> Vec<Box<dyn Rule>> {
 fn make_metadata_hit(n: usize) -> Metadata {
     let last_suffix_i = (0..n).rev().find(|&i| i % 3 == 0).unwrap_or(0);
     Metadata {
-        host: format!("host.suffix{}.example.com", last_suffix_i),
+        host: format!("host.suffix{last_suffix_i}.example.com"),
         dst_port: 443,
         ..Default::default()
     }
@@ -72,7 +72,7 @@ fn bench_rules(c: &mut Criterion) {
 
         // ── Hit: last DOMAIN-SUFFIX rule ─────────────────────────────────────
 
-        let mut group = c.benchmark_group(format!("rules_hit_last/n={}", n));
+        let mut group = c.benchmark_group(format!("rules_hit_last/n={n}"));
 
         group.bench_with_input(BenchmarkId::new("before_linear", n), &n, |b, _| {
             b.iter(|| black_box(scan_linear(black_box(&rules), black_box(&meta_hit))));
@@ -92,7 +92,7 @@ fn bench_rules(c: &mut Criterion) {
 
         // ── Miss: FINAL rule (full scan — index can't help) ──────────────────
 
-        let mut group = c.benchmark_group(format!("rules_miss_final/n={}", n));
+        let mut group = c.benchmark_group(format!("rules_miss_final/n={n}"));
 
         group.bench_with_input(BenchmarkId::new("before_linear", n), &n, |b, _| {
             b.iter(|| black_box(scan_linear(black_box(&rules), black_box(&meta_miss))));

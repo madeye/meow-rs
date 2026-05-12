@@ -8,9 +8,8 @@ pub async fn start_echo_server() -> anyhow::Result<(SocketAddr, JoinHandle<()>)>
 
     let handle = tokio::spawn(async move {
         loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(_) => continue,
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
             };
             tokio::spawn(async move {
                 let (mut rd, mut wr) = tokio::io::split(stream);

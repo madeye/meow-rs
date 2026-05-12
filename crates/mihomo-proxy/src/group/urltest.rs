@@ -71,8 +71,7 @@ impl UrlTestGroup {
         let current_delay = current_name
             .as_deref()
             .and_then(|n| all.iter().find(|p| p.name() == n))
-            .map(|p| p.last_delay())
-            .unwrap_or(u16::MAX);
+            .map_or(u16::MAX, |p| p.last_delay());
         let current_alive = current_name
             .as_deref()
             .and_then(|n| all.iter().find(|p| p.name() == n))
@@ -152,13 +151,12 @@ impl Proxy for UrlTestGroup {
     }
 
     fn last_delay(&self) -> u16 {
-        self.fastest_proxy().map(|p| p.last_delay()).unwrap_or(0)
+        self.fastest_proxy().map_or(0, |p| p.last_delay())
     }
 
     fn last_delay_for_url(&self, url: &str) -> u16 {
         self.fastest_proxy()
-            .map(|p| p.last_delay_for_url(url))
-            .unwrap_or(0)
+            .map_or(0, |p| p.last_delay_for_url(url))
     }
 
     fn delay_history(&self) -> Vec<DelayHistory> {

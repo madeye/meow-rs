@@ -384,9 +384,7 @@ mod tests {
             let n = payload_len - 1;
             assert!(
                 PADDING_RANGE.contains(&n),
-                "random byte count {} not in PADDING_RANGE {:?}",
-                n,
-                PADDING_RANGE
+                "random byte count {n} not in PADDING_RANGE {PADDING_RANGE:?}"
             );
         }
     }
@@ -473,8 +471,7 @@ mod tests {
         // The 5 data bytes must appear verbatim (no extra prefix).
         assert!(
             combined.windows(5).any(|w| w == data),
-            "passthrough must forward the 5 original bytes; got {:?}",
-            combined
+            "passthrough must forward the 5 original bytes; got {combined:?}"
         );
         assert!(
             !conn.vision_entered,
@@ -539,8 +536,7 @@ mod tests {
             let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
             assert!(
                 combined.is_empty(),
-                "must NOT write to inner after only the 5-byte header; got {:?}",
-                combined
+                "must NOT write to inner after only the 5-byte header; got {combined:?}"
             );
         }
 
@@ -551,8 +547,7 @@ mod tests {
             let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
             assert!(
                 combined.is_empty(),
-                "must NOT write to inner after partial body (2/4 bytes); got {:?}",
-                combined
+                "must NOT write to inner after partial body (2/4 bytes); got {combined:?}"
             );
         }
 
@@ -590,7 +585,7 @@ mod tests {
         // Supply 511 bytes (not enough).
         conn.write_all(&vec![0u8; 511]).await.unwrap();
         assert!(
-            written.lock().unwrap().iter().all(|v| v.is_empty())
+            written.lock().unwrap().iter().all(std::vec::Vec::is_empty)
                 || written.lock().unwrap().is_empty(),
             "partial body must not trigger send"
         );
@@ -712,12 +707,11 @@ mod tests {
         let bad_lines: Vec<&str> = captured
             .iter()
             .filter(|l| l.contains("WARN") || l.contains("ERROR"))
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
             .collect();
         assert!(
             bad_lines.is_empty(),
-            "passthrough must not emit WARN/ERROR logs; got: {:?}",
-            bad_lines
+            "passthrough must not emit WARN/ERROR logs; got: {bad_lines:?}"
         );
     }
 }

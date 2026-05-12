@@ -68,17 +68,15 @@ impl SnifferRuntime {
         }
 
         // Per-port protocol dispatch.
-        let proto = match self.port_map.get(&metadata.dst_port) {
-            Some(p) => p,
-            None => return,
+        let Some(proto) = self.port_map.get(&metadata.dst_port) else {
+            return;
         };
 
         // Bounded peek (8 KiB) with configurable timeout.
         let mut buf = [0u8; 8192];
-        let n = match tokio::time::timeout(self.cfg.timeout, stream.peek(&mut buf)).await {
-            Ok(Ok(n)) => n,
+        let Ok(Ok(n)) = tokio::time::timeout(self.cfg.timeout, stream.peek(&mut buf)).await else {
             // Peek returned IO error or timed out — leave metadata unchanged.
-            Ok(Err(_)) | Err(_) => return,
+            return;
         };
 
         let sniffed = match proto {
@@ -344,8 +342,7 @@ mod tests {
         let slack = std::time::Duration::from_millis(50);
         assert!(
             elapsed <= timeout + slack,
-            "sniff must return within timeout + 50ms slack, took {:?}",
-            elapsed
+            "sniff must return within timeout + 50ms slack, took {elapsed:?}"
         );
     }
 

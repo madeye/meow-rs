@@ -7,13 +7,13 @@ pub fn measure_rss(pid: u32) -> anyhow::Result<u64> {
         .output()?;
 
     if !output.status.success() {
-        anyhow::bail!("ps failed for pid {}", pid);
+        anyhow::bail!("ps failed for pid {pid}");
     }
 
     let rss_kb: u64 = String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse()
-        .map_err(|e| anyhow::anyhow!("parse RSS: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("parse RSS: {e}"))?;
 
     Ok(rss_kb * 1024)
 }

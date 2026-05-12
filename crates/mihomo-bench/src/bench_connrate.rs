@@ -48,10 +48,7 @@ pub async fn bench_conn_rate(
     let actual_elapsed = duration_secs as f64;
     let cps = total as f64 / actual_elapsed;
 
-    eprintln!(
-        "  conn-rate: {} connections in {}s = {:.0}/s",
-        total, duration_secs, cps
-    );
+    eprintln!("  conn-rate: {total} connections in {duration_secs}s = {cps:.0}/s");
 
     Ok(ConnRateResult {
         duration_secs: actual_elapsed,

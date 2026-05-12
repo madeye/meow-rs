@@ -96,7 +96,7 @@ impl RuleProvider {
             parse_bytes_to_ruleset(&bytes, behavior, &ctx_clone)
         })
         .await
-        .map_err(|e| anyhow!("parse task panicked: {}", e))??;
+        .map_err(|e| anyhow!("parse task panicked: {e}"))??;
         let count = boxed.len();
         let new_rules: Arc<dyn RuleSet> = Arc::from(boxed);
         *self.rules.write() = new_rules;
@@ -169,12 +169,12 @@ fn load_one(
     cache_dir: Option<&Path>,
     ctx: &ParserContext,
 ) -> Result<RuleProvider> {
-    let behavior: RuleSetBehavior = cfg.behavior.parse().map_err(|e: String| anyhow!("{}", e))?;
+    let behavior: RuleSetBehavior = cfg.behavior.parse().map_err(|e: String| anyhow!("{e}"))?;
     match cfg.provider_type.as_str() {
         "inline" => load_inline(name, cfg, behavior, ctx),
         "file" => load_file(name, cfg, cache_dir, behavior, ctx),
         "http" => load_http(name, cfg, cache_dir, behavior, ctx),
-        other => Err(anyhow!("unknown rule-provider type: {}", other)),
+        other => Err(anyhow!("unknown rule-provider type: {other}")),
     }
 }
 
@@ -186,15 +186,14 @@ fn load_inline(
 ) -> Result<RuleProvider> {
     if cfg.interval.is_some_and(|i| i > 0) {
         return Err(anyhow!(
-            "rule-provider '{}': inline providers cannot refresh; \
-             remove the `interval:` field (Class A per ADR-0002)",
-            name
+            "rule-provider '{name}': inline providers cannot refresh; \
+             remove the `interval:` field (Class A per ADR-0002)"
         ));
     }
     let payload = cfg
         .payload
         .as_deref()
-        .ok_or_else(|| anyhow!("rule-provider '{}': inline type requires `payload:`", name))?;
+        .ok_or_else(|| anyhow!("rule-provider '{name}': inline type requires `payload:`"))?;
     let rules = build_rule_set(behavior, payload, ctx);
     Ok(make_provider(
         name,
@@ -221,7 +220,7 @@ fn load_file(
         );
     }
     let path = resolve_path(cfg, cache_dir, name)
-        .ok_or_else(|| anyhow!("file provider '{}' requires a 'path'", name))?;
+        .ok_or_else(|| anyhow!("file provider '{name}' requires a 'path'"))?;
     let bytes = std::fs::read(&path)
         .with_context(|| format!("reading provider file {}", path.display()))?;
     let explicit_format = parse_explicit_format(cfg)?;
@@ -247,7 +246,7 @@ fn load_http(
     let url = cfg
         .url
         .as_deref()
-        .ok_or_else(|| anyhow!("http provider '{}' requires a 'url'", name))?;
+        .ok_or_else(|| anyhow!("http provider '{name}' requires a 'url'"))?;
     let cache_path = resolve_path(cfg, cache_dir, name);
     let bytes = fetch_http_blocking_with_cache(url, cache_path.as_deref())?;
     let explicit_format = parse_explicit_format(cfg)?;
@@ -294,7 +293,7 @@ fn make_provider(
 fn parse_explicit_format(cfg: &RawRuleProvider) -> Result<Option<RuleSetFormat>> {
     cfg.format
         .as_deref()
-        .map(|s| s.parse::<RuleSetFormat>().map_err(|e| anyhow!("{}", e)))
+        .map(|s| s.parse::<RuleSetFormat>().map_err(|e| anyhow!("{e}")))
         .transpose()
 }
 
@@ -314,7 +313,7 @@ fn parse_bytes_to_ruleset_with_format(
 ) -> Result<Box<dyn RuleSet>> {
     let use_mrs = explicit_format == Some(RuleSetFormat::Mrs) || is_mrs_bytes(bytes);
     if use_mrs {
-        return build_rule_set_from_mrs(bytes, ctx).map_err(|e| anyhow!("mrs parse error: {}", e));
+        return build_rule_set_from_mrs(bytes, ctx).map_err(|e| anyhow!("mrs parse error: {e}"));
     }
     let text = std::str::from_utf8(bytes).context("payload is not valid UTF-8")?;
     let entries = match explicit_format.unwrap_or(RuleSetFormat::Yaml) {
@@ -341,9 +340,9 @@ fn parse_yaml_payload(raw: &str) -> Result<Vec<String>> {
 
 fn parse_text_payload(raw: &str) -> Vec<String> {
     raw.lines()
-        .map(|l| l.trim())
+        .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| l.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 
@@ -363,7 +362,7 @@ fn resolve_path(cfg: &RawRuleProvider, cache_dir: Option<&Path>, name: &str) -> 
         });
     }
     let dir = cache_dir?;
-    Some(dir.join("rule-providers").join(format!("{}.yaml", name)))
+    Some(dir.join("rule-providers").join(format!("{name}.yaml")))
 }
 
 // ---------------------------------------------------------------------------
@@ -521,8 +520,7 @@ mod tests {
             .expect_err("inline + interval must hard-error");
         assert!(
             err.to_string().contains("inline providers cannot refresh"),
-            "unexpected: {}",
-            err
+            "unexpected: {err}"
         );
     }
 

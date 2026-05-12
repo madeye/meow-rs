@@ -22,8 +22,7 @@ fn unit_contains_read_write_paths_for_config_dir() {
 
     assert!(
         unit.contains("ReadWritePaths=/etc/mihomo"),
-        "Unit must grant ReadWritePaths to config directory:\n{}",
-        unit,
+        "Unit must grant ReadWritePaths to config directory:\n{unit}",
     );
 }
 
@@ -41,8 +40,7 @@ fn unit_exec_start_uses_absolute_config_path() {
 
     assert!(
         unit.contains("ExecStart=/usr/bin/mihomo -f /etc/mihomo/config.yaml"),
-        "ExecStart should use the absolute config path:\n{}",
-        unit,
+        "ExecStart should use the absolute config path:\n{unit}",
     );
 }
 

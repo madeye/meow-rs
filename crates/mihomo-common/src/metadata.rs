@@ -98,10 +98,10 @@ impl Metadata {
     }
 
     pub fn rule_host(&self) -> &str {
-        if !self.sniff_host.is_empty() {
-            &self.sniff_host
-        } else {
+        if self.sniff_host.is_empty() {
             &self.host
+        } else {
+            &self.sniff_host
         }
     }
 

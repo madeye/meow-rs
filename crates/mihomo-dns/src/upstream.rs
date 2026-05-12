@@ -65,10 +65,10 @@ impl NameServerUrl {
     /// `None` if the address is already an IP literal.
     pub fn needs_bootstrap(&self) -> Option<&str> {
         let addr = match self {
-            NameServerUrl::Udp { addr, .. } => addr,
-            NameServerUrl::Tcp { addr, .. } => addr,
-            NameServerUrl::Tls { addr, .. } => addr,
-            NameServerUrl::Https { addr, .. } => addr,
+            NameServerUrl::Udp { addr, .. }
+            | NameServerUrl::Tcp { addr, .. }
+            | NameServerUrl::Tls { addr, .. }
+            | NameServerUrl::Https { addr, .. } => addr,
         };
         match addr {
             HostOrIp::Host(h) => Some(h.as_str()),

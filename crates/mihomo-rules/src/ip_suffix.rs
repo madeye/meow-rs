@@ -40,8 +40,7 @@ impl IpSuffixRule {
         let net: IpNet = payload.parse().map_err(|e| {
             format!(
                 "invalid IP-SUFFIX: expected addr/prefix_len where prefix_len ≤ 32 (IPv4) or \
-                 128 (IPv6): {} ({})",
-                payload, e
+                 128 (IPv6): {payload} ({e})"
             )
         })?;
         let family = match net {
@@ -49,8 +48,7 @@ impl IpSuffixRule {
                 let prefix = v4.prefix_len();
                 if prefix > 32 {
                     return Err(format!(
-                        "invalid IP-SUFFIX: IPv4 prefix_len {} exceeds 32",
-                        prefix
+                        "invalid IP-SUFFIX: IPv4 prefix_len {prefix} exceeds 32"
                     ));
                 }
                 // Low `prefix` bits form the match mask.
@@ -71,8 +69,7 @@ impl IpSuffixRule {
                 let prefix = v6.prefix_len();
                 if prefix > 128 {
                     return Err(format!(
-                        "invalid IP-SUFFIX: IPv6 prefix_len {} exceeds 128",
-                        prefix
+                        "invalid IP-SUFFIX: IPv6 prefix_len {prefix} exceeds 128"
                     ));
                 }
                 let mask: u128 = if prefix == 0 {
@@ -216,7 +213,7 @@ mod tests {
     fn ip_suffix_invalid_payload_errors() {
         match IpSuffixRule::new("not-an-ip", "PROXY", false, true) {
             Ok(_) => panic!("expected parse error"),
-            Err(err) => assert!(err.contains("IP-SUFFIX"), "unexpected error: {}", err),
+            Err(err) => assert!(err.contains("IP-SUFFIX"), "unexpected error: {err}"),
         }
     }
 
@@ -233,8 +230,7 @@ mod tests {
             Ok(_) => panic!("expected parse error"),
             Err(err) => assert!(
                 err.contains("IP-SUFFIX"),
-                "IP-SUFFIX error should self-identify, got: {}",
-                err
+                "IP-SUFFIX error should self-identify, got: {err}"
             ),
         }
     }

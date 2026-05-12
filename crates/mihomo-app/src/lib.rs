@@ -20,7 +20,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={exe} -f {config}
+ExecStart={exe_path} -f {config_path}
 WorkingDirectory={work_dir}
 Restart=on-failure
 RestartSec=5
@@ -35,8 +35,5 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 "#,
-        exe = exe_path,
-        config = config_path,
-        work_dir = work_dir,
     )
 }

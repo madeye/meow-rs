@@ -28,7 +28,7 @@ impl FromStr for TunnelMode {
             "global" => Ok(TunnelMode::Global),
             "rule" => Ok(TunnelMode::Rule),
             "direct" => Ok(TunnelMode::Direct),
-            _ => Err(format!("unknown tunnel mode: {}", s)),
+            _ => Err(format!("unknown tunnel mode: {s}")),
         }
     }
 }

@@ -21,9 +21,8 @@ pub fn parse_auth_config(
                 // Upstream silently ignores; we diverge (ADR-0002 Class A) because
                 // a missing colon is almost certainly a typo, not intent.
                 return Err(format!(
-                    "authentication: malformed entry {:?} — expected 'user:pass' format \
-                    (Class A divergence from upstream: NOT silently ignored)",
-                    entry
+                    "authentication: malformed entry {entry:?} — expected 'user:pass' format \
+                    (Class A divergence from upstream: NOT silently ignored)"
                 ));
             }
             Some(pos) => {
@@ -52,12 +51,7 @@ pub fn parse_auth_config(
     for cidr in skip_auth_prefixes.unwrap_or(&[]) {
         match IpNet::from_str(cidr) {
             Ok(net) => skip_prefixes.push(net),
-            Err(e) => {
-                return Err(format!(
-                    "skip-auth-prefixes: invalid CIDR {:?}: {}",
-                    cidr, e
-                ))
-            }
+            Err(e) => return Err(format!("skip-auth-prefixes: invalid CIDR {cidr:?}: {e}")),
         }
     }
 
@@ -73,7 +67,12 @@ mod tests {
 
     fn make_auth(entries: &[&str]) -> AuthConfig {
         parse_auth_config(
-            Some(&entries.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+            Some(
+                &entries
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>(),
+            ),
             None,
         )
         .unwrap()
@@ -128,8 +127,7 @@ mod tests {
         let err = parse_auth_config(Some(&["userpassword".to_string()]), None).unwrap_err();
         assert!(
             err.contains("malformed"),
-            "expected malformed error, got: {}",
-            err
+            "expected malformed error, got: {err}"
         );
     }
 
@@ -156,6 +154,6 @@ mod tests {
     #[test]
     fn parse_skip_auth_prefixes_invalid_cidr() {
         let err = parse_auth_config(None, Some(&["not-a-cidr".to_string()])).unwrap_err();
-        assert!(err.contains("invalid CIDR"), "got: {}", err);
+        assert!(err.contains("invalid CIDR"), "got: {err}");
     }
 }

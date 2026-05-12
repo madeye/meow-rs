@@ -98,9 +98,8 @@ fn no_server_side_symbols_in_src() {
 }
 
 fn walk_rs_files(dir: &std::path::Path, f: &mut dyn FnMut(&std::path::Path, &str)) {
-    let rd = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return,
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in rd.flatten() {
         let path = entry.path();
@@ -131,6 +130,7 @@ fn transport_error_is_non_exhaustive() {
     // #[non_exhaustive].  If it were exhaustive, the `_` arm would generate
     // a compile-time `unreachable_patterns` warning (not an error), which
     // would not catch the regression.  We keep the wildcard and document why.
+    #[allow(clippy::match_same_arms)] // arms are distinct variants; bodies coincidentally identical
     let _display = match err {
         TransportError::Io(e) => e.to_string(),
         TransportError::Tls(s) => s,

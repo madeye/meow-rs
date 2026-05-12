@@ -22,7 +22,7 @@ fn test_adapter_type_display() {
         (AdapterType::Hysteria2, "Hysteria2"),
     ];
     for (variant, expected) in cases {
-        assert_eq!(variant.to_string(), expected, "AdapterType::{:?}", variant);
+        assert_eq!(variant.to_string(), expected, "AdapterType::{variant:?}");
     }
 }
 
@@ -49,7 +49,7 @@ fn test_conn_type_display() {
         (ConnType::Inner, "Inner"),
     ];
     for (variant, expected) in cases {
-        assert_eq!(variant.to_string(), expected, "ConnType::{:?}", variant);
+        assert_eq!(variant.to_string(), expected, "ConnType::{variant:?}");
     }
 }
 
@@ -144,7 +144,7 @@ fn test_rule_type_display() {
         (RuleType::Not, "NOT"),
     ];
     for (variant, expected) in cases {
-        assert_eq!(variant.to_string(), expected, "RuleType::{:?}", variant);
+        assert_eq!(variant.to_string(), expected, "RuleType::{variant:?}");
     }
 }
 

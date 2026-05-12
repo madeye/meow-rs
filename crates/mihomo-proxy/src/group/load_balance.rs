@@ -345,7 +345,7 @@ mod tests {
         let a = MockProxy::new("A");
         let b = MockProxy::new("B");
         let c = MockProxy::new("C");
-        let proxies: Vec<Arc<dyn Proxy>> = vec![a.clone(), b.clone(), c.clone()];
+        let proxies: Vec<Arc<dyn Proxy>> = vec![a, b, c];
         let group = make_rr(proxies);
         let meta = meta_no_src();
 
@@ -362,7 +362,7 @@ mod tests {
         let b = MockProxy::new("B");
         let c = MockProxy::new("C");
         b.mark_dead();
-        let proxies: Vec<Arc<dyn Proxy>> = vec![a.clone(), b.clone(), c.clone()];
+        let proxies: Vec<Arc<dyn Proxy>> = vec![a, b, c];
         let group = make_rr(proxies);
         let meta = meta_no_src();
 
@@ -381,7 +381,7 @@ mod tests {
         let c = MockProxy::new("C");
         b.mark_dead();
         c.mark_dead();
-        let proxies: Vec<Arc<dyn Proxy>> = vec![a.clone(), b.clone(), c.clone()];
+        let proxies: Vec<Arc<dyn Proxy>> = vec![a, b, c];
         let group = make_rr(proxies);
         let meta = meta_no_src();
         for _ in 0..5 {
@@ -418,7 +418,7 @@ mod tests {
         let a = MockProxy::new("A");
         let b = MockProxy::new("B");
         let c = MockProxy::new("C");
-        let proxies: Vec<Arc<dyn Proxy>> = vec![a.clone(), b.clone(), c.clone()];
+        let proxies: Vec<Arc<dyn Proxy>> = vec![a, b.clone(), c];
         let group = make_rr(proxies);
         let meta = meta_no_src();
 
@@ -479,7 +479,7 @@ mod tests {
         let a = MockProxy::new("A");
         let b = MockProxy::new("B");
         let c = MockProxy::new("C");
-        let proxies: Vec<Arc<dyn Proxy>> = vec![a.clone(), b.clone(), c.clone()];
+        let proxies: Vec<Arc<dyn Proxy>> = vec![a.clone(), b, c];
         let group = make_ch(proxies);
         let meta = meta_src(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
 
@@ -537,7 +537,7 @@ mod tests {
         let a = MockProxy::new("A");
         let b = MockProxy::new("B");
         let c = MockProxy::new("C");
-        let proxies: Vec<Arc<dyn Proxy>> = vec![a.clone(), b.clone(), c.clone()];
+        let proxies: Vec<Arc<dyn Proxy>> = vec![a, b.clone(), c];
         let group = make_ch(proxies);
         let meta = meta_src(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)));
 

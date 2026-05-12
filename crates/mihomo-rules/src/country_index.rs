@@ -124,7 +124,7 @@ impl CountryIndex {
 
         let iter = reader
             .networks(Default::default())
-            .map_err(|e| format!("failed to iterate GeoIP networks: {}", e))?;
+            .map_err(|e| format!("failed to iterate GeoIP networks: {e}"))?;
 
         // Path straight to `country.iso_code`, skipping every other field
         // in the GeoIP2 record (continent, names, traits, …). Borrowed by
@@ -138,9 +138,8 @@ impl CountryIndex {
         let mut offset_cache: HashMap<usize, Option<u16>> = HashMap::new();
 
         for result in iter {
-            let lookup = match result {
-                Ok(r) => r,
-                Err(_) => continue,
+            let Ok(lookup) = result else {
+                continue;
             };
 
             // Networks with no data record can't drive any rule.
@@ -170,9 +169,8 @@ impl CountryIndex {
                 continue;
             };
 
-            let net = match lookup.network() {
-                Ok(n) => n,
-                Err(_) => continue,
+            let Ok(net) = lookup.network() else {
+                continue;
             };
             let prefix = net.prefix();
             let bucket = &mut buckets[bucket_idx as usize];
@@ -378,7 +376,7 @@ mod tests {
         // Arc — a sanity check that no per-rule range allocation slipped in.
         let baseline = idx.ranges_for("CN");
         for i in 0..100 {
-            let line = format!("GEOIP,CN,Proxy{}", i);
+            let line = format!("GEOIP,CN,Proxy{i}");
             let _rule = parse_rule(&line, &ctx).expect("parse_rule must succeed");
             // We can't introspect GeoIpRule.ranges (private), but we can
             // re-fetch from the index — which is the very Arc the parser
@@ -386,13 +384,11 @@ mod tests {
             let again = idx.ranges_for("CN");
             assert!(
                 Arc::ptr_eq(&baseline.v4, &again.v4),
-                "iteration {} broke v4 Arc sharing",
-                i
+                "iteration {i} broke v4 Arc sharing"
             );
             assert!(
                 Arc::ptr_eq(&baseline.v6, &again.v6),
-                "iteration {} broke v6 Arc sharing",
-                i
+                "iteration {i} broke v6 Arc sharing"
             );
         }
 

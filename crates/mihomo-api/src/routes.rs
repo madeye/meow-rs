@@ -112,7 +112,7 @@ async fn require_auth_ws(
                 .or_else(|| v.strip_prefix("bearer "))
         });
 
-    let token_param = query.get("token").map(|s| s.as_str());
+    let token_param = query.get("token").map(std::string::String::as_str);
     let provided = bearer.or(token_param);
 
     // TODO(task#33): apply constant-time comparison here when that task lands,
@@ -265,7 +265,7 @@ impl ProxyInfo {
         debug!(
             name = proxy.name(),
             proxy_type = %proxy.adapter_type(),
-            member_count = members.as_ref().map(|v| v.len()),
+            member_count = members.as_ref().map(std::vec::Vec::len),
             current = ?current,
             "building ProxyInfo",
         );
@@ -552,9 +552,9 @@ async fn get_subscriptions(State(state): State<Arc<AppState>>) -> Json<Vec<Subsc
             url: s.url.clone(),
             interval: s.interval,
             last_updated: s.last_updated,
-            proxy_count: raw.proxies.as_ref().map(|v| v.len()).unwrap_or(0),
-            group_count: raw.proxy_groups.as_ref().map(|v| v.len()).unwrap_or(0),
-            rule_count: raw.rules.as_ref().map(|v| v.len()).unwrap_or(0),
+            proxy_count: raw.proxies.as_ref().map_or(0, std::vec::Vec::len),
+            group_count: raw.proxy_groups.as_ref().map_or(0, std::vec::Vec::len),
+            rule_count: raw.rules.as_ref().map_or(0, std::vec::Vec::len),
         })
         .collect();
     Json(result)
@@ -573,7 +573,7 @@ async fn add_subscription(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let fetched = mihomo_config::subscription::fetch_subscription(&body.url)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("fetch failed: {}", e)))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("fetch failed: {e}")))?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -666,7 +666,7 @@ async fn refresh_subscription(
 
     let fetched = mihomo_config::subscription::fetch_subscription(&url)
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("fetch failed: {}", e)))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("fetch failed: {e}")))?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -730,7 +730,7 @@ async fn get_proxy_groups(State(state): State<Arc<AppState>>) -> Json<Vec<ProxyG
                 .get(&g.name)
                 .and_then(|p| p.as_any())
                 .and_then(|a| a.downcast_ref::<SelectorGroup>())
-                .and_then(|s| s.selected_proxy())
+                .and_then(mihomo_proxy::SelectorGroup::selected_proxy)
                 .map(|p| p.name().to_string());
             ProxyGroupInfo {
                 name: g.name.clone(),
@@ -1133,7 +1133,7 @@ async fn put_configs(
     Query(params): Query<HashMap<String, String>>,
     Json(body): Json<PutConfigsBody>,
 ) -> Response {
-    let force = params.get("force").map(|v| v == "true").unwrap_or(false);
+    let force = params.get("force").is_some_and(|v| v == "true");
 
     let yaml =
         match (body.path, body.payload) {
@@ -1150,15 +1150,12 @@ async fn put_configs(
             (_, Some(b64)) => {
                 use base64::engine::general_purpose::STANDARD;
                 use base64::Engine as _;
-                let bytes = match STANDARD.decode(&b64) {
-                    Ok(b) => b,
-                    Err(_) => {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({"message": "payload is not valid base64"})),
-                        )
-                            .into_response()
-                    }
+                let Ok(bytes) = STANDARD.decode(&b64) else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"message": "payload is not valid base64"})),
+                    )
+                        .into_response();
                 };
                 match String::from_utf8(bytes) {
                     Ok(s) => s,
@@ -1382,7 +1379,7 @@ async fn get_logs(
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    let lag_msg = format!("{{\"type\":\"lagged\",\"missed\":{}}}", n);
+                    let lag_msg = format!("{{\"type\":\"lagged\",\"missed\":{n}}}");
                     if socket.send(Message::Text(lag_msg.into())).await.is_err() {
                         break;
                     }
@@ -1420,7 +1417,7 @@ fn read_rss_bytes() -> u64 {
     let pid = Pid::from_u32(std::process::id());
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
-    sys.process(pid).map(|p| p.memory()).unwrap_or(0)
+    sys.process(pid).map_or(0, sysinfo::Process::memory)
 }
 
 fn read_os_memory_limit() -> u64 {

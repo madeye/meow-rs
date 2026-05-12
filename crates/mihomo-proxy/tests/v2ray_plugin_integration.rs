@@ -50,8 +50,7 @@ fn v2ray_plugin_available() -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 async fn start_tcp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
@@ -59,9 +58,8 @@ async fn start_tcp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
         loop {
-            let (mut stream, _) = match listener.accept().await {
-                Ok(s) => s,
-                Err(_) => break,
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
             };
             tokio::spawn(async move {
                 let mut buf = [0u8; 4096];
@@ -109,7 +107,7 @@ async fn start_ssserver_with_plugin(ss_port: u16, plugin: &str, plugin_opts: &st
 
     // Give ssserver + its plugin subprocess time to listen on `ss_port`.
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", ss_port))
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{ss_port}"))
             .await
             .is_ok()
         {
@@ -238,10 +236,8 @@ async fn test_ss_v2ray_plugin_tls_websocket_mux() {
 
     // See the note in the plain-ws test above: the server must run without
     // `mux=1`, while the client still passes it to cover the parse path.
-    let server_opts = format!(
-        "server;tls;mux=0;host=example.com;path=/ws;cert={};key={}",
-        cert_path, key_path
-    );
+    let server_opts =
+        format!("server;tls;mux=0;host=example.com;path=/ws;cert={cert_path};key={key_path}");
     let _ssserver = start_ssserver_with_plugin(ss_port, "v2ray-plugin", &server_opts).await;
 
     let adapter = ShadowsocksAdapter::new(

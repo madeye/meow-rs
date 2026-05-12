@@ -31,7 +31,7 @@ pub async fn fetch_subscription(url: &str) -> Result<SubscriptionData, anyhow::E
 /// Parse a Clash YAML string and extract proxies, proxy-groups, and rules.
 pub fn parse_subscription_yaml(text: &str) -> Result<SubscriptionData, anyhow::Error> {
     let root: Value =
-        serde_yaml::from_str(text).map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))?;
+        serde_yaml::from_str(text).map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
     let mapping = root
         .as_mapping()
         .ok_or_else(|| anyhow::anyhow!("subscription root is not a mapping"))?;
@@ -41,9 +41,9 @@ pub fn parse_subscription_yaml(text: &str) -> Result<SubscriptionData, anyhow::E
     let proxies_val = mapping.get(&proxies_key).ok_or_else(|| {
         let keys: Vec<String> = mapping
             .keys()
-            .filter_map(|k| k.as_str().map(|s| s.to_string()))
+            .filter_map(|k| k.as_str().map(std::string::ToString::to_string))
             .collect();
-        anyhow::anyhow!("subscription missing 'proxies' key; found keys: {:?}", keys)
+        anyhow::anyhow!("subscription missing 'proxies' key; found keys: {keys:?}")
     })?;
     let proxies_seq = proxies_val
         .as_sequence()
@@ -74,7 +74,7 @@ pub fn parse_subscription_yaml(text: &str) -> Result<SubscriptionData, anyhow::E
         .and_then(|v| v.as_sequence())
         .map(|seq| {
             seq.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
                 .collect()
         })
         .unwrap_or_default();

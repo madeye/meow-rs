@@ -183,8 +183,7 @@ where
              check UUID and whether a TLS layer is required"
         );
         return Err(MihomoError::Proxy(format!(
-            "vless: version mismatch: expected 0x00, got {:#04x}",
-            version
+            "vless: version mismatch: expected 0x00, got {version:#04x}"
         )));
     }
 
@@ -558,8 +557,7 @@ mod tests {
         let err_str = result.unwrap_err().to_string();
         assert!(
             err_str.contains("version") || err_str.contains("mismatch"),
-            "error must mention version mismatch, got: {}",
-            err_str
+            "error must mention version mismatch, got: {err_str}"
         );
 
         let logs = captured.lock().unwrap();

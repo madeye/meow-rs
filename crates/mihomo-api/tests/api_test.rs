@@ -1614,7 +1614,7 @@ async fn a1_get_proxy_delay_ok_records_delay() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value = body_json(resp).await;
     let delay = body["delay"].as_u64().unwrap();
-    assert!(delay > 0, "delay must be positive, got {}", delay);
+    assert!(delay > 0, "delay must be positive, got {delay}");
     assert_eq!(body.as_object().unwrap().len(), 1, "only the delay key");
     // Verify recorded into history
     let proxies = state.tunnel.proxies();
@@ -1770,8 +1770,8 @@ async fn d1_group_delay_ok_all_members_reported() {
     let obj = body.as_object().unwrap();
     assert_eq!(obj.len(), 3);
     for k in ["A", "B", "C"] {
-        let v = obj.get(k).and_then(|v| v.as_u64()).unwrap();
-        assert!(v > 0, "member {} should have positive delay", k);
+        let v = obj.get(k).and_then(serde_json::Value::as_u64).unwrap();
+        assert!(v > 0, "member {k} should have positive delay");
     }
 }
 
@@ -1972,8 +1972,7 @@ async fn e1_group_delay_dials_all_members_concurrently() {
     // jitter on CI.
     assert!(
         spread < std::time::Duration::from_millis(50),
-        "dial starts should be concurrent, spread was {:?}",
-        spread
+        "dial starts should be concurrent, spread was {spread:?}"
     );
 }
 
@@ -1994,8 +1993,7 @@ async fn e2_group_delay_total_walltime_bounded_by_timeout() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
         elapsed < std::time::Duration::from_millis(200),
-        "group probe with 3 instant members should finish fast, took {:?}",
-        elapsed
+        "group probe with 3 instant members should finish fast, took {elapsed:?}"
     );
 }
 

@@ -37,9 +37,8 @@ mod vless_tests {
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             loop {
-                let (mut stream, _) = match listener.accept().await {
-                    Ok(s) => s,
-                    Err(_) => break,
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
                 };
                 tokio::spawn(async move {
                     let mut buf = [0u8; 4096];
@@ -125,7 +124,7 @@ mod vless_tests {
                     other => {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::Unsupported,
-                            format!("mock vless: cannot resolve '{}'", other),
+                            format!("mock vless: cannot resolve '{other}'"),
                         ));
                     }
                 };
@@ -140,7 +139,7 @@ mod vless_tests {
             other => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("mock vless: unknown addr_type {:#04x}", other),
+                    format!("mock vless: unknown addr_type {other:#04x}"),
                 ));
             }
         };
@@ -164,18 +163,14 @@ mod vless_tests {
 
         let handle = tokio::spawn(async move {
             loop {
-                let (mut tcp, _) = match listener.accept().await {
-                    Ok(s) => s,
-                    Err(_) => break,
+                let Ok((mut tcp, _)) = listener.accept().await else {
+                    break;
                 };
                 let expected_uuid = expected_uuid.clone();
                 tokio::spawn(async move {
-                    let (uuid, cmd, target_addr) = match read_vless_header(&mut tcp).await {
-                        Ok(h) => h,
-                        Err(e) => {
-                            eprintln!("mock vless: header parse error: {}", e);
-                            return;
-                        }
+                    let Ok((uuid, cmd, target_addr)) = read_vless_header(&mut tcp).await else {
+                        eprintln!("mock vless: header parse error");
+                        return;
                     };
 
                     // UUID mismatch — close without response (simulates xray behaviour).
@@ -198,15 +193,12 @@ mod vless_tests {
                                         tokio::io::copy_bidirectional(&mut tcp, &mut target).await;
                                 }
                                 Err(e) => {
-                                    eprintln!(
-                                        "mock vless: relay connect to {}: {}",
-                                        target_addr, e
-                                    );
+                                    eprintln!("mock vless: relay connect to {target_addr}: {e}");
                                 }
                             }
                         }
                         other => {
-                            eprintln!("mock vless: unsupported cmd {:#04x}", other);
+                            eprintln!("mock vless: unsupported cmd {other:#04x}");
                         }
                     }
                 });
@@ -345,7 +337,7 @@ mod vless_tests {
                 conn.read_exact(&mut buf)
                     .await
                     .expect("concurrent: read_exact failed");
-                assert_eq!(buf, payload, "concurrent echo mismatch for i={}", i);
+                assert_eq!(buf, payload, "concurrent echo mismatch for i={i}");
             });
             handles.push(handle);
         }
@@ -457,8 +449,7 @@ mod vless_tests {
                         || err_str.contains("Eof")
                         || err_str.contains("server")
                         || err_str.contains("UUID"),
-                    "error must describe the cause, got: {}",
-                    err_str
+                    "error must describe the cause, got: {err_str}"
                 );
             }
             Err(e) => {
@@ -468,8 +459,7 @@ mod vless_tests {
                     err_str.contains("server closed")
                         || err_str.contains("UUID")
                         || err_str.contains("server config"),
-                    "error must describe the cause, got: {}",
-                    err_str
+                    "error must describe the cause, got: {err_str}"
                 );
             }
         }

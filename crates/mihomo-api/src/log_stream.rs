@@ -78,7 +78,7 @@ struct MessageVisitor(String);
 impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            self.0 = format!("{:?}", value);
+            self.0 = format!("{value:?}");
         }
     }
 
@@ -92,10 +92,10 @@ impl tracing::field::Visit for MessageVisitor {
 pub fn parse_log_level(s: &str) -> LogLevel {
     match s.to_ascii_lowercase().as_str() {
         "debug" => LogLevel::Debug,
-        "info" => LogLevel::Info,
         "warning" | "warn" => LogLevel::Warning,
         "error" => LogLevel::Error,
         "silent" => LogLevel::Silent,
+        // "info" and any unrecognised value default to Info.
         _ => LogLevel::Info,
     }
 }

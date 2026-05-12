@@ -192,9 +192,8 @@ async fn handle_tproxy_conn(
     );
 
     let inner = tunnel.inner();
-    let (proxy, rule_name, rule_payload) = match inner.resolve_proxy(&metadata) {
-        Some(v) => v,
-        None => return Err("no matching rule".into()),
+    let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
+        return Err("no matching rule".into());
     };
 
     info!(

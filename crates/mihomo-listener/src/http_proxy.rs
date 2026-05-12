@@ -68,8 +68,8 @@ async fn handle_http_inner(
     }
 
     // Auth check: verify Proxy-Authorization before dispatching.
-    let needs_auth = auth.map(|a| !a.credentials.is_empty()).unwrap_or(false)
-        && !auth.map(|a| a.should_skip(&src_addr.ip())).unwrap_or(false);
+    let needs_auth = auth.is_some_and(|a| !a.credentials.is_empty())
+        && !auth.is_some_and(|a| a.should_skip(&src_addr.ip()));
 
     let in_user: Option<String> = if needs_auth {
         match parse_proxy_authorization(&request_buf) {
@@ -92,7 +92,7 @@ async fn handle_http_inner(
                               Content-Length: 0\r\n\r\n",
                         )
                         .await?;
-                    return Err(format!("HTTP auth failed for user {:?}", username).into());
+                    return Err(format!("HTTP auth failed for user {username:?}").into());
                 }
                 Some(username)
             }
@@ -119,7 +119,7 @@ async fn handle_http_inner(
 
     if method.eq_ignore_ascii_case("CONNECT") {
         // HTTPS CONNECT
-        let (host, port) = parse_host_port(target, 443)?;
+        let (host, port) = parse_host_port(target, 443);
 
         let mut metadata = Metadata {
             network: Network::Tcp,
@@ -149,9 +149,8 @@ async fn handle_http_inner(
 
         // Hand off to tunnel
         let inner = tunnel.inner();
-        let (proxy, rule_name, rule_payload) = match inner.resolve_proxy(&metadata) {
-            Some(v) => v,
-            None => return Err("no matching rule".into()),
+        let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
+            return Err("no matching rule".into());
         };
 
         info!(
@@ -185,7 +184,7 @@ async fn handle_http_inner(
     } else {
         // Plain HTTP proxy (GET/POST/etc via proxy)
         let url = target;
-        let (host, port) = parse_url_host_port(url)?;
+        let (host, port) = parse_url_host_port(url);
 
         let mut metadata = Metadata {
             network: Network::Tcp,
@@ -211,14 +210,11 @@ async fn handle_http_inner(
         debug!("HTTP {} to {}:{}", method, host, port);
 
         let inner = tunnel.inner();
-        let (proxy, rule_name, rule_payload) = match inner.resolve_proxy(&metadata) {
-            Some(v) => v,
-            None => {
-                stream
-                    .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
-                    .await?;
-                return Err("no matching rule".into());
-            }
+        let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
+            stream
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                .await?;
+            return Err("no matching rule".into());
         };
 
         info!(
@@ -285,23 +281,18 @@ async fn handle_http_inner(
     Ok(())
 }
 
-fn parse_host_port(
-    target: &str,
-    default_port: u16,
-) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+fn parse_host_port(target: &str, default_port: u16) -> (String, u16) {
     // target is like "host:port" or just "host"
     if let Some((host, port_str)) = target.rsplit_once(':') {
         if let Ok(port) = port_str.parse::<u16>() {
-            return Ok((host.to_string(), port));
+            return (host.to_string(), port);
         }
     }
-    Ok((target.to_string(), default_port))
+    (target.to_string(), default_port)
 }
 
 /// Parse host and port from an absolute HTTP URL like "http://ipinfo.io/json"
-fn parse_url_host_port(
-    url: &str,
-) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+fn parse_url_host_port(url: &str) -> (String, u16) {
     // Strip scheme
     let without_scheme = url
         .strip_prefix("http://")
@@ -321,8 +312,7 @@ fn extract_path_from_url(url: &str) -> &str {
         .unwrap_or(url);
     without_scheme
         .find('/')
-        .map(|i| &without_scheme[i..])
-        .unwrap_or("/")
+        .map_or("/", |i| &without_scheme[i..])
 }
 
 /// Parse `Proxy-Authorization: Basic <base64>` from raw request headers.

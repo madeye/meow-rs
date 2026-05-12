@@ -103,13 +103,11 @@ impl Proxy for FallbackGroup {
     }
 
     fn last_delay(&self) -> u16 {
-        self.first_alive().map(|p| p.last_delay()).unwrap_or(0)
+        self.first_alive().map_or(0, |p| p.last_delay())
     }
 
     fn last_delay_for_url(&self, url: &str) -> u16 {
-        self.first_alive()
-            .map(|p| p.last_delay_for_url(url))
-            .unwrap_or(0)
+        self.first_alive().map_or(0, |p| p.last_delay_for_url(url))
     }
 
     fn delay_history(&self) -> Vec<DelayHistory> {

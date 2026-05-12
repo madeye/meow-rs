@@ -21,14 +21,14 @@ impl PortRule {
                 let start: u16 = start
                     .trim()
                     .parse()
-                    .map_err(|e| format!("invalid port: {}", e))?;
+                    .map_err(|e| format!("invalid port: {e}"))?;
                 let end: u16 = end
                     .trim()
                     .parse()
-                    .map_err(|e| format!("invalid port: {}", e))?;
+                    .map_err(|e| format!("invalid port: {e}"))?;
                 ranges.push(PortRange::Range(start, end));
             } else {
-                let port: u16 = part.parse().map_err(|e| format!("invalid port: {}", e))?;
+                let port: u16 = part.parse().map_err(|e| format!("invalid port: {e}"))?;
                 ranges.push(PortRange::Single(port));
             }
         }

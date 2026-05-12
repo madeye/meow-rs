@@ -24,8 +24,10 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "vless")]
 use base64::Engine;
 use mihomo_config::ech_dns::preresolve_ech;
+#[cfg(feature = "vless")]
 use mihomo_config::load_config_from_str;
 use serde_yaml::Value;
 
@@ -44,7 +46,7 @@ fn ech_config_str(map: &HashMap<String, Value>) -> Option<String> {
         .as_mapping()?
         .get(Value::String("config".into()))?
         .as_str()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
 }
 
 // ─── E1: no ech-opts → untouched ──────────────────────────────────────────

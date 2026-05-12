@@ -70,8 +70,7 @@ async fn tls_connect_bad_cert_errs() {
     // The error message must contain a TLS-related marker so log greps stay useful.
     assert!(
         err_str.contains("tls") || err_str.contains("handshake") || err_str.contains("certificate"),
-        "error message missing expected marker: {}",
-        err_str
+        "error message missing expected marker: {err_str}"
     );
 }
 
@@ -419,16 +418,8 @@ fn tls_fingerprint_warn_twice_for_distinct_values() {
     // One warn per distinct value — dedup is by value, not globally suppressed.
     let count_fp1 = logs.count_containing(&["WARN", fp1]);
     let count_fp2 = logs.count_containing(&["WARN", fp2]);
-    assert_eq!(
-        count_fp1, 1,
-        "expected 1 warn for '{}', got {}",
-        fp1, count_fp1
-    );
-    assert_eq!(
-        count_fp2, 1,
-        "expected 1 warn for '{}', got {}",
-        fp2, count_fp2
-    );
+    assert_eq!(count_fp1, 1, "expected 1 warn for '{fp1}', got {count_fp1}");
+    assert_eq!(count_fp2, 1, "expected 1 warn for '{fp2}', got {count_fp2}");
 }
 
 // ─── A13: tls_fingerprint_none_no_warn ───────────────────────────────────────
@@ -448,7 +439,6 @@ fn tls_fingerprint_none_no_warn() {
     let fp_warn_count = logs.count_containing(&["uTLS fingerprint"]);
     assert_eq!(
         fp_warn_count, 0,
-        "expected 0 fingerprint warns with fingerprint=None, got {}",
-        fp_warn_count
+        "expected 0 fingerprint warns with fingerprint=None, got {fp_warn_count}"
     );
 }

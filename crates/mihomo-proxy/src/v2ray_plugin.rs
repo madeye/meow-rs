@@ -91,8 +91,7 @@ pub fn parse_opts(s: &str) -> Result<V2rayPluginConfig> {
                     cfg.mode = Mode::Websocket;
                 } else {
                     return Err(MihomoError::Config(format!(
-                        "v2ray-plugin: unsupported mode '{}' (only 'websocket' is supported)",
-                        value
+                        "v2ray-plugin: unsupported mode '{value}' (only 'websocket' is supported)"
                     )));
                 }
             }

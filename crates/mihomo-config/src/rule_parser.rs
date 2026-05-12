@@ -69,7 +69,7 @@ fn try_parse_rule_set(
     line: &str,
     providers: &HashMap<String, Arc<dyn RuleSet>>,
 ) -> Option<Result<Box<dyn Rule>, String>> {
-    let parts: Vec<&str> = line.splitn(4, ',').map(|s| s.trim()).collect();
+    let parts: Vec<&str> = line.splitn(4, ',').map(str::trim).collect();
     if parts.first().copied() != Some("RULE-SET") {
         return None;
     }
@@ -83,7 +83,7 @@ fn try_parse_rule_set(
         .is_some_and(|extra| extra.eq_ignore_ascii_case("no-resolve"));
 
     let Some(set) = providers.get(name) else {
-        return Some(Err(format!("unknown rule-provider '{}'", name)));
+        return Some(Err(format!("unknown rule-provider '{name}'")));
     };
 
     Some(Ok(Box::new(RuleSetRule::new(

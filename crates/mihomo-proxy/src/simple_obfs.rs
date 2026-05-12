@@ -84,7 +84,7 @@ fn build_http_request(host: &str, port: u16, body: &[u8]) -> Vec<u8> {
     let host_header = if port == 80 {
         host.to_string()
     } else {
-        format!("{}:{}", host, port)
+        format!("{host}:{port}")
     };
 
     let mut rng = rand::rng();
@@ -508,8 +508,7 @@ fn build_client_hello(data: &[u8], server: &str) -> Vec<u8> {
     // Random: 4-byte timestamp + 28 random bytes.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs() as u32);
     buf.extend_from_slice(&now.to_be_bytes());
     buf.extend_from_slice(&random);
 
@@ -659,7 +658,7 @@ mod tests {
         }
         let received = &received[..total];
         let s = std::str::from_utf8(received).unwrap_or("");
-        assert!(s.starts_with("GET / HTTP/1.1\r\n"), "got: {:?}", s);
+        assert!(s.starts_with("GET / HTTP/1.1\r\n"), "got: {s:?}");
         // The body PAYLOAD1 follows \r\n\r\n.
         let idx = received
             .windows(4)

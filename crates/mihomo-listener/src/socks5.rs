@@ -61,8 +61,8 @@ async fn handle_socks5_inner(
     let mut methods = vec![0u8; nmethods];
     stream.read_exact(&mut methods).await?;
 
-    let needs_auth = auth.map(|a| !a.credentials.is_empty()).unwrap_or(false)
-        && !auth.map(|a| a.should_skip(&src_addr.ip())).unwrap_or(false);
+    let needs_auth = auth.is_some_and(|a| !a.credentials.is_empty())
+        && !auth.is_some_and(|a| a.should_skip(&src_addr.ip()));
 
     let in_user: Option<String> = if needs_auth {
         let auth = auth.unwrap();
@@ -94,7 +94,7 @@ async fn handle_socks5_inner(
 
         if !auth.credentials.verify(&username, &password) {
             stream.write_all(&[0x01, 0x01]).await?;
-            return Err(format!("SOCKS5 auth failed for user {:?}", username).into());
+            return Err(format!("SOCKS5 auth failed for user {username:?}").into());
         }
         stream.write_all(&[0x01, 0x00]).await?;
         Some(username)
@@ -121,7 +121,7 @@ async fn handle_socks5_inner(
         // Send command not supported
         let reply = [SOCKS5_VERSION, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
         stream.write_all(&reply).await?;
-        return Err(format!("unsupported SOCKS5 command: {}", cmd).into());
+        return Err(format!("unsupported SOCKS5 command: {cmd}").into());
     }
 
     // 3. Send success reply
@@ -162,9 +162,8 @@ async fn handle_socks5_inner(
     debug!("SOCKS5 CONNECT to {}", metadata.remote_address());
 
     let inner = tunnel.inner();
-    let (proxy, rule_name, rule_payload) = match inner.resolve_proxy(&metadata) {
-        Some(v) => v,
-        None => return Err("no matching rule".into()),
+    let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
+        return Err("no matching rule".into());
     };
 
     info!(
@@ -232,6 +231,6 @@ async fn parse_socks5_address(
             let port = u16::from_be_bytes(port_buf);
             Ok((String::new(), Some(ip), port))
         }
-        _ => Err(format!("unsupported address type: {}", atyp).into()),
+        _ => Err(format!("unsupported address type: {atyp}").into()),
     }
 }

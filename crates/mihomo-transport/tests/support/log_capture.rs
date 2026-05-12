@@ -43,7 +43,10 @@ pub struct LogBuffer(pub Arc<Mutex<Vec<String>>>);
 
 impl LogBuffer {
     pub fn lines(&self) -> Vec<String> {
-        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Count lines that contain every needle in `needles`.
@@ -67,10 +70,16 @@ impl io::Write for BufferWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let s = String::from_utf8_lossy(buf);
         // Accumulate into a line buffer; flush to the log on newline.
-        let mut line_buf = self.1.lock().unwrap_or_else(|p| p.into_inner());
+        let mut line_buf = self
+            .1
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         line_buf.push_str(&s);
         if line_buf.contains('\n') {
-            let mut log = self.0.lock().unwrap_or_else(|p| p.into_inner());
+            let mut log = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for line in line_buf.split('\n') {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {

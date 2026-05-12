@@ -68,7 +68,7 @@ impl HttpAdapter {
     ) -> Self {
         Self {
             name: name.to_string(),
-            addr_str: format!("{}:{}", server, port),
+            addr_str: format!("{server}:{port}"),
             server: server.to_string(),
             port,
             auth,

@@ -668,12 +668,11 @@ rules:
   - SUB-RULE,MISSING
   - MATCH,DIRECT
 "#;
-    let err = match load_config_from_str(yaml).await {
-        Ok(_) => panic!("expected error"),
-        Err(e) => e,
+    let Err(err) = load_config_from_str(yaml).await else {
+        panic!("expected error");
     };
-    let msg = format!("{:#}", err);
-    assert!(msg.contains("MISSING"), "unexpected: {}", msg);
+    let msg = format!("{err:#}");
+    assert!(msg.contains("MISSING"), "unexpected: {msg}");
 }
 
 /// D1 — cycle (A → B → A) → hard parse error.
@@ -690,12 +689,11 @@ rules:
   - SUB-RULE,A
   - MATCH,DIRECT
 "#;
-    let err = match load_config_from_str(yaml).await {
-        Ok(_) => panic!("expected error"),
-        Err(e) => e,
+    let Err(err) = load_config_from_str(yaml).await else {
+        panic!("expected error");
     };
-    let msg = format!("{:#}", err);
-    assert!(msg.contains("cycle"), "unexpected: {}", msg);
+    let msg = format!("{err:#}");
+    assert!(msg.contains("cycle"), "unexpected: {msg}");
 }
 
 /// D2 — self-reference is a degenerate cycle.
@@ -710,12 +708,11 @@ rules:
   - SUB-RULE,A
   - MATCH,DIRECT
 "#;
-    let err = match load_config_from_str(yaml).await {
-        Ok(_) => panic!("expected error"),
-        Err(e) => e,
+    let Err(err) = load_config_from_str(yaml).await else {
+        panic!("expected error");
     };
-    let msg = format!("{:#}", err);
-    assert!(msg.contains("cycle"), "unexpected: {}", msg);
+    let msg = format!("{err:#}");
+    assert!(msg.contains("cycle"), "unexpected: {msg}");
 }
 
 /// D5 — diamond (A → B, A → C, B → D, C → D) is NOT a cycle. Parse succeeds.

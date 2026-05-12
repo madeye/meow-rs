@@ -49,10 +49,9 @@ impl InTypeRule {
             "INNER" => r.match_inner = true,
             other => {
                 return Err(format!(
-                    "unknown IN-TYPE value '{}'; expected HTTP, HTTPS, SOCKS5, TPROXY, or INNER \
-                     (Class A per ADR-0002, upstream: rules/common/inbound.go)",
-                    other
-                ))
+                "unknown IN-TYPE value '{other}'; expected HTTP, HTTPS, SOCKS5, TPROXY, or INNER \
+                     (Class A per ADR-0002, upstream: rules/common/inbound.go)"
+            ))
             }
         }
         Ok(r)

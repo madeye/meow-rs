@@ -73,11 +73,11 @@ impl ProxyProvider {
                     }
                 } else {
                     let dir = cache_dir.unwrap_or(Path::new("."));
-                    dir.join(format!("provider_{}.yaml", name))
+                    dir.join(format!("provider_{name}.yaml"))
                 };
                 (Vehicle::Http { url, cache_path }, "HTTP")
             }
-            t => return Err(format!("unknown proxy-provider type '{}'", t)),
+            t => return Err(format!("unknown proxy-provider type '{t}'")),
         };
 
         let filter = compile_opt_regex(&raw.filter, "filter")?;
@@ -253,14 +253,14 @@ fn compile_opt_regex(
     match pattern.as_deref() {
         Some(p) => regex::Regex::new(p)
             .map(Some)
-            .map_err(|e| format!("{} regex error: {}", field, e)),
+            .map_err(|e| format!("{field} regex error: {e}")),
         None => Ok(None),
     }
 }
 
 fn read_cache(path: &Path, name: &str) -> Result<String, String> {
     std::fs::read_to_string(path)
-        .map_err(|e| format!("proxy-provider '{}': no cache at {:?}: {}", name, path, e))
+        .map_err(|e| format!("proxy-provider '{name}': no cache at {path:?}: {e}"))
 }
 
 fn build_health_check_config(raw: Option<&RawHealthCheck>) -> Option<HealthCheckConfig> {

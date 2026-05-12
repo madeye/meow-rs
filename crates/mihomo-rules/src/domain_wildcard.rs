@@ -23,8 +23,8 @@ impl DomainWildcardRule {
         let escaped = regex::escape(pattern);
         // `*` — single-label: any sequence of non-dot characters.
         let expanded = escaped.replace(r"\*", r"[^.]+");
-        let re = regex::Regex::new(&format!("^(?i){}$", expanded))
-            .map_err(|e| format!("invalid DOMAIN-WILDCARD pattern '{}': {}", pattern, e))?;
+        let re = regex::Regex::new(&format!("^(?i){expanded}$"))
+            .map_err(|e| format!("invalid DOMAIN-WILDCARD pattern '{pattern}': {e}"))?;
         Ok(Self {
             pattern: re,
             raw: pattern.to_string(),

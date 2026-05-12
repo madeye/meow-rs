@@ -34,8 +34,8 @@ impl<T: Clone> DomainTrie<T> {
 
         // Handle +.domain (insert both * and . wildcards)
         if let Some(rest) = domain.strip_prefix("+.") {
-            let parts_star = Self::split_domain(&format!("*.{}", rest));
-            let parts_dot = Self::split_domain(&format!(".{}", rest));
+            let parts_star = Self::split_domain(&format!("*.{rest}"));
+            let parts_dot = Self::split_domain(&format!(".{rest}"));
             if let Some(parts) = parts_star {
                 self.insert_parts(&parts, data.clone());
             }
@@ -113,7 +113,11 @@ impl<T: Clone> DomainTrie<T> {
             (None, domain)
         };
 
-        let mut parts: Vec<String> = domain.split('.').rev().map(|s| s.to_string()).collect();
+        let mut parts: Vec<String> = domain
+            .split('.')
+            .rev()
+            .map(std::string::ToString::to_string)
+            .collect();
         if let Some(p) = prefix {
             parts.push(p.to_string());
         }

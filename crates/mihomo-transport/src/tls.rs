@@ -75,7 +75,7 @@ fn fingerprint_warned_set() -> &'static Mutex<HashSet<String>> {
 pub(crate) fn warn_fingerprint_once(fingerprint: &str) {
     let mut set = fingerprint_warned_set()
         .lock()
-        .unwrap_or_else(|p| p.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if set.insert(fingerprint.to_string()) {
         warn!(
             "client-fingerprint=\"{}\" set on proxy: \
@@ -322,7 +322,7 @@ impl RustlsInner {
         })?;
 
         let server_name = rustls::pki_types::ServerName::try_from(sni_str)
-            .map_err(|e| TransportError::Config(format!("invalid SNI '{}': {}", sni_str, e)))?
+            .map_err(|e| TransportError::Config(format!("invalid SNI '{sni_str}': {e}")))?
             .to_owned();
 
         let rustls_config = Self::build_rustls_config(config)?;
@@ -348,7 +348,7 @@ impl RustlsInner {
                 root_store
                     .add(rustls::pki_types::CertificateDer::from(ca_der.clone()))
                     .map_err(|e| {
-                        TransportError::Config(format!("additional_roots: invalid CA cert: {}", e))
+                        TransportError::Config(format!("additional_roots: invalid CA cert: {e}"))
                     })?;
             }
             rustls::ClientConfig::builder().with_root_certificates(root_store)
@@ -361,23 +361,19 @@ impl RustlsInner {
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| {
                         TransportError::Config(format!(
-                            "client_cert.cert_pem: PEM parse error: {}",
-                            e
+                            "client_cert.cert_pem: PEM parse error: {e}"
                         ))
                     })?;
                 let private_key = rustls_pemfile::private_key(&mut cc.key_pem.as_slice())
                     .map_err(|e| {
-                        TransportError::Config(format!(
-                            "client_cert.key_pem: PEM parse error: {}",
-                            e
-                        ))
+                        TransportError::Config(format!("client_cert.key_pem: PEM parse error: {e}"))
                     })?
                     .ok_or_else(|| {
                         TransportError::Config("client_cert.key_pem: no private key found".into())
                     })?;
                 builder
                     .with_client_auth_cert(cert_chain, private_key)
-                    .map_err(|e| TransportError::Tls(format!("client cert setup: {}", e)))?
+                    .map_err(|e| TransportError::Tls(format!("client cert setup: {e}")))?
             }
             None => builder.with_no_client_auth(),
         };

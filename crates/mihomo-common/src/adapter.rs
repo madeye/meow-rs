@@ -51,8 +51,7 @@ impl ProxyHealth {
             .read()
             .expect("ProxyHealth history lock poisoned")
             .last()
-            .map(|h| h.delay)
-            .unwrap_or(0)
+            .map_or(0, |h| h.delay)
     }
 
     pub fn delay_history(&self) -> Vec<DelayHistory> {

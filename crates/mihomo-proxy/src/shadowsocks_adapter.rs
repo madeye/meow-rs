@@ -71,11 +71,11 @@ impl ShadowsocksAdapter {
     ) -> Result<Self> {
         let cipher_kind = cipher
             .parse::<CipherKind>()
-            .map_err(|_| MihomoError::Config(format!("unknown cipher: {}", cipher)))?;
+            .map_err(|_| MihomoError::Config(format!("unknown cipher: {cipher}")))?;
         let mut server_config = ServerConfig::new((server, port), password, cipher_kind)
-            .map_err(|e| MihomoError::Config(format!("invalid ss config: {}", e)))?;
+            .map_err(|e| MihomoError::Config(format!("invalid ss config: {e}")))?;
         let context = Context::new_shared(ServerType::Local);
-        let addr_str = format!("{}:{}", server, port);
+        let addr_str = format!("{server}:{port}");
 
         let plugin = match plugin_name {
             Some(p) if is_builtin_obfs_plugin(p) => {
@@ -104,10 +104,7 @@ impl ShadowsocksAdapter {
                 let started =
                     Plugin::start(&plugin_config, server_config.addr(), PluginMode::Client)
                         .map_err(|e| {
-                            MihomoError::Config(format!(
-                                "failed to start ss plugin '{}': {}",
-                                pname, e
-                            ))
+                            MihomoError::Config(format!("failed to start ss plugin '{pname}': {e}"))
                         })?;
                 server_config.set_plugin_addr(ServerAddr::SocketAddr(started.local_addr()));
                 server_config.set_plugin(plugin_config);
@@ -182,8 +179,7 @@ pub(crate) fn parse_obfs_opts(plugin_opts: Option<&str>, server: &str) -> Result
         "http" => Ok(BuiltinObfs::Http { host }),
         "tls" => Ok(BuiltinObfs::Tls { server: host }),
         other => Err(MihomoError::Config(format!(
-            "simple-obfs unsupported mode '{}': expected 'http' or 'tls'",
-            other
+            "simple-obfs unsupported mode '{other}': expected 'http' or 'tls'"
         ))),
     }
 }
@@ -249,12 +245,12 @@ impl<S: DatagramSend + DatagramReceive + DatagramSocket + Send + Sync + 'static>
             .socket
             .recv(buf)
             .await
-            .map_err(|e| MihomoError::Proxy(format!("ss udp recv: {}", e)))?;
+            .map_err(|e| MihomoError::Proxy(format!("ss udp recv: {e}")))?;
         let sock_addr = match addr {
             Address::SocketAddress(sa) => sa,
-            Address::DomainNameAddress(host, port) => format!("{}:{}", host, port)
+            Address::DomainNameAddress(host, port) => format!("{host}:{port}")
                 .parse()
-                .map_err(|e| MihomoError::Proxy(format!("addr parse: {}", e)))?,
+                .map_err(|e| MihomoError::Proxy(format!("addr parse: {e}")))?,
         };
         Ok((n, sock_addr))
     }
@@ -266,7 +262,7 @@ impl<S: DatagramSend + DatagramReceive + DatagramSocket + Send + Sync + 'static>
         self.socket
             .send(&target, buf)
             .await
-            .map_err(|e| MihomoError::Proxy(format!("ss udp send: {}", e)))?;
+            .map_err(|e| MihomoError::Proxy(format!("ss udp send: {e}")))?;
         Ok(buf.len())
     }
 
@@ -317,7 +313,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 // simple-obfs codec, then layer the SS crypto stream on top.
                 let tcp = TcpStream::connect((self.server.as_str(), self.port))
                     .await
-                    .map_err(|e| MihomoError::Proxy(format!("ss obfs tcp connect: {}", e)))?;
+                    .map_err(|e| MihomoError::Proxy(format!("ss obfs tcp connect: {e}")))?;
                 let _ = tcp.set_nodelay(true);
                 match obfs.clone() {
                     BuiltinObfs::Http { host } => {
@@ -356,7 +352,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 let stream =
                     ProxyClientStream::connect(self.context.clone(), &self.server_config, addr)
                         .await
-                        .map_err(|e| MihomoError::Proxy(format!("ss connect: {}", e)))?;
+                        .map_err(|e| MihomoError::Proxy(format!("ss connect: {e}")))?;
                 Ok(Box::new(SsConn(stream)))
             }
         }
@@ -370,7 +366,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
         }
         let socket = ProxySocket::connect(self.context.clone(), &self.server_config)
             .await
-            .map_err(|e| MihomoError::Proxy(format!("ss udp connect: {}", e)))?;
+            .map_err(|e| MihomoError::Proxy(format!("ss udp connect: {e}")))?;
         debug!("SS UDP connected via {}", self.addr_str);
         Ok(Box::new(SsPacketConn { socket }))
     }

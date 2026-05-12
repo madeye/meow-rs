@@ -74,7 +74,7 @@ async fn wait_for_port(addr: SocketAddr, timeout: Duration) -> anyhow::Result<()
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("timeout waiting for {} to become reachable", addr);
+            anyhow::bail!("timeout waiting for {addr} to become reachable");
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -104,7 +104,7 @@ async fn wait_for_udp_port(addr: SocketAddr, timeout: Duration) -> anyhow::Resul
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("timeout waiting for DNS port {} to become reachable", addr);
+            anyhow::bail!("timeout waiting for DNS port {addr} to become reachable");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -116,11 +116,11 @@ async fn benchmark_target(
     target_name: &str,
     args: &Args,
 ) -> anyhow::Result<BenchmarkResults> {
-    let proxy_addr: SocketAddr = format!("127.0.0.1:{}", PROXY_PORT).parse()?;
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{PROXY_PORT}").parse()?;
 
     // Start a fresh echo server for this target (avoids TIME_WAIT port exhaustion)
     let (echo_addr, echo_handle) = echo_server::start_echo_server().await?;
-    eprintln!("[{}] echo server on {}", target_name, echo_addr);
+    eprintln!("[{target_name}] echo server on {echo_addr}");
 
     eprintln!("[{}] starting proxy: {}", target_name, binary.display());
 
@@ -140,7 +140,7 @@ async fn benchmark_target(
         let _ = child.wait();
         return Err(e);
     }
-    eprintln!("[{}] proxy ready on port {}", target_name, PROXY_PORT);
+    eprintln!("[{target_name}] proxy ready on port {PROXY_PORT}");
 
     // Settle time
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -162,7 +162,7 @@ async fn benchmark_target(
     );
 
     // Warmup
-    eprintln!("[{}] warming up...", target_name);
+    eprintln!("[{target_name}] warming up...");
     for _ in 0..50 {
         if let Ok(mut s) = socks5_client::socks5_connect(proxy_addr, echo_addr).await {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -176,7 +176,7 @@ async fn benchmark_target(
     let only = args.only.as_deref().unwrap_or("");
 
     // W1 — Throughput
-    eprintln!("[{}] benchmarking throughput...", target_name);
+    eprintln!("[{target_name}] benchmarking throughput...");
     let throughput = if run_all || only == "throughput" {
         bench_throughput::bench_throughput(proxy_addr, echo_addr).await?
     } else {
@@ -184,7 +184,7 @@ async fn benchmark_target(
     };
 
     // W2 — Latency
-    eprintln!("[{}] benchmarking latency...", target_name);
+    eprintln!("[{target_name}] benchmarking latency...");
     let latency = if run_all || only == "latency" {
         bench_latency::bench_latency(proxy_addr, echo_addr, args.latency_iterations).await?
     } else {
@@ -199,7 +199,7 @@ async fn benchmark_target(
     };
 
     // W3 — Connection rate (also measures peak RSS concurrently)
-    eprintln!("[{}] benchmarking connection rate...", target_name);
+    eprintln!("[{target_name}] benchmarking connection rate...");
     let (conn_rate, rss_load) = if run_all || only == "connrate" {
         let rss_handle = tokio::spawn({
             let duration = args.duration;
@@ -228,7 +228,7 @@ async fn benchmark_target(
     );
 
     // Stop the SOCKS5 proxy process before starting the DNS process
-    eprintln!("[{}] stopping SOCKS5 proxy...", target_name);
+    eprintln!("[{target_name}] stopping SOCKS5 proxy...");
     let _ = Command::new("kill")
         .args(["-TERM", &pid.to_string()])
         .status();
@@ -245,7 +245,7 @@ async fn benchmark_target(
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .map_err(|e| anyhow::anyhow!("failed to start DNS proxy: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("failed to start DNS proxy: {e}"))?;
 
             let dns_pid = dns_child.id();
             let dns_addr: SocketAddr = format!("127.0.0.1:{}", args.dns_port).parse()?;
@@ -254,13 +254,13 @@ async fn benchmark_target(
             if let Err(e) = ready {
                 let _ = dns_child.kill();
                 let _ = dns_child.wait();
-                eprintln!("[{}] DNS port not ready: {} — skipping W4", target_name, e);
+                eprintln!("[{target_name}] DNS port not ready: {e} — skipping W4");
                 None
             } else {
-                eprintln!("[{}] DNS proxy ready on {}", target_name, dns_addr);
+                eprintln!("[{target_name}] DNS proxy ready on {dns_addr}");
                 tokio::time::sleep(Duration::from_secs(1)).await;
 
-                eprintln!("[{}] benchmarking DNS QPS...", target_name);
+                eprintln!("[{target_name}] benchmarking DNS QPS...");
                 let dns_result = bench_dns::bench_dns(dns_addr, args.duration).await;
 
                 let _ = Command::new("kill")
@@ -271,7 +271,7 @@ async fn benchmark_target(
                 match dns_result {
                     Ok(r) => Some(r),
                     Err(e) => {
-                        eprintln!("[{}] DNS bench error: {}", target_name, e);
+                        eprintln!("[{target_name}] DNS bench error: {e}");
                         None
                     }
                 }
@@ -325,14 +325,14 @@ async fn main() -> anyhow::Result<()> {
         std::fs::write(output_path, &json)?;
         eprintln!("results written to {}", output_path.display());
     } else {
-        println!("{}", json);
+        println!("{json}");
     }
 
     // Output markdown
     if args.markdown {
         eprintln!("\n--- Markdown ---\n");
         let md = results::render_markdown(&report);
-        println!("{}", md);
+        println!("{md}");
     }
 
     Ok(())

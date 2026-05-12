@@ -39,7 +39,7 @@ impl DomainIndex {
                         // For Domain: exact match pattern; trie handles it directly.
                         // For DomainSuffix: use "+." prefix so trie matches subdomains.
                         let trie_key = if rule.rule_type() == RuleType::DomainSuffix {
-                            format!("+.{}", pattern)
+                            format!("+.{pattern}")
                         } else {
                             pattern
                         };
@@ -84,10 +84,10 @@ pub fn match_rules(
     let meta: &Metadata = enriched.as_ref().unwrap_or(metadata);
 
     let host = meta.rule_host();
-    let trie_hit = if !host.is_empty() {
-        index.search(host)
-    } else {
+    let trie_hit = if host.is_empty() {
         None
+    } else {
+        index.search(host)
     };
 
     // Determine the scan ceiling: if trie found a hit at index T, we only

@@ -36,9 +36,12 @@ pub fn gen_cert(
     String, // cert PEM
     String, // key PEM
 ) {
-    let ck =
-        rcgen::generate_simple_self_signed(sans.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-            .expect("rcgen cert generation failed");
+    let ck = rcgen::generate_simple_self_signed(
+        sans.iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>(),
+    )
+    .expect("rcgen cert generation failed");
 
     let cert_der = CertificateDer::from(ck.cert.der().to_vec());
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der()));
@@ -125,24 +128,22 @@ pub async fn spawn_tls_server(
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let (tcp, _) = match listener.accept().await {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
         };
 
-        let tls_stream = match acceptor.accept(tcp).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("loopback TLS accept error: {}", e);
-                return;
-            }
+        let Ok(tls_stream) = acceptor.accept(tcp).await else {
+            eprintln!("loopback TLS accept error");
+            return;
         };
 
         // Capture handshake metadata before moving the stream.
         let (_, server_conn) = tls_stream.get_ref();
         let info = ConnInfo {
-            server_name: server_conn.server_name().map(|s| s.to_owned()),
-            alpn: server_conn.alpn_protocol().map(|p| p.to_vec()),
+            server_name: server_conn
+                .server_name()
+                .map(std::borrow::ToOwned::to_owned),
+            alpn: server_conn.alpn_protocol().map(<[u8]>::to_vec),
             peer_certs: server_conn
                 .peer_certificates()
                 .unwrap_or(&[])
@@ -203,22 +204,17 @@ pub async fn spawn_grpc_server() -> (
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let (tcp, _) = match listener.accept().await {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
         };
 
-        let mut conn = match h2::server::handshake(tcp).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("grpc loopback h2 handshake error: {e}");
-                return;
-            }
+        let Ok(mut conn) = h2::server::handshake(tcp).await else {
+            eprintln!("grpc loopback h2 handshake error");
+            return;
         };
 
-        let (req, mut respond) = match conn.accept().await {
-            Some(Ok(pair)) => pair,
-            _ => return,
+        let Some(Ok((req, mut respond))) = conn.accept().await else {
+            return;
         };
 
         // Capture request metadata before consuming the request.
@@ -227,7 +223,7 @@ pub async fn spawn_grpc_server() -> (
             .headers()
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         let _ = tx.send(GrpcConnInfo { path, content_type });
 
         // Spawn the h2 connection driver so control frames (WINDOW_UPDATE,
@@ -244,9 +240,8 @@ pub async fn spawn_grpc_server() -> (
             .status(200)
             .body(())
             .expect("response build");
-        let mut send = match respond.send_response(response, false) {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok(mut send) = respond.send_response(response, false) else {
+            return;
         };
 
         // Echo every DATA frame back verbatim (same gun-framed bytes).
@@ -254,7 +249,6 @@ pub async fn spawn_grpc_server() -> (
         loop {
             let data = std::future::poll_fn(|cx| body.poll_data(cx)).await;
             match data {
-                None => break,
                 Some(Ok(data)) => {
                     // Release flow-control window so the client can keep sending.
                     let _ = body.flow_control().release_capacity(data.len());
@@ -262,7 +256,7 @@ pub async fn spawn_grpc_server() -> (
                         return;
                     }
                 }
-                Some(Err(_)) => break,
+                None | Some(Err(_)) => break,
             }
         }
 
@@ -312,9 +306,8 @@ pub async fn spawn_h2_server(
     tokio::spawn(async move {
         let mut remaining = max_connections;
         while remaining > 0 {
-            let (tcp, _) = match listener.accept().await {
-                Ok(s) => s,
-                Err(_) => break,
+            let Ok((tcp, _)) = listener.accept().await else {
+                break;
             };
             remaining -= 1;
             let tx = tx.clone();
@@ -327,23 +320,17 @@ pub async fn spawn_h2_server(
 
 #[cfg(feature = "h2")]
 async fn h2_handle_conn(tcp: tokio::net::TcpStream, tx: tokio::sync::mpsc::Sender<H2ReqInfo>) {
-    let mut conn = match h2::server::handshake(tcp).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("h2 loopback handshake error: {e}");
-            return;
-        }
+    let Ok(mut conn) = h2::server::handshake(tcp).await else {
+        eprintln!("h2 loopback handshake error");
+        return;
     };
 
-    let (req, mut respond) = match conn.accept().await {
-        Some(Ok(pair)) => pair,
-        other => {
-            eprintln!("h2 loopback accept error: {:?}", other.map(|r| r.err()));
-            return;
-        }
+    let Some(Ok((req, mut respond))) = conn.accept().await else {
+        eprintln!("h2 loopback accept error");
+        return;
     };
 
-    let authority = req.uri().authority().map(|a| a.to_string());
+    let authority = req.uri().authority().map(std::string::ToString::to_string);
     let path = req.uri().path().to_string();
 
     // Send info BEFORE the 200 response — callers can safely `recv()` after
@@ -358,9 +345,8 @@ async fn h2_handle_conn(tcp: tokio::net::TcpStream, tx: tokio::sync::mpsc::Sende
         .status(200)
         .body(())
         .expect("response build");
-    let mut send = match respond.send_response(response, false) {
-        Ok(s) => s,
-        Err(_) => return,
+    let Ok(mut send) = respond.send_response(response, false) else {
+        return;
     };
 
     // Echo every DATA frame back verbatim.
@@ -368,14 +354,13 @@ async fn h2_handle_conn(tcp: tokio::net::TcpStream, tx: tokio::sync::mpsc::Sende
     loop {
         let chunk = std::future::poll_fn(|cx| body.poll_data(cx)).await;
         match chunk {
-            None => break,
             Some(Ok(data)) => {
                 let _ = body.flow_control().release_capacity(data.len());
                 if send.send_data(data, false).is_err() {
                     return;
                 }
             }
-            Some(Err(_)) => break,
+            None | Some(Err(_)) => break,
         }
     }
     let _ = send.send_data(bytes::Bytes::new(), true);
@@ -422,9 +407,8 @@ pub async fn spawn_httpupgrade_server(
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let (mut tcp, _) = match listener.accept().await {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok((mut tcp, _)) = listener.accept().await else {
+            return;
         };
 
         // Read request headers byte-by-byte until \r\n\r\n.
@@ -507,9 +491,8 @@ pub async fn spawn_ws_server() -> (
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let (tcp, _) = match listener.accept().await {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
         };
 
         // Use accept_hdr_async to capture the upgrade-request headers.
@@ -564,12 +547,9 @@ pub async fn spawn_ws_server() -> (
             }
         }
 
-        let ws = match tokio_tungstenite::accept_hdr_async(tcp, CaptureCallback(tx)).await {
-            Ok(ws) => ws,
-            Err(e) => {
-                eprintln!("ws loopback accept error: {}", e);
-                return;
-            }
+        let Ok(ws) = tokio_tungstenite::accept_hdr_async(tcp, CaptureCallback(tx)).await else {
+            eprintln!("ws loopback accept error");
+            return;
         };
 
         // Drain the connection.
@@ -996,18 +976,14 @@ pub async fn spawn_boring_server(
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let (tcp, _) = match listener.accept().await {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
         };
 
-        let mut stream = match tokio_boring::accept(&acceptor, tcp).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("boring loopback accept error: {e}");
-                let _ = tx.send(BoringConnInfo::default());
-                return;
-            }
+        let Ok(mut stream) = tokio_boring::accept(&acceptor, tcp).await else {
+            eprintln!("boring loopback accept error");
+            let _ = tx.send(BoringConnInfo::default());
+            return;
         };
 
         let info = BoringConnInfo {
@@ -1100,18 +1076,14 @@ pub async fn spawn_ech_server(
     let addr = listener.local_addr().expect("local_addr");
 
     tokio::spawn(async move {
-        let (tcp, _) = match listener.accept().await {
-            Ok(s) => s,
-            Err(_) => return,
+        let Ok((tcp, _)) = listener.accept().await else {
+            return;
         };
 
-        let mut stream = match tokio_boring::accept(&acceptor, tcp).await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("boring ECH loopback accept error: {e}");
-                let _ = tx.send(BoringConnInfo::default());
-                return;
-            }
+        let Ok(mut stream) = tokio_boring::accept(&acceptor, tcp).await else {
+            eprintln!("boring ECH loopback accept error");
+            let _ = tx.send(BoringConnInfo::default());
+            return;
         };
 
         let ech_accepted = stream.ssl().ech_accepted();
@@ -1188,20 +1160,16 @@ pub async fn spawn_ech_server_multi(
 
     tokio::spawn(async move {
         for _ in 0..count {
-            let (tcp, _) = match listener.accept().await {
-                Ok(s) => s,
-                Err(_) => return,
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
             };
             let acceptor = acceptor.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
-                let mut stream = match tokio_boring::accept(&acceptor, tcp).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("boring ECH multi accept error: {e}");
-                        let _ = tx.send(BoringConnInfo::default()).await;
-                        return;
-                    }
+                let Ok(mut stream) = tokio_boring::accept(&acceptor, tcp).await else {
+                    eprintln!("boring ECH multi accept error");
+                    let _ = tx.send(BoringConnInfo::default()).await;
+                    return;
                 };
                 let ech_accepted = stream.ssl().ech_accepted();
                 let info = BoringConnInfo {

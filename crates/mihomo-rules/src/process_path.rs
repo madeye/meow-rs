@@ -45,8 +45,8 @@ impl ProcessPathRule {
             // `?` wildcard is not supported — upstream does not support it either.
             let escaped = regex::escape(payload);
             let pattern = escaped.replace(r"\*", r"[^/\\]*");
-            let re = regex::Regex::new(&format!("^(?i){}$", pattern))
-                .map_err(|e| format!("invalid PROCESS-PATH glob '{}': {}", payload, e))?;
+            let re = regex::Regex::new(&format!("^(?i){pattern}$"))
+                .map_err(|e| format!("invalid PROCESS-PATH glob '{payload}': {e}"))?;
             MatchMode::Glob(re)
         } else if payload.starts_with('/') || payload.starts_with('\\') {
             MatchMode::Prefix
