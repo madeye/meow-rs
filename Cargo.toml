@@ -59,7 +59,7 @@ useless_format = "deny"
 large_enum_variant = "warn"
 large_types_passed_by_value = "warn"
 unnecessary_box_returns = "warn"
-vec_init_then_push = "warn"
+vec_init_then_push = "deny"
 # Too noisy or contrary to project style — kept as allow:
 module_name_repetitions = "allow"
 struct_excessive_bools = "allow"
