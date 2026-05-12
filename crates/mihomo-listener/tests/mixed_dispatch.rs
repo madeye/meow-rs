@@ -1,12 +1,14 @@
-/// Integration test: MixedListener dispatches connections by first byte.
-///
-/// `MixedListener` peeks the first byte to decide protocol:
-///   0x05  → SOCKS5 handler
-///   other → HTTP proxy handler
-///
-/// This test spins up a real `MixedListener` and sends two connections to it —
-/// one using a SOCKS5 greeting and one using an HTTP CONNECT — and asserts each
-/// routes to the correct handler (identified by the response format).
+//! Integration test: MixedListener dispatches connections by first byte.
+//!
+//! `MixedListener` peeks the first byte to decide protocol:
+//!   0x05  → SOCKS5 handler
+//!   other → HTTP proxy handler
+//!
+//! This test spins up a real `MixedListener` and sends two connections to it —
+//! one using a SOCKS5 greeting and one using an HTTP CONNECT — and asserts each
+//! routes to the correct handler (identified by the response format).
+#![cfg(feature = "listener-mixed")]
+
 mod common;
 
 use common::{direct_tunnel, spawn_echo_server};

@@ -756,12 +756,9 @@ impl EchKeyPairGenerator {
 
         // 2. Marshal the ECHConfig (single config with ID 1) from the HPKE key.
         // The ECHConfig includes the public key; the private key is kept by the server.
-        let public_name_cstr = match CString::new(public_name) {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!("ECH: invalid public name");
-                return None;
-            }
+        let Ok(public_name_cstr) = CString::new(public_name) else {
+            eprintln!("ECH: invalid public name");
+            return None;
         };
 
         let mut ech_config_ptr: *mut u8 = std::ptr::null_mut();
@@ -990,8 +987,8 @@ pub async fn spawn_boring_server(
             server_name: stream
                 .ssl()
                 .servername(boring::ssl::NameType::HOST_NAME)
-                .map(|s| s.to_string()),
-            alpn: stream.ssl().selected_alpn_protocol().map(|p| p.to_vec()),
+                .map(std::string::ToString::to_string),
+            alpn: stream.ssl().selected_alpn_protocol().map(<[u8]>::to_vec),
             client_hello_bytes: vec![],
             peer_certs: vec![],
             ech_accepted: false,
@@ -1091,8 +1088,8 @@ pub async fn spawn_ech_server(
             server_name: stream
                 .ssl()
                 .servername(boring::ssl::NameType::HOST_NAME)
-                .map(|s| s.to_string()),
-            alpn: stream.ssl().selected_alpn_protocol().map(|p| p.to_vec()),
+                .map(std::string::ToString::to_string),
+            alpn: stream.ssl().selected_alpn_protocol().map(<[u8]>::to_vec),
             client_hello_bytes: vec![],
             peer_certs: vec![],
             ech_accepted,
@@ -1176,8 +1173,8 @@ pub async fn spawn_ech_server_multi(
                     server_name: stream
                         .ssl()
                         .servername(boring::ssl::NameType::HOST_NAME)
-                        .map(|s| s.to_string()),
-                    alpn: stream.ssl().selected_alpn_protocol().map(|p| p.to_vec()),
+                        .map(std::string::ToString::to_string),
+                    alpn: stream.ssl().selected_alpn_protocol().map(<[u8]>::to_vec),
                     client_hello_bytes: vec![],
                     peer_certs: vec![],
                     ech_accepted,

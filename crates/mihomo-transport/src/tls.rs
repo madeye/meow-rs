@@ -691,21 +691,19 @@ impl BoringInner {
         })?;
 
         let mut b = boring::ssl::SslConnector::builder(boring::ssl::SslMethod::tls())
-            .map_err(|e| TransportError::Config(format!("boring TLS init: {}", e)))?;
+            .map_err(|e| TransportError::Config(format!("boring TLS init: {e}")))?;
 
         // ── Fingerprint shaping ──────────────────────────────────────────────
         if let Some(fp_str) = &config.fingerprint {
             if let Some(p) = resolve_fingerprint(fp_str) {
-                b.set_cipher_list(p.cipher_list).map_err(|e| {
-                    TransportError::Config(format!("boring: set_cipher_list: {}", e))
-                })?;
-                b.set_curves_list(p.curves_list).map_err(|e| {
-                    TransportError::Config(format!("boring: set_curves_list: {}", e))
-                })?;
+                b.set_cipher_list(p.cipher_list)
+                    .map_err(|e| TransportError::Config(format!("boring: set_cipher_list: {e}")))?;
+                b.set_curves_list(p.curves_list)
+                    .map_err(|e| TransportError::Config(format!("boring: set_curves_list: {e}")))?;
                 b.set_grease_enabled(p.grease);
                 b.set_permute_extensions(p.permute_extensions);
                 b.set_sigalgs_list(p.sigalgs_list).map_err(|e| {
-                    TransportError::Config(format!("boring: set_sigalgs_list: {}", e))
+                    TransportError::Config(format!("boring: set_sigalgs_list: {e}"))
                 })?;
             } else {
                 // Deferred profile — warn and continue with boring defaults.
@@ -733,7 +731,7 @@ impl BoringInner {
                 })
                 .collect();
             b.set_alpn_protos(&wire)
-                .map_err(|e| TransportError::Config(format!("boring: set_alpn_protos: {}", e)))?;
+                .map_err(|e| TransportError::Config(format!("boring: set_alpn_protos: {e}")))?;
         }
 
         // ── Certificate verification ─────────────────────────────────────────
@@ -750,15 +748,11 @@ impl BoringInner {
                 for der in &config.additional_roots {
                     let x509 = boring::x509::X509::from_der(der).map_err(|e| {
                         TransportError::Config(format!(
-                            "additional_roots: invalid CA cert (boring): {}",
-                            e
+                            "additional_roots: invalid CA cert (boring): {e}"
                         ))
                     })?;
                     cert_store.add_cert(x509).map_err(|e| {
-                        TransportError::Config(format!(
-                            "additional_roots: add_cert (boring): {}",
-                            e
-                        ))
+                        TransportError::Config(format!("additional_roots: add_cert (boring): {e}"))
                     })?;
                 }
             }
@@ -768,20 +762,18 @@ impl BoringInner {
         if let Some(cc) = &config.client_cert {
             let cert = boring::x509::X509::from_pem(&cc.cert_pem).map_err(|e| {
                 TransportError::Config(format!(
-                    "client_cert.cert_pem: PEM parse error (boring): {}",
-                    e
+                    "client_cert.cert_pem: PEM parse error (boring): {e}"
                 ))
             })?;
             let key = boring::pkey::PKey::private_key_from_pem(&cc.key_pem).map_err(|e| {
                 TransportError::Config(format!(
-                    "client_cert.key_pem: PEM parse error (boring): {}",
-                    e
+                    "client_cert.key_pem: PEM parse error (boring): {e}"
                 ))
             })?;
             b.set_certificate(&cert)
-                .map_err(|e| TransportError::Tls(format!("boring: set_certificate: {}", e)))?;
+                .map_err(|e| TransportError::Tls(format!("boring: set_certificate: {e}")))?;
             b.set_private_key(&key)
-                .map_err(|e| TransportError::Tls(format!("boring: set_private_key: {}", e)))?;
+                .map_err(|e| TransportError::Tls(format!("boring: set_private_key: {e}")))?;
         }
 
         let connector = b.build();
@@ -796,7 +788,7 @@ impl BoringInner {
         let mut cfg = self
             .connector
             .configure()
-            .map_err(|e| TransportError::Tls(format!("boring: configure: {}", e)))?;
+            .map_err(|e| TransportError::Tls(format!("boring: configure: {e}")))?;
 
         // SNI
         cfg.set_use_server_name_indication(true);
@@ -808,15 +800,14 @@ impl BoringInner {
 
         // ECH inline path — per-connection setup on ConnectConfiguration.
         if let Some(EchOpts::Config(ech_bytes)) = &ech_snapshot {
-            cfg.set_ech_config_list(ech_bytes).map_err(|e| {
-                TransportError::Config(format!("boring: set_ech_config_list: {}", e))
-            })?;
+            cfg.set_ech_config_list(ech_bytes)
+                .map_err(|e| TransportError::Config(format!("boring: set_ech_config_list: {e}")))?;
             // RFC 9180 §6: ECH requires TLS 1.3.  BoringSSL enforces this
             // automatically when an ECH config list is set, but we set it
             // explicitly here so the requirement is visible at the call site.
             cfg.set_min_proto_version(Some(boring::ssl::SslVersion::TLS1_3))
                 .map_err(|e| {
-                    TransportError::Config(format!("boring: set_min_proto_version TLS1.3: {}", e))
+                    TransportError::Config(format!("boring: set_min_proto_version TLS1.3: {e}"))
                 })?;
         }
 
@@ -847,7 +838,7 @@ impl BoringInner {
                             let new_bytes = retry_configs.to_vec();
                             let hex = new_bytes
                                 .iter()
-                                .map(|b| format!("{:02x}", b))
+                                .map(|b| format!("{b:02x}"))
                                 .collect::<String>();
                             *self.ech.lock().expect("ech mutex poisoned") =
                                 Some(EchOpts::Config(new_bytes));
@@ -858,13 +849,12 @@ impl BoringInner {
                                  next connect will use the new key"
                             );
                             return Err(TransportError::Tls(format!(
-                                "boring TLS handshake (ECH rejected; retry_configs={}): {}",
-                                hex, e
+                                "boring TLS handshake (ECH rejected; retry_configs={hex}): {e}"
                             )));
                         }
                     }
                 }
-                Err(TransportError::Tls(format!("boring TLS handshake: {}", e)))
+                Err(TransportError::Tls(format!("boring TLS handshake: {e}")))
             }
         }
     }

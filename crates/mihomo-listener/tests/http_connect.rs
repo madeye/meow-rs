@@ -1,10 +1,12 @@
-/// Integration test: HTTP CONNECT handshake + relay through a local echo server.
-///
-/// The test drives the full `handle_http` path:
-///   client ──HTTP CONNECT──► handle_http ──DIRECT dial──► echo server
-///
-/// After the 200 response, data written by the client is relayed to the
-/// echo server and echoed back, confirming the tunnel is live.
+//! Integration test: HTTP CONNECT handshake + relay through a local echo server.
+//!
+//! The test drives the full `handle_http` path:
+//!   client ──HTTP CONNECT──► handle_http ──DIRECT dial──► echo server
+//!
+//! After the 200 response, data written by the client is relayed to the
+//! echo server and echoed back, confirming the tunnel is live.
+#![cfg(feature = "listener-http")]
+
 mod common;
 
 use common::{direct_tunnel, spawn_echo_server};

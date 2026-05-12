@@ -41,7 +41,7 @@ impl CapturingStream {
         (
             Self {
                 inner,
-                first_write: slot.clone(),
+                first_write: Arc::clone(&slot),
             },
             slot,
         )
@@ -315,12 +315,12 @@ fn extract_signature_algorithms(buf: &[u8]) -> Option<String> {
             while ap + 2 <= aend {
                 let alg = u16::from_be_bytes([buf[ap], buf[ap + 1]]);
                 ap += 2;
-                algs.push(format!("0x{:04x}", alg));
+                algs.push(format!("0x{alg:04x}"));
             }
-            return if !algs.is_empty() {
-                Some(algs.join(","))
-            } else {
+            return if algs.is_empty() {
                 None
+            } else {
+                Some(algs.join(","))
             };
         }
 
@@ -374,8 +374,8 @@ async fn boring_firefox_connects_and_ja3() {
     assert!(connected, "boring firefox profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
-    eprintln!("firefox JA3: {}", ja3_str);
-    eprintln!("firefox MD5: {}", hash);
+    eprintln!("firefox JA3: {ja3_str}");
+    eprintln!("firefox MD5: {hash}");
     // ECDHE-RSA-AES128-GCM-SHA256 = 0xc02f = 49199 must be present
     assert!(
         ja3_str.contains("49199"),
@@ -408,8 +408,8 @@ async fn boring_safari_connects_and_ja3() {
     assert!(connected, "boring safari profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
-    eprintln!("safari JA3: {}", ja3_str);
-    eprintln!("safari MD5: {}", hash);
+    eprintln!("safari JA3: {ja3_str}");
+    eprintln!("safari MD5: {hash}");
     // ECDHE-ECDSA-AES256-GCM-SHA384 = 0xc02c = 49196 is safari's first cipher
     assert!(
         ja3_str.contains("49196"),
@@ -435,8 +435,8 @@ async fn boring_ios_connects_and_ja3() {
     assert!(connected, "boring ios profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
-    eprintln!("ios JA3: {}", ja3_str);
-    eprintln!("ios MD5: {}", hash);
+    eprintln!("ios JA3: {ja3_str}");
+    eprintln!("ios MD5: {hash}");
     // Same cipher ordering as Safari; first cipher is ECDHE-ECDSA-AES256-GCM-SHA384
     assert!(
         ja3_str.contains("49196"),
@@ -457,14 +457,13 @@ async fn boring_android_connects_and_ja3() {
     assert!(connected, "boring android profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
-    eprintln!("android JA3: {}", ja3_str);
-    eprintln!("android MD5: {}", hash);
+    eprintln!("android JA3: {ja3_str}");
+    eprintln!("android MD5: {hash}");
     // Android OkHttp: P-256 (secp256r1 = 23) precedes X25519 (29) in groups
     let groups_field = ja3_str.split(',').nth(3).unwrap_or("");
     assert!(
         groups_field.starts_with("23"),
-        "android: P-256 (23) must be first group, got: {}",
-        groups_field
+        "android: P-256 (23) must be first group, got: {groups_field}"
     );
 }
 
@@ -481,8 +480,8 @@ async fn boring_edge_connects_and_ja3() {
     assert!(connected, "boring edge profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
     let hash = hash.unwrap();
-    eprintln!("edge JA3: {}", ja3_str);
-    eprintln!("edge MD5: {}", hash);
+    eprintln!("edge JA3: {ja3_str}");
+    eprintln!("edge MD5: {hash}");
     // Edge 85 has the same TLS 1.2 cipher list as Chrome 83
     assert!(
         ja3_str.contains("49199"),
@@ -507,7 +506,7 @@ async fn boring_chrome_property_check() {
     let (connected, ja3_str, _hash, _raw_ch) = connect_capture_ja3(&config).await;
     assert!(connected, "boring chrome profile must connect");
     let ja3_str = ja3_str.expect("ClientHello not captured");
-    eprintln!("chrome JA3 (non-deterministic): {}", ja3_str);
+    eprintln!("chrome JA3 (non-deterministic): {ja3_str}");
     // Must contain the Chrome 120 cipher suite pair
     assert!(ja3_str.contains("49195"), "chrome: c02b (49195) missing");
     assert!(ja3_str.contains("49199"), "chrome: c02f (49199) missing");
@@ -537,7 +536,7 @@ async fn boring_version_pinned_aliases_connect() {
             ..TlsConfig::new("localhost")
         };
         let (connected, _, _, _) = connect_capture_ja3(&config).await;
-        assert!(connected, "alias '{}' must connect", alias);
+        assert!(connected, "alias '{alias}' must connect");
     }
 }
 
@@ -609,19 +608,18 @@ async fn boring_ech_connect_path_exercised() {
     let layer = TlsLayer::new(&config).expect("TlsLayer::new");
     let result = layer.connect(Box::new(tcp)).await;
 
-    // Either a Config error (invalid ECH structure) or Tls error (server doesn't
-    // support ECH) is acceptable. The important assertion is: no panic.
-    match result {
-        Err(mihomo_transport::TransportError::Config(_)) => {
-            // Expected if ECH config is invalid.
-        }
-        Err(mihomo_transport::TransportError::Tls(_)) => {
-            // Expected if server rejects ECH.
-        }
-        Err(e) => panic!("unexpected error variant: {:?}", e),
-        Ok(_) => {
-            // Unlikely but acceptable if something succeeds.
-        }
+    // Either a Config error (invalid ECH structure), a Tls error (server doesn't
+    // support ECH), or an unlikely Ok is acceptable. The important assertion is
+    // that we do NOT panic on any of those, only on an unexpected error variant.
+    if let Err(e) = result {
+        assert!(
+            matches!(
+                e,
+                mihomo_transport::TransportError::Config(_)
+                    | mihomo_transport::TransportError::Tls(_)
+            ),
+            "unexpected error variant: {e:?}"
+        );
     }
 }
 
@@ -644,10 +642,10 @@ async fn c2_all_profiles_ja3_distinct() {
             ..TlsConfig::new("localhost")
         };
         let (connected, _ja3_str, ja3_hash_opt, raw_ch) = connect_capture_ja3(&config).await;
-        assert!(connected, "profile '{}' must connect", profile);
+        assert!(connected, "profile '{profile}' must connect");
 
         let actual_hash =
-            ja3_hash_opt.unwrap_or_else(|| panic!("profile '{}' JA3 hash not computed", profile));
+            ja3_hash_opt.unwrap_or_else(|| panic!("profile '{profile}' JA3 hash not computed"));
         hashes.insert(profile, actual_hash);
 
         // Verify sigalgs can be extracted (for future profile differentiation)
@@ -655,8 +653,7 @@ async fn c2_all_profiles_ja3_distinct() {
             let sigalgs = extract_signature_algorithms(&ch_bytes);
             assert!(
                 sigalgs.is_some(),
-                "profile '{}' must have signature_algorithms extension",
-                profile
+                "profile '{profile}' must have signature_algorithms extension"
             );
         }
     }
@@ -680,8 +677,7 @@ async fn c2_all_profiles_ja3_distinct() {
     let ios_hash = hashes["ios"].clone();
     assert_eq!(
         safari_hash, ios_hash,
-        "ios must alias safari (identical JA3): safari={}, ios={}",
-        safari_hash, ios_hash
+        "ios must alias safari (identical JA3): safari={safari_hash}, ios={ios_hash}"
     );
 
     // Assert the 4 unique profiles {firefox, safari, android, edge} are mutually distinct
@@ -1020,7 +1016,7 @@ async fn c15_ech_retry_config_on_mismatch() {
 
     assert!(result.is_err(), "ECH keypair mismatch must fail");
     let err_str = result.err().unwrap().to_string();
-    eprintln!("C15 ECH mismatch error: {}", err_str);
+    eprintln!("C15 ECH mismatch error: {err_str}");
 
     // BoringSSL includes retry_configs in the rejection alert — our error
     // message wraps them as "retry_configs=<hex>".  If retry configs are
@@ -1030,8 +1026,7 @@ async fn c15_ech_retry_config_on_mismatch() {
         err_str.contains("retry_configs")
             || err_str.contains("handshake")
             || err_str.contains("tls"),
-        "ECH mismatch error must mention TLS/ECH details: {}",
-        err_str
+        "ECH mismatch error must mention TLS/ECH details: {err_str}"
     );
 }
 
@@ -1091,8 +1086,7 @@ async fn c16_ech_self_heal_uses_retry_configs_on_next_connect() {
     let err1 = r1.err().unwrap().to_string();
     assert!(
         err1.contains("retry_configs"),
-        "first connect must surface retry_configs (server signed real key); got: {}",
-        err1
+        "first connect must surface retry_configs (server signed real key); got: {err1}"
     );
 
     // Attempt 2 — fresh TCP, same TlsLayer.  Self-heal should have rotated

@@ -1,10 +1,12 @@
-/// Integration test: SOCKS5 handshake + CONNECT round-trip through a local echo server.
-///
-/// The test drives the full `handle_socks5` path:
-///   client ──SOCKS5──► handle_socks5 ──DIRECT dial──► echo server
-///
-/// After the handshake, data written by the client is echoed back via the
-/// proxy relay, confirming that bytes flow end-to-end.
+//! Integration test: SOCKS5 handshake + CONNECT round-trip through a local echo server.
+//!
+//! The test drives the full `handle_socks5` path:
+//!   client ──SOCKS5──► handle_socks5 ──DIRECT dial──► echo server
+//!
+//! After the handshake, data written by the client is echoed back via the
+//! proxy relay, confirming that bytes flow end-to-end.
+#![cfg(feature = "listener-socks5")]
+
 mod common;
 
 use common::{direct_tunnel, spawn_echo_server};
