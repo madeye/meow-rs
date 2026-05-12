@@ -57,7 +57,7 @@ format_push_string = "deny"
 string_add = "deny"
 useless_format = "deny"
 large_enum_variant = "deny"
-large_types_passed_by_value = "warn"
+large_types_passed_by_value = "deny"
 unnecessary_box_returns = "warn"
 vec_init_then_push = "deny"
 # Too noisy or contrary to project style — kept as allow:
