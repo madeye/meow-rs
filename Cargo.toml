@@ -39,7 +39,7 @@ license = "GPL-3.0"
 [workspace.lints.clippy]
 uninlined_format_args = "warn"
 redundant_closure = "warn"
-redundant_clone = "warn"
+redundant_clone = "deny"
 manual_let_else = "warn"
 map_unwrap_or = "warn"
 redundant_closure_for_method_calls = "warn"
