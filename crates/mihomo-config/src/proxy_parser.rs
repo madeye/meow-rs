@@ -784,14 +784,14 @@ fn parse_proxy_group_inner(
     // include_all_proxies: add all config-defined proxies to static list
     if config.include_all_proxies.unwrap_or(false) {
         for p in existing_proxies.values() {
-            proxies.push(p.clone());
+            proxies.push(Arc::clone(p));
         }
     }
 
     let proxy_names = config.proxies.as_deref().unwrap_or(&[]);
     for name in proxy_names {
         match existing_proxies.get(name.as_str()) {
-            Some(proxy) => proxies.push(proxy.clone()),
+            Some(proxy) => proxies.push(Arc::clone(proxy)),
             None if strict => {
                 return Err(format!(
                     "group '{}' references unknown proxy '{}'",
@@ -810,7 +810,7 @@ fn parse_proxy_group_inner(
 
     // Collect provider slots: include_all wires every provider; use: wires specific ones.
     let slots: Vec<mihomo_common::ProviderSlot> = if config.include_all.unwrap_or(false) {
-        providers.values().map(|p| p.slot.clone()).collect()
+        providers.values().map(|p| Arc::clone(&p.slot)).collect()
     } else {
         config
             .use_providers
@@ -819,7 +819,7 @@ fn parse_proxy_group_inner(
             .iter()
             .filter_map(|pname| {
                 if let Some(p) = providers.get(pname.as_str()) {
-                    Some(p.slot.clone())
+                    Some(Arc::clone(&p.slot))
                 } else {
                     tracing::warn!(
                         "proxy-provider '{}' not found for group '{}', skipping",

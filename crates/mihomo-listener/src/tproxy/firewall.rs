@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io;
 use std::net::IpAddr;
 use std::process::Command;
@@ -72,13 +73,12 @@ impl PlatformGuard {
         let mut rules = format!("pass out quick on lo0 proto tcp from any to any user {uid}\n");
         rules.push_str("pass out quick on lo0 proto tcp from any to 127.0.0.0/8\n");
         for ip in bypass_ips {
-            rules.push_str(&format!(
-                "pass out quick on lo0 proto tcp from any to {ip}\n"
-            ));
+            let _ = writeln!(rules, "pass out quick on lo0 proto tcp from any to {ip}");
         }
-        rules.push_str(&format!(
-            "rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {listen_port}\n",
-        ));
+        let _ = writeln!(
+            rules,
+            "rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {listen_port}",
+        );
 
         let tmp_path = format!("/tmp/mihomo_tproxy_{}.conf", std::process::id());
         std::fs::write(&tmp_path, &rules)?;

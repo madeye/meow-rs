@@ -215,7 +215,7 @@ mod tests {
     async fn touched_sessions_are_kept() {
         let table = new_nat_table();
         let session = mk_session();
-        table.insert(mk_key(1), session.clone());
+        table.insert(mk_key(1), Arc::clone(&session));
 
         let _handle =
             spawn_nat_sweeper(&table, Duration::from_millis(80), Duration::from_millis(20));

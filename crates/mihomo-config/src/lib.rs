@@ -724,7 +724,7 @@ async fn build_config(
     let (proxies, rules) = rebuild_from_raw_impl(
         &raw,
         cache_dir,
-        Some(dns_config.resolver.clone()),
+        Some(Arc::clone(&dns_config.resolver)),
         &proxy_providers,
     )?;
 

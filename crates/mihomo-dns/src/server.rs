@@ -33,8 +33,8 @@ impl DnsServer {
             };
 
             let data = buf[..len].to_vec();
-            let resolver = self.resolver.clone();
-            let socket_clone = socket.clone();
+            let resolver = Arc::clone(&self.resolver);
+            let socket_clone = Arc::clone(&socket);
 
             tokio::spawn(async move {
                 match Self::handle_query(&data, &resolver).await {

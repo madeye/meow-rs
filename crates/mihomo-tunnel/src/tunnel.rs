@@ -58,7 +58,7 @@ impl TunnelInner {
         let mode = *self.mode.read();
         match mode {
             TunnelMode::Direct => Some((
-                self.direct.clone() as Arc<dyn ProxyAdapter>,
+                Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
                 "Direct".into(),
                 String::new(),
             )),
@@ -66,13 +66,13 @@ impl TunnelInner {
                 let proxies = self.proxies.read();
                 if let Some(proxy) = proxies.get("GLOBAL") {
                     Some((
-                        proxy.clone() as Arc<dyn ProxyAdapter>,
+                        Arc::clone(proxy) as Arc<dyn ProxyAdapter>,
                         "Global".into(),
                         String::new(),
                     ))
                 } else {
                     Some((
-                        self.direct.clone() as Arc<dyn ProxyAdapter>,
+                        Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
                         "Direct".into(),
                         String::new(),
                     ))
@@ -98,7 +98,7 @@ impl TunnelInner {
                         let proxy = proxies.get(&m.adapter_name).cloned().map_or_else(
                             || {
                                 debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
-                                self.direct.clone() as Arc<dyn ProxyAdapter>
+                                Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>
                             },
                             |p| p as Arc<dyn ProxyAdapter>,
                         );
@@ -107,7 +107,7 @@ impl TunnelInner {
                     None => {
                         // No rule matched, use DIRECT
                         Some((
-                            self.direct.clone() as Arc<dyn ProxyAdapter>,
+                            Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
                             "Final".into(),
                             String::new(),
                         ))
@@ -124,7 +124,7 @@ pub struct Tunnel {
 
 impl Tunnel {
     pub fn new(resolver: Arc<Resolver>) -> Self {
-        let direct = Arc::new(DirectAdapter::new().with_resolver(resolver.clone()));
+        let direct = Arc::new(DirectAdapter::new().with_resolver(Arc::clone(&resolver)));
         Self {
             inner: Arc::new(TunnelInner {
                 mode: RwLock::new(TunnelMode::Rule),
@@ -214,7 +214,7 @@ impl Tunnel {
 impl Clone for Tunnel {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            inner: Arc::clone(&self.inner),
         }
     }
 }

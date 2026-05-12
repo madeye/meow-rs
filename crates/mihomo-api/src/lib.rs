@@ -58,10 +58,10 @@ impl ApiServer {
             tunnel: self.tunnel.clone(),
             secret: self.secret.clone(),
             config_path: self.config_path.clone(),
-            raw_config: self.raw_config.clone(),
+            raw_config: Arc::clone(&self.raw_config),
             log_tx: self.log_tx.clone(),
-            proxy_providers: self.proxy_providers.clone(),
-            rule_providers: self.rule_providers.clone(),
+            proxy_providers: Arc::clone(&self.proxy_providers),
+            rule_providers: Arc::clone(&self.rule_providers),
             listeners: self.listeners.clone(),
         });
 

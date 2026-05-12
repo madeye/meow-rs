@@ -97,8 +97,8 @@ async fn aborted_handle_tcp_does_not_leak_statistics_entry() {
         ..Default::default()
     };
 
-    let stats = tunnel.statistics().clone();
-    let inner = tunnel.inner().clone();
+    let stats = Arc::clone(tunnel.statistics());
+    let inner = Arc::clone(tunnel.inner());
 
     // 4. Spawn handle_tcp — it will dial the idle server, register in stats,
     //    then block in copy_bidirectional.

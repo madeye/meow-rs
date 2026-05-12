@@ -287,7 +287,7 @@ where
     let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 
     // tls -> udp: forward each frame to its named destination.
-    let udp_send = udp.clone();
+    let udp_send = Arc::clone(&udp);
     let send_task = tokio::spawn(async move {
         while let Ok((addr, payload)) = read_trojan_udp_frame(&mut tls_r).await {
             if udp_send.send_to(&payload, addr).await.is_err() {

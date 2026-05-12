@@ -137,7 +137,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/logs", get(get_logs))
         .route("/memory", get(get_memory))
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
+            Arc::clone(&state),
             require_auth_ws,
         ));
 
@@ -209,7 +209,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // Listeners (read-only list)
         .route("/listeners", get(get_listeners))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_auth,
+        ));
 
     // Web UI is intentionally unauthenticated so dashboards can load and then
     // present a token prompt; this matches upstream mihomo behaviour.
@@ -521,7 +524,7 @@ async fn apply_raw_to_tunnel(
         mihomo_config::ech_dns::preresolve_ech(ps).await;
     }
     let (proxies, rules) =
-        mihomo_config::rebuild_from_raw_with_resolver(&raw, Some(tunnel.resolver().clone()))
+        mihomo_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(tunnel.resolver())))
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     tunnel.update_proxies(proxies);
     tunnel.update_rules(rules);
@@ -1083,8 +1086,8 @@ async fn get_group_delay(
     let expected_shared = Arc::new(expected);
     let mut set: JoinSet<(String, u16)> = JoinSet::new();
     for (member_name, proxy) in members {
-        let url = url_shared.clone();
-        let expected = expected_shared.clone();
+        let url = Arc::clone(&url_shared);
+        let expected = Arc::clone(&expected_shared);
         set.spawn(async move {
             // Per-member errors collapse to 0 in the map — upstream uses the
             // same sentinel for both timeout and transport-error inside the
@@ -1195,7 +1198,7 @@ async fn put_configs(
     }
 
     // Semantic rebuild (proxy/rule parsing)
-    let resolver = state.tunnel.resolver().clone();
+    let resolver = Arc::clone(state.tunnel.resolver());
     let (proxies, rules) =
         match mihomo_config::rebuild_from_raw_with_resolver(&raw_config, Some(resolver)) {
             Ok(r) => r,
@@ -1502,7 +1505,7 @@ async fn refresh_provider(
     Path(name): Path<String>,
 ) -> Response {
     let provider = match state.proxy_providers.get(&name) {
-        Some(entry) => entry.value().clone(),
+        Some(entry) => Arc::clone(entry.value()),
         None => return msg_err(StatusCode::NOT_FOUND, "resource not found"),
     };
     provider.refresh().await;
@@ -1524,7 +1527,7 @@ async fn provider_healthcheck(
     let expected = params.expected.clone();
 
     let provider = match state.proxy_providers.get(&name) {
-        Some(entry) => entry.value().clone(),
+        Some(entry) => Arc::clone(entry.value()),
         None => return msg_err(StatusCode::NOT_FOUND, "resource not found"),
     };
 
@@ -1533,8 +1536,8 @@ async fn provider_healthcheck(
     let expected_shared = Arc::new(expected);
     let mut set: JoinSet<(String, u16)> = JoinSet::new();
     for proxy in members {
-        let url = url_shared.clone();
-        let expected = expected_shared.clone();
+        let url = Arc::clone(&url_shared);
+        let expected = Arc::clone(&expected_shared);
         set.spawn(async move {
             let delay = probe_and_record(&proxy, &url, expected.as_deref(), timeout)
                 .await

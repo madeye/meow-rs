@@ -91,7 +91,7 @@ impl UrlTestGroup {
         let name: Option<String> = self.fastest.read().clone();
         if let Some(n) = name {
             if let Some(p) = all.iter().find(|p| p.name() == n) {
-                return Some(p.clone());
+                return Some(Arc::clone(p));
             }
         }
         all.into_iter().next()

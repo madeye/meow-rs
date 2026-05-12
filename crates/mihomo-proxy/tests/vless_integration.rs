@@ -166,7 +166,7 @@ mod vless_tests {
                 let Ok((mut tcp, _)) = listener.accept().await else {
                     break;
                 };
-                let expected_uuid = expected_uuid.clone();
+                let expected_uuid = Arc::clone(&expected_uuid);
                 tokio::spawn(async move {
                     let Ok((uuid, cmd, target_addr)) = read_vless_header(&mut tcp).await else {
                         eprintln!("mock vless: header parse error");
@@ -314,7 +314,7 @@ mod vless_tests {
 
         let mut handles = Vec::new();
         for i in 0u8..5 {
-            let adapter = adapter.clone();
+            let adapter = Arc::clone(&adapter);
             let handle = tokio::spawn(async move {
                 let metadata = Metadata {
                     network: Network::Tcp,

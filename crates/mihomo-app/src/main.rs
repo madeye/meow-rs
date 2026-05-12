@@ -424,10 +424,10 @@ async fn run(
     let rule_providers = Arc::new(RwLock::new(config.rule_providers));
 
     // Keep a resolver clone for the auto-update task before it moves into the tunnel.
-    let resolver = config.dns.resolver.clone();
+    let resolver = Arc::clone(&config.dns.resolver);
 
     // Create the tunnel (core routing engine)
-    let tunnel = Tunnel::new(config.dns.resolver.clone());
+    let tunnel = Tunnel::new(Arc::clone(&config.dns.resolver));
     tunnel.set_mode(config.general.mode);
     tunnel.update_rules(config.rules);
     tunnel.update_proxies(config.proxies);
@@ -435,7 +435,7 @@ async fn run(
 
     // Start DNS server if configured
     if let Some(listen_addr) = config.dns.listen_addr {
-        let dns_server = DnsServer::new(config.dns.resolver.clone(), listen_addr);
+        let dns_server = DnsServer::new(Arc::clone(&config.dns.resolver), listen_addr);
         tokio::spawn(async move {
             if let Err(e) = dns_server.run().await {
                 error!("DNS server error: {}", e);
@@ -450,10 +450,10 @@ async fn run(
             api_addr,
             config.api.secret.clone(),
             config_path.clone(),
-            raw_config.clone(),
+            Arc::clone(&raw_config),
             log_tx.clone(),
-            proxy_providers.clone(),
-            rule_providers.clone(),
+            Arc::clone(&proxy_providers),
+            Arc::clone(&rule_providers),
             config.listeners.named.clone(),
         );
         tokio::spawn(async move {
@@ -493,7 +493,7 @@ async fn run(
 
     // Start subscription background refresh task
     {
-        let raw_config = raw_config.clone();
+        let raw_config = Arc::clone(&raw_config);
         let tunnel = tunnel.clone();
         let config_path = config_path.clone();
         tokio::spawn(async move {
@@ -505,8 +505,8 @@ async fn run(
     if config.geodata.auto_update {
         let geodata = config.geodata.clone();
         let tunnel = tunnel.clone();
-        let raw_config = raw_config.clone();
-        let resolver = resolver.clone();
+        let raw_config = Arc::clone(&raw_config);
+        let resolver = Arc::clone(&resolver);
         tokio::spawn(async move {
             geodata_auto_update_loop(geodata, tunnel, raw_config, resolver).await;
         });
@@ -532,7 +532,7 @@ async fn run(
                 #[cfg(feature = "listener-mixed")]
                 {
                     let listener = MixedListener::new(tunnel.clone(), addr, nl.name.clone())
-                        .with_sniffer(sniffer_runtime.clone())
+                        .with_sniffer(Arc::clone(&sniffer_runtime))
                         .with_auth(auth.clone());
                     tokio::spawn(async move {
                         if let Err(e) = listener.run().await {
@@ -557,7 +557,7 @@ async fn run(
                         config.listeners.routing_mark,
                         nl.name.clone(),
                     )
-                    .with_sniffer(sniffer_runtime.clone());
+                    .with_sniffer(Arc::clone(&sniffer_runtime));
                     tokio::spawn(async move {
                         if let Err(e) = listener.run().await {
                             error!("TProxy listener error: {}", e);
@@ -640,7 +640,7 @@ async fn subscription_refresh_loop(
 
                     match mihomo_config::rebuild_from_raw_with_resolver(
                         &raw,
-                        Some(tunnel.resolver().clone()),
+                        Some(Arc::clone(tunnel.resolver())),
                     ) {
                         Ok((new_proxies, new_rules)) => {
                             tunnel.update_proxies(new_proxies);
@@ -722,7 +722,7 @@ async fn geodata_auto_update_loop(
         // Rebuild rules with the newly downloaded DBs. Only rules are affected
         // by geodata changes; proxies are unchanged.
         let raw = raw_config.read().clone();
-        match mihomo_config::rebuild_from_raw_with_resolver(&raw, Some(resolver.clone())) {
+        match mihomo_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(&resolver))) {
             Ok((_proxies, new_rules)) => {
                 tunnel.update_rules(new_rules);
                 info!("geodata auto-update: rules reloaded with updated DBs");

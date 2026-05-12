@@ -65,7 +65,7 @@ impl SelectorGroup {
         let sel = self.selected.read();
         if let Some(name) = sel.as_deref() {
             if let Some(p) = all.iter().find(|p| p.name() == name) {
-                return Some(p.clone());
+                return Some(Arc::clone(p));
             }
         }
         // Fall back to first proxy in the list

@@ -711,8 +711,8 @@ mod tests {
         let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
         let resolver =
             std::sync::Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
-        let r1 = resolver.clone();
-        let r2 = resolver.clone();
+        let r1 = Arc::clone(&resolver);
+        let r2 = Arc::clone(&resolver);
         let (a, b) = tokio::join!(
             r1.lookup_actual_all("concurrent.test"),
             r2.lookup_actual_all("concurrent.test"),

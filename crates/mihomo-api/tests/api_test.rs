@@ -242,7 +242,7 @@ async fn get_configs_returns_mode() {
 #[tokio::test]
 async fn patch_configs_change_mode() {
     let state = test_state_default();
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -352,7 +352,7 @@ async fn get_rules_returns_initial() {
 #[tokio::test]
 async fn replace_rules() {
     let state = test_state_default();
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -369,7 +369,7 @@ async fn replace_rules() {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Verify
-    let app2 = create_router(state.clone());
+    let app2 = create_router(Arc::clone(&state));
     let resp2 = app2
         .oneshot(
             Request::get("/rules")
@@ -392,7 +392,7 @@ async fn replace_rules() {
 #[tokio::test]
 async fn update_rule_at_index() {
     let state = test_state_default();
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()
@@ -435,7 +435,7 @@ async fn update_rule_out_of_range() {
 #[tokio::test]
 async fn delete_rule() {
     let state = test_state_default();
-    let app = create_router(state.clone());
+    let app = create_router(Arc::clone(&state));
     let resp = app
         .oneshot(
             Request::builder()

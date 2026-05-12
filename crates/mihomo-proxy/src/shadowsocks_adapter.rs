@@ -13,6 +13,7 @@ use shadowsocks::relay::udprelay::{DatagramReceive, DatagramSend, DatagramSocket
 use shadowsocks::relay::Address;
 use shadowsocks::ProxyClientStream;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::debug;
 
@@ -319,7 +320,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
                     BuiltinObfs::Http { host } => {
                         let wrapped = HttpObfs::new(tcp, host, self.port);
                         let stream = ProxyClientStream::from_stream(
-                            self.context.clone(),
+                            Arc::clone(&self.context),
                             wrapped,
                             &self.server_config,
                             addr,
@@ -329,7 +330,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
                     BuiltinObfs::Tls { server } => {
                         let wrapped = TlsObfs::new(tcp, server);
                         let stream = ProxyClientStream::from_stream(
-                            self.context.clone(),
+                            Arc::clone(&self.context),
                             wrapped,
                             &self.server_config,
                             addr,
@@ -341,7 +342,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
             PluginKind::V2ray(cfg) => {
                 let transport = v2ray_plugin::dial(cfg, &self.server, self.port).await?;
                 let stream = ProxyClientStream::from_stream(
-                    self.context.clone(),
+                    Arc::clone(&self.context),
                     transport,
                     &self.server_config,
                     addr,
@@ -349,10 +350,13 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 Ok(Box::new(SsConn(stream)))
             }
             PluginKind::None | PluginKind::External(_) => {
-                let stream =
-                    ProxyClientStream::connect(self.context.clone(), &self.server_config, addr)
-                        .await
-                        .map_err(|e| MihomoError::Proxy(format!("ss connect: {e}")))?;
+                let stream = ProxyClientStream::connect(
+                    Arc::clone(&self.context),
+                    &self.server_config,
+                    addr,
+                )
+                .await
+                .map_err(|e| MihomoError::Proxy(format!("ss connect: {e}")))?;
                 Ok(Box::new(SsConn(stream)))
             }
         }
@@ -364,7 +368,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 "v2ray-plugin does not support UDP relay".into(),
             ));
         }
-        let socket = ProxySocket::connect(self.context.clone(), &self.server_config)
+        let socket = ProxySocket::connect(Arc::clone(&self.context), &self.server_config)
             .await
             .map_err(|e| MihomoError::Proxy(format!("ss udp connect: {e}")))?;
         debug!("SS UDP connected via {}", self.addr_str);

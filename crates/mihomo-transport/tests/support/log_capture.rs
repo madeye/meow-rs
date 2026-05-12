@@ -102,7 +102,7 @@ struct BufMakeWriter(Arc<Mutex<Vec<String>>>, Arc<Mutex<String>>);
 impl<'a> MakeWriter<'a> for BufMakeWriter {
     type Writer = BufferWriter;
     fn make_writer(&'a self) -> Self::Writer {
-        BufferWriter(self.0.clone(), self.1.clone())
+        BufferWriter(Arc::clone(&self.0), Arc::clone(&self.1))
     }
 }
 
@@ -114,7 +114,7 @@ impl<'a> MakeWriter<'a> for BufMakeWriter {
 pub fn make_capture_subscriber() -> (impl Subscriber + Send + Sync, LogBuffer) {
     let buf = LogBuffer::default();
     let line_buf = Arc::new(Mutex::new(String::new()));
-    let make_writer = BufMakeWriter(buf.0.clone(), line_buf);
+    let make_writer = BufMakeWriter(Arc::clone(&buf.0), line_buf);
 
     let sub = tracing_subscriber::fmt()
         .with_writer(make_writer)
