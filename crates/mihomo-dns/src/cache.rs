@@ -1,3 +1,16 @@
+// M2 layout change (ADR-0011 T7):
+//   CacheEntry.ips:      Vec<IpAddr>  (24 B: ptr+len+cap) → Box<[IpAddr]> (16 B: ptr+len, −8 B)
+//   ReverseEntry.domain: String       (24 B: ptr+len+cap) → Box<str>      (16 B: ptr+len, −8 B)
+//
+// Removing the unused capacity word from both fields.  `Box<[T]>` and `Box<str>`
+// are fat pointers (ptr+len) with no spare capacity — correct for entries that are
+// written once and read many times.
+//
+// Per-entry savings: CacheEntry 40 B → 32 B (−8 B); ReverseEntry 40 B → 32 B (−8 B).
+// At default caps (1024 fwd, 4096 rev): total struct savings ≈ 40 KiB.
+// (LRU list-node + hash-table overhead is the same either way.)
+//
+// CacheEntry and ReverseEntry are private — no public API break per ADR-0009.
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::net::IpAddr;
@@ -5,12 +18,12 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
 struct CacheEntry {
-    ips: Vec<IpAddr>,
+    ips: Box<[IpAddr]>,
     expire_at: Instant,
 }
 
 struct ReverseEntry {
-    domain: String,
+    domain: Box<str>,
     expire_at: Instant,
 }
 
@@ -41,7 +54,7 @@ impl DnsCache {
         let mut cache = self.cache.lock();
         if let Some(entry) = cache.get(domain) {
             if entry.expire_at > Instant::now() {
-                return Some(entry.ips.clone());
+                return Some(entry.ips.to_vec());
             }
             // Expired, but don't remove here to avoid borrow issues
         }
@@ -58,14 +71,17 @@ impl DnsCache {
                 reverse.put(
                     ip,
                     ReverseEntry {
-                        domain: domain.to_string(),
+                        domain: domain.into(),
                         expire_at,
                     },
                 );
             }
         }
 
-        let entry = CacheEntry { ips, expire_at };
+        let entry = CacheEntry {
+            ips: ips.into_boxed_slice(),
+            expire_at,
+        };
         self.cache.lock().put(domain.to_string(), entry);
     }
 
@@ -75,7 +91,7 @@ impl DnsCache {
         let now = Instant::now();
         if let Some(entry) = reverse.get(&ip) {
             if entry.expire_at > now {
-                return Some(entry.domain.clone());
+                return Some(entry.domain.to_string());
             }
         } else {
             return None;
