@@ -95,6 +95,42 @@ The workspace has 12 crates (see also [ADR-0009](docs/adr/0009-cleanup-scope.md)
 2. Add the rule type variant to `RuleType` enum in `mihomo-common/src/rule.rs`
 3. Register parsing in `mihomo-rules/src/parser.rs`
 
+## Lint Policy
+
+Workspace-wide clippy lints are declared in the root `Cargo.toml` `[workspace.lints.clippy]` table; every member crate opts in via `[lints] workspace = true`. See [ADR-0010](docs/adr/0010-m1-hygiene-and-gates.md) for the full rationale and [ADR-0010 Addendum A](docs/adr/0010-m1-hygiene-and-gates-addendum.md) for the allocation-focused additions.
+
+Curated lint set (all `warn` unless noted):
+
+**Readability / style** — `uninlined_format_args`, `redundant_closure`, `redundant_closure_for_method_calls`, `redundant_clone`, `cloned_instead_of_copied`, `manual_let_else`, `map_unwrap_or`, `semicolon_if_nothing_returned`, `explicit_iter_loop`, `needless_pass_by_value`, `match_same_arms`, `if_not_else`, `unnecessary_wraps`
+
+**Allocation / footprint** (addendum A1, feeds M2 baseline) — `clone_on_ref_ptr`, `needless_collect`, `format_push_string`, `string_add`, `useless_format`, `large_enum_variant`, `large_types_passed_by_value`, `unnecessary_box_returns`, `vec_init_then_push`
+
+Explicitly suppressed workspace-wide (too noisy without benefit): `module_name_repetitions`, `struct_excessive_bools`, `too_many_lines`, `missing_errors_doc`, `missing_panics_doc`.
+
+When a specific site cannot be fixed cleanly, use `#[allow(clippy::lint_name, reason = "…")]` inline — no silent allows.
+
+## Regression Bar
+
+Run before every commit and push:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --lib
+```
+
+The three-way clippy check (default / no-default-features / all-features) is enforced in CI via `.github/workflows/test.yml` (added in M1, per ADR-0010 §3).
+
+M1 exit integration gates (run before closing M1):
+```bash
+cargo test --test rules_test
+cargo test --test trojan_integration
+cargo test --test shadowsocks_integration
+```
+Docker-based tproxy QEMU test (`bash tests/test_tproxy_qemu.sh`) is CI-only; do not block local work on it.
+
 ## Key Dependencies
 
 - **Async runtime**: tokio (multi-threaded)
