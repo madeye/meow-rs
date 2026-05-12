@@ -14,17 +14,21 @@ pub const DEFAULT_UDP_IDLE: Duration = Duration::from_secs(60);
 /// How often the sweeper scans for expired sessions.
 pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
-/// NAT table entry for UDP sessions
+/// NAT table entry for UDP sessions.
+// M2 layout change (ADR-0011 T3):
+//   proxy_name: String (24 B heap) → Arc<str> (16 B fat-ptr, −8 B)
+//   One allocation per distinct proxy name across all NAT entries; identical
+//   names share the same Arc instead of each holding an independent heap copy.
 pub struct UdpSession {
     pub conn: Box<dyn ProxyPacketConn>,
-    pub proxy_name: String,
+    pub proxy_name: Arc<str>,
     /// Monotonic millis since process start. Bumped on every fast-path forward
     /// so idle sessions can be evicted by [`spawn_nat_sweeper`].
     last_activity_ms: AtomicU64,
 }
 
 impl UdpSession {
-    pub fn new(conn: Box<dyn ProxyPacketConn>, proxy_name: String) -> Self {
+    pub fn new(conn: Box<dyn ProxyPacketConn>, proxy_name: Arc<str>) -> Self {
         Self {
             conn,
             proxy_name,
@@ -152,7 +156,7 @@ pub async fn handle_udp(
                 warn!("UDP initial write error for {} -> {}: {}", src, dst_addr, e);
                 return;
             }
-            let session = Arc::new(UdpSession::new(conn, proxy.name().to_string()));
+            let session = Arc::new(UdpSession::new(conn, Arc::from(proxy.name())));
             tunnel.nat_table.insert(key, session);
         }
         Err(e) => {
@@ -186,7 +190,7 @@ mod tests {
     }
 
     fn mk_session() -> Arc<UdpSession> {
-        Arc::new(UdpSession::new(Box::new(NoopPacketConn), "test".into()))
+        Arc::new(UdpSession::new(Box::new(NoopPacketConn), Arc::from("test")))
     }
 
     fn mk_key(port: u16) -> (SocketAddr, SocketAddr) {
