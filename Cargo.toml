@@ -77,7 +77,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Networking
-shadowsocks = { version = "1.21", features = ["aead-cipher-2022", "stream-cipher"] }
+shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "stream-cipher"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "0.26"

@@ -49,8 +49,8 @@ pub trait Store: Send + Sync {
     fn del_by_ip(&self, ip: IpAddr);
     fn exists(&self, ip: IpAddr) -> bool;
     fn flush(&self);
-    /// Persistence sentinels — used by [`Pool::store_state`] /
-    /// [`Pool::restore_state`] to survive process restart. No-op for the
+    /// Persistence sentinels — used by `Pool::store_state` /
+    /// `Pool::restore_state` to survive process restart. No-op for the
     /// in-memory store.
     fn put_state(&self, _offset: IpAddr, _cycle: bool) {}
     fn get_state(&self) -> Option<(IpAddr, bool)> {
