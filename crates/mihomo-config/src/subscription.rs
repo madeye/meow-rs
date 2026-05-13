@@ -30,8 +30,12 @@ pub async fn fetch_subscription(url: &str) -> Result<SubscriptionData, anyhow::E
 
 /// Parse a Clash YAML string and extract proxies, proxy-groups, and rules.
 pub fn parse_subscription_yaml(text: &str) -> Result<SubscriptionData, anyhow::Error> {
-    let root: Value =
+    let mut root: Value =
         serde_yaml::from_str(text).map_err(|e| anyhow::anyhow!("YAML parse error: {e}"))?;
+    // Expand `<<: *anchor` merge keys so subscriptions that share anchor
+    // blocks (rule-anchor patterns, common in upstream mihomo configs) parse.
+    root.apply_merge()
+        .map_err(|e| anyhow::anyhow!("YAML merge expand error: {e}"))?;
     let mapping = root
         .as_mapping()
         .ok_or_else(|| anyhow::anyhow!("subscription root is not a mapping"))?;

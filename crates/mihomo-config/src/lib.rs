@@ -102,7 +102,7 @@ pub struct ApiConfig {
 
 pub async fn load_config(path: &str) -> Result<Config, anyhow::Error> {
     let content = std::fs::read_to_string(path)?;
-    let raw: raw::RawConfig = serde_yaml::from_str(&content)?;
+    let raw: raw::RawConfig = parse_raw_yaml(&content)?;
     // Rule-provider cache files live next to config.yaml.
     let cache_dir: Option<PathBuf> = std::path::Path::new(path).parent().and_then(|p| {
         if p.as_os_str().is_empty() {
@@ -115,8 +115,22 @@ pub async fn load_config(path: &str) -> Result<Config, anyhow::Error> {
 }
 
 pub async fn load_config_from_str(content: &str) -> Result<Config, anyhow::Error> {
-    let raw: raw::RawConfig = serde_yaml::from_str(content)?;
+    let raw: raw::RawConfig = parse_raw_yaml(content)?;
     build_config(raw, None).await
+}
+
+/// Parse a Clash/mihomo YAML document into [`raw::RawConfig`], expanding YAML
+/// anchor merge keys (`<<: *anchor`) before deserialisation.
+///
+/// `serde_yaml` resolves anchors, but it does not by itself substitute merge
+/// keys into the surrounding mapping; without [`serde_yaml::Value::apply_merge`]
+/// the `<<` key reaches the typed deserialiser and the merged fields look
+/// "missing". Upstream mihomo configs (e.g. `rule-anchor` patterns) rely on
+/// this expansion — see meow-ios#112.
+fn parse_raw_yaml(content: &str) -> Result<raw::RawConfig, anyhow::Error> {
+    let mut value: serde_yaml::Value = serde_yaml::from_str(content)?;
+    value.apply_merge()?;
+    Ok(serde_yaml::from_value(value)?)
 }
 
 /// Save a RawConfig back to disk with atomic write (.tmp → rename) and .bak backup.
@@ -979,6 +993,31 @@ mod geoip_context_tests {
         )
         .unwrap();
         assert!(ctx.asn.is_none());
+    }
+
+    /// Regression for meow-ios#112: YAML anchor merge keys (`<<: *anchor`)
+    /// in `rule-providers` must expand before typed deserialisation, otherwise
+    /// merged fields like `type` look missing and the import fails.
+    #[test]
+    fn parse_raw_yaml_expands_anchor_merge_keys() {
+        let yaml = r"
+rule-anchor:
+  domain: &domain {type: http, interval: 86400, behavior: domain, format: mrs}
+
+rule-providers:
+  cn_domain: {<<: *domain, url: 'https://example.invalid/cn.mrs'}
+";
+        let raw = super::parse_raw_yaml(yaml).expect("merge keys must expand");
+        let providers = raw.rule_providers.expect("rule-providers present");
+        let cn = providers.get("cn_domain").expect("cn_domain entry");
+        // After merge expansion the anchor's `type` and `behavior` fields are
+        // materialised on the typed struct — without `apply_merge` these would
+        // appear missing and deserialisation would fail with `missing field`.
+        assert_eq!(cn.provider_type, "http");
+        assert_eq!(cn.behavior, "domain");
+        assert_eq!(cn.format.as_deref(), Some("mrs"));
+        assert_eq!(cn.interval, Some(86400));
+        assert_eq!(cn.url.as_deref(), Some("https://example.invalid/cn.mrs"));
     }
 
     #[test]
