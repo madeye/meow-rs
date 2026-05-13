@@ -116,19 +116,23 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 
 ## Benchmarks
 
-Measured on Apple M4, macOS, loopback (`127.0.0.1`). Both binaries use identical config (`mode: direct`, SOCKS5 listener on port 17890, DNS disabled). Proxy relays traffic to a TCP echo server via the DIRECT adapter. Run with `bash bench.sh`.
+Latest Rust-only baseline on a developer host (Apple Silicon arm64, macOS 25.4, loopback `127.0.0.1`). Config is `mode: direct`, SOCKS5 listener on port 17890, DNS disabled; the proxy relays traffic to a TCP echo server via the DIRECT adapter. Three runs per metric, median reported per [ADR-0006](docs/adr/0006-m2-benchmark-methodology.md) §4. Reproduce with `bash bench.sh` (auto-downloads Go mihomo for a side-by-side run).
 
-| Metric | mihomo (Go) | mihomo-rust | Delta |
-|--------|-------------|-------------|-------|
-| Binary size (stripped) | 30.5 MB | 8.9 MB | **-71%** |
-| RSS idle | 25.8 MB | 8.5 MB | **-67%** |
-| RSS under load | 25.8 MB | 8.5 MB | **-67%** |
-| TCP throughput (64 MB) | 33.0 Gbps | 34.4 Gbps | **+4%** |
-| Latency p50 | 132 us | 129 us | **-2%** |
-| Latency p99 | 181 us | 169 us | **-7%** |
-| Connections/sec | 714 | 710 | ~0% |
+| Metric | mihomo-rust v0.7.0 | Notes |
+|--------|--------------------|-------|
+| Binary size (stripped, release LTO) | **5.2 MB** | ADR-0007 cap: well under |
+| RSS idle | **9.2 MB** | |
+| RSS under load (peak) | **12.3 MB** | |
+| TCP throughput, 64 MB×1 | **12.96 Gbps** | |
+| TCP throughput, 1 MB×10 | **11.29 Gbps** | |
+| TCP throughput, 4 KB×10000 | **2.10 Gbps** | small-payload bound by per-conn overhead |
+| Latency p50 (connect + 1 B echo) | **179 µs** | 500 iterations |
+| Latency p99 | 758 µs | IQR/median > 0.10 — see footnote |
+| Connections/sec (10 s, concurrency 64) | **646 /s** | |
 
-> Go: [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) v1.19.23 darwin-arm64. Rust: v0.4.0, `--release` with LTO + strip.
+vs the 2026-04-18 M2-open Rust baseline (`docs/benchmarks/baseline-2026-04-18.json`): binary size −53%, throughput +85% to +156% across workloads, p50 latency −40%, idle RSS flat. The p99 latency sample has IQR/median = 47% and is rejected by the ADR-0006 variance gate; a clean reference-host re-run is required to characterise it.
+
+For full methodology, workload definitions (W1–W5), and the Go-comparable gauntlet, see [docs/benchmarks/index.md](docs/benchmarks/index.md).
 
 ## Architecture
 
