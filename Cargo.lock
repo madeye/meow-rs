@@ -1946,7 +1946,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "mihomo-api"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1981,7 +1981,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-app"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-bench"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2018,7 +2018,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-common"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2038,7 +2038,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-config"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2066,7 +2066,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-dns"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "dashmap",
  "futures",
@@ -2088,7 +2088,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-listener"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64",
  "libc",
@@ -2102,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-proxy"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2131,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-rules"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "criterion",
  "ipnet",
@@ -2148,7 +2148,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-transport"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-trie"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "criterion",
  "proptest",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "mihomo-tunnel"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "criterion",
