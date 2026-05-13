@@ -357,19 +357,21 @@ impl RustlsInner {
         // --- Client-auth half ---
         let mut tls_config = match &config.client_cert {
             Some(cc) => {
-                let cert_chain = rustls_pemfile::certs(&mut cc.cert_pem.as_slice())
+                // rustls-pemfile is unmaintained (RUSTSEC-2025-0134); use the
+                // PemObject trait from rustls-pki-types, which is the same parser
+                // re-exposed without the wrapper crate.
+                use rustls::pki_types::pem::PemObject;
+                use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+                let cert_chain = CertificateDer::pem_slice_iter(cc.cert_pem.as_slice())
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(|e| {
                         TransportError::Config(format!(
                             "client_cert.cert_pem: PEM parse error: {e}"
                         ))
                     })?;
-                let private_key = rustls_pemfile::private_key(&mut cc.key_pem.as_slice())
-                    .map_err(|e| {
+                let private_key =
+                    PrivateKeyDer::from_pem_slice(cc.key_pem.as_slice()).map_err(|e| {
                         TransportError::Config(format!("client_cert.key_pem: PEM parse error: {e}"))
-                    })?
-                    .ok_or_else(|| {
-                        TransportError::Config("client_cert.key_pem: no private key found".into())
                     })?;
                 builder
                     .with_client_auth_cert(cert_chain, private_key)

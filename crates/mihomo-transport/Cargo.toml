@@ -16,7 +16,6 @@ tls = [
     "dep:tokio-rustls",
     "dep:rustls",
     "dep:webpki-roots",
-    "dep:rustls-pemfile",
 ]
 # boring-tls: enables BoringSSL-backed TLS for ECH and uTLS fingerprinting.
 # Requires cmake 3.14+ and a C++ compiler at build time (boring-sys vendors BoringSSL).
@@ -59,7 +58,6 @@ bytes = { workspace = true }
 tokio-rustls    = { workspace = true, optional = true }
 rustls          = { workspace = true, optional = true }
 webpki-roots    = { workspace = true, optional = true }
-rustls-pemfile  = { version = "2", optional = true }
 
 # ws feature
 tokio-tungstenite = { workspace = true, optional = true }
@@ -83,7 +81,6 @@ boring-sys   = { version = "5.0.2", optional = true }
 tokio        = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls       = { workspace = true }
-rustls-pemfile = "2"
 rcgen        = "0.13"
 md5          = "0.8"
 # Log-capture strategy: home-rolled MakeWriter in tests/support/log_capture.rs using
