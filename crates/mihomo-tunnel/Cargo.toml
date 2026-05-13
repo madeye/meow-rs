@@ -31,6 +31,8 @@ tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"
 mihomo-trie = { workspace = true }
 criterion = { workspace = true }
 dashmap = { workspace = true }
+ipnet = { workspace = true }
+mihomo-rules = { workspace = true }
 
 [lints]
 workspace = true

@@ -30,6 +30,43 @@ pub struct TunnelInner {
 }
 
 impl TunnelInner {
+    /// Rewrite a fake-IP destination back to its real hostname before rule
+    /// matching. Mirrors upstream `preHandleMetadata` in
+    /// `tunnel/tunnel.go`. Always called from `handle_tcp` / `handle_udp`
+    /// before [`Self::pre_resolve`]; outside fake-IP mode this is a no-op
+    /// except for the snooping-cache hostname fill-in.
+    ///
+    /// After a fake-IP rewrite the metadata has:
+    /// - `metadata.host` ← real domain recovered from the pool reverse map
+    /// - `metadata.dst_ip` ← `None`, so `pre_resolve` (or the adapter)
+    ///   re-resolves to a real address via the configured DNS path
+    pub fn pre_handle_metadata(&self, metadata: &mut Metadata) {
+        let Some(ip) = metadata.dst_ip else {
+            return;
+        };
+        if !self.resolver.is_fake_ip(ip) {
+            // Outside fake-IP mode — also fold in a snooping-cache hostname
+            // if metadata.host is currently empty. Preserves the upstream
+            // `DNSMapping` mode contract used by the tproxy listener.
+            if metadata.host.is_empty() {
+                if let Some(host) = self.resolver.reverse_lookup(ip) {
+                    metadata.host = host.into();
+                }
+            }
+            return;
+        }
+        if let Some(host) = self.resolver.reverse_lookup(ip) {
+            debug!("pre_handle_metadata: fake-ip {} → {}", ip, host);
+            metadata.host = host.into();
+            metadata.dst_ip = None;
+        } else {
+            // Fake IP without a reverse mapping — pool wrap evicted the
+            // entry since synthesis. Leave the IP in place; the connection
+            // dials to a dead address but we don't drop the metadata silently.
+            debug!("pre_handle_metadata: fake-ip {} has no reverse mapping", ip);
+        }
+    }
+
     /// Pre-process metadata before rule matching: if any rule needs IP
     /// resolution and we don't yet have a destination IP, resolve
     /// `metadata.host` via the internal resolver and populate `dst_ip`.

@@ -35,9 +35,6 @@ runtime-control surface that real users depend on — and do it well.
 The following are **explicitly out of scope** and should not be planned, specced,
 or implemented without an explicit product decision to reverse course:
 
-- **fake-ip DNS mode.** Removed deliberately in commit 812f3c6. DNS snooping
-  (IP → domain reverse table) covers the transparent-proxy use case without
-  the IP-pool bookkeeping and edge cases fake-ip introduces.
 - **tun vpn / tun inbound.** Too much OS-specific surface area (Linux tun,
   macOS utun, Windows wintun) for the value it adds over transparent proxy
   on the platforms we target. Users who need whole-device VPN-style capture
@@ -83,8 +80,10 @@ Already shipped (based on README and `crates/`):
 - Rules: DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX, IP-CIDR,
   SRC-IP-CIDR, DST-PORT, SRC-PORT, NETWORK, PROCESS-NAME, GEOIP, MATCH,
   AND/OR/NOT logic, RULE-SET / rule-providers (commit 3eca397).
-- DNS: UDP server, main + fallback groups, cache + dedup, snooping.
-  (fake-ip removed.)
+- DNS: UDP server, main + fallback groups, cache + dedup, snooping, and
+  fake-IP mode (v4 + v6 pools, BlackList/WhiteList skipper, optional JSON
+  persistence via `store-fake-ip`). Re-added after the 812f3c6 removal —
+  the parser-only stub now backs a full upstream-compatible implementation.
 - Inbounds: Mixed, HTTP, SOCKS5, TProxy (nftables on Linux, pf on macOS).
 - Tunnel: Rule / Global / Direct modes, TCP relay, UDP NAT, per-conn stats.
 - REST API + embedded web dashboard, subscription management with

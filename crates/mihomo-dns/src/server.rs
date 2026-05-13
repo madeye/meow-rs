@@ -1,8 +1,12 @@
 use crate::resolver::Resolver;
+use mihomo_common::DnsMode;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
+
+/// TTL stamped on regular (non-fake-IP) A/AAAA answers built by this server.
+const DEFAULT_ANSWER_TTL_SECS: u32 = 60;
 
 /// Simple DNS server that handles queries by forwarding to our resolver.
 pub struct DnsServer {
@@ -88,20 +92,35 @@ impl DnsServer {
                 all_ips.iter().find(|ip| ip.is_ipv6()).copied()
             };
             return Ok(match ip {
-                Some(addr) => Self::build_response(id, data, &domain, qtype, addr),
+                Some(addr) => Self::build_response(id, data, qtype, addr, DEFAULT_ANSWER_TTL_SECS),
                 None => Self::build_noerror_empty(id, data),
             });
         }
 
-        // Resolve using our resolver (cache + upstream).
+        // Resolve using our resolver (cache + upstream + fake-IP synthesis).
         let ip = if qtype == 1 {
             resolver.lookup_ipv4(&domain).await
         } else {
             resolver.lookup_ipv6(&domain).await
         };
 
+        // Synthesised fake-IP responses get a short TTL so clients re-query
+        // after pool eviction. Real upstream answers keep the default.
+        let ttl =
+            if resolver.mode() == DnsMode::FakeIp && ip.is_some_and(|i| resolver.is_fake_ip(i)) {
+                resolver.fake_ip_ttl().as_secs().clamp(1, u32::MAX as u64) as u32
+            } else {
+                DEFAULT_ANSWER_TTL_SECS
+            };
+
         Ok(match ip {
-            Some(addr) => Self::build_response(id, data, &domain, qtype, addr),
+            Some(addr) => Self::build_response(id, data, qtype, addr, ttl),
+            // Fake-IP mode AAAA when only v4 pool is configured: return
+            // NOERROR-empty so clients fall back to IPv4 cleanly. NXDOMAIN
+            // would tell them "no such host" — wrong signal.
+            None if qtype == 28 && resolver.mode() == DnsMode::FakeIp => {
+                Self::build_noerror_empty(id, data)
+            }
             None => Self::build_nxdomain(id, data),
         })
     }
@@ -140,9 +159,9 @@ impl DnsServer {
     fn build_response(
         id: u16,
         query: &[u8],
-        _domain: &str,
         qtype: u16,
         addr: std::net::IpAddr,
+        ttl_secs: u32,
     ) -> Vec<u8> {
         let mut response = Vec::with_capacity(512);
 
@@ -168,7 +187,7 @@ impl DnsServer {
         response.extend_from_slice(&[0xc0, 0x0c]); // Name pointer to offset 12
         response.extend_from_slice(&qtype.to_be_bytes()); // TYPE
         response.extend_from_slice(&[0x00, 0x01]); // CLASS IN
-        response.extend_from_slice(&60u32.to_be_bytes()); // TTL = 60
+        response.extend_from_slice(&ttl_secs.to_be_bytes()); // TTL
 
         match addr {
             std::net::IpAddr::V4(v4) => {

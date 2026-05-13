@@ -107,6 +107,10 @@ pub async fn handle_udp(
     src: SocketAddr,
     mut metadata: Metadata,
 ) {
+    // Fake-IP → host rewrite (no-op outside fake-IP mode aside from a
+    // snooping-cache hostname fill-in).
+    tunnel.pre_handle_metadata(&mut metadata);
+
     // Pre-resolve metadata (host -> real IP if rules need it).
     tunnel.pre_resolve(&mut metadata).await;
 

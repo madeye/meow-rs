@@ -29,6 +29,8 @@ parking_lot = { workspace = true }
 ipnet = { workspace = true }
 maxminddb = { workspace = true }
 futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

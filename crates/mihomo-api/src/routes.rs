@@ -166,6 +166,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/traffic", get(get_traffic))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
+        .route("/cache/fakeip/flush", post(flush_fakeip_cache))
         // Config save
         .route("/api/config/save", post(save_config))
         // Subscriptions
@@ -492,6 +493,21 @@ async fn dns_query_get(
 async fn flush_dns_cache(State(state): State<Arc<AppState>>) -> StatusCode {
     state.tunnel.resolver().clear_cache();
     StatusCode::NO_CONTENT
+}
+
+/// `POST /cache/fakeip/flush` — clear every fake-IP allocation. Mirrors
+/// upstream `hub/route/cache.go::flushFakeIPPool`. Returns 204 on success,
+/// 400 with a JSON `{message: ...}` body if persistence flushing fails.
+async fn flush_fakeip_cache(
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
+    match state.tunnel.resolver().flush_fake_ip() {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "message": e.to_string() })),
+        )),
+    }
 }
 
 async fn close_all_connections(State(state): State<Arc<AppState>>) -> StatusCode {

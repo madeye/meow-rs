@@ -113,6 +113,13 @@ pub struct RawDns {
     pub listen: Option<String>,
     pub enhanced_mode: Option<String>,
     pub fake_ip_range: Option<String>,
+    /// Fake-IP filter mode: `blacklist` (default) or `whitelist`. Controls
+    /// how `fake_ip_filter` patterns are interpreted.
+    pub fake_ip_filter_mode: Option<String>,
+    /// If true, the fake-IP host↔ip map is persisted to disk and survives
+    /// restarts. The on-disk file is `fakeip-v4.json` / `fakeip-v6.json`
+    /// alongside the working directory.
+    pub store_fake_ip: Option<bool>,
     pub default_nameserver: Option<Vec<String>>,
     pub nameserver: Option<Vec<String>>,
     pub fallback: Option<Vec<String>>,
@@ -228,6 +235,11 @@ pub struct RawSniffer {
     pub parse_pure_ip: Option<bool>,
     pub override_destination: Option<bool>,
     /// Accepted and ignored — we do not implement fake-ip.
+    /// Accepted; respected when fake-ip mode is enabled. When true and the
+    /// destination IP is a fake-IP allocation, the sniffer skips peek and
+    /// trusts the fake-IP reverse mapping. Currently unused (the tunnel's
+    /// `pre_handle_metadata` always consults the reverse map regardless), so
+    /// this flag is parsed and ignored for upstream-config compatibility.
     pub force_dns_mapping: Option<bool>,
     /// Protocol → port list map. Recognised keys: `TLS`, `HTTP`.
     pub sniff: Option<HashMap<String, RawSniffProtocol>>,

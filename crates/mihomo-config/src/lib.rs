@@ -705,7 +705,7 @@ async fn build_config(
 
     // DNS — pass the explicit mmdb path so fallback-filter GeoIP uses the
     // same path as the rule engine.
-    let dns_config = dns_parser::parse_dns(&raw, geodata.mmdb_path.as_deref()).await?;
+    let dns_config = dns_parser::parse_dns(&raw, geodata.mmdb_path.as_deref(), cache_dir).await?;
 
     // Load proxy providers (async: may HTTP-fetch provider files).
     let proxy_providers = if let Some(raw_pp) = raw.proxy_providers.as_ref() {

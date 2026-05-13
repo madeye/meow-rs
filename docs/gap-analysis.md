@@ -12,7 +12,6 @@ This document compares the current `mihomo-rust` implementation against the upst
 
 The following upstream features are **intentionally out of scope** for `mihomo-rust` and are **not** counted as gaps:
 
-- **fake-ip DNS mode** — removed in commit `812f3c6`. `enhanced-mode: fake-ip` will log a warning and fall back to `normal`.
 - **tun vpn / tun inbound** — we do not ship an in-process TUN device or sing-tun integration. Transparent proxy is served via `tproxy` (nftables/pf) only.
 - **VMess outbound** — dropped from M1 scope 2026-04-11. Protocol complexity (AEAD KDF, auth-id cache, legacy cipher quirks) for diminishing returns as modern users have migrated to VLESS. Spec preserved in `docs/specs/proxy-vmess.md` as a design record. Use VLESS instead.
 
@@ -173,8 +172,8 @@ Upstream `dns/` directory covers client/server/policy/middleware with numerous t
 | Cache with TTL              | Yes      | Yes  | OK (`cache.rs`, 10s–3600s clamp) |
 | In-flight request dedup     | Yes      | Scaffolded | **Partial** — `inflight: DashMap` allocated but marked `#[allow(dead_code)]` |
 | Redir-host (mapping) mode   | Yes      | Yes  | OK — our `DnsMode::Mapping` + DNS snooping |
-| fake-ip mode                | Yes      | **Excluded** | Non-goal |
-| DNS snooping (IP→domain)    | Yes (via fake-ip) | Yes | Our unique path, replaces fake-ip |
+| fake-ip mode                | Yes      | Yes  | OK — `fakeip::Pool` (v4+v6), `Skipper`, `store-fake-ip` JSON persistence |
+| DNS snooping (IP→domain)    | Yes (via fake-ip) | Yes | OK — `DnsMode::Mapping` covers configs that prefer snooping over fake-IP |
 | use-hosts / use-system-hosts | Yes     | No   | Gap |
 
 ---
@@ -209,7 +208,7 @@ Upstream `hub/route/` mounts these sub-routers, and Clash Dashboard / Yacd expec
 | `PUT /configs` (reload)      | Yes | No  | **Gap** — reload from path/body |
 | `GET /dns/query`             | Yes | `POST /dns/query` | Divergent — upstream uses GET with query params |
 | `POST /cache/dns/flush`      | Yes | No  | **Gap** |
-| `POST /cache/fakeip/flush`   | Yes | N/A | Excluded (fake-ip) |
+| `POST /cache/fakeip/flush`   | Yes | Yes | OK — clears every fake-IP allocation, 204 on success |
 | `POST /restart`              | Yes | No  | Gap — low priority |
 | `POST /upgrade`              | Yes | No  | Gap — low priority |
 | Auth (Bearer `secret`)       | Yes | No  | **Gap** — `secret` field parsed but never enforced (`#[allow(dead_code)]` in `AppState`) |
@@ -263,13 +262,13 @@ Upstream config keys documented at https://wiki.metacubex.one/. Checking `crates
 | `sub-rules` | Named rule subsets referenced from main rules |
 | `proxy-providers` | External proxy lists (http/file) |
 | `tun` | **Excluded** |
-| `dns.enhanced-mode: fake-ip` | **Excluded** — handled by warning fallback |
+| `dns.store-fake-ip` | Recognised at `dns:` block (JSON persistence). Top-level `profile.store-fake-ip` still missing. |
 
 ### DNS section sub-keys
 
-Supported: `enable`, `listen`, `enhanced-mode`, `nameserver`, `fallback`, `fake-ip-range` (parsed but ignored), `fake-ip-filter` (parsed but ignored).
+Supported: `enable`, `listen`, `enhanced-mode` (incl. `fake-ip`), `nameserver`, `fallback`, `fake-ip-range`, `fake-ip-filter`, `fake-ip-filter-mode`, `store-fake-ip`, `default-nameserver`, `nameserver-policy`, `fallback-filter.{geoip,geoip-code,ipcidr,domain}`, `use-hosts`, `use-system-hosts`.
 
-Missing: `default-nameserver`, `nameserver-policy`, `fallback-filter.{geoip,geoip-code,ipcidr,domain}`, `respect-rules`, `use-hosts`, `use-system-hosts`, `prefer-h3`, `cache-algorithm`.
+Missing: `respect-rules`, `prefer-h3`, `cache-algorithm`.
 
 ### Proxy group sub-keys
 

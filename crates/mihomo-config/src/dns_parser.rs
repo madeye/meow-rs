@@ -1,6 +1,7 @@
 use crate::raw::{HostsValue, RawConfig};
 use crate::DnsConfig;
 use mihomo_common::DnsMode;
+use mihomo_dns::fakeip::{FileStore, MemoryStore, Pool, Skipper, SkipperMode, Store};
 use mihomo_dns::resolver::{FallbackFilter, NameserverPolicy, PolicyEntry};
 use mihomo_dns::upstream::NameServerUrl;
 use mihomo_dns::{HostOrIp, Resolver};
@@ -10,9 +11,14 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use tracing::warn;
 
+/// Upstream Go mihomo default for v4 fake-IP CIDR. Used when
+/// `enhanced-mode: fake-ip` is set but `fake-ip-range` is omitted.
+const DEFAULT_FAKE_IP_RANGE_V4: &str = "198.18.0.1/16";
+
 pub async fn parse_dns(
     raw: &RawConfig,
     mmdb_path: Option<&std::path::Path>,
+    cache_dir: Option<&std::path::Path>,
 ) -> Result<DnsConfig, anyhow::Error> {
     let dns = match &raw.dns {
         Some(dns) if dns.enable.unwrap_or(false) => dns,
@@ -41,10 +47,7 @@ pub async fn parse_dns(
     let default_ns_urls = parse_nameserver_urls(dns.default_nameserver.as_deref().unwrap_or(&[]))?;
 
     let mode = match dns.enhanced_mode.as_deref() {
-        Some("fake-ip") => {
-            warn!("dns.enhanced-mode: 'fake-ip' is no longer supported; falling back to 'normal'");
-            DnsMode::Normal
-        }
+        Some("fake-ip") => DnsMode::FakeIp,
         Some("redir-host") => DnsMode::Mapping,
         _ => DnsMode::Normal,
     };
@@ -77,7 +80,7 @@ pub async fn parse_dns(
         ))
     };
 
-    let resolver = Resolver::new_with_bootstrap(
+    let mut resolver = Resolver::new_with_bootstrap(
         main_urls,
         fallback_urls,
         default_ns_urls,
@@ -90,10 +93,82 @@ pub async fn parse_dns(
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    // Fake-IP wiring: only when enhanced-mode == fake-ip. Errors here are
+    // fatal (Class A per ADR-0002) — a misconfigured fake-IP range would
+    // silently fall back to the upstream resolver, which is a user-surprising
+    // privacy regression.
+    if mode == DnsMode::FakeIp {
+        install_fakeip(&mut resolver, dns, cache_dir)?;
+    }
+
     Ok(DnsConfig {
         resolver: Arc::new(resolver),
         listen_addr,
     })
+}
+
+fn install_fakeip(
+    resolver: &mut Resolver,
+    dns: &crate::raw::RawDns,
+    cache_dir: Option<&std::path::Path>,
+) -> Result<(), anyhow::Error> {
+    let range_str = dns
+        .fake_ip_range
+        .as_deref()
+        .unwrap_or(DEFAULT_FAKE_IP_RANGE_V4);
+    let prefix: ipnet::IpNet = range_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("dns.fake-ip-range '{range_str}' is not a valid CIDR: {e}"))?;
+
+    let persist = dns.store_fake_ip.unwrap_or(false);
+    let store_path = |suffix: &str| -> std::path::PathBuf {
+        let base = cache_dir.map_or_else(
+            || std::path::PathBuf::from("."),
+            std::path::Path::to_path_buf,
+        );
+        base.join(format!("fakeip-{suffix}.json"))
+    };
+
+    let store: Arc<dyn Store> = if persist {
+        let path = store_path(match &prefix {
+            ipnet::IpNet::V4(_) => "v4",
+            ipnet::IpNet::V6(_) => "v6",
+        });
+        let p = FileStore::open(&path).map_err(|e| {
+            let disp = path.display();
+            anyhow::anyhow!("cannot open fakeip store {disp}: {e}")
+        })?;
+        Arc::new(p)
+    } else {
+        // Capacity bounded by prefix size, but cap at a sensible upper bound
+        // so a /8 doesn't allocate 16M cache slots up front.
+        Arc::new(MemoryStore::new(1 << 20))
+    };
+
+    let pool =
+        Pool::new(prefix, store).map_err(|e| anyhow::anyhow!("cannot build fakeip pool: {e}"))?;
+    let pool = Arc::new(pool);
+
+    match &prefix {
+        ipnet::IpNet::V4(_) => resolver.set_fakeip_v4(pool),
+        ipnet::IpNet::V6(_) => resolver.set_fakeip_v6(pool),
+    }
+
+    // Skipper: fake-ip-filter patterns + optional fake-ip-filter-mode.
+    let patterns = dns.fake_ip_filter.clone().unwrap_or_default();
+    let skipper_mode = match dns.fake_ip_filter_mode.as_deref() {
+        Some("whitelist") | Some("white-list") => SkipperMode::WhiteList,
+        Some("blacklist") | Some("black-list") | None => SkipperMode::BlackList,
+        Some(other) => {
+            warn!(
+                "dns.fake-ip-filter-mode '{}' unknown; using 'blacklist'",
+                other
+            );
+            SkipperMode::BlackList
+        }
+    };
+    resolver.set_fakeip_skipper(Skipper::new(&patterns, skipper_mode));
+    Ok(())
 }
 
 /// Parse nameserver strings into `NameServerUrl`s — every entry must parse

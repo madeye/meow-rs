@@ -1,4 +1,5 @@
 use crate::cache::DnsCache;
+use crate::fakeip::{Pool, Skipper};
 use crate::upstream::{HostOrIp, NameServerUrl};
 use dashmap::DashMap;
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
@@ -144,6 +145,16 @@ pub struct Resolver {
     inflight: DashMap<String, InflightTx>,
     policy: Option<NameserverPolicy>,
     fallback_filter: Option<FallbackFilter>,
+    /// IPv4 fake-IP pool (None when fake-ip mode is disabled or only v6 is configured).
+    fakeip_v4: Option<Arc<Pool>>,
+    /// IPv6 fake-IP pool.
+    fakeip_v6: Option<Arc<Pool>>,
+    /// Optional bypass filter (BlackList by default). Hosts that match are
+    /// resolved normally instead of being assigned a fake IP.
+    fakeip_skipper: Option<Skipper>,
+    /// TTL stamped on synthesised A/AAAA responses. Short by design so
+    /// clients re-query rather than caching a fake IP after pool eviction.
+    fakeip_ttl: Duration,
 }
 
 struct InflightGuard<'a> {
@@ -157,6 +168,11 @@ impl Drop for InflightGuard<'_> {
         self.map.remove(&self.key);
     }
 }
+
+/// Default TTL stamped on synthesised fake-IP responses. Upstream Go mihomo
+/// uses 1 s — same default here. Short TTL keeps clients honest after pool
+/// wrap evictions.
+pub const DEFAULT_FAKE_IP_TTL: Duration = Duration::from_secs(1);
 
 fn clamp_ttl(raw: Duration) -> Duration {
     const MIN_TTL: Duration = Duration::from_secs(10);
@@ -265,6 +281,10 @@ impl Resolver {
             inflight: DashMap::new(),
             policy: None,
             fallback_filter: None,
+            fakeip_v4: None,
+            fakeip_v6: None,
+            fakeip_skipper: None,
+            fakeip_ttl: DEFAULT_FAKE_IP_TTL,
         }
     }
 
@@ -411,6 +431,10 @@ impl Resolver {
             inflight: DashMap::new(),
             policy,
             fallback_filter,
+            fakeip_v4: None,
+            fakeip_v6: None,
+            fakeip_skipper: None,
+            fakeip_ttl: DEFAULT_FAKE_IP_TTL,
         })
     }
 
@@ -513,6 +537,16 @@ impl Resolver {
                 return ips.iter().find(|ip| ip.is_ipv4()).copied();
             }
         }
+        // Fake-IP mode: synthesise from the v4 pool unless the skipper says
+        // bypass. The hosts trie above still wins — explicit user mappings
+        // never get rewritten to a fake address.
+        if self.mode == DnsMode::FakeIp {
+            if let Some(pool) = &self.fakeip_v4 {
+                if !self.skipper_bypasses(host) {
+                    return Some(pool.lookup(host));
+                }
+            }
+        }
         if let Some(ips) = self.cache.get(host) {
             return ips.iter().find(|ip| ip.is_ipv4()).copied();
         }
@@ -526,11 +560,31 @@ impl Resolver {
                 return ips.iter().find(|ip| ip.is_ipv6()).copied();
             }
         }
+        // Fake-IP mode for AAAA: synthesise from the v6 pool if configured.
+        // If only a v4 pool is configured (the common case — upstream
+        // default is `198.18.0.1/16` only), return None so the server emits
+        // a NOERROR with zero answers and clients fall back to IPv4.
+        if self.mode == DnsMode::FakeIp {
+            if let Some(pool) = &self.fakeip_v6 {
+                if !self.skipper_bypasses(host) {
+                    return Some(pool.lookup(host));
+                }
+            } else if self.fakeip_v4.is_some() && !self.skipper_bypasses(host) {
+                // v4-only fake-ip config: suppress AAAA so clients fall back.
+                return None;
+            }
+        }
         if let Some(ips) = self.cache.get(host) {
             return ips.iter().find(|ip| ip.is_ipv6()).copied();
         }
         let ips = self.lookup_actual_all(host).await?;
         ips.into_iter().find(std::net::IpAddr::is_ipv6)
+    }
+
+    fn skipper_bypasses(&self, host: &str) -> bool {
+        self.fakeip_skipper
+            .as_ref()
+            .is_some_and(|s| s.should_skip(host))
     }
 
     /// Returns all IPs for `host` from the hosts trie (respecting `use_hosts`),
@@ -630,7 +684,70 @@ impl Resolver {
     }
 
     pub fn reverse_lookup(&self, ip: IpAddr) -> Option<String> {
+        // Fake-IP pools own the authoritative reverse mapping for their
+        // synthesised IPs. Consult them first; fall back to the snooping
+        // cache for `Mapping` mode or real-IP hits.
+        if let Some(pool) = &self.fakeip_v4 {
+            if let Some(host) = pool.look_back(ip) {
+                return Some(host);
+            }
+        }
+        if let Some(pool) = &self.fakeip_v6 {
+            if let Some(host) = pool.look_back(ip) {
+                return Some(host);
+            }
+        }
         self.cache.reverse_lookup(ip)
+    }
+
+    /// True if `ip` is an active fake-IP allocation (either family).
+    pub fn is_fake_ip(&self, ip: IpAddr) -> bool {
+        if let Some(pool) = &self.fakeip_v4 {
+            if pool.is_fake_ip(ip) {
+                return true;
+            }
+        }
+        if let Some(pool) = &self.fakeip_v6 {
+            if pool.is_fake_ip(ip) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Clear every fake-IP allocation; resets cursors. No-op when fake-ip
+    /// is disabled. Returns `Ok` unless persistence fails (currently
+    /// infallible — failures are logged, not returned).
+    pub fn flush_fake_ip(&self) -> Result<(), std::io::Error> {
+        if let Some(p) = &self.fakeip_v4 {
+            p.flush();
+        }
+        if let Some(p) = &self.fakeip_v6 {
+            p.flush();
+        }
+        Ok(())
+    }
+
+    /// Fake-IP A/AAAA response TTL (used by the UDP DNS server).
+    pub fn fake_ip_ttl(&self) -> Duration {
+        self.fakeip_ttl
+    }
+
+    /// Install a v4 fake-IP pool. Caller wires this after `new_with_bootstrap`.
+    pub fn set_fakeip_v4(&mut self, pool: Arc<Pool>) {
+        self.fakeip_v4 = Some(pool);
+    }
+    /// Install a v6 fake-IP pool.
+    pub fn set_fakeip_v6(&mut self, pool: Arc<Pool>) {
+        self.fakeip_v6 = Some(pool);
+    }
+    /// Install a bypass skipper.
+    pub fn set_fakeip_skipper(&mut self, skipper: Skipper) {
+        self.fakeip_skipper = Some(skipper);
+    }
+    /// Override the synthesised-answer TTL (default `DEFAULT_FAKE_IP_TTL`).
+    pub fn set_fakeip_ttl(&mut self, ttl: Duration) {
+        self.fakeip_ttl = ttl;
     }
 
     pub fn mode(&self) -> DnsMode {

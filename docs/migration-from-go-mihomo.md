@@ -80,7 +80,7 @@ cause problems; items marked ~ work with caveats; items marked ✓ work.
 | `dns:` — `nameserver-policy` | ~ | M1.E-3 — see §DNS. |
 | `dns:` — `fallback-filter` | ~ | M1.E-4, bundled with M1.E-3. |
 | `dns:` — `hosts` + `use-system-hosts` | ✓ | M1.E-5, wildcards supported. |
-| `dns:` — `fake-ip` mode | ✗ | Removed (see §Removed features). |
+| `dns:` — `fake-ip` mode | ✓ | v4/v6 pools, `fake-ip-filter`, `fake-ip-filter-mode`, `store-fake-ip` JSON persistence. See §fake-ip mode. |
 | `tproxy-port` | ✓ | Linux nftables / macOS pf. |
 | `proxy-providers:` | ~ | M1.H-1 — see §Providers. |
 | `geodata:` / `geox-url` | ✗ | M2+ (auto-update, path overrides). M1 uses XDG discovery. |
@@ -424,8 +424,39 @@ bootstrap server.
 
 ### fake-ip mode
 
-**Removed.** mihomo-rust does not support `dns.enhanced-mode: fake-ip`.
-Use `enhanced-mode: redir-host` (or `normal`) instead. See §Removed features.
+Supported. `enhanced-mode: fake-ip` assigns each resolved host a stable
+synthetic IP from the configured CIDR. The tunnel rewrites incoming
+connections back to the hostname before rule matching, mirroring upstream
+`tunnel/tunnel.go::preHandleMetadata`.
+
+```yaml
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-range: "198.18.0.1/16"      # default if omitted
+  fake-ip-filter:
+    - "+.local"
+    - "+.lan"
+    - "example.corp"                  # plain entry = suffix match
+  fake-ip-filter-mode: blacklist      # default; whitelist also accepted
+  store-fake-ip: true                 # optional: persist mappings across restart
+```
+
+- **Pool layout.** Network/.1 (gateway)/.2/.3/broadcast are reserved; first
+  allocatable is `network + 4`. Effective capacity = `prefix_size − 4`.
+  Sequential cursor, wraps on exhaustion and evicts the oldest mapping.
+- **Filter.** `BlackList` (default) routes matched hosts through the real
+  resolver; `WhiteList` does the opposite. Plain entries are treated as
+  suffixes (`example.com` matches `example.com` and any subdomain).
+- **AAAA in v4-only configs.** Returns NOERROR-empty so clients fall back
+  to IPv4 cleanly. To allocate v6 fake IPs, point `fake-ip-range` at an
+  IPv6 prefix (e.g. `fc00::/64`).
+- **Persistence.** `store-fake-ip: true` writes `fakeip-v4.json` /
+  `fakeip-v6.json` next to the config file (atomic via tmp + rename).
+  Differs from upstream's bbolt format — there is no migration path
+  between the two on-disk layouts.
+- **Flush.** `POST /cache/fakeip/flush` clears every allocation and resets
+  cursors. 204 on success.
 
 ### hosts and use-system-hosts
 
@@ -468,7 +499,6 @@ using them will produce a clear error at startup.
 
 | Feature | Reason | Alternative |
 |---------|--------|-------------|
-| `dns.enhanced-mode: fake-ip` | Protocol complexity, privacy concerns | Use `redir-host` |
 | `geodata:` YAML subsection | M2+ only | M1 uses XDG file discovery |
 | External plugin subprocess (v2ray-plugin bin) | No subprocess exec in M1 | Built-in transport layer (WS + TLS) |
 | Hysteria2, TUIC, WireGuard protocols | QUIC dep tree + size budget | Revisit in M1.5/M2 |
@@ -521,10 +551,12 @@ Most common format from public providers. Typical issues:
 
 1. **VMess proxies** — replace with VLESS alternatives from your provider, or
    remove them. mihomo-rust hard-errors on `type: vmess`.
-2. **`enhanced-mode: fake-ip`** — change to `redir-host` or remove the line
-   entirely (default is `redir-host`). Auto-fallback applies but logs a warn.
-3. **`fake-ip-range` / `fake-ip-filter`** — remove; silently ignored but creates
-   log noise.
+2. **`enhanced-mode: fake-ip`** — supported. Migration from a prior
+   mihomo-rust release that warned-and-fell-back to `normal` is automatic;
+   no config change required.
+3. **`fake-ip-range` / `fake-ip-filter`** — honoured. Defaults to
+   `198.18.0.1/16` when range is omitted; filter defaults to empty
+   (`BlackList` mode never skips).
 4. **GEOSITE rules with `.dat` files** — convert to mrs format:
    ```bash
    metacubex convert-geo geosite.dat -o geosite.mrs
@@ -583,7 +615,7 @@ The following produce hard errors at load time (not silent failures):
 
 - **`quic://` nameservers** — hard error; replace with `tls://` or `https://`.
 - **Hysteria2 / TUIC proxies** — hard error (`type: hysteria2` / `type: tuic`); no alternative in M1.
-- **`fake-ip` DNS mode** — warn-once fallback to `redir-host`; see §Removed features.
+- **`fake-ip` DNS mode** — supported in full; see §fake-ip mode.
 - **VMess proxies** — hard error; use `type: vless` instead.
 - **`vless` with `flow: xtls-rprx-direct`** — hard error; use `xtls-rprx-vision`.
 

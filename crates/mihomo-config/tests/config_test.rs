@@ -147,20 +147,88 @@ dns:
 }
 
 #[tokio::test]
-async fn test_dns_config_fakeip_falls_back_to_normal() {
-    // FakeIP support has been removed; legacy `enhanced-mode: fake-ip` configs
-    // must still load (with a warning) and silently fall back to Normal mode.
+async fn test_dns_config_fakeip_enabled() {
+    // `enhanced-mode: fake-ip` must be accepted, with the pool synthesising
+    // IPs from the configured CIDR.
     let yaml = r#"
 dns:
   enable: true
   listen: "0.0.0.0:5353"
   enhanced-mode: fake-ip
   fake-ip-range: "198.18.0.1/16"
+  fake-ip-filter:
+    - "+.local"
+    - "example.com"
   nameserver:
     - "8.8.8.8"
 "#;
     let config = load_config_from_str(yaml).await.unwrap();
-    assert_eq!(config.dns.resolver.mode().to_string(), "normal");
+    assert_eq!(config.dns.resolver.mode().to_string(), "fake-ip");
+    // Skipper bypasses filtered domains: lookup returns no fake IP for them.
+    let r = &config.dns.resolver;
+    let v4 = r.lookup_ipv4("foo.test").await.unwrap();
+    let foo_octets = match v4 {
+        std::net::IpAddr::V4(v) => v.octets(),
+        _ => panic!("expected v4"),
+    };
+    assert_eq!(
+        &foo_octets[..2],
+        &[198, 18],
+        "non-filtered host must get a fake IP from 198.18.0.0/16, got {v4}"
+    );
+    assert!(r.is_fake_ip(v4));
+    let again = r.lookup_ipv4("foo.test").await.unwrap();
+    assert_eq!(again, v4, "fake-IP must be stable per host");
+    // Reverse lookup recovers the hostname.
+    assert_eq!(r.reverse_lookup(v4).as_deref(), Some("foo.test"));
+    // Flush wipes the pool.
+    r.flush_fake_ip().unwrap();
+    assert!(r.reverse_lookup(v4).is_none());
+}
+
+#[tokio::test]
+async fn test_dns_config_fakeip_default_range() {
+    // Omitting fake-ip-range should pick the upstream default 198.18.0.1/16.
+    let yaml = r#"
+dns:
+  enable: true
+  listen: "0.0.0.0:5353"
+  enhanced-mode: fake-ip
+  nameserver:
+    - "8.8.8.8"
+"#;
+    let config = load_config_from_str(yaml).await.unwrap();
+    assert_eq!(config.dns.resolver.mode().to_string(), "fake-ip");
+    let ip = config
+        .dns
+        .resolver
+        .lookup_ipv4("anything.test")
+        .await
+        .unwrap();
+    let std::net::IpAddr::V4(v4) = ip else {
+        panic!("expected v4");
+    };
+    assert_eq!(&v4.octets()[..2], &[198, 18]);
+}
+
+#[tokio::test]
+async fn test_dns_config_fakeip_invalid_range_errors() {
+    let yaml = r#"
+dns:
+  enable: true
+  listen: "0.0.0.0:5353"
+  enhanced-mode: fake-ip
+  fake-ip-range: "not-a-cidr"
+  nameserver:
+    - "8.8.8.8"
+"#;
+    let Err(err) = load_config_from_str(yaml).await else {
+        panic!("expected error for invalid CIDR");
+    };
+    assert!(
+        err.to_string().contains("fake-ip-range"),
+        "expected fake-ip-range parse error, got: {err}"
+    );
 }
 
 #[tokio::test]
