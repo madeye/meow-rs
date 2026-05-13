@@ -1,7 +1,7 @@
 # mihomo-rust Roadmap
 
 Owner: pm
-Last updated: 2026-04-25 (audit — strike merged M0/M1/M2 items; only M1.E-6, M1.F-4/5, and M3 remain open)
+Last updated: 2026-05-13 (audit — reconcile M2 item 6 [release CI, done via release.yml] and M1.H-2 [Prometheus /metrics, dropped 2026-04-19]; cite primary landing commits where the prior audit only cited follow-ups. Still open: M1.E-6, M1.F-4/5, the Go-vs-Rust shared-hw benchmark publication, and M3.)
 Source inputs: `docs/vision.md`, `docs/gap-analysis.md`, `docs/ci-status.md`.
 
 This roadmap translates the architect's gap analysis into an ordered work
@@ -27,7 +27,7 @@ pick these up as "fix-it Fridays" while larger M1 specs are drafted.
 
 | # | Item | Value | Risk | Notes |
 |---|------|:-----:|:----:|-------|
-| ~~M0-1~~ | ~~Enforce REST API `secret` (Bearer auth)~~ | H | L | ~~`AppState.secret` is `#[allow(dead_code)]`; unauth API is a security gap~~ *(merged [178c30f](../../../commit/178c30f))* |
+| ~~M0-1~~ | ~~Enforce REST API `secret` (Bearer auth)~~ | H | L | ~~`AppState.secret` is `#[allow(dead_code)]`; unauth API is a security gap~~ *(landed in [d89e5fd](../../../commit/d89e5fd); hardened to constant-time compare in [178c30f](../../../commit/178c30f); upstream-parity refinements in [3b84db2](../../../commit/3b84db2))* |
 | ~~M0-2~~ | ~~Replace `eprintln!` debug in `routes.rs:115` with `tracing::debug!`~~ | L | L | ~~Hot-path log spam~~ *(closed: no `eprintln!` left in `mihomo-api`; routes.rs has been rewritten)* |
 | ~~M0-3~~ | ~~Wire `PROCESS-NAME` lookup (netlink on Linux, `libproc` on macOS)~~ | M | M | ~~Currently a no-op `Box<dyn Fn()>`; rules silently never match~~ *(merged [d89e5fd](../../../commit/d89e5fd))* |
 | ~~M0-4~~ | ~~GEOIP parser + shared `Arc<MaxMindDB>` plumbing~~ | H | M | ~~Today `parse_rule` rejects `GEOIP`; YAML with GEOIP fails to load~~ *(merged [d89e5fd](../../../commit/d89e5fd))* |
@@ -158,12 +158,12 @@ has its own `connect_over` override in 334d55c. All B items are on main.
 
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
-| ~~M1.G-1~~ | ~~Bearer `secret` auth enforcement (= M0-1, tracked here too)~~ | H | L | ~~trivial, fold into M0-1~~ *(merged [178c30f](../../../commit/178c30f))* | ~~engineer~~ |
+| ~~M1.G-1~~ | ~~Bearer `secret` auth enforcement (= M0-1, tracked here too)~~ | H | L | ~~trivial, fold into M0-1~~ *(landed in [d89e5fd](../../../commit/d89e5fd); hardened in [178c30f](../../../commit/178c30f) and [3b84db2](../../../commit/3b84db2))* | ~~engineer~~ |
 | ~~M1.G-2~~ | ~~`GET /proxies/:name/delay` and `GET /group/:name/delay`~~ | H | L | ~~[`docs/specs/api-delay-endpoints.md`](specs/api-delay-endpoints.md)~~ *(merged [eab429f](../../../commit/eab429f))* | ~~engineer~~ |
 | ~~M1.G-3~~ | ~~`GET /logs` websocket stream~~ | H | M | ~~[`docs/specs/api-logs-websocket.md`](specs/api-logs-websocket.md)~~ *(merged [413a6f8](../../../commit/413a6f8); WS routed at `routes.rs:137`)* | ~~engineer-a~~ |
 | ~~M1.G-4~~ | ~~`GET /memory` websocket (runtime RSS stream)~~ | M | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8); routed at `routes.rs:138`)* | ~~engineer-a~~ |
-| ~~M1.G-5~~ | ~~`GET/PUT /providers/rules[/:name]`~~ | M | L | ~~bundled into M1.D-5 spec~~ *(merged [7d32518](../../../commit/7d32518); routed at `routes.rs:205`)* | ~~engineer-b~~ |
-| ~~M1.G-6~~ | ~~`GET/PUT /providers/proxies[/:name]` + proxy providers impl~~ | H | M | ~~depends on M1.H-1~~ *(merged [a0e4e26](../../../commit/a0e4e26); routed at `routes.rs:195` with `/healthcheck`)* | ~~engineer-b~~ |
+| ~~M1.G-5~~ | ~~`GET/PUT /providers/rules[/:name]`~~ | M | L | ~~bundled into M1.D-5 spec~~ *(merged [7d32518](../../../commit/7d32518); routed via `get_rule_providers` in `crates/mihomo-api/src/routes.rs`)* | ~~engineer-b~~ |
+| ~~M1.G-6~~ | ~~`GET/PUT /providers/proxies[/:name]` + proxy providers impl~~ | H | M | ~~depends on M1.H-1~~ *(merged [a0e4e26](../../../commit/a0e4e26); routed via `get_providers` + `/healthcheck` in `crates/mihomo-api/src/routes.rs`)* | ~~engineer-b~~ |
 | ~~M1.G-7~~ | ~~`DELETE /connections` (bulk)~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
 | ~~M1.G-8~~ | ~~`GET /dns/query` (align with upstream; current is POST)~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
 | ~~M1.G-9~~ | ~~`POST /cache/dns/flush`~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
@@ -174,7 +174,7 @@ has its own `connect_over` override in 334d55c. All B items are on main.
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
 | ~~M1.H-1~~ | ~~`proxy-providers` (http/file, health-check, include-all)~~ | H | M | ~~[`docs/specs/proxy-providers.md`](specs/proxy-providers.md)~~ *(merged [a0e4e26](../../../commit/a0e4e26))* | ~~engineer-b~~ |
-| ~~M1.H-2~~ | ~~Prometheus `/metrics` (traffic, conns, rule-match counters, proxy health)~~ | H | L | ~~[`docs/specs/metrics-prometheus.md`](specs/metrics-prometheus.md)~~ *(merged [9ca423e](../../../commit/9ca423e))* | ~~engineer-a~~ |
+| ~~M1.H-2~~ | ~~Prometheus `/metrics` (traffic, conns, rule-match counters, proxy health)~~ | H | L | ~~[`docs/specs/metrics-prometheus.md`](specs/metrics-prometheus.md)~~ *(merged [9ca423e](../../../commit/9ca423e), then **dropped** in [44a4ec1](../../../commit/44a4ec1) on 2026-04-19 — OTel/Prom support deferred to M3; spec preserved as design record)* | ~~engineer-a~~ |
 | ~~M1.H-3~~ | ~~Migration guide from Go mihomo (supported vs intentionally-not fields)~~ | M | L | ~~`docs/migration-from-go-mihomo.md`~~ *(merged [e3e1a50](../../../commit/e3e1a50))* | ~~pm~~ |
 
 ### M1 exit criteria (revised 2026-04-11)
@@ -203,7 +203,7 @@ Scope frozen after M1 lands. Status as of 2026-04-25:
 3. ~~Allocator audit of TCP relay and UDP NAT hot paths.~~ *(merged [a4058af](../../../commit/a4058af) zero-alloc UDP NAT; [f191272](../../../commit/f191272) trie early-exit + skip-domain scan — M2.D; [2ceebeb](../../../commit/2ceebeb) reverted mimalloc back to system allocator)*
 4. ~~Cargo feature flags for every optional protocol/transport; minimal-build size budget for `aarch64-musl` and `mipsel-musl`.~~ *(merged [f249a56](../../../commit/f249a56) feature flags + size budget; [10e570c](../../../commit/10e570c) `panic=abort`; [b377939](../../../commit/b377939) `opt-level=z` — M2.E; aarch64 minimal 9.5 → 5.x MB)*
 5. ~~Rule-engine micro-optimizations (trie layout, IP-CIDR structure).~~ *(merged with M2.D in [f191272](../../../commit/f191272))*
-6. Release CI — prebuilt static binaries per `ci-status.md` P1 item 5. *(open)*
+6. ~~Release CI — prebuilt static binaries per `ci-status.md` P1 item 5.~~ *(closed: `.github/workflows/release.yml` builds `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` via `cargo-zigbuild` on `v*` tag pushes, with sha256 sidecars and `softprops/action-gh-release@v2` publication; see `docs/ci-status.md` §release.yml and Gap-5 resolution)*
 7. ~~MSRV pin, `cargo audit` cron, `cargo doc` check, `cargo hack --feature-powerset`, coverage upload.~~ *(merged [9dd952f](../../../commit/9dd952f) / [280876f](../../../commit/280876f) — M2.F; macOS CI was already on)*
 
 Exit criteria: measurably lower CPU and RSS than Go mihomo on a shared
@@ -211,8 +211,14 @@ benchmark, minimal-build binary under stated size budget. **Bench numbers
 are now produced by the criterion harness; an exit comparison vs Go mihomo
 on shared hardware still needs to be published before declaring M2 done.**
 
-**Still open in M2:** release-CI prebuilt binaries (item 6) and the
-published Go-vs-Rust benchmark comparison.
+**Still open in M2:** the published Go-vs-Rust benchmark comparison on
+the reference Linux bench host (per ADR-0006 §3 "exactly one machine, the
+canonical baseline"). Local-scope verification on macOS is captured in
+[`docs/benchmarks/m2-exit-local.md`](benchmarks/m2-exit-local.md) and the
+preliminary status in
+[`docs/benchmarks/m2-exit-status-preliminary.md`](benchmarks/m2-exit-status-preliminary.md);
+the final aggregate (`m2-exit-summary.md`) lands once the reference-host
+W1–W5 runs are published.
 
 ---
 
