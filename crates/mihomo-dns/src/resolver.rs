@@ -3,7 +3,9 @@ use crate::fakeip::{Pool, Skipper};
 use crate::upstream::{HostOrIp, NameServerUrl};
 use dashmap::DashMap;
 use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
+use hickory_resolver::lookup::Lookup;
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::RecordType;
 use hickory_resolver::TokioResolver;
 use ipnet::IpNet;
 use mihomo_common::DnsMode;
@@ -254,6 +256,35 @@ async fn query_pool(resolvers: &[TokioResolver], host: &str) -> Option<(Vec<IpAd
         Ok(((ips, ttl), _)) => Some((ips, ttl)),
         Err(_) => None,
     }
+}
+
+/// Typed-record counterpart of `query_pool`: queries a resolver pool for an
+/// arbitrary `RecordType` (TXT, MX, SRV, HTTPS, …) and returns the first
+/// successful `Lookup`. No TTL clamping or cache write — hickory's caching
+/// client owns the per-record cache for non-A/AAAA queries.
+async fn query_pool_generic(
+    resolvers: &[TokioResolver],
+    host: &str,
+    record_type: RecordType,
+) -> Option<Lookup> {
+    if resolvers.is_empty() {
+        return None;
+    }
+    if resolvers.len() == 1 {
+        return resolvers[0].lookup(host, record_type).await.ok();
+    }
+    let futs: Vec<_> = resolvers
+        .iter()
+        .map(|r| {
+            let host = host.to_owned();
+            Box::pin(async move {
+                r.lookup(&host, record_type)
+                    .await
+                    .map_err(|e| format!("{e}"))
+            })
+        })
+        .collect();
+    futures::future::select_ok(futs).await.ok().map(|(l, _)| l)
 }
 
 impl Resolver {
@@ -672,6 +703,37 @@ impl Resolver {
         }
 
         self.try_fallback(host).await
+    }
+
+    /// Forward a non-A/AAAA query (TXT, MX, SRV, HTTPS, SOA, PTR, …) through
+    /// the same nameserver pipeline as ordinary lookups: domain-gate → policy
+    /// → main → fallback. Returns the typed `Lookup` so callers can re-emit
+    /// the answer section verbatim in their response.
+    ///
+    /// Skips the `ip_gated` fallback hop — the fallback-filter's IP-CIDR /
+    /// GeoIP gates only apply to address records.
+    pub async fn forward_generic(&self, domain: &str, record_type: RecordType) -> Option<Lookup> {
+        if let Some(ff) = &self.fallback_filter {
+            if ff.domain_gated(domain) {
+                return self.try_fallback_generic(domain, record_type).await;
+            }
+        }
+        if let Some(policy) = &self.policy {
+            if let Some(entry) = policy.lookup(domain) {
+                if let Some(l) = query_pool_generic(&entry.nameservers, domain, record_type).await {
+                    return Some(l);
+                }
+            }
+        }
+        if let Some(l) = query_pool_generic(&self.main, domain, record_type).await {
+            return Some(l);
+        }
+        self.try_fallback_generic(domain, record_type).await
+    }
+
+    async fn try_fallback_generic(&self, domain: &str, record_type: RecordType) -> Option<Lookup> {
+        let fb = self.fallback.as_deref()?;
+        query_pool_generic(fb, domain, record_type).await
     }
 
     async fn try_fallback(&self, host: &str) -> Option<Vec<IpAddr>> {

@@ -1,4 +1,6 @@
 use crate::resolver::Resolver;
+use hickory_resolver::proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_resolver::proto::rr::RecordType;
 use mihomo_common::DnsMode;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -75,10 +77,13 @@ impl DnsServer {
         let (domain, qtype, _offset) = Self::parse_question(&data[12..])?;
         debug!("DNS query: {} type={}", domain, qtype);
 
-        // Only handle A (1) and AAAA (28) queries
+        // Non-address queries (TXT, MX, SRV, HTTPS, SOA, PTR, …) go through
+        // the same nameserver pipeline as A/AAAA — policy → main → fallback —
+        // and the typed `Lookup` is re-emitted into a wire-format response.
+        // We deliberately stop short of fake-IP synthesis here: only address
+        // records ever get a synthetic answer.
         if qtype != 1 && qtype != 28 {
-            // Forward as-is or return NXDOMAIN
-            return Ok(Self::build_nxdomain(id, data));
+            return Self::handle_generic_forward(id, data, &domain, qtype, resolver).await;
         }
 
         // Check hosts trie first. If the domain is present in the hosts table
@@ -123,6 +128,50 @@ impl DnsServer {
             }
             None => Self::build_nxdomain(id, data),
         })
+    }
+
+    /// Forward a non-A/AAAA query through the resolver pipeline and emit the
+    /// returned records as a wire-format response. On upstream failure we
+    /// return SERVFAIL (not NXDOMAIN) — clients may negative-cache NXDOMAIN
+    /// against the bare name, which would poison subsequent A/AAAA lookups.
+    async fn handle_generic_forward(
+        id: u16,
+        query: &[u8],
+        domain: &str,
+        qtype: u16,
+        resolver: &Resolver,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let record_type = RecordType::from(qtype);
+        debug!("DNS forward (generic): {} type={:?}", domain, record_type);
+        let lookup = resolver.forward_generic(domain, record_type).await;
+
+        // Parse the inbound query just to copy its question section verbatim.
+        // If parsing fails we fall back to the hand-rolled NXDOMAIN builder
+        // rather than dropping the packet.
+        let Ok(req) = Message::from_vec(query) else {
+            return Ok(Self::build_nxdomain(id, query));
+        };
+
+        let mut resp = Message::new(id, MessageType::Response, OpCode::Query);
+        resp.metadata.recursion_desired = req.metadata.recursion_desired;
+        resp.metadata.recursion_available = true;
+        resp.add_queries(req.queries.iter().cloned());
+
+        match lookup {
+            Some(l) => {
+                resp.metadata.response_code = ResponseCode::NoError;
+                for rec in l.answers() {
+                    resp.add_answer(rec.clone());
+                }
+            }
+            None => {
+                resp.metadata.response_code = ResponseCode::ServFail;
+            }
+        }
+
+        Ok(resp
+            .to_vec()
+            .unwrap_or_else(|_| Self::build_nxdomain(id, query)))
     }
 
     fn parse_question(
