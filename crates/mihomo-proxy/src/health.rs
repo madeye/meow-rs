@@ -177,9 +177,16 @@ fn tls_connector() -> tokio_rustls::TlsConnector {
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    // Be explicit about the provider: when `ech-tls-tunnel` (or any other
+    // feature that pulls aws-lc-rs) is on, rustls' `builder()` would panic
+    // because two providers are compiled in.
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("rustls protocol versions are safe defaults")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
     tokio_rustls::TlsConnector::from(Arc::new(config))
 }
 

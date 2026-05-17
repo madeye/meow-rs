@@ -33,6 +33,14 @@ ws = [
     "dep:futures-util",
     "dep:base64",
 ]
+# ech: enable rustls-side Encrypted Client Hello using aws-lc-rs HPKE primitives.
+# Adds ~1 MB to the binary (aws-lc-rs static crypto blob) — off by default.
+# Strictly additive: the rest of the TLS path keeps using ring.
+ech = [
+    "tls",
+    "rustls/aws_lc_rs",
+    "tokio-rustls/aws_lc_rs",
+]
 grpc = [
     "dep:h2",
     "dep:http",

@@ -1,3 +1,5 @@
+#[cfg(feature = "ech-tls-tunnel")]
+use crate::ech_tls_tunnel::{self, EchTlsTunnelConfig};
 use crate::simple_obfs::{HttpObfs, TlsObfs};
 use crate::v2ray_plugin::{self, V2rayPluginConfig};
 use async_trait::async_trait;
@@ -44,6 +46,8 @@ enum PluginKind {
     External(#[allow(dead_code)] Plugin),
     Obfs(BuiltinObfs),
     V2ray(V2rayPluginConfig),
+    #[cfg(feature = "ech-tls-tunnel")]
+    EchTlsTunnel(EchTlsTunnelConfig),
 }
 
 pub struct ShadowsocksAdapter {
@@ -94,6 +98,18 @@ impl ShadowsocksAdapter {
                     name, cfg.tls, cfg.host, cfg.path, cfg.mux
                 );
                 PluginKind::V2ray(cfg)
+            }
+            #[cfg(feature = "ech-tls-tunnel")]
+            Some("ech-tls-tunnel") => {
+                let cfg = ech_tls_tunnel::parse_opts(plugin_opts.unwrap_or(""))?;
+                debug!(
+                    "SS '{}' using built-in ech-tls-tunnel: sni={} path={} ech_config_len={}",
+                    name,
+                    cfg.sni,
+                    cfg.path,
+                    cfg.ech_config.len()
+                );
+                PluginKind::EchTlsTunnel(cfg)
             }
             Some(pname) => {
                 let plugin_config = PluginConfig {
@@ -349,6 +365,17 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 );
                 Ok(Box::new(SsConn(stream)))
             }
+            #[cfg(feature = "ech-tls-tunnel")]
+            PluginKind::EchTlsTunnel(cfg) => {
+                let transport = ech_tls_tunnel::dial(cfg, &self.server, self.port).await?;
+                let stream = ProxyClientStream::from_stream(
+                    Arc::clone(&self.context),
+                    transport,
+                    &self.server_config,
+                    addr,
+                );
+                Ok(Box::new(SsConn(stream)))
+            }
             PluginKind::None | PluginKind::External(_) => {
                 let stream = ProxyClientStream::connect(
                     Arc::clone(&self.context),
@@ -366,6 +393,12 @@ impl ProxyAdapter for ShadowsocksAdapter {
         if matches!(self.plugin, PluginKind::V2ray(_)) {
             return Err(MihomoError::NotSupported(
                 "v2ray-plugin does not support UDP relay".into(),
+            ));
+        }
+        #[cfg(feature = "ech-tls-tunnel")]
+        if matches!(self.plugin, PluginKind::EchTlsTunnel(_)) {
+            return Err(MihomoError::NotSupported(
+                "ech-tls-tunnel does not support UDP relay".into(),
             ));
         }
         let socket = ProxySocket::connect(Arc::clone(&self.context), &self.server_config)

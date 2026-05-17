@@ -391,7 +391,13 @@ fn tls_client_config(alpn: &str) -> Arc<rustls::ClientConfig> {
         let root_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
         };
-        let mut cfg = rustls::ClientConfig::builder()
+        // Be explicit about the provider — when both `ring` and `aws_lc_rs`
+        // are linked (e.g. by mihomo-transport's `ech` feature), the default
+        // `ClientConfig::builder()` panics on the auto-detect.
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("rustls protocol versions are safe defaults")
             .with_root_certificates(root_store)
             .with_no_client_auth();
         cfg.alpn_protocols = match alpn {

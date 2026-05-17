@@ -8,10 +8,12 @@
 //!
 //! | Condition | Backend |
 //! |-----------|---------|
-//! | `fingerprint = None` AND `ech = None` | rustls (default) |
-//! | `fingerprint` or `ech` set, `boring-tls` feature enabled | BoringSSL |
+//! | `fingerprint = None` AND `ech = None` | rustls (default, `ring` provider) |
+//! | `ech` set, `ech` feature enabled | rustls (`aws-lc-rs` provider for HPKE) |
+//! | `fingerprint` set, `boring-tls` feature enabled | BoringSSL |
+//! | `ech` set, only `boring-tls` enabled (no `ech` feature) | BoringSSL |
 //! | `fingerprint` set, `boring-tls` feature absent | rustls + stub warn |
-//! | `ech` set, `boring-tls` feature absent | `Err(TransportError::Config)` |
+//! | `ech` set, neither `ech` nor `boring-tls` feature | `Err(TransportError::Config)` |
 //!
 //! # SNI resolution contract
 //!
@@ -208,19 +210,22 @@ impl TlsLayer {
     /// * [`TransportError::Config`] — `client_cert` PEM is unparseable (rustls path).
     /// * [`TransportError::Tls`] — client cert + key don't match (rustls path).
     pub fn new(config: &TlsConfig) -> Result<Self> {
-        // ECH without boring-tls is a hard error.
-        #[cfg(not(feature = "boring-tls"))]
+        // ECH without either feature is a hard error.
+        #[cfg(all(not(feature = "boring-tls"), not(feature = "ech")))]
         if config.ech.is_some() {
             return Err(TransportError::Config(
-                "ech-opts requires the boring-tls cargo feature; \
-                 recompile with `--features boring-tls`."
+                "ech-opts requires either the `ech` (rustls + aws-lc-rs) or \
+                 `boring-tls` (BoringSSL) cargo feature; \
+                 recompile with `--features ech` or `--features boring-tls`."
                     .into(),
             ));
         }
 
-        // Route to boring when fingerprint or ECH is requested and the feature is present.
+        // Route to boring when fingerprint is requested (no rustls equivalent
+        // for uTLS fingerprinting) or when ECH is requested and the `ech`
+        // feature is *not* compiled in (boring is then the only ECH backend).
         #[cfg(feature = "boring-tls")]
-        if config.fingerprint.is_some() || config.ech.is_some() {
+        if config.fingerprint.is_some() || (config.ech.is_some() && !cfg!(feature = "ech")) {
             tracing::debug!(
                 fingerprint = ?config.fingerprint,
                 ech = config.ech.is_some(),
@@ -304,6 +309,22 @@ struct RustlsInner {
     server_name: rustls::pki_types::ServerName<'static>,
 }
 
+/// Build a `rustls::client::EchMode::Enable` from an [`EchOpts`].
+///
+/// Uses the `aws-lc-rs` HPKE provider — `ring` does not expose HPKE primitives.
+/// The selected ECH config must match one of the suites in
+/// `rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES`; otherwise
+/// `EchConfig::new` returns `EncryptedClientHelloError::NoCompatibleConfig`.
+#[cfg(feature = "ech")]
+fn build_rustls_ech_mode(ech: &EchOpts) -> Result<rustls::client::EchMode> {
+    use rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES;
+    let EchOpts::Config(bytes) = ech;
+    let config_list = rustls::pki_types::EchConfigListBytes::from(bytes.as_slice());
+    let ech_config = rustls::client::EchConfig::new(config_list, ALL_SUPPORTED_SUITES)
+        .map_err(|e| TransportError::Tls(format!("rustls ECH: parse config list: {e}")))?;
+    Ok(rustls::client::EchMode::from(ech_config))
+}
+
 impl RustlsInner {
     fn new(config: &TlsConfig) -> Result<Self> {
         if config.skip_cert_verify {
@@ -335,9 +356,38 @@ impl RustlsInner {
     }
 
     fn build_rustls_config(config: &TlsConfig) -> Result<rustls::ClientConfig> {
+        // --- Provider + ECH half ---
+        //
+        // ECH on rustls requires HPKE primitives, which `ring` does not
+        // expose. When ECH is requested *and* the `ech` feature is compiled
+        // in, switch this single ClientConfig to the `aws-lc-rs` provider —
+        // every other rustls path in the workspace keeps using `ring`.
+        #[allow(unused_mut)]
+        let mut wants_verifier: rustls::ConfigBuilder<
+            rustls::ClientConfig,
+            rustls::WantsVerifier,
+        > = {
+            // Be explicit about the crypto provider so we don't rely on
+            // rustls' auto-detect, which panics when *both* `ring` and
+            // `aws_lc_rs` features are compiled in (as they are when the
+            // `ech` feature is on).
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .map_err(|e| TransportError::Tls(format!("rustls protocol-versions setup: {e}")))?
+        };
+        #[cfg(feature = "ech")]
+        if let Some(ech) = &config.ech {
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let ech_mode = build_rustls_ech_mode(ech)?;
+            wants_verifier = rustls::ClientConfig::builder_with_provider(provider)
+                .with_ech(ech_mode)
+                .map_err(|e| TransportError::Tls(format!("rustls ECH setup: {e}")))?;
+        }
+
         // --- Verifier half ---
         let builder = if config.skip_cert_verify {
-            rustls::ClientConfig::builder()
+            wants_verifier
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
         } else {
@@ -351,7 +401,7 @@ impl RustlsInner {
                         TransportError::Config(format!("additional_roots: invalid CA cert: {e}"))
                     })?;
             }
-            rustls::ClientConfig::builder().with_root_certificates(root_store)
+            wants_verifier.with_root_certificates(root_store)
         };
 
         // --- Client-auth half ---

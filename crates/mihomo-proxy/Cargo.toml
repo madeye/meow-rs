@@ -10,6 +10,10 @@ ss = ["dep:shadowsocks"]
 trojan = []
 vless = []
 vless-vision = ["vless"]
+# Native client for the `ech-tls-tunnel` SIP003 plugin
+# (https://github.com/shadowsocks/ech-tls-tunnel). Requires ECH on rustls,
+# which pulls aws-lc-rs in via mihomo-transport.
+ech-tls-tunnel = ["ss", "mihomo-transport/ech"]
 
 [dependencies]
 mihomo-common = { workspace = true }

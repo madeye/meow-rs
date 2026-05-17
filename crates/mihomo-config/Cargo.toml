@@ -11,6 +11,7 @@ trojan = ["mihomo-proxy/trojan"]
 vless = ["mihomo-proxy/vless"]
 vless-vision = ["vless", "mihomo-proxy/vless-vision"]
 boring-tls = ["mihomo-transport/boring-tls"]
+ech-tls-tunnel = ["ss", "mihomo-proxy/ech-tls-tunnel"]
 
 [dependencies]
 mihomo-common = { workspace = true }

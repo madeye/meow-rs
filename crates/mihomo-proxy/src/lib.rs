@@ -7,6 +7,8 @@ pub mod socks5_adapter;
 pub mod stream_conn;
 pub mod transport_chain;
 
+#[cfg(feature = "ech-tls-tunnel")]
+pub mod ech_tls_tunnel;
 #[cfg(feature = "ss")]
 pub mod shadowsocks_adapter;
 #[cfg(feature = "ss")]

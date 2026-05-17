@@ -15,6 +15,11 @@ ss = ["mihomo-config/ss", "mihomo-proxy/ss"]
 trojan = ["mihomo-config/trojan", "mihomo-proxy/trojan"]
 vless = ["mihomo-config/vless", "mihomo-proxy/vless"]
 vless-vision = ["vless", "mihomo-config/vless-vision", "mihomo-proxy/vless-vision"]
+ech-tls-tunnel = [
+    "ss",
+    "mihomo-config/ech-tls-tunnel",
+    "mihomo-proxy/ech-tls-tunnel",
+]
 
 # DNS
 dns-server = ["mihomo-dns/dns-server"]
