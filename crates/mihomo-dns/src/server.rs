@@ -1,6 +1,6 @@
 use crate::resolver::Resolver;
-use hickory_resolver::proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_resolver::proto::rr::RecordType;
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::rr::RecordType;
 use mihomo_common::DnsMode;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -160,7 +160,7 @@ impl DnsServer {
         match lookup {
             Some(l) => {
                 resp.metadata.response_code = ResponseCode::NoError;
-                for rec in l.answers() {
+                for rec in &l.answers {
                     resp.add_answer(rec.clone());
                 }
             }

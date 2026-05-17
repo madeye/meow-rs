@@ -1,13 +1,15 @@
 //! DNS-sourced ECH config lookup and pre-resolution pass.
 //!
 //! Resolves the wire-format `ECHConfigList` from an HTTPS (RR type 65) record
-//! via `hickory-resolver` using the system DNS configuration
-//! (`/etc/resolv.conf` on Unix, registry on Windows).
+//! using the system nameservers (`/etc/resolv.conf` on Unix, a small built-in
+//! fallback list on Windows).  Queries go through the internal `mihomo-dns`
+//! client so socket creation can be intercepted by host integrations
+//! (e.g. Android `protect()`).
 //!
 //! # Why not the in-process resolver?
 //!
-//! `mihomo-dns` is built *from* the parsed config, so at parse time it does
-//! not yet exist. We bootstrap with the system resolver instead.
+//! `mihomo-dns::Resolver` is built *from* the parsed config, so at parse time
+//! it does not yet exist. We bootstrap with the system nameservers instead.
 //!
 //! # Why a separate pre-resolution pass?
 //!
@@ -23,21 +25,72 @@
 use base64::Engine;
 use hickory_proto::rr::rdata::svcb::SvcParamValue;
 use hickory_proto::rr::{RData, RecordType};
-use hickory_resolver::Resolver;
+use mihomo_dns::DnsClient;
 use serde_yaml::Value;
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Read the platform's configured recursive resolvers.
+///
+/// Unix: parse `/etc/resolv.conf` `nameserver` lines.  Other platforms (or a
+/// missing / unreadable resolv.conf) fall back to a short list of well-known
+/// public resolvers so ECH lookups still succeed in unconfigured environments.
+fn system_nameservers() -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    #[cfg(unix)]
+    {
+        if let Ok(contents) = std::fs::read_to_string("/etc/resolv.conf") {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                    continue;
+                }
+                let Some(rest) = line.strip_prefix("nameserver") else {
+                    continue;
+                };
+                let token = rest.split_whitespace().next().unwrap_or("");
+                if let Ok(ip) = token.parse::<IpAddr>() {
+                    out.push(SocketAddr::new(ip, 53));
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        // Fallback: well-known public resolvers.
+        out.push(SocketAddr::from(([1, 1, 1, 1], 53)));
+        out.push(SocketAddr::from(([8, 8, 8, 8], 53)));
+    }
+    out
+}
 
 pub(crate) async fn fetch_ech_from_dns(name: &str) -> Result<Vec<u8>, String> {
-    let resolver = Resolver::builder_tokio()
-        .map_err(|e| format!("ech-dns: build system resolver: {e}"))?
-        .build()
-        .map_err(|e| format!("ech-dns: build system resolver: {e}"))?;
-    let lookup = resolver
-        .lookup(name, RecordType::HTTPS)
-        .await
-        .map_err(|e| format!("ech-dns: HTTPS lookup for {name}: {e}"))?;
+    let nameservers = system_nameservers();
+    let clients: Vec<Arc<DnsClient>> = nameservers
+        .iter()
+        .map(|addr| Arc::new(DnsClient::udp(*addr).with_timeout(Duration::from_secs(5))))
+        .collect();
 
-    for record in lookup.answers() {
+    let mut last_err: Option<String> = None;
+    let mut response = None;
+    for c in &clients {
+        match c.query(name, RecordType::HTTPS).await {
+            Ok(msg) => {
+                response = Some(msg);
+                break;
+            }
+            Err(e) => last_err = Some(format!("{e}")),
+        }
+    }
+    let msg = response.ok_or_else(|| {
+        format!(
+            "ech-dns: HTTPS lookup for {name} failed via all system nameservers: {}",
+            last_err.unwrap_or_else(|| "no nameservers".to_string())
+        )
+    })?;
+
+    for record in &msg.answers {
         let svcb = match &record.data {
             RData::HTTPS(https) => &https.0,
             _ => continue,

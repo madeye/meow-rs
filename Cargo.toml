@@ -82,9 +82,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "0.26"
 
-# DNS
-hickory-resolver = "0.26"
-hickory-server = "0.26"
+# DNS — only hickory-proto for wire-format encode/decode; the upstream
+# transport (UDP/TCP/DoT/DoH) is implemented in-tree in `mihomo-dns::client`
+# so the sockets are owned by us and host integrations can intercept them
+# (Android `protect()`).
 hickory-proto = "0.26"
 
 # Web framework
@@ -114,7 +115,7 @@ subtle = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# Time (transitive via hickory-server; explicitly declared to enable formatting)
+# Time (used directly by mihomo-api log timestamps; formatting feature enabled)
 time = { version = "0.3", features = ["formatting"] }
 
 # CLI

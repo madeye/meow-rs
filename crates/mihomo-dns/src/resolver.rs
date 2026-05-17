@@ -1,12 +1,10 @@
 use crate::cache::DnsCache;
+use crate::client::DnsClient;
 use crate::fakeip::{Pool, Skipper};
 use crate::upstream::{HostOrIp, NameServerUrl};
 use dashmap::DashMap;
-use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig};
-use hickory_resolver::lookup::Lookup;
-use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::proto::rr::RecordType;
-use hickory_resolver::TokioResolver;
+use hickory_proto::op::Message;
+use hickory_proto::rr::RecordType;
 use ipnet::IpNet;
 use mihomo_common::DnsMode;
 use mihomo_trie::DomainTrie;
@@ -39,11 +37,11 @@ pub enum BootstrapError {
 /// Capacity 1 is enough — subscribers call `recv()` at most once.
 type InflightTx = tokio::sync::broadcast::Sender<Option<Vec<IpAddr>>>;
 
-/// A single entry in `NameserverPolicy`: one or more pre-built resolvers,
-/// one per configured nameserver URL.
+/// A single entry in `NameserverPolicy`: one or more pre-built upstream DNS
+/// clients, one per configured nameserver URL.
 #[derive(Clone)]
 pub struct PolicyEntry {
-    pub nameservers: Vec<TokioResolver>,
+    pub nameservers: Vec<Arc<DnsClient>>,
 }
 
 /// Per-domain nameserver routing: exact matches and `+.` wildcard prefixes.
@@ -138,8 +136,8 @@ impl FallbackFilter {
 }
 
 pub struct Resolver {
-    main: Vec<TokioResolver>,
-    fallback: Option<Vec<TokioResolver>>,
+    main: Vec<Arc<DnsClient>>,
+    fallback: Option<Vec<Arc<DnsClient>>>,
     cache: DnsCache,
     mode: DnsMode,
     hosts: DomainTrie<Vec<IpAddr>>,
@@ -182,13 +180,6 @@ fn clamp_ttl(raw: Duration) -> Duration {
     raw.clamp(MIN_TTL, MAX_TTL)
 }
 
-fn ttl_from_lookup(lookup: &hickory_resolver::lookup_ip::LookupIp) -> Duration {
-    let raw = lookup
-        .valid_until()
-        .saturating_duration_since(std::time::Instant::now());
-    clamp_ttl(raw)
-}
-
 fn host_or_ip_to_addr(addr: &HostOrIp, resolved: &HashMap<String, IpAddr>) -> IpAddr {
     match addr {
         HostOrIp::Ip(ip) => *ip,
@@ -211,80 +202,65 @@ fn url_to_plain_socketaddr(url: &NameServerUrl) -> SocketAddr {
     }
 }
 
-/// Query a pool of resolvers in parallel; return the first successful result.
-/// Uses `futures::future::select_ok` — first `Ok` wins, remaining are cancelled.
-async fn query_pool(resolvers: &[TokioResolver], host: &str) -> Option<(Vec<IpAddr>, Duration)> {
-    if resolvers.is_empty() {
+/// Query a pool of clients in parallel; return the first successful A+AAAA
+/// result. `select_ok` semantics — first `Ok` wins, remaining are cancelled.
+async fn query_pool(clients: &[Arc<DnsClient>], host: &str) -> Option<(Vec<IpAddr>, Duration)> {
+    if clients.is_empty() {
         return None;
     }
-    if resolvers.len() == 1 {
-        return match resolvers[0].lookup_ip(host).await {
-            Ok(l) => {
-                let ips: Vec<IpAddr> = l.iter().collect();
-                if ips.is_empty() {
-                    None
-                } else {
-                    Some((ips, ttl_from_lookup(&l)))
-                }
-            }
-            Err(_) => None,
+    if clients.len() == 1 {
+        return match clients[0].lookup_ip(host).await {
+            Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+            _ => None,
         };
     }
-
-    let futs: Vec<_> = resolvers
+    let futs: Vec<_> = clients
         .iter()
-        .map(|r| {
+        .map(|c| {
+            let c = Arc::clone(c);
             let host = host.to_owned();
             Box::pin(async move {
-                let l = r.lookup_ip(&host).await.map_err(|e| format!("{e}"))?;
-                let ips: Vec<IpAddr> = l.iter().collect();
+                let (ips, ttl) = c.lookup_ip(&host).await.map_err(|e| format!("{e}"))?;
                 if ips.is_empty() {
                     return Err("empty".to_string());
                 }
-                let ttl = {
-                    let raw = l
-                        .valid_until()
-                        .saturating_duration_since(std::time::Instant::now());
-                    clamp_ttl(raw)
-                };
-                Ok((ips, ttl))
+                Ok((ips, clamp_ttl(ttl)))
             })
         })
         .collect();
-
     match futures::future::select_ok(futs).await {
         Ok(((ips, ttl), _)) => Some((ips, ttl)),
         Err(_) => None,
     }
 }
 
-/// Typed-record counterpart of `query_pool`: queries a resolver pool for an
+/// Typed-record counterpart of `query_pool`: queries a client pool for an
 /// arbitrary `RecordType` (TXT, MX, SRV, HTTPS, …) and returns the first
-/// successful `Lookup`. No TTL clamping or cache write — hickory's caching
-/// client owns the per-record cache for non-A/AAAA queries.
+/// successful `Message`. Caller copies the answer section into its response.
 async fn query_pool_generic(
-    resolvers: &[TokioResolver],
+    clients: &[Arc<DnsClient>],
     host: &str,
     record_type: RecordType,
-) -> Option<Lookup> {
-    if resolvers.is_empty() {
+) -> Option<Message> {
+    if clients.is_empty() {
         return None;
     }
-    if resolvers.len() == 1 {
-        return resolvers[0].lookup(host, record_type).await.ok();
+    if clients.len() == 1 {
+        return clients[0].query(host, record_type).await.ok();
     }
-    let futs: Vec<_> = resolvers
+    let futs: Vec<_> = clients
         .iter()
-        .map(|r| {
+        .map(|c| {
+            let c = Arc::clone(c);
             let host = host.to_owned();
             Box::pin(async move {
-                r.lookup(&host, record_type)
+                c.query(&host, record_type)
                     .await
                     .map_err(|e| format!("{e}"))
             })
         })
         .collect();
-    futures::future::select_ok(futs).await.ok().map(|(l, _)| l)
+    futures::future::select_ok(futs).await.ok().map(|(m, _)| m)
 }
 
 impl Resolver {
@@ -296,11 +272,11 @@ impl Resolver {
         hosts: DomainTrie<Vec<IpAddr>>,
         use_hosts: bool,
     ) -> Self {
-        let main = vec![Self::build_resolver(&main_servers)];
+        let main = Self::build_clients(&main_servers);
         let fallback = if fallback_servers.is_empty() {
             None
         } else {
-            Some(vec![Self::build_resolver(&fallback_servers)])
+            Some(Self::build_clients(&fallback_servers))
         };
         Self {
             main,
@@ -319,24 +295,13 @@ impl Resolver {
         }
     }
 
-    fn build_resolver(servers: &[SocketAddr]) -> TokioResolver {
-        let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
-        for &addr in servers {
-            let mut udp = ConnectionConfig::udp();
-            udp.port = addr.port();
-            let mut tcp = ConnectionConfig::tcp();
-            tcp.port = addr.port();
-            config.add_name_server(NameServerConfig::new(addr.ip(), true, vec![udp, tcp]));
-        }
-        let mut builder =
-            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
-        let opts = builder.options_mut();
-        opts.timeout = Duration::from_secs(5);
-        opts.attempts = 2;
-        opts.cache_size = 0;
-        builder
-            .build()
-            .expect("TokioResolver build is infallible for the static configuration above")
+    /// Build one UDP `DnsClient` per address. Used by the simple `new()`
+    /// constructor and tests.
+    fn build_clients(servers: &[SocketAddr]) -> Vec<Arc<DnsClient>> {
+        servers
+            .iter()
+            .map(|addr| Arc::new(DnsClient::udp(*addr)))
+            .collect()
     }
 
     /// Build a `Resolver` from structured `NameServerUrl` lists, running a
@@ -377,64 +342,46 @@ impl Resolver {
         }
 
         // Step 3: Short-circuit if no bootstrap needed.
-        let resolved_map: HashMap<String, IpAddr> =
-            if hostnames_needing_bootstrap.is_empty() {
-                HashMap::new()
-            } else {
-                if default_ns.is_empty() {
-                    return Err(BootstrapError::DefaultNameserverMissing {
-                        first_encrypted: first_encrypted_with_hostname.unwrap_or_default(),
-                    });
-                }
+        let resolved_map: HashMap<String, IpAddr> = if hostnames_needing_bootstrap.is_empty() {
+            HashMap::new()
+        } else {
+            if default_ns.is_empty() {
+                return Err(BootstrapError::DefaultNameserverMissing {
+                    first_encrypted: first_encrypted_with_hostname.unwrap_or_default(),
+                });
+            }
 
-                // Step 4: Build throwaway bootstrap resolver.
-                let bootstrap_resolver = {
-                    let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
-                    for ns in &default_ns {
-                        let addr = url_to_plain_socketaddr(ns);
-                        let mut cc = if matches!(ns, NameServerUrl::Tcp { .. }) {
-                            ConnectionConfig::tcp()
-                        } else {
-                            ConnectionConfig::udp()
-                        };
-                        cc.port = addr.port();
-                        config.add_name_server(NameServerConfig::new(addr.ip(), true, vec![cc]));
+            // Step 4: Build throwaway bootstrap clients (one per default_ns).
+            let bootstrap_clients: Vec<Arc<DnsClient>> = default_ns
+                .iter()
+                .map(|ns| {
+                    let addr = url_to_plain_socketaddr(ns);
+                    let c = if matches!(ns, NameServerUrl::Tcp { .. }) {
+                        DnsClient::tcp(addr)
+                    } else {
+                        DnsClient::udp(addr)
+                    };
+                    Arc::new(c.with_timeout(Duration::from_secs(3)))
+                })
+                .collect();
+
+            // Resolve sequentially — fail-fast on first failure.
+            let mut map = HashMap::new();
+            for host in &hostnames_needing_bootstrap {
+                match query_pool(&bootstrap_clients, host).await {
+                    Some((ips, _ttl)) if !ips.is_empty() => {
+                        map.insert(host.clone(), ips[0]);
                     }
-                    let mut builder =
-                        TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
-                    let opts = builder.options_mut();
-                    opts.timeout = Duration::from_secs(3);
-                    opts.attempts = 2;
-                    opts.cache_size = 0;
-                    builder.build().map_err(|e| BootstrapError::CannotResolve {
-                        host: "<bootstrap>".to_string(),
-                        source: Box::new(e),
-                    })?
-                };
-
-                // Resolve sequentially — fail-fast on first failure.
-                let mut map = HashMap::new();
-                for host in &hostnames_needing_bootstrap {
-                    match bootstrap_resolver.lookup_ip(host.as_str()).await {
-                        Ok(lookup) => {
-                            let ip = lookup.iter().next().ok_or_else(|| {
-                                BootstrapError::CannotResolve {
-                                    host: host.clone(),
-                                    source: "no addresses returned".into(),
-                                }
-                            })?;
-                            map.insert(host.clone(), ip);
-                        }
-                        Err(e) => {
-                            return Err(BootstrapError::CannotResolve {
-                                host: host.clone(),
-                                source: Box::new(e),
-                            });
-                        }
+                    _ => {
+                        return Err(BootstrapError::CannotResolve {
+                            host: host.clone(),
+                            source: "no addresses returned".into(),
+                        });
                     }
                 }
-                map
-            };
+            }
+            map
+        };
 
         // Steps 5 & 6: Build main + fallback — one resolver per URL for parallel dispatch.
         let main = main_urls
@@ -469,13 +416,13 @@ impl Resolver {
         })
     }
 
-    /// Build a single `TokioResolver` for one `NameServerUrl`, using
-    /// `resolved` to substitute hostnames that needed bootstrap.
-    /// Pass an empty map for IP-literal URLs (no hostname substitution needed).
+    /// Build a single `DnsClient` for one `NameServerUrl`, using `resolved`
+    /// to substitute hostnames that needed bootstrap. Pass an empty map for
+    /// IP-literal URLs (no hostname substitution needed).
     pub fn build_single_resolver(
         url: &NameServerUrl,
         resolved: &HashMap<String, IpAddr>,
-    ) -> TokioResolver {
+    ) -> Arc<DnsClient> {
         let socket_addr = match url {
             NameServerUrl::Udp { addr, port }
             | NameServerUrl::Tcp { addr, port }
@@ -484,25 +431,13 @@ impl Resolver {
                 SocketAddr::new(host_or_ip_to_addr(addr, resolved), *port)
             }
         };
-        let port = socket_addr.port();
-        let ip = socket_addr.ip();
-        let ns_cfg = match url {
-            NameServerUrl::Udp { .. } => {
-                let mut cc = ConnectionConfig::udp();
-                cc.port = port;
-                NameServerConfig::new(ip, true, vec![cc])
-            }
-            NameServerUrl::Tcp { .. } => {
-                let mut cc = ConnectionConfig::tcp();
-                cc.port = port;
-                NameServerConfig::new(ip, true, vec![cc])
-            }
+        let client = match url {
+            NameServerUrl::Udp { .. } => DnsClient::udp(socket_addr),
+            NameServerUrl::Tcp { .. } => DnsClient::tcp(socket_addr),
             NameServerUrl::Tls { sni, .. } => {
                 #[cfg(feature = "encrypted")]
                 {
-                    let mut cc = ConnectionConfig::tls(Arc::from(sni.as_str()));
-                    cc.port = port;
-                    NameServerConfig::new(ip, true, vec![cc])
+                    DnsClient::dot(socket_addr, sni)
                 }
                 #[cfg(not(feature = "encrypted"))]
                 {
@@ -516,12 +451,7 @@ impl Resolver {
             NameServerUrl::Https { sni, path, .. } => {
                 #[cfg(feature = "encrypted")]
                 {
-                    let mut cc = ConnectionConfig::https(
-                        Arc::from(sni.as_str()),
-                        Some(Arc::from(path.as_str())),
-                    );
-                    cc.port = port;
-                    NameServerConfig::new(ip, true, vec![cc])
+                    DnsClient::doh(socket_addr, sni, path)
                 }
                 #[cfg(not(feature = "encrypted"))]
                 {
@@ -533,17 +463,7 @@ impl Resolver {
                 }
             }
         };
-        let mut config = ResolverConfig::from_parts(None, vec![], vec![]);
-        config.add_name_server(ns_cfg);
-        let mut builder =
-            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
-        let opts = builder.options_mut();
-        opts.timeout = Duration::from_secs(5);
-        opts.attempts = 2;
-        opts.cache_size = 0;
-        builder
-            .build()
-            .expect("TokioResolver build is infallible for the static configuration above")
+        Arc::new(client)
     }
 
     pub async fn resolve_ip(&self, host: &str) -> Option<IpAddr> {
@@ -707,12 +627,12 @@ impl Resolver {
 
     /// Forward a non-A/AAAA query (TXT, MX, SRV, HTTPS, SOA, PTR, …) through
     /// the same nameserver pipeline as ordinary lookups: domain-gate → policy
-    /// → main → fallback. Returns the typed `Lookup` so callers can re-emit
-    /// the answer section verbatim in their response.
+    /// → main → fallback. Returns the upstream `Message` so callers can
+    /// re-emit the answer section verbatim in their response.
     ///
     /// Skips the `ip_gated` fallback hop — the fallback-filter's IP-CIDR /
     /// GeoIP gates only apply to address records.
-    pub async fn forward_generic(&self, domain: &str, record_type: RecordType) -> Option<Lookup> {
+    pub async fn forward_generic(&self, domain: &str, record_type: RecordType) -> Option<Message> {
         if let Some(ff) = &self.fallback_filter {
             if ff.domain_gated(domain) {
                 return self.try_fallback_generic(domain, record_type).await;
@@ -731,7 +651,7 @@ impl Resolver {
         self.try_fallback_generic(domain, record_type).await
     }
 
-    async fn try_fallback_generic(&self, domain: &str, record_type: RecordType) -> Option<Lookup> {
+    async fn try_fallback_generic(&self, domain: &str, record_type: RecordType) -> Option<Message> {
         let fb = self.fallback.as_deref()?;
         query_pool_generic(fb, domain, record_type).await
     }

@@ -6,21 +6,20 @@ rust-version.workspace = true
 
 [features]
 default = ["encrypted", "dns-server"]
-encrypted = ["hickory-resolver/tls-ring", "hickory-resolver/https-ring"]
-dns-server = ["dep:hickory-server"]
-
-# cargo-machete false-positive: hickory-server is optional, backing the
-# `dns-server` feature gate; it has no direct src imports but the `dep:`
-# reference in [features] requires the dep entry to exist.
-[package.metadata.cargo-machete]
-ignored = ["hickory-server"]
+encrypted = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots"]
+# `dns-server` historically gated hickory-server; the in-tree server now uses
+# only `hickory-proto`, so the feature is a no-op kept for API stability.
+dns-server = []
 
 [dependencies]
 mihomo-common = { workspace = true }
 mihomo-trie = { workspace = true }
 tokio = { workspace = true }
-hickory-resolver = { workspace = true }
-hickory-server = { workspace = true, optional = true }
+hickory-proto = { workspace = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+rand = { workspace = true }
 lru = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
