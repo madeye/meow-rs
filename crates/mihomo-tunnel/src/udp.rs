@@ -1,5 +1,6 @@
 use crate::tunnel::TunnelInner;
 use dashmap::DashMap;
+use mihomo_common::adapter::ProxyAdapter;
 use mihomo_common::{Metadata, ProxyPacketConn};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -140,9 +141,24 @@ pub async fn handle_udp(
     }
 
     // Slow path: new session — match rules and dial.
-    let Some((proxy, rule_name, rule_payload)) = tunnel.resolve_proxy(&metadata) else {
-        warn!("no matching rule for UDP {}", metadata.remote_address());
-        return;
+    //
+    // UDP DNS bypass: any UDP packet destined for port 53 short-circuits
+    // rule matching and is dialled DIRECT. Routing client DNS through a
+    // proxy would defeat the whole point of the in-process DNS resolver
+    // (rule-set selection, fake-IP, snooping) and on Android would push
+    // queries through the VPN tun rather than over the protected fd.
+    let (proxy, rule_name, rule_payload) = if metadata.dst_port == 53 {
+        (
+            Arc::clone(&tunnel.direct) as Arc<dyn ProxyAdapter>,
+            "DnsBypass".to_string(),
+            String::new(),
+        )
+    } else {
+        let Some(matched) = tunnel.resolve_proxy(&metadata) else {
+            warn!("no matching rule for UDP {}", metadata.remote_address());
+            return;
+        };
+        matched
     };
 
     info!(
