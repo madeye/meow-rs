@@ -259,6 +259,43 @@ fn rebuild_from_raw_impl(
         remaining = still_remaining;
     }
 
+    // Synthesise the built-in "GLOBAL" Selector group. Dashboards and the
+    // home view enumerate it to render every available outbound; without it
+    // the proxy panel is empty even when proxies and groups parsed fine.
+    // Members are ordered: groups in config order, then individual proxies in
+    // config order, then DIRECT / REJECT — matching upstream Go mihomo's
+    // `tunnel.go::patchProxies` insertion order.
+    {
+        let mut members: Vec<Arc<dyn Proxy>> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for raw_group in raw.proxy_groups.as_deref().unwrap_or(&[]) {
+            if let Some(p) = proxies.get(&raw_group.name) {
+                if seen.insert(raw_group.name.clone()) {
+                    members.push(Arc::clone(p));
+                }
+            }
+        }
+        for raw_proxy in raw.proxies.as_deref().unwrap_or(&[]) {
+            let Some(name) = raw_proxy.get("name").and_then(serde_yaml::Value::as_str) else {
+                continue;
+            };
+            if let Some(p) = proxies.get(name) {
+                if seen.insert(name.to_string()) {
+                    members.push(Arc::clone(p));
+                }
+            }
+        }
+        for builtin in ["DIRECT", "REJECT"] {
+            if let Some(p) = proxies.get(builtin) {
+                if seen.insert(builtin.to_string()) {
+                    members.push(Arc::clone(p));
+                }
+            }
+        }
+        let global = Arc::new(mihomo_proxy::SelectorGroup::new("GLOBAL", members));
+        proxies.insert("GLOBAL".to_string(), global);
+    }
+
     // Build the parser context: lazy-load the GeoIP MMDB iff any rule
     // (top-level) references GEOIP. Respects any `geodata:` path overrides
     // already embedded in the raw config.
