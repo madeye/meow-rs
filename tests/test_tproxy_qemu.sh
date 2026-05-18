@@ -34,7 +34,10 @@ DOCKER_IMAGE="mihomo-tproxy-test"
 
 docker build -t "$DOCKER_IMAGE" -f - "$ROOT_DIR" <<'DOCKERFILE'
 FROM rust:1-alpine AS builder
-RUN apk add --no-cache musl-dev nftables bash busybox-extras
+# git + perl + make + cmake are required by boring-sys to build the bundled
+# BoringSSL when the boring-tls feature is on (default since 11970cf).
+RUN apk add --no-cache musl-dev nftables bash busybox-extras \
+    git perl make cmake clang clang-dev linux-headers g++
 WORKDIR /src
 COPY . .
 RUN cargo build -p mihomo-app 2>&1
