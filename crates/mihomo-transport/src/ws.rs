@@ -26,11 +26,27 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use futures_util::{Sink, Stream as FuturesStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::WebSocketStream;
 use tracing::warn;
 
 use crate::{Result, Stream, Transport, TransportError};
+
+/// Footprint-bounded WebSocket config (tungstenite defaults to a 128 KiB
+/// write buffer per connection and 64 MiB max message, which inflates RSS at
+/// high concurrency). 4 KiB matches `RELAY_BUF_SIZE` and is plenty for the
+/// streaming-relay use case where each write is a single relay-buf chunk.
+fn ws_config() -> WebSocketConfig {
+    #[allow(deprecated)]
+    WebSocketConfig {
+        max_send_queue: None,
+        write_buffer_size: 4 * 1024,
+        max_write_buffer_size: 64 * 1024,
+        max_message_size: Some(4 * 1024 * 1024),
+        max_frame_size: Some(1024 * 1024),
+        accept_unmasked_frames: false,
+    }
+}
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -162,9 +178,10 @@ impl Transport for WsLayer {
             // Eager path — no early data.
             let request = build_request(&uri, &host, &extra, "", "")
                 .map_err(|e| TransportError::Config(e.to_string()))?;
-            let (ws, _) = tokio_tungstenite::client_async(request, inner)
-                .await
-                .map_err(|e| TransportError::WebSocket(e.to_string()))?;
+            let (ws, _) =
+                tokio_tungstenite::client_async_with_config(request, inner, Some(ws_config()))
+                    .await
+                    .map_err(|e| TransportError::WebSocket(e.to_string()))?;
             Ok(Box::new(WsStream::connected(ws)))
         } else {
             // Deferred path — accumulate early data on first writes.
@@ -306,7 +323,8 @@ fn begin_upgrade(state: &mut PendingState) -> UpgradeRx {
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        let result = tokio_tungstenite::client_async(request, inner).await;
+        let result =
+            tokio_tungstenite::client_async_with_config(request, inner, Some(ws_config())).await;
         let _ = tx.send(result.map(|(ws, _)| ws));
     });
     rx

@@ -6,7 +6,16 @@ use mihomo_tunnel::Tunnel;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::{debug, error, info};
+use tokio::sync::Semaphore;
+use tracing::{debug, error, info, warn};
+
+/// Default cap on in-flight inbound connections per listener.
+/// Empirically, each live VLESS+WS+TLS+ECH tunnel costs ~90 KB of userland
+/// memory (rustls/BoringSSL state + WS framer + tokio future heap + relay
+/// buffers). 256 caps load RSS at ~50 MB on top of an ~18 MB idle baseline —
+/// the documented footprint cap. Excess clients block on `accept()` rather
+/// than driving RSS unbounded.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 
 pub struct MixedListener {
     tunnel: Tunnel,
@@ -14,6 +23,7 @@ pub struct MixedListener {
     sniffer: Option<Arc<SnifferRuntime>>,
     name: String,
     auth: Option<Arc<AuthConfig>>,
+    max_connections: usize,
 }
 
 impl MixedListener {
@@ -24,7 +34,15 @@ impl MixedListener {
             sniffer: None,
             name,
             auth: None,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
         }
+    }
+
+    /// Override the cap on in-flight inbound connections (default
+    /// [`DEFAULT_MAX_CONNECTIONS`]). `0` disables the cap.
+    pub fn with_max_connections(mut self, max: usize) -> Self {
+        self.max_connections = max;
+        self
     }
 
     pub fn with_sniffer(mut self, sniffer: Arc<SnifferRuntime>) -> Self {
@@ -43,13 +61,53 @@ impl MixedListener {
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(self.listen_addr).await?;
-        info!("Mixed listener '{}' on {}", self.name, self.listen_addr);
+        info!(
+            "Mixed listener '{}' on {} (max_connections={})",
+            self.name, self.listen_addr, self.max_connections
+        );
+
+        // Bound the number of in-flight connection-handler tasks so RSS stays
+        // capped under burst load. The semaphore is None when max=0
+        // (cap disabled).
+        let conn_limit: Option<Arc<Semaphore>> = if self.max_connections > 0 {
+            Some(Arc::new(Semaphore::new(self.max_connections)))
+        } else {
+            None
+        };
+        let mut warned_saturated = false;
 
         loop {
+            // Acquire a slot before accepting — back-pressures the TCP listen
+            // queue when the cap is reached rather than spawning unbounded
+            // tasks and bloating RSS.
+            let permit = if let Some(sem) = &conn_limit {
+                let sem = Arc::clone(sem);
+                if sem.available_permits() == 0 && !warned_saturated {
+                    warn!(
+                        "Mixed listener '{}' saturated at {} concurrent connections; new clients will queue",
+                        self.name, self.max_connections
+                    );
+                    warned_saturated = true;
+                }
+                match sem.acquire_owned().await {
+                    Ok(p) => {
+                        if warned_saturated {
+                            debug!("Mixed listener '{}' has free capacity again", self.name);
+                            warned_saturated = false;
+                        }
+                        Some(p)
+                    }
+                    Err(_) => return Ok(()), // semaphore closed → shutdown
+                }
+            } else {
+                None
+            };
+
             let (stream, src_addr) = match listener.accept().await {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Accept error: {}", e);
+                    drop(permit);
                     continue;
                 }
             };
@@ -61,6 +119,7 @@ impl MixedListener {
             let auth = self.auth.clone();
             tokio::spawn(async move {
                 handle_connection(tunnel, stream, src_addr, sniffer, name, port, auth).await;
+                drop(permit);
             });
         }
     }

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["full"]
+default = ["full", "boring-tls"]
 boring-tls = ["mihomo-config/boring-tls"]
 # Heap profiling via dhat crate — swaps global allocator; never enable in production.
 dhat-heap = ["dhat"]
