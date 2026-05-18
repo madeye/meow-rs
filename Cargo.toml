@@ -31,7 +31,7 @@ debug = 1
 opt-level = 1
 
 [workspace.package]
-version = "0.7.4"
+version = "0.7.5"
 edition = "2021"
 rust-version = "1.89"
 license = "GPL-3.0"
