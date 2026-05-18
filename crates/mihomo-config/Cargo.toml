@@ -34,6 +34,9 @@ regex = { workspace = true }
 parking_lot = { workspace = true }
 hickory-proto = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = "3"

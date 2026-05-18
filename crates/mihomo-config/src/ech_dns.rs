@@ -28,9 +28,71 @@ use hickory_proto::rr::{RData, RecordType};
 use mihomo_dns::DnsClient;
 use serde_yaml::Value;
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Public DoH fallback used when no system nameserver answers an HTTPS RR
+/// query. Many ISP/captive recursive resolvers refuse or strip RR type 65;
+/// Cloudflare's resolver serves it reliably.
+const DOH_FALLBACK_HOST: &str = "cloudflare-dns.com";
+const DOH_FALLBACK_PATH: &str = "/dns-query";
+/// Bootstrap A records for `cloudflare-dns.com`. Hard-coded so the DoH client
+/// has somewhere to send the first packet without bootstrapping its own
+/// resolver. If both fail, ECH lookup silently falls back to plain TLS.
+const DOH_FALLBACK_IPS: &[IpAddr] = &[
+    IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1)),
+    IpAddr::V4(std::net::Ipv4Addr::new(1, 0, 0, 1)),
+];
+
+/// Parse a resolv.conf-style nameserver token into a `SocketAddr` on port 53,
+/// honouring an optional IPv6 zone identifier (`fe80::1%en0`). Rust's
+/// `IpAddr::FromStr` rejects the `%zone` suffix outright, so we strip it and
+/// resolve it through `if_nametoindex(3)` to populate `SocketAddrV6::scope_id`.
+fn parse_nameserver_token(token: &str) -> Option<SocketAddr> {
+    // IPv6 addresses can carry a zone-id (`%en0`) — strip it before parsing
+    // and feed it into the resulting SocketAddrV6 as a numeric scope_id.
+    let (addr_str, zone) = match token.split_once('%') {
+        Some((addr, z)) => (addr, Some(z)),
+        None => (token, None),
+    };
+    let ip: IpAddr = addr_str.parse().ok()?;
+    match ip {
+        IpAddr::V4(v4) => Some(SocketAddr::new(IpAddr::V4(v4), 53)),
+        IpAddr::V6(v6) => {
+            let scope = zone.map_or(0, zone_to_scope_id);
+            Some(SocketAddr::V6(SocketAddrV6::new(v6, 53, 0, scope)))
+        }
+    }
+}
+
+/// Resolve a textual zone identifier (interface name like `en0`, or a
+/// numeric string like `4`) to a `scope_id`. Returns `0` on lookup failure,
+/// which behaves the same as no scope from the kernel's perspective.
+#[cfg(unix)]
+fn zone_to_scope_id(zone: &str) -> u32 {
+    if let Ok(n) = zone.parse::<u32>() {
+        return n;
+    }
+    let Ok(c_name) = std::ffi::CString::new(zone) else {
+        return 0;
+    };
+    // SAFETY: `if_nametoindex` reads the NUL-terminated string and returns
+    // an index (or 0 on error); no aliasing or lifetime requirements.
+    unsafe { libc::if_nametoindex(c_name.as_ptr()) }
+}
+
+#[cfg(not(unix))]
+fn zone_to_scope_id(zone: &str) -> u32 {
+    zone.parse().unwrap_or(0)
+}
+
+/// `_ = Ipv6Addr` keeps the import live on non-unix builds without
+/// triggering `unused_imports`. The IPv6 path itself only runs after a
+/// successful parse.
+const _: fn() = || {
+    let _: Ipv6Addr = Ipv6Addr::UNSPECIFIED;
+};
 
 /// Read the platform's configured recursive resolvers.
 ///
@@ -51,8 +113,8 @@ fn system_nameservers() -> Vec<SocketAddr> {
                     continue;
                 };
                 let token = rest.split_whitespace().next().unwrap_or("");
-                if let Ok(ip) = token.parse::<IpAddr>() {
-                    out.push(SocketAddr::new(ip, 53));
+                if let Some(addr) = parse_nameserver_token(token) {
+                    out.push(addr);
                 }
             }
         }
@@ -67,10 +129,25 @@ fn system_nameservers() -> Vec<SocketAddr> {
 
 pub(crate) async fn fetch_ech_from_dns(name: &str) -> Result<Vec<u8>, String> {
     let nameservers = system_nameservers();
-    let clients: Vec<Arc<DnsClient>> = nameservers
+    let mut clients: Vec<Arc<DnsClient>> = nameservers
         .iter()
         .map(|addr| Arc::new(DnsClient::udp(*addr).with_timeout(Duration::from_secs(5))))
         .collect();
+
+    // DoH fallback: many recursive resolvers refuse/strip HTTPS RR (type 65),
+    // so layer a public DoH endpoint after the system-NS attempts. Without
+    // this, ECH bootstrap silently falls back to plain TLS on restrictive
+    // networks.
+    for ip in DOH_FALLBACK_IPS {
+        clients.push(Arc::new(
+            DnsClient::doh(
+                SocketAddr::new(*ip, 443),
+                DOH_FALLBACK_HOST,
+                DOH_FALLBACK_PATH,
+            )
+            .with_timeout(Duration::from_secs(5)),
+        ));
+    }
 
     let mut last_err: Option<String> = None;
     let mut response = None;
@@ -85,7 +162,7 @@ pub(crate) async fn fetch_ech_from_dns(name: &str) -> Result<Vec<u8>, String> {
     }
     let msg = response.ok_or_else(|| {
         format!(
-            "ech-dns: HTTPS lookup for {name} failed via all system nameservers: {}",
+            "ech-dns: HTTPS lookup for {name} failed via all nameservers (system + DoH {DOH_FALLBACK_HOST}): {}",
             last_err.unwrap_or_else(|| "no nameservers".to_string())
         )
     })?;
@@ -186,5 +263,61 @@ pub async fn preresolve_ech(proxies: &mut [HashMap<String, Value>]) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ipv4_nameserver() {
+        let got = parse_nameserver_token("8.8.8.8").unwrap();
+        assert_eq!(got, "8.8.8.8:53".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn parses_ipv6_nameserver_without_zone() {
+        let got = parse_nameserver_token("2001:4860:4860::8888").unwrap();
+        match got {
+            SocketAddr::V6(s) => {
+                assert_eq!(s.port(), 53);
+                assert_eq!(s.scope_id(), 0);
+            }
+            _ => panic!("expected v6"),
+        }
+    }
+
+    #[test]
+    fn ipv6_zone_id_does_not_get_rejected() {
+        // The previous code returned None here because `IpAddr::FromStr`
+        // rejects the `%en0` suffix. The fix is that we strip the zone and
+        // resolve it separately.
+        let got = parse_nameserver_token("fe80::1%en0");
+        assert!(got.is_some(), "fe80::1%en0 must parse, not silently drop");
+        match got.unwrap() {
+            SocketAddr::V6(s) => {
+                assert_eq!(s.port(), 53);
+                // scope_id may be 0 if `en0` doesn't exist in this test
+                // environment — what matters is that the line was parsed
+                // rather than silently dropped.
+            }
+            _ => panic!("expected v6"),
+        }
+    }
+
+    #[test]
+    fn ipv6_numeric_zone_id_parses() {
+        let got = parse_nameserver_token("fe80::1%4").unwrap();
+        match got {
+            SocketAddr::V6(s) => assert_eq!(s.scope_id(), 4),
+            _ => panic!("expected v6"),
+        }
+    }
+
+    #[test]
+    fn garbage_token_returns_none() {
+        assert!(parse_nameserver_token("not-an-ip").is_none());
+        assert!(parse_nameserver_token("").is_none());
     }
 }

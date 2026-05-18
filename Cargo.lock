@@ -1834,6 +1834,7 @@ dependencies = [
  "base64",
  "hickory-proto",
  "ipnet",
+ "libc",
  "maxminddb",
  "mihomo-common",
  "mihomo-dns",
