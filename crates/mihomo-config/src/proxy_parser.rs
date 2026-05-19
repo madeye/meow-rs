@@ -173,6 +173,11 @@ pub fn parse_proxy(
             let adapter = parse_direct(name, config)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
+        #[cfg(feature = "anytls")]
+        "anytls" => {
+            let adapter = parse_anytls(name, config)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
         _ => Err(format!("unsupported proxy type: {proxy_type}")),
     }
 }
@@ -381,6 +386,47 @@ fn parse_direct(
     }
 
     Ok(adapter)
+}
+
+/// Parse a `type: anytls` proxy block into an [`AnytlsAdapter`].
+///
+/// Required fields: `server`, `port`, `password`. Optional: `sni`,
+/// `skip-cert-verify`. Closes the parser side of issue #75; the wire
+/// protocol itself is provided by the `anytls-rs` crate.
+///
+/// # Hard errors (Class A per ADR-0002)
+///
+/// - missing `server`, `port`, or `password` — required by the protocol.
+/// - `port == 0` — never a valid endpoint.
+///
+/// upstream: `adapter/outbound/anytls.go`
+#[cfg(feature = "anytls")]
+fn parse_anytls(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<mihomo_proxy::AnytlsAdapter, String> {
+    let server = config
+        .get("server")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("anytls[{name}]: missing server"))?;
+    let port = config
+        .get("port")
+        .and_then(serde_yaml::Value::as_u64)
+        .ok_or_else(|| format!("anytls[{name}]: missing port"))? as u16;
+    if port == 0 {
+        return Err(format!("anytls[{name}]: port must be non-zero"));
+    }
+    let password = config
+        .get("password")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("anytls[{name}]: missing password"))?;
+    let sni = config.get("sni").and_then(|v| v.as_str());
+    let skip_cert_verify = config
+        .get("skip-cert-verify")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+
+    mihomo_proxy::AnytlsAdapter::new(name, server, port, password, sni, skip_cert_verify)
 }
 
 /// Parse the `strategy` field for a `load-balance` group.
@@ -1110,6 +1156,56 @@ tls: true
             panic!("scalar non-string dns must hard-error (Class A)");
         };
         assert!(err.contains("dns must be a string or list"), "msg: {err}");
+    }
+
+    // ─── anytls proxy parser (issue #75) ─────────────────────────────────────
+
+    #[cfg(feature = "anytls")]
+    fn anytls_config(yaml: &str) -> HashMap<String, serde_yaml::Value> {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    // The upstream `anytls-rs` Client constructor spawns a background pool
+    // reaper task synchronously, which requires a live tokio reactor. The
+    // production code path always calls parse_proxy from inside the main
+    // runtime, but tests have to opt in explicitly with #[tokio::test].
+
+    #[cfg(feature = "anytls")]
+    #[tokio::test]
+    async fn parse_anytls_minimum_fields_ok() {
+        let cfg =
+            anytls_config("name: jp\ntype: anytls\nserver: 1.2.3.4\nport: 443\npassword: secret\n");
+        assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[cfg(feature = "anytls")]
+    #[tokio::test]
+    async fn parse_anytls_with_sni_and_skip_verify_ok() {
+        let cfg = anytls_config(
+            "name: jp\ntype: anytls\nserver: 1.2.3.4\nport: 443\npassword: secret\nsni: example.com\nskip-cert-verify: true\n",
+        );
+        assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[cfg(feature = "anytls")]
+    #[tokio::test]
+    async fn parse_anytls_rejects_missing_password() {
+        let cfg = anytls_config("name: jp\ntype: anytls\nserver: 1.2.3.4\nport: 443\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("missing password must hard-error (Class A)");
+        };
+        assert!(err.contains("missing password"), "msg: {err}");
+    }
+
+    #[cfg(feature = "anytls")]
+    #[tokio::test]
+    async fn parse_anytls_rejects_zero_port() {
+        let cfg =
+            anytls_config("name: jp\ntype: anytls\nserver: 1.2.3.4\nport: 0\npassword: secret\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("zero port must hard-error (Class A)");
+        };
+        assert!(err.contains("port must be non-zero"), "msg: {err}");
     }
 
     // ─── Load-balance strategy parser (F1-F7) ────────────────────────────────

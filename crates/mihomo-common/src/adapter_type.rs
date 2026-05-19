@@ -17,6 +17,7 @@ pub enum AdapterType {
     Vless,
     Trojan,
     Hysteria2,
+    Anytls,
 }
 
 impl fmt::Display for AdapterType {
@@ -36,6 +37,7 @@ impl fmt::Display for AdapterType {
             AdapterType::Vless => write!(f, "Vless"),
             AdapterType::Trojan => write!(f, "Trojan"),
             AdapterType::Hysteria2 => write!(f, "Hysteria2"),
+            AdapterType::Anytls => write!(f, "AnyTLS"),
         }
     }
 }

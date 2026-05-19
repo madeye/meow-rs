@@ -10,6 +10,11 @@ ss = ["dep:shadowsocks"]
 trojan = []
 vless = []
 vless-vision = ["vless"]
+# Opt-in anytls outbound (uses the `anytls-rs` crate). Adds ~one extra TLS
+# provider to the binary because the upstream crate pins default rustls
+# features — accept the bloat in exchange for not re-implementing the
+# wire protocol. Off by default.
+anytls = ["dep:anytls-rs"]
 # Native client for the `ech-tls-tunnel` SIP003 plugin
 # (https://github.com/shadowsocks/ech-tls-tunnel). Requires ECH on rustls,
 # which pulls aws-lc-rs in via mihomo-transport.
@@ -20,6 +25,7 @@ mihomo-common = { workspace = true }
 mihomo-dns = { workspace = true }
 mihomo-transport = { workspace = true }
 tokio = { workspace = true }
+anytls-rs = { workspace = true, optional = true }
 shadowsocks = { workspace = true, optional = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
@@ -46,6 +52,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
+smol_str = { workspace = true }
 
 [lints]
 workspace = true

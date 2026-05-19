@@ -10,6 +10,7 @@ ss = ["mihomo-proxy/ss"]
 trojan = ["mihomo-proxy/trojan"]
 vless = ["mihomo-proxy/vless"]
 vless-vision = ["vless", "mihomo-proxy/vless-vision"]
+anytls = ["mihomo-proxy/anytls"]
 boring-tls = ["mihomo-transport/boring-tls"]
 ech-tls-tunnel = ["ss", "mihomo-proxy/ech-tls-tunnel"]
 

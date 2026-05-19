@@ -19,6 +19,11 @@ pub mod v2ray_plugin;
 #[cfg(feature = "trojan")]
 pub mod trojan;
 
+#[cfg(feature = "anytls")]
+pub mod anytls_adapter;
+#[cfg(feature = "anytls")]
+pub use anytls_adapter::AnytlsAdapter;
+
 #[cfg(feature = "vless")]
 pub(crate) mod vless;
 #[cfg(feature = "vless")]
