@@ -8,8 +8,8 @@ use mihomo_proxy::ShadowsocksAdapter;
 #[cfg(feature = "trojan")]
 use mihomo_proxy::TrojanAdapter;
 use mihomo_proxy::{
-    FallbackGroup, HttpAdapter, LbStrategy, LoadBalanceGroup, RelayGroup, SelectorGroup,
-    Socks5Adapter, UrlTestGroup,
+    DirectAdapter, FallbackGroup, HttpAdapter, LbStrategy, LoadBalanceGroup, RelayGroup,
+    SelectorGroup, Socks5Adapter, UrlTestGroup,
 };
 #[cfg(feature = "vless")]
 use mihomo_proxy::{TransportChain, VlessAdapter, VlessFlow};
@@ -169,6 +169,10 @@ pub fn parse_proxy(
             let adapter = parse_socks5(name, config)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
+        "direct" => {
+            let adapter = parse_direct(name, config)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
         _ => Err(format!("unsupported proxy type: {proxy_type}")),
     }
 }
@@ -304,6 +308,79 @@ fn parse_socks5(
         tls,
         skip_cert_verify,
     ))
+}
+
+/// Parse a `type: direct` proxy block into a [`DirectAdapter`].
+///
+/// Accepts an optional `dns:` field — a single `host:port` string or a list
+/// of them — that scopes hostname resolution for this proxy to the given DNS
+/// servers (plain UDP). Closes #67: lets users route a subset of direct
+/// traffic through a different DNS than the global resolver (e.g. a LAN
+/// resolver for `*.local` while the global resolver handles WAN).
+///
+/// `dns:` entries must include an explicit port (`:53` is conventional).
+/// Hard error (Class A per ADR-0002) on an unparseable address — silently
+/// falling back to the global resolver would surprise the user by leaking
+/// queries.
+fn parse_direct(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<DirectAdapter, String> {
+    use mihomo_common::DnsMode;
+    use mihomo_dns::Resolver;
+    use mihomo_trie::DomainTrie;
+    use std::net::{IpAddr, SocketAddr};
+
+    let mut adapter = DirectAdapter::new();
+
+    if let Some(v) = config.get("dns") {
+        let entries: Vec<String> = match v {
+            serde_yaml::Value::String(s) => vec![s.clone()],
+            serde_yaml::Value::Sequence(seq) => seq
+                .iter()
+                .map(|e| {
+                    e.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| format!("direct[{name}]: dns entries must be strings"))
+                })
+                .collect::<std::result::Result<_, _>>()?,
+            _ => {
+                return Err(format!(
+                    "direct[{name}]: dns must be a string or list of strings"
+                ));
+            }
+        };
+
+        let mut servers: Vec<SocketAddr> = Vec::with_capacity(entries.len());
+        for entry in &entries {
+            // Accept `IP` (default port 53), `IP:53`, or bracketed IPv6.
+            let parsed = if let Ok(sa) = entry.parse::<SocketAddr>() {
+                sa
+            } else if let Ok(ip) = entry.parse::<IpAddr>() {
+                SocketAddr::new(ip, 53)
+            } else {
+                return Err(format!(
+                    "direct[{name}]: dns entry '{entry}' is not a valid IP or host:port"
+                ));
+            };
+            servers.push(parsed);
+        }
+
+        if servers.is_empty() {
+            return Err(format!("direct[{name}]: dns list is empty"));
+        }
+
+        let resolver = Arc::new(Resolver::new(
+            servers,
+            Vec::new(),
+            DnsMode::Normal,
+            DomainTrie::<Vec<IpAddr>>::new(),
+            false,
+        ));
+        adapter = adapter.with_resolver(resolver);
+    }
+
+    Ok(adapter)
 }
 
 /// Parse the `strategy` field for a `load-balance` group.
@@ -981,6 +1058,58 @@ tls: true
         let yaml: serde_yaml::Value = serde_yaml::from_str("port: 8080").unwrap();
         let result = serialize_plugin_opts(&yaml).unwrap();
         assert_eq!(result, "port=8080");
+    }
+
+    // ─── direct proxy with per-proxy DNS (issue #67) ─────────────────────────
+
+    fn direct_config(yaml: &str) -> HashMap<String, serde_yaml::Value> {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn parse_direct_without_dns_ok() {
+        let cfg = direct_config("name: my-direct\ntype: direct\n");
+        assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[test]
+    fn parse_direct_with_single_dns_string() {
+        let cfg = direct_config("name: lan\ntype: direct\ndns: 192.168.1.1\n");
+        assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[test]
+    fn parse_direct_with_dns_list_and_explicit_port() {
+        let cfg = direct_config("name: lan\ntype: direct\ndns:\n  - 192.168.1.1\n  - 8.8.8.8:53\n");
+        assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[test]
+    fn parse_direct_rejects_invalid_dns_entry() {
+        let cfg = direct_config("name: bad\ntype: direct\ndns: not-an-ip\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("invalid dns entry must hard-error (Class A)");
+        };
+        assert!(err.contains("not a valid IP or host:port"), "msg: {err}");
+    }
+
+    #[test]
+    fn parse_direct_rejects_empty_dns_list() {
+        let cfg = direct_config("name: bad\ntype: direct\ndns: []\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("empty dns list must hard-error (Class A)");
+        };
+        assert!(err.contains("dns list is empty"), "msg: {err}");
+    }
+
+    #[test]
+    fn parse_direct_rejects_wrong_dns_type() {
+        let cfg = direct_config("name: bad\ntype: direct\ndns: 53\n");
+        // Integer 53 is neither a string nor a list — must be rejected.
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("scalar non-string dns must hard-error (Class A)");
+        };
+        assert!(err.contains("dns must be a string or list"), "msg: {err}");
     }
 
     // ─── Load-balance strategy parser (F1-F7) ────────────────────────────────
