@@ -1,6 +1,6 @@
 //! AnyTLS outbound (issue #75).
 //!
-//! Thin wrapper over the [`anytls-rs`] crate's `Client`. The protocol itself
+//! Thin wrapper over the `anytls-rs` crate's `Client`. The protocol itself
 //! — TLS handshake, password auth, session multiplexing, padding scheme —
 //! lives upstream; this file only translates between mihomo's `ProxyAdapter`
 //! trait and `anytls_rs`'s `Client::create_proxy_stream` / `Session` API.

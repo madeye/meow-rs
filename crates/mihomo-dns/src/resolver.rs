@@ -313,9 +313,10 @@ impl Resolver {
     }
 
     /// Build a `Resolver` from `NameServerUrl` lists with no `#PROXY`
-    /// support. Equivalent to [`new_with_bootstrap_with_proxies`] with an
-    /// empty registry; convenient for tests and call sites that don't
-    /// need proxy-routed DNS.
+    /// support. Equivalent to
+    /// [`Resolver::new_with_bootstrap_with_proxies`] with an empty
+    /// registry; convenient for tests and call sites that don't need
+    /// proxy-routed DNS.
     #[allow(clippy::too_many_arguments)]
     pub async fn new_with_bootstrap(
         main_urls: Vec<NameServerUrl>,
@@ -527,7 +528,7 @@ impl Resolver {
         Self::build_single_resolver_with_proxy(url, resolved, None)
     }
 
-    /// Like [`build_single_resolver`] but also attaches an optional
+    /// Like [`Resolver::build_single_resolver`] but also attaches an optional
     /// proxy adapter so queries route via `proxy.dial_tcp` (issue #67
     /// phase 2). Pass `None` to get the unrouted client.
     pub fn build_single_resolver_with_proxy(
