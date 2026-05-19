@@ -101,8 +101,20 @@ pub struct ApiConfig {
 }
 
 pub async fn load_config(path: &str) -> Result<Config, anyhow::Error> {
-    let content = std::fs::read_to_string(path)?;
-    let raw: raw::RawConfig = parse_raw_yaml(&content)?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| anyhow::anyhow!("failed to read config file {path}: {e}"))?;
+    // Strip an optional UTF-8 BOM, which YAML 1.2 permits but some
+    // editors (especially on Windows) leave behind.
+    let bytes = bytes
+        .strip_prefix(b"\xEF\xBB\xBF")
+        .unwrap_or(bytes.as_slice());
+    let content = std::str::from_utf8(bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "config file {path} is not valid UTF-8 at byte {}: {e}. Re-save the file with UTF-8 encoding.",
+            e.valid_up_to()
+        )
+    })?;
+    let raw: raw::RawConfig = parse_raw_yaml(content)?;
     // Rule-provider cache files live next to config.yaml.
     let cache_dir: Option<PathBuf> = std::path::Path::new(path).parent().and_then(|p| {
         if p.as_os_str().is_empty() {
@@ -1037,6 +1049,67 @@ rule-providers:
             msg.contains("IP-ASN,13335,PROXY"),
             "error must name the triggering rule: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod load_config_encoding_tests {
+    use super::load_config;
+    use std::io::Write;
+
+    // Minimal config body that parse_raw_yaml accepts; load_config will still
+    // fail downstream on missing fields, so we only care that the read+decode
+    // step succeeds (i.e. the BOM was stripped and YAML parsing started).
+    const MINIMAL_YAML: &str = "port: 7890\n";
+
+    fn write_tmp(bytes: &[u8]) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        path.push(format!("mihomo-cfg-{pid}-{nanos}.yaml"));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(bytes).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_yields_actionable_error() {
+        // 0xFF is never valid in UTF-8.
+        let path = write_tmp(b"port: 7890\nrubbish: \xFF\xFE\n");
+        let Err(err) = load_config(path.to_str().unwrap()).await else {
+            panic!("non-UTF-8 config must fail");
+        };
+        let _ = std::fs::remove_file(&path);
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("not valid UTF-8"),
+            "error must mention UTF-8: {msg}"
+        );
+        assert!(
+            msg.contains(path.to_str().unwrap()),
+            "error must include the config path: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn utf8_bom_is_stripped() {
+        let mut bytes = b"\xEF\xBB\xBF".to_vec();
+        bytes.extend_from_slice(MINIMAL_YAML.as_bytes());
+        let path = write_tmp(&bytes);
+        // We don't assert success of full load_config (it requires more fields),
+        // but the error — if any — must NOT be the UTF-8/BOM error path.
+        let result = load_config(path.to_str().unwrap()).await;
+        let _ = std::fs::remove_file(&path);
+        if let Err(e) = result {
+            let msg = format!("{e}");
+            assert!(
+                !msg.contains("not valid UTF-8"),
+                "BOM-prefixed UTF-8 must not trigger encoding error: {msg}"
+            );
+        }
     }
 }
 
