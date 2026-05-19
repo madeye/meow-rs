@@ -60,6 +60,63 @@ impl fmt::Display for NameServerUrl {
     }
 }
 
+/// A nameserver entry — a [`NameServerUrl`] plus an optional `#PROXY` tag
+/// telling the resolver to tunnel queries through the named proxy.
+///
+/// See [ADR-0012](../../../../docs/adr/0012-dns-via-proxy.md) for the
+/// design (issue #67 phase 2). Only the plain `Udp` / `Tcp` URL forms
+/// accept a `#PROXY` fragment in this slice; `Tls` / `Https` already use
+/// `#` for SNI and need the `?proxy=NAME` query-string disambiguator
+/// from the ADR, which is left for a follow-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameServerEntry {
+    pub url: NameServerUrl,
+    pub proxy: Option<String>,
+}
+
+impl NameServerEntry {
+    pub fn plain(url: NameServerUrl) -> Self {
+        Self { url, proxy: None }
+    }
+
+    /// Parse a nameserver string, returning the parsed `NameServerUrl` plus
+    /// the optional proxy name if a `#PROXY` fragment was present on a
+    /// plain (Udp/Tcp) entry.
+    pub fn parse(s: &str) -> Result<Self, NameServerParseError> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(NameServerParseError::EmptyInput);
+        }
+
+        // Only plain forms (no scheme, `udp://`, `tcp://`) treat the `#`
+        // fragment as a proxy name. For `tls://` / `https://` the
+        // fragment is SNI — leave it intact and let NameServerUrl::parse
+        // consume it normally.
+        let is_plain_form = !(s.starts_with("tls://") || s.starts_with("https://"));
+        if is_plain_form {
+            if let Some(idx) = s.find('#') {
+                let head = &s[..idx];
+                let proxy = s[idx + 1..].trim();
+                if proxy.is_empty() {
+                    return Err(NameServerParseError::InvalidHost(s.to_string()));
+                }
+                let url = NameServerUrl::parse(head)?;
+                return Ok(Self {
+                    url,
+                    proxy: Some(proxy.to_string()),
+                });
+            }
+        }
+        Ok(Self::plain(NameServerUrl::parse(s)?))
+    }
+}
+
+impl From<NameServerUrl> for NameServerEntry {
+    fn from(url: NameServerUrl) -> Self {
+        Self::plain(url)
+    }
+}
+
 impl NameServerUrl {
     /// Returns `Some(hostname)` if this entry needs bootstrap DNS resolution,
     /// `None` if the address is already an IP literal.
@@ -620,5 +677,59 @@ mod tests {
             msg.contains("encrypted"),
             "error message must mention the 'encrypted' feature, got: {msg}"
         );
+    }
+
+    // ─── #PROXY suffix parsing (issue #67 phase 2, ADR-0012) ──────────────
+
+    #[test]
+    fn entry_no_proxy_default() {
+        let e = NameServerEntry::parse("8.8.8.8").unwrap();
+        assert!(e.proxy.is_none());
+        assert_eq!(
+            e.url,
+            NameServerUrl::Udp {
+                addr: ip4(8, 8, 8, 8),
+                port: 53,
+            }
+        );
+    }
+
+    #[test]
+    fn entry_plain_udp_with_proxy_tag() {
+        let e = NameServerEntry::parse("1.1.1.1#PROXY-JP").unwrap();
+        assert_eq!(e.proxy.as_deref(), Some("PROXY-JP"));
+        assert_eq!(
+            e.url,
+            NameServerUrl::Udp {
+                addr: ip4(1, 1, 1, 1),
+                port: 53,
+            }
+        );
+    }
+
+    #[test]
+    fn entry_tcp_scheme_with_proxy_tag() {
+        let e = NameServerEntry::parse("tcp://1.1.1.1:53#PROXY-JP").unwrap();
+        assert_eq!(e.proxy.as_deref(), Some("PROXY-JP"));
+        assert!(matches!(e.url, NameServerUrl::Tcp { .. }));
+    }
+
+    #[test]
+    #[cfg(feature = "encrypted")]
+    fn entry_tls_fragment_is_sni_not_proxy() {
+        // For tls:// the `#` is SNI per the existing parser; the
+        // NameServerEntry layer must NOT steal that fragment as a proxy
+        // name. ADR-0012 reserves `?proxy=NAME` for TLS/HTTPS — not yet
+        // implemented, but the existing SNI semantics must keep working.
+        let e = NameServerEntry::parse("tls://1.1.1.1:853#dns.google").unwrap();
+        assert!(e.proxy.is_none());
+        assert!(matches!(e.url, NameServerUrl::Tls { .. }));
+    }
+
+    #[test]
+    fn entry_empty_proxy_tag_errors() {
+        // `1.1.1.1#` with nothing after the # is a typo, not "no proxy."
+        let err = NameServerEntry::parse("1.1.1.1#").unwrap_err();
+        assert!(matches!(err, NameServerParseError::InvalidHost(_)));
     }
 }

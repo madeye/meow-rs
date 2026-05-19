@@ -3,7 +3,7 @@ use crate::DnsConfig;
 use mihomo_common::DnsMode;
 use mihomo_dns::fakeip::{FileStore, MemoryStore, Pool, Skipper, SkipperMode, Store};
 use mihomo_dns::resolver::{FallbackFilter, NameserverPolicy, PolicyEntry};
-use mihomo_dns::upstream::NameServerUrl;
+use mihomo_dns::upstream::{NameServerEntry, NameServerUrl};
 use mihomo_dns::{HostOrIp, Resolver};
 use mihomo_trie::DomainTrie;
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ pub async fn parse_dns(
     raw: &RawConfig,
     mmdb_path: Option<&std::path::Path>,
     cache_dir: Option<&std::path::Path>,
+    proxy_registry: &HashMap<String, Arc<dyn mihomo_common::Proxy>>,
 ) -> Result<DnsConfig, anyhow::Error> {
     let dns = match &raw.dns {
         Some(dns) if dns.enable.unwrap_or(false) => dns,
@@ -42,9 +43,10 @@ pub async fn parse_dns(
     let use_hosts = dns.use_hosts.unwrap_or(true);
     let use_system_hosts = dns.use_system_hosts.unwrap_or(true);
 
-    let main_urls = parse_nameserver_urls(dns.nameserver.as_deref().unwrap_or(&[]))?;
-    let fallback_urls = parse_nameserver_urls(dns.fallback.as_deref().unwrap_or(&[]))?;
-    let default_ns_urls = parse_nameserver_urls(dns.default_nameserver.as_deref().unwrap_or(&[]))?;
+    let main_urls = parse_nameserver_entries(dns.nameserver.as_deref().unwrap_or(&[]))?;
+    let fallback_urls = parse_nameserver_entries(dns.fallback.as_deref().unwrap_or(&[]))?;
+    let default_ns_urls =
+        parse_nameserver_entries(dns.default_nameserver.as_deref().unwrap_or(&[]))?;
 
     let mode = match dns.enhanced_mode.as_deref() {
         Some("fake-ip") => DnsMode::FakeIp,
@@ -80,7 +82,7 @@ pub async fn parse_dns(
         ))
     };
 
-    let mut resolver = Resolver::new_with_bootstrap(
+    let mut resolver = Resolver::new_with_bootstrap_with_proxies(
         main_urls,
         fallback_urls,
         default_ns_urls,
@@ -89,6 +91,7 @@ pub async fn parse_dns(
         use_hosts,
         policy,
         fallback_filter,
+        proxy_registry,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -171,16 +174,24 @@ fn install_fakeip(
     Ok(())
 }
 
-/// Parse nameserver strings into `NameServerUrl`s — every entry must parse
-/// or load fails. No silent warn-and-drop.
-fn parse_nameserver_urls(servers: &[String]) -> Result<Vec<NameServerUrl>, anyhow::Error> {
+/// Parse nameserver strings into `NameServerEntry`s — every entry must
+/// parse or load fails. No silent warn-and-drop.
+fn parse_nameserver_entries(servers: &[String]) -> Result<Vec<NameServerEntry>, anyhow::Error> {
     servers
         .iter()
         .map(|s| {
-            NameServerUrl::parse(s)
+            NameServerEntry::parse(s)
                 .map_err(|e| anyhow::anyhow!("failed to parse nameserver '{s}': {e}"))
         })
         .collect()
+}
+
+/// Pre-`NameServerEntry` shim kept for the existing tests below that build
+/// raw `NameServerUrl`s and compare against the result. New code should use
+/// [`parse_nameserver_entries`].
+#[cfg(test)]
+fn parse_nameserver_urls(servers: &[String]) -> Result<Vec<NameServerUrl>, anyhow::Error> {
+    parse_nameserver_entries(servers).map(|v| v.into_iter().map(|e| e.url).collect())
 }
 
 /// Build a `NameserverPolicy` from the raw YAML map.

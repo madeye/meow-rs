@@ -30,10 +30,13 @@ maxminddb = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+smol_str = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 sysinfo = "0.32"
+async-trait = { workspace = true }
+hickory-proto = { workspace = true }
 
 [lints]
 workspace = true

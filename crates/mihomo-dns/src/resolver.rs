@@ -1,7 +1,7 @@
 use crate::cache::DnsCache;
 use crate::client::DnsClient;
 use crate::fakeip::{Pool, Skipper};
-use crate::upstream::{HostOrIp, NameServerUrl};
+use crate::upstream::{HostOrIp, NameServerEntry, NameServerUrl};
 use dashmap::DashMap;
 use hickory_proto::op::Message;
 use hickory_proto::rr::RecordType;
@@ -31,6 +31,14 @@ pub enum BootstrapError {
         input: String,
         source: crate::upstream::NameServerParseError,
     },
+    #[error("nameserver '{nameserver}' references proxy '{proxy}', which is not defined")]
+    UnknownProxy { nameserver: String, proxy: String },
+    #[error(
+        "nameserver '{nameserver}' uses proxy '{proxy}' on a tls:///https:// entry; \
+        DoT/DoH routing through a proxy is not implemented yet — use plain udp:// or tcp:// \
+        (issue #67 phase 2 follow-up)"
+    )]
+    EncryptedProxyUnsupported { nameserver: String, proxy: String },
 }
 
 /// Broadcast channel used to share a singleflight lookup result.
@@ -304,8 +312,10 @@ impl Resolver {
             .collect()
     }
 
-    /// Build a `Resolver` from structured `NameServerUrl` lists, running a
-    /// bootstrap DNS lookup for any encrypted upstream that uses a hostname.
+    /// Build a `Resolver` from `NameServerUrl` lists with no `#PROXY`
+    /// support. Equivalent to [`new_with_bootstrap_with_proxies`] with an
+    /// empty registry; convenient for tests and call sites that don't
+    /// need proxy-routed DNS.
     #[allow(clippy::too_many_arguments)]
     pub async fn new_with_bootstrap(
         main_urls: Vec<NameServerUrl>,
@@ -317,6 +327,93 @@ impl Resolver {
         policy: Option<NameserverPolicy>,
         fallback_filter: Option<FallbackFilter>,
     ) -> Result<Self, BootstrapError> {
+        Self::new_with_bootstrap_with_proxies(
+            main_urls.into_iter().map(Into::into).collect(),
+            fallback_urls.into_iter().map(Into::into).collect(),
+            default_ns.into_iter().map(Into::into).collect(),
+            mode,
+            hosts,
+            use_hosts,
+            policy,
+            fallback_filter,
+            &HashMap::new(),
+        )
+        .await
+    }
+
+    /// Build a `Resolver` from structured nameserver entries, running a
+    /// bootstrap DNS lookup for any encrypted upstream that uses a
+    /// hostname.
+    ///
+    /// `proxy_registry` resolves any `#PROXY` references on plain
+    /// (`udp://`/`tcp://`) entries (issue #67 phase 2). Pass an empty map
+    /// when proxies aren't yet built — entries that reference proxies
+    /// will then be rejected with `BootstrapError::UnknownProxy`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new_with_bootstrap_with_proxies(
+        main_urls: Vec<NameServerEntry>,
+        fallback_urls: Vec<NameServerEntry>,
+        default_ns: Vec<NameServerEntry>,
+        mode: DnsMode,
+        hosts: DomainTrie<Vec<IpAddr>>,
+        use_hosts: bool,
+        policy: Option<NameserverPolicy>,
+        fallback_filter: Option<FallbackFilter>,
+        proxy_registry: &HashMap<String, Arc<dyn mihomo_common::Proxy>>,
+    ) -> Result<Self, BootstrapError> {
+        // ── Validate proxy references up front so misconfig fails loud.
+        // `default_ns` entries are forbidden from carrying #PROXY — they
+        // are the bootstrap path that resolves the proxy server's own
+        // hostname, so routing them through a proxy would create the
+        // chicken-and-egg loop ADR-0012 warns about.
+        for entry in &default_ns {
+            if let Some(p) = entry.proxy.as_ref() {
+                return Err(BootstrapError::UnknownProxy {
+                    nameserver: entry.url.to_string(),
+                    proxy: format!("{p} (default-nameserver may not use #PROXY)"),
+                });
+            }
+        }
+        for entry in main_urls.iter().chain(fallback_urls.iter()) {
+            let Some(p) = entry.proxy.as_ref() else {
+                continue;
+            };
+            if matches!(
+                entry.url,
+                NameServerUrl::Tls { .. } | NameServerUrl::Https { .. }
+            ) {
+                return Err(BootstrapError::EncryptedProxyUnsupported {
+                    nameserver: entry.url.to_string(),
+                    proxy: p.clone(),
+                });
+            }
+            if !proxy_registry.contains_key(p) {
+                return Err(BootstrapError::UnknownProxy {
+                    nameserver: entry.url.to_string(),
+                    proxy: p.clone(),
+                });
+            }
+        }
+
+        // Split out the bare URLs (for the existing match-arm helpers
+        // below) and a parallel proxy-handle vector (Some when the entry
+        // carried a validated #PROXY tag).
+        let resolve_proxy =
+            |entries: &[NameServerEntry]| -> Vec<Option<Arc<dyn mihomo_common::Proxy>>> {
+                entries
+                    .iter()
+                    .map(|e| {
+                        e.proxy
+                            .as_ref()
+                            .and_then(|p| proxy_registry.get(p).cloned())
+                    })
+                    .collect()
+            };
+        let main_proxies = resolve_proxy(&main_urls);
+        let fallback_proxies = resolve_proxy(&fallback_urls);
+        let main_urls: Vec<NameServerUrl> = main_urls.into_iter().map(|e| e.url).collect();
+        let fallback_urls: Vec<NameServerUrl> = fallback_urls.into_iter().map(|e| e.url).collect();
+        let default_ns: Vec<NameServerUrl> = default_ns.into_iter().map(|e| e.url).collect();
         // Step 1: Validate default_ns — only plain entries allowed.
         for ns in &default_ns {
             if !ns.is_plain() {
@@ -384,9 +481,10 @@ impl Resolver {
         };
 
         // Steps 5 & 6: Build main + fallback — one resolver per URL for parallel dispatch.
-        let main = main_urls
+        let main: Vec<Arc<DnsClient>> = main_urls
             .iter()
-            .map(|url| Self::build_single_resolver(url, &resolved_map))
+            .zip(main_proxies)
+            .map(|(url, proxy)| Self::build_single_resolver_with_proxy(url, &resolved_map, proxy))
             .collect();
         let fallback = if fallback_urls.is_empty() {
             None
@@ -394,7 +492,10 @@ impl Resolver {
             Some(
                 fallback_urls
                     .iter()
-                    .map(|url| Self::build_single_resolver(url, &resolved_map))
+                    .zip(fallback_proxies)
+                    .map(|(url, proxy)| {
+                        Self::build_single_resolver_with_proxy(url, &resolved_map, proxy)
+                    })
                     .collect(),
             )
         };
@@ -422,6 +523,17 @@ impl Resolver {
     pub fn build_single_resolver(
         url: &NameServerUrl,
         resolved: &HashMap<String, IpAddr>,
+    ) -> Arc<DnsClient> {
+        Self::build_single_resolver_with_proxy(url, resolved, None)
+    }
+
+    /// Like [`build_single_resolver`] but also attaches an optional
+    /// proxy adapter so queries route via `proxy.dial_tcp` (issue #67
+    /// phase 2). Pass `None` to get the unrouted client.
+    pub fn build_single_resolver_with_proxy(
+        url: &NameServerUrl,
+        resolved: &HashMap<String, IpAddr>,
+        proxy: Option<Arc<dyn mihomo_common::Proxy>>,
     ) -> Arc<DnsClient> {
         let socket_addr = match url {
             NameServerUrl::Udp { addr, port }
@@ -462,6 +574,10 @@ impl Resolver {
                     )
                 }
             }
+        };
+        let client = match proxy {
+            Some(p) => client.with_proxy(p),
+            None => client,
         };
         Arc::new(client)
     }

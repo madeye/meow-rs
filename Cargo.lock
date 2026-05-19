@@ -2042,6 +2042,7 @@ dependencies = [
 name = "mihomo-dns"
 version = "0.7.6"
 dependencies = [
+ "async-trait",
  "dashmap",
  "futures",
  "hickory-proto",
@@ -2055,6 +2056,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "smol_str",
  "sysinfo",
  "thiserror 2.0.18",
  "tokio",
