@@ -729,10 +729,6 @@ async fn build_config(
         bind_address,
     };
 
-    // DNS — pass the explicit mmdb path so fallback-filter GeoIP uses the
-    // same path as the rule engine.
-    let dns_config = dns_parser::parse_dns(&raw, geodata.mmdb_path.as_deref(), cache_dir).await?;
-
     // Load proxy providers (async: may HTTP-fetch provider files).
     let proxy_providers = if let Some(raw_pp) = raw.proxy_providers.as_ref() {
         if raw_pp.is_empty() {
@@ -744,9 +740,26 @@ async fn build_config(
         HashMap::new()
     };
 
-    // Proxies and rules via rebuild — pass the resolver so DIRECT can avoid
-    // the OS resolver (and the resulting DNS-loop when mihomo is system DNS).
-    // Uses geodata paths from the raw config (already validated above).
+    // Two-pass build so DNS can see the proxy registry without a circular
+    // dependency on the resolver itself (issue #67 phase 2, ADR-0012):
+    //
+    //   1. Build proxies with no resolver injected. Every adapter except
+    //      DIRECT is fully functional here; DIRECT falls back to the OS
+    //      resolver, which would loop if mihomo were the system DNS.
+    //   2. Build the DNS resolver, passing those proxies as the
+    //      `#PROXY-NAME` registry. The resolver does not call back into
+    //      proxies during construction, so this is safe.
+    //   3. Rebuild proxies with the real resolver attached. The two
+    //      passes only differ in DIRECT's resolver field; nothing else
+    //      depends on the placeholder built in step 1.
+    let (proxies, _) = rebuild_from_raw_impl(&raw, cache_dir, None, &proxy_providers)?;
+
+    // DNS — pass the explicit mmdb path so fallback-filter GeoIP uses the
+    // same path as the rule engine, plus the proxy registry from step 1
+    // so #PROXY-tagged nameservers can resolve their referenced adapter.
+    let dns_config =
+        dns_parser::parse_dns(&raw, geodata.mmdb_path.as_deref(), cache_dir, &proxies).await?;
+
     let (proxies, rules) = rebuild_from_raw_impl(
         &raw,
         cache_dir,

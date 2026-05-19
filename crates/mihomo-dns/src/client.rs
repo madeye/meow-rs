@@ -95,10 +95,16 @@ pub enum ClientError {
     Rcode(hickory_proto::op::ResponseCode),
 }
 
+/// Optional proxy adapter for routing DNS queries through. When set, the
+/// TCP exchange is performed via `proxy.dial_tcp` instead of
+/// `factory().connect_tcp` — see ADR-0012 (issue #67 phase 2).
+pub type DnsProxy = Arc<dyn mihomo_common::Proxy>;
+
 /// A single DNS upstream the resolver can query.
 pub struct DnsClient {
     transport: Transport,
     timeout: Duration,
+    proxy: Option<DnsProxy>,
 }
 
 enum Transport {
@@ -129,6 +135,7 @@ impl DnsClient {
         Self {
             transport: Transport::Udp { addr },
             timeout: DEFAULT_QUERY_TIMEOUT,
+            proxy: None,
         }
     }
 
@@ -137,6 +144,7 @@ impl DnsClient {
         Self {
             transport: Transport::Tcp { addr },
             timeout: DEFAULT_QUERY_TIMEOUT,
+            proxy: None,
         }
     }
 
@@ -150,6 +158,7 @@ impl DnsClient {
                 tls: tls_client_config("dot"),
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
+            proxy: None,
         }
     }
 
@@ -164,12 +173,26 @@ impl DnsClient {
                 tls: tls_client_config("doh"),
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
+            proxy: None,
         }
     }
 
     /// Override the per-query timeout.
     pub fn with_timeout(mut self, t: Duration) -> Self {
         self.timeout = t;
+        self
+    }
+
+    /// Route this client's exchanges through `proxy` (issue #67 phase 2).
+    ///
+    /// When set:
+    /// - TCP / DoT / DoH exchanges use `proxy.dial_tcp` instead of opening
+    ///   a direct TCP connection.
+    /// - UDP exchanges fall through to TCP-over-proxy, since most proxy
+    ///   adapters can't relay arbitrary UDP. The fallback matches the
+    ///   semantics in ADR-0012.
+    pub fn with_proxy(mut self, proxy: DnsProxy) -> Self {
+        self.proxy = Some(proxy);
         self
     }
 
@@ -228,6 +251,26 @@ impl DnsClient {
     }
 
     async fn exchange(&self, wire: &[u8]) -> Result<Vec<u8>, ClientError> {
+        if let Some(proxy) = self.proxy.as_ref() {
+            let addr = match &self.transport {
+                Transport::Udp { addr } | Transport::Tcp { addr } => *addr,
+                #[cfg(feature = "encrypted")]
+                Transport::Dot { .. } | Transport::Doh { .. } => {
+                    // DoT/DoH-over-proxy needs TLS layered on a Box<dyn
+                    // ProxyConn>; the upstream tokio_rustls TlsConnector
+                    // is generic over the IO stream but the call sites
+                    // here aren't wired yet. ADR-0012 marks it
+                    // follow-up. Refuse so misconfiguration is loud.
+                    return Err(ClientError::Tls(
+                        "DoT/DoH routing through a proxy is not implemented yet \
+                        (issue #67 phase 2 follow-up); use plain udp:// or tcp:// for \
+                        a #PROXY-tagged nameserver"
+                            .to_string(),
+                    ));
+                }
+            };
+            return proxy_tcp_exchange(proxy, addr, wire).await;
+        }
         match &self.transport {
             Transport::Udp { addr } => udp_exchange(*addr, wire).await,
             Transport::Tcp { addr } => tcp_exchange(*addr, wire).await,
@@ -244,6 +287,28 @@ impl DnsClient {
             } => doh_exchange(*addr, sni, path, Arc::clone(tls), wire).await,
         }
     }
+}
+
+async fn proxy_tcp_exchange(
+    proxy: &DnsProxy,
+    addr: SocketAddr,
+    wire: &[u8],
+) -> Result<Vec<u8>, ClientError> {
+    use mihomo_common::{ConnType, Metadata, Network};
+    let metadata = Metadata {
+        network: Network::Tcp,
+        conn_type: ConnType::Inner,
+        host: smol_str::SmolStr::from(addr.ip().to_string()),
+        dst_ip: Some(addr.ip()),
+        dst_port: addr.port(),
+        ..Default::default()
+    };
+    let mut stream = proxy
+        .dial_tcp(&metadata)
+        .await
+        .map_err(|e| io::Error::other(format!("dns-via-proxy dial: {e}")))?;
+    write_lp(&mut stream, wire).await?;
+    read_lp(&mut stream).await
 }
 
 fn ip_from_record(rec: &Record) -> Option<IpAddr> {
