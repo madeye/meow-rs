@@ -24,6 +24,11 @@ pub mod anytls_adapter;
 #[cfg(feature = "anytls")]
 pub use anytls_adapter::AnytlsAdapter;
 
+#[cfg(feature = "hysteria2")]
+pub mod hysteria2_adapter;
+#[cfg(feature = "hysteria2")]
+pub use hysteria2_adapter::Hy2Adapter;
+
 #[cfg(feature = "vless")]
 pub(crate) mod vless;
 #[cfg(feature = "vless")]
