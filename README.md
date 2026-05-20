@@ -116,23 +116,21 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 
 ## Benchmarks
 
-Latest Rust-only baseline on a developer host (Apple Silicon arm64, macOS 25.4, loopback `127.0.0.1`). Config is `mode: direct`, SOCKS5 listener on port 17890, DNS disabled; the proxy relays traffic to a TCP echo server via the DIRECT adapter. Three runs per metric, median reported per [ADR-0006](docs/adr/0006-m2-benchmark-methodology.md) §4. Reproduce with `bash bench.sh` (auto-downloads Go mihomo for a side-by-side run).
+Side-by-side against upstream Go mihomo on the same host (Apple Silicon arm64, macOS 25.5, loopback `127.0.0.1`). Both binaries use identical config: `mode: direct`, SOCKS5 listener on port 17890, DNS disabled. Reproduce with `bash bench.sh` (auto-downloads the latest Go mihomo release).
 
-| Metric | mihomo-rust v0.7.0 | Notes |
-|--------|--------------------|-------|
-| Binary size (stripped, release LTO) | **5.2 MB** | ADR-0007 cap: well under |
-| RSS idle | **9.2 MB** | |
-| RSS under load (peak) | **12.3 MB** | |
-| TCP throughput, 64 MB×1 | **12.96 Gbps** | |
-| TCP throughput, 1 MB×10 | **11.29 Gbps** | |
-| TCP throughput, 4 KB×10000 | **2.10 Gbps** | small-payload bound by per-conn overhead |
-| Latency p50 (connect + 1 B echo) | **179 µs** | 500 iterations |
-| Latency p99 | 758 µs | IQR/median > 0.10 — see footnote |
-| Connections/sec (10 s, concurrency 64) | **646 /s** | |
+| Metric | mihomo (Go) | mihomo-rust v0.7.6 | Delta |
+|--------|-------------|--------------------|-------|
+| Binary size (stripped) | 30.5 MB | **5.7 MB** | **−81%** |
+| RSS idle | 26.9 MB | **9.0 MB** | **−67%** |
+| RSS under load (peak) | 35.8 MB | **11.7 MB** | **−67%** |
+| TCP throughput, 64 MB×1 | 6.11 Gbps | 5.41 Gbps | −11% |
+| TCP throughput, 1 MB×10 | 6.23 Gbps | 4.61 Gbps | −26% |
+| TCP throughput, 4 KB×10000 | 0.79 Gbps | 0.87 Gbps | **+10%** |
+| Latency p50 (connect + 1 B echo) | 325 µs | **266 µs** | **−18%** |
+| Latency p99 | 583 µs | **339 µs** | **−42%** |
+| Connections/sec (10 s, concurrency 64) | 711 /s | 712 /s | ±0% |
 
-vs the 2026-04-18 M2-open Rust baseline (`docs/benchmarks/baseline-2026-04-18.json`): binary size −53%, throughput +85% to +156% across workloads, p50 latency −40%, idle RSS flat. The p99 latency sample has IQR/median = 47% and is rejected by the ADR-0006 variance gate; a clean reference-host re-run is required to characterise it.
-
-For full methodology, workload definitions (W1–W5), and the Go-comparable gauntlet, see [docs/benchmarks/index.md](docs/benchmarks/index.md).
+Single-run results from `bash bench.sh`; numbers will vary with host load. For the full methodology, three-run-median protocol, and workload definitions (W1–W5), see [ADR-0006](docs/adr/0006-m2-benchmark-methodology.md) and [docs/benchmarks/index.md](docs/benchmarks/index.md).
 
 ## Architecture
 

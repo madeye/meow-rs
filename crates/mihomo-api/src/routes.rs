@@ -115,8 +115,6 @@ async fn require_auth_ws(
     let token_param = query.get("token").map(std::string::String::as_str);
     let provided = bearer.or(token_param);
 
-    // TODO(task#33): apply constant-time comparison here when that task lands,
-    // matching the same fix applied to require_auth above.
     let ok = match provided {
         Some(t) if t.len() == expected.len() => {
             use subtle::ConstantTimeEq;

@@ -235,6 +235,10 @@ impl Tunnel {
         self.inner.proxies.read().clone()
     }
 
+    pub fn proxy(&self, name: &str) -> Option<Arc<dyn Proxy>> {
+        self.inner.proxies.read().get(name).cloned()
+    }
+
     /// Spawn background tasks owned by the tunnel (currently just the UDP NAT
     /// sweeper). Idempotent callers should only invoke this once per process.
     pub fn spawn_background_tasks(&self) {
