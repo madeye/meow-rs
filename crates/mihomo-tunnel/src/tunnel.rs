@@ -1,6 +1,7 @@
 use crate::match_engine::{self, DomainIndex};
 use crate::statistics::Statistics;
 use crate::udp::{self, NatTable};
+use arc_swap::ArcSwap;
 use mihomo_common::{Metadata, Proxy, ProxyAdapter, Rule, TunnelMode};
 use mihomo_dns::Resolver;
 use mihomo_proxy::DirectAdapter;
@@ -10,13 +11,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
 
+/// Bundled rules + domain index + proxies map, atomically swapped on config
+/// reload via `ArcSwap`. Reads on the connection-setup hot path are lock-free
+/// — previously each `resolve_proxy` call acquired three `parking_lot::RwLock`
+/// guards (rules, domain_index, proxies). The atomic swap also guarantees
+/// rules + proxies are observed as a consistent snapshot, so a connection
+/// can no longer match a rule that points at a proxy not yet inserted.
+///
+/// `rules` and `domain_index` are themselves `Arc`-wrapped so a partial
+/// update (e.g. `update_proxies` keeping the rules) is a refcount bump
+/// rather than a deep clone — `Box<dyn Rule>` is not `Clone`.
+pub struct RouteTable {
+    pub rules: Arc<Vec<Box<dyn Rule>>>,
+    pub domain_index: Arc<DomainIndex>,
+    pub proxies: HashMap<String, Arc<dyn Proxy>>,
+}
+
+impl RouteTable {
+    fn empty() -> Self {
+        Self {
+            rules: Arc::new(Vec::new()),
+            domain_index: Arc::new(DomainIndex::empty()),
+            proxies: HashMap::new(),
+        }
+    }
+}
+
 pub struct TunnelInner {
     pub mode: RwLock<TunnelMode>,
-    pub rules: RwLock<Vec<Box<dyn Rule>>>,
-    /// Domain trie index for early-exit rule matching (ADR-0008 §7 sub-area 0).
-    /// Rebuilt atomically whenever `update_rules` is called.
-    pub domain_index: RwLock<DomainIndex>,
-    pub proxies: RwLock<HashMap<String, Arc<dyn Proxy>>>,
+    /// Atomically-swapped route table (rules + domain index + proxies).
+    pub route: ArcSwap<RouteTable>,
     pub resolver: Arc<Resolver>,
     /// Fallback DIRECT adapter used when no user-defined rule matches or
     /// when Direct/Global mode bypasses the proxies map. Pre-built with the
@@ -104,8 +128,8 @@ impl TunnelInner {
                 String::new(),
             )),
             TunnelMode::Global => {
-                let proxies = self.proxies.read();
-                if let Some(proxy) = proxies.get("GLOBAL") {
+                let route = self.route.load();
+                if let Some(proxy) = route.proxies.get("GLOBAL") {
                     Some((
                         Arc::clone(proxy) as Arc<dyn ProxyAdapter>,
                         "Global".into(),
@@ -120,10 +144,16 @@ impl TunnelInner {
                 }
             }
             TunnelMode::Rule => {
-                let rules = self.rules.read();
-                let index = self.domain_index.read();
+                // One ArcSwap load — rules + index + proxies all read from a
+                // consistent snapshot. Replaces three RwLock acquisitions.
+                let route = self.route.load();
                 let needs_proc = self.needs_process_lookup.load(Ordering::Relaxed);
-                let result = match_engine::match_rules(metadata, &rules, &index, needs_proc);
+                let result = match_engine::match_rules(
+                    metadata,
+                    route.rules.as_ref(),
+                    route.domain_index.as_ref(),
+                    needs_proc,
+                );
                 match result {
                     Some(m) => {
                         let action = if m.adapter_name == "DIRECT" {
@@ -136,8 +166,7 @@ impl TunnelInner {
                         self.stats
                             .rule_match
                             .increment(m.rule_type.as_str(), action);
-                        let proxies = self.proxies.read();
-                        let proxy = proxies.get(&m.adapter_name).cloned().map_or_else(
+                        let proxy = route.proxies.get(&m.adapter_name).cloned().map_or_else(
                             || {
                                 debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
                                 Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>
@@ -170,9 +199,7 @@ impl Tunnel {
         Self {
             inner: Arc::new(TunnelInner {
                 mode: RwLock::new(TunnelMode::Rule),
-                rules: RwLock::new(Vec::new()),
-                domain_index: RwLock::new(DomainIndex::empty()),
-                proxies: RwLock::new(HashMap::new()),
+                route: ArcSwap::from_pointee(RouteTable::empty()),
                 resolver,
                 direct,
                 nat_table: udp::new_nat_table(),
@@ -200,18 +227,22 @@ impl Tunnel {
         let needs_ip = rules.iter().any(|r| r.should_resolve_ip());
         let needs_proc = rules.iter().any(|r| r.should_find_process());
         let new_index = DomainIndex::build(&rules);
-        {
-            let mut rules_guard = self.inner.rules.write();
-            let mut index_guard = self.inner.domain_index.write();
-            *rules_guard = rules;
-            *index_guard = new_index;
-            self.inner
-                .needs_ip_resolution
-                .store(needs_ip, Ordering::Relaxed);
-            self.inner
-                .needs_process_lookup
-                .store(needs_proc, Ordering::Relaxed);
-        }
+        // Build a new route table on top of the current proxies map. The
+        // current proxies are cloned (Arc bumps for adapter handles, one
+        // HashMap clone) — paid only on config-reload, not the hot path.
+        let current = self.inner.route.load();
+        let new_route = RouteTable {
+            rules: Arc::new(rules),
+            domain_index: Arc::new(new_index),
+            proxies: current.proxies.clone(),
+        };
+        self.inner.route.store(Arc::new(new_route));
+        self.inner
+            .needs_ip_resolution
+            .store(needs_ip, Ordering::Relaxed);
+        self.inner
+            .needs_process_lookup
+            .store(needs_proc, Ordering::Relaxed);
         info!(
             "Rules updated (needs_ip_resolution={}, needs_process_lookup={})",
             needs_ip, needs_proc
@@ -219,7 +250,14 @@ impl Tunnel {
     }
 
     pub fn update_proxies(&self, proxies: HashMap<String, Arc<dyn Proxy>>) {
-        *self.inner.proxies.write() = proxies;
+        // Preserve the current rules + index via Arc refcount bumps.
+        let current = self.inner.route.load();
+        let new_route = RouteTable {
+            rules: Arc::clone(&current.rules),
+            domain_index: Arc::clone(&current.domain_index),
+            proxies,
+        };
+        self.inner.route.store(Arc::new(new_route));
         info!("Proxies updated");
     }
 
@@ -232,11 +270,11 @@ impl Tunnel {
     }
 
     pub fn proxies(&self) -> HashMap<String, Arc<dyn Proxy>> {
-        self.inner.proxies.read().clone()
+        self.inner.route.load().proxies.clone()
     }
 
     pub fn proxy(&self, name: &str) -> Option<Arc<dyn Proxy>> {
-        self.inner.proxies.read().get(name).cloned()
+        self.inner.route.load().proxies.get(name).cloned()
     }
 
     /// Spawn background tasks owned by the tunnel (currently just the UDP NAT
@@ -251,8 +289,9 @@ impl Tunnel {
 
     pub fn rules_info(&self) -> Vec<(String, String, String)> {
         self.inner
+            .route
+            .load()
             .rules
-            .read()
             .iter()
             .map(|r| {
                 (

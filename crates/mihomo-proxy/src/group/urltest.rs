@@ -11,7 +11,9 @@ pub struct UrlTestGroup {
     static_proxies: Vec<Arc<dyn Proxy>>,
     provider_slots: Vec<ProviderSlot>,
     tolerance: u16,
-    /// Name of the currently fastest proxy; `None` means use the first.
+    /// Name of the currently selected proxy; `None` means "not yet picked,
+    /// use the first available".  Updated by `pick_for_dial` whenever it
+    /// promotes a new best.
     fastest: RwLock<Option<String>>,
     health: ProxyHealth,
 }
@@ -44,57 +46,127 @@ impl UrlTestGroup {
         }
     }
 
-    fn effective_proxies(&self) -> Vec<Arc<dyn Proxy>> {
-        let mut all = self.static_proxies.clone();
-        for slot in &self.provider_slots {
-            all.extend(slot.read().iter().cloned());
-        }
-        all
-    }
+    /// Single-pass dial-path selector: walks `static_proxies` + provider
+    /// slots once without allocating a unified Vec, updates `self.fastest`
+    /// if a strictly-better-by-tolerance alternative exists (or if the
+    /// current pick has died), and returns the chosen proxy.
+    ///
+    /// Previously this was three separate full scans per dial:
+    /// `update_fastest` cloned the Vec once, scanned to find best, then
+    /// scanned again to read the current proxy's delay/aliveness; then
+    /// `fastest_proxy` cloned the Vec a second time to look up by name.
+    fn pick_for_dial(&self) -> Option<Arc<dyn Proxy>> {
+        let current_name: Option<String> = self.fastest.read().clone();
 
-    pub fn update_fastest(&self) {
-        let all = self.effective_proxies();
-        let mut best_name: Option<String> = None;
-        let mut best_delay = u16::MAX;
+        let mut best_proxy: Option<Arc<dyn Proxy>> = None;
+        let mut best_delay: u16 = u16::MAX;
+        let mut current_proxy: Option<Arc<dyn Proxy>> = None;
+        let mut current_delay: u16 = u16::MAX;
+        let mut current_alive = false;
+        let mut first_any: Option<Arc<dyn Proxy>> = None;
 
-        for proxy in &all {
-            if proxy.alive() {
-                let delay = proxy.last_delay();
-                if delay > 0 && delay < best_delay {
-                    best_delay = delay;
-                    best_name = Some(proxy.name().to_string());
+        // Inline visit logic to avoid an `FnMut` closure that would conflict
+        // with the multiple mutable borrows below.
+        macro_rules! visit {
+            ($p:expr) => {{
+                let p: &Arc<dyn Proxy> = $p;
+                if first_any.is_none() {
+                    first_any = Some(Arc::clone(p));
                 }
+                if p.alive() {
+                    let d = p.last_delay();
+                    if let Some(ref n) = current_name {
+                        if p.name() == n.as_str() {
+                            current_alive = true;
+                            current_delay = d;
+                            current_proxy = Some(Arc::clone(p));
+                        }
+                    }
+                    if d > 0 && d < best_delay {
+                        best_delay = d;
+                        best_proxy = Some(Arc::clone(p));
+                    }
+                }
+            }};
+        }
+
+        for p in &self.static_proxies {
+            visit!(p);
+        }
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            for p in guard.iter() {
+                visit!(p);
             }
         }
 
-        let current_name: Option<String> = self.fastest.read().clone();
-        let current_delay = current_name
-            .as_deref()
-            .and_then(|n| all.iter().find(|p| p.name() == n))
-            .map_or(u16::MAX, |p| p.last_delay());
-        let current_alive = current_name
-            .as_deref()
-            .and_then(|n| all.iter().find(|p| p.name() == n))
-            .is_some_and(|p| p.alive());
-
-        if let Some(ref bname) = best_name {
-            if best_delay + self.tolerance < current_delay || !current_alive {
-                *self.fastest.write() = Some(bname.clone());
+        if let Some(bp) = best_proxy.as_ref() {
+            if best_delay.saturating_add(self.tolerance) < current_delay || !current_alive {
+                *self.fastest.write() = Some(bp.name().to_string());
+                return Some(Arc::clone(bp));
             }
         } else if !current_alive {
-            *self.fastest.write() = all.first().map(|p| p.name().to_string());
+            let fb = first_any.clone();
+            *self.fastest.write() = fb.as_ref().map(|p| p.name().to_string());
+            return fb;
         }
+        current_proxy.or(best_proxy).or(first_any)
     }
 
+    /// Read-only lookup of whatever `fastest` currently points at — used by
+    /// the REST/info methods below.  No Vec allocation; falls back to the
+    /// first proxy if `fastest` is unset or names something no longer present.
     fn fastest_proxy(&self) -> Option<Arc<dyn Proxy>> {
-        let all = self.effective_proxies();
-        let name: Option<String> = self.fastest.read().clone();
+        let name = self.fastest.read().clone();
+        let mut first_any: Option<Arc<dyn Proxy>> = None;
         if let Some(n) = name {
-            if let Some(p) = all.iter().find(|p| p.name() == n) {
+            for p in &self.static_proxies {
+                if first_any.is_none() {
+                    first_any = Some(Arc::clone(p));
+                }
+                if p.name() == n {
+                    return Some(Arc::clone(p));
+                }
+            }
+            for slot in &self.provider_slots {
+                let guard = slot.read();
+                for p in guard.iter() {
+                    if first_any.is_none() {
+                        first_any = Some(Arc::clone(p));
+                    }
+                    if p.name() == n {
+                        return Some(Arc::clone(p));
+                    }
+                }
+            }
+            return first_any;
+        }
+        // No selection yet: return first proxy if any.
+        if let Some(p) = self.static_proxies.first() {
+            return Some(Arc::clone(p));
+        }
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            if let Some(p) = guard.first() {
                 return Some(Arc::clone(p));
             }
         }
-        all.into_iter().next()
+        None
+    }
+
+    fn member_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .static_proxies
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect();
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            for p in guard.iter() {
+                out.push(p.name().to_string());
+            }
+        }
+        out
     }
 }
 
@@ -117,17 +189,15 @@ impl ProxyAdapter for UrlTestGroup {
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-        self.update_fastest();
         let proxy = self
-            .fastest_proxy()
+            .pick_for_dial()
             .ok_or_else(|| MihomoError::Proxy("no proxy available".into()))?;
         proxy.dial_tcp(metadata).await
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
-        self.update_fastest();
         let proxy = self
-            .fastest_proxy()
+            .pick_for_dial()
             .ok_or_else(|| MihomoError::Proxy("no proxy available".into()))?;
         proxy.dial_udp(metadata).await
     }
@@ -166,12 +236,7 @@ impl Proxy for UrlTestGroup {
     }
 
     fn members(&self) -> Option<Vec<String>> {
-        Some(
-            self.effective_proxies()
-                .iter()
-                .map(|p| p.name().to_string())
-                .collect(),
-        )
+        Some(self.member_names())
     }
 
     fn current(&self) -> Option<String> {

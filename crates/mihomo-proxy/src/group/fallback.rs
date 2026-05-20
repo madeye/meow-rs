@@ -35,20 +35,46 @@ impl FallbackGroup {
         }
     }
 
-    fn effective_proxies(&self) -> Vec<Arc<dyn Proxy>> {
-        let mut all = self.static_proxies.clone();
-        for slot in &self.provider_slots {
-            all.extend(slot.read().iter().cloned());
+    /// Single-pass scan: returns the first alive proxy, or the first
+    /// proxy of any kind if none are alive.  Walks `static_proxies` and
+    /// each provider slot directly without building a unified `Vec`.
+    fn first_alive(&self) -> Option<Arc<dyn Proxy>> {
+        let mut fallback: Option<Arc<dyn Proxy>> = None;
+        for p in &self.static_proxies {
+            if fallback.is_none() {
+                fallback = Some(Arc::clone(p));
+            }
+            if p.alive() {
+                return Some(Arc::clone(p));
+            }
         }
-        all
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            for p in guard.iter() {
+                if fallback.is_none() {
+                    fallback = Some(Arc::clone(p));
+                }
+                if p.alive() {
+                    return Some(Arc::clone(p));
+                }
+            }
+        }
+        fallback
     }
 
-    fn first_alive(&self) -> Option<Arc<dyn Proxy>> {
-        let all = self.effective_proxies();
-        all.iter()
-            .find(|p| p.alive())
-            .cloned()
-            .or_else(|| all.into_iter().next())
+    fn member_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .static_proxies
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect();
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            for p in guard.iter() {
+                out.push(p.name().to_string());
+            }
+        }
+        out
     }
 }
 
@@ -117,12 +143,7 @@ impl Proxy for FallbackGroup {
     }
 
     fn members(&self) -> Option<Vec<String>> {
-        Some(
-            self.effective_proxies()
-                .iter()
-                .map(|p| p.name().to_string())
-                .collect(),
-        )
+        Some(self.member_names())
     }
 
     fn current(&self) -> Option<String> {

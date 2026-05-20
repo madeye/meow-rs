@@ -40,19 +40,23 @@ impl SelectorGroup {
         }
     }
 
-    fn effective_proxies(&self) -> Vec<Arc<dyn Proxy>> {
-        let mut all = self.static_proxies.clone();
-        for slot in &self.provider_slots {
-            all.extend(slot.read().iter().cloned());
+    fn contains_name(&self, name: &str) -> bool {
+        if self.static_proxies.iter().any(|p| p.name() == name) {
+            return true;
         }
-        all
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            if guard.iter().any(|p| p.name() == name) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Select the proxy with the given name. Returns `true` if found.
     /// Selection survives provider refreshes because it is stored by name.
     pub fn select(&self, name: &str) -> bool {
-        let all = self.effective_proxies();
-        if all.iter().any(|p| p.name() == name) {
+        if self.contains_name(name) {
             *self.selected.write() = Some(name.to_string());
             true
         } else {
@@ -60,23 +64,59 @@ impl SelectorGroup {
         }
     }
 
+    /// Resolve `selected` to an `Arc<dyn Proxy>` without allocating a unified
+    /// `Vec`. Walks `static_proxies` then provider slots; falls back to the
+    /// first proxy if `selected` is unset or names something no longer present.
     pub fn selected_proxy(&self) -> Option<Arc<dyn Proxy>> {
-        let all = self.effective_proxies();
-        let sel = self.selected.read();
-        if let Some(name) = sel.as_deref() {
-            if let Some(p) = all.iter().find(|p| p.name() == name) {
+        let sel = self.selected.read().clone();
+        let mut first_any: Option<Arc<dyn Proxy>> = None;
+        if let Some(name) = sel {
+            for p in &self.static_proxies {
+                if first_any.is_none() {
+                    first_any = Some(Arc::clone(p));
+                }
+                if p.name() == name {
+                    return Some(Arc::clone(p));
+                }
+            }
+            for slot in &self.provider_slots {
+                let guard = slot.read();
+                for p in guard.iter() {
+                    if first_any.is_none() {
+                        first_any = Some(Arc::clone(p));
+                    }
+                    if p.name() == name {
+                        return Some(Arc::clone(p));
+                    }
+                }
+            }
+            return first_any;
+        }
+        if let Some(p) = self.static_proxies.first() {
+            return Some(Arc::clone(p));
+        }
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            if let Some(p) = guard.first() {
                 return Some(Arc::clone(p));
             }
         }
-        // Fall back to first proxy in the list
-        all.into_iter().next()
+        None
     }
 
     pub fn proxy_names(&self) -> Vec<String> {
-        self.effective_proxies()
+        let mut out: Vec<String> = self
+            .static_proxies
             .iter()
             .map(|p| p.name().to_string())
-            .collect()
+            .collect();
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            for p in guard.iter() {
+                out.push(p.name().to_string());
+            }
+        }
+        out
     }
 }
 

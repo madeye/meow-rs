@@ -2003,7 +2003,7 @@ async fn e2_group_delay_total_walltime_bounded_by_timeout() {
 
 #[tokio::test]
 async fn e5_group_delay_url_test_no_reselection() {
-    // UrlTestGroup::current() is driven by update_fastest(), which is
+    // UrlTestGroup::current() is driven by pick_for_dial(), which is
     // called only from its own dial_tcp — not from the delay endpoint
     // (which walks members directly). Probing the group must NOT change
     // `current`, even if a later member would win a reselection. Locks in
