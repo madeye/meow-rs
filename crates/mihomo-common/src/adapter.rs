@@ -4,6 +4,7 @@ use crate::error::Result;
 use crate::metadata::Metadata;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -25,7 +26,7 @@ pub struct ProxyState {
 /// mutability so the trait method can return `&ProxyHealth`.
 pub struct ProxyHealth {
     alive: AtomicBool,
-    history: RwLock<Vec<DelayHistory>>,
+    history: RwLock<VecDeque<DelayHistory>>,
     max_history: usize,
 }
 
@@ -33,7 +34,7 @@ impl ProxyHealth {
     pub fn new() -> Self {
         Self {
             alive: AtomicBool::new(true),
-            history: RwLock::new(Vec::new()),
+            history: RwLock::new(VecDeque::new()),
             max_history: 10,
         }
     }
@@ -49,29 +50,31 @@ impl ProxyHealth {
     pub fn last_delay(&self) -> u16 {
         self.history
             .read()
-            .expect("ProxyHealth history lock poisoned")
-            .last()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .back()
             .map_or(0, |h| h.delay)
     }
 
     pub fn delay_history(&self) -> Vec<DelayHistory> {
         self.history
             .read()
-            .expect("ProxyHealth history lock poisoned")
-            .clone()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
     }
 
     pub fn record_delay(&self, delay: u16) {
         let mut history = self
             .history
             .write()
-            .expect("ProxyHealth history lock poisoned");
-        history.push(DelayHistory {
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        history.push_back(DelayHistory {
             time: SystemTime::now(),
             delay,
         });
         if history.len() > self.max_history {
-            history.remove(0);
+            history.pop_front();
         }
         self.alive.store(delay > 0, Ordering::Relaxed);
     }

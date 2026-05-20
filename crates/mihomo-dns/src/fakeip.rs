@@ -33,7 +33,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -133,14 +134,19 @@ struct PersistedSnapshot {
 /// supplies the path (e.g. `<workdir>/fakeip-v4.json`).
 ///
 /// Writes are atomic via `tmp + rename`. The in-memory copy is the source of
-/// truth between flushes; every mutation triggers a save so an unexpected
-/// shutdown loses at most the most recent operation.
+/// truth between flushes; mutations set a dirty flag and a background tokio
+/// task batches the persist after a 1 s debounce so a burst of allocations
+/// from a startup-storm hits the disk once. On `Drop` (process shutdown) we
+/// do one final synchronous flush so SIGTERM during the debounce window
+/// doesn't lose data.
 pub struct FileStore {
     path: PathBuf,
-    state: Mutex<PersistedSnapshot>,
+    state: Arc<Mutex<PersistedSnapshot>>,
     /// In-memory reverse map rebuilt from `state.entries` at load time and
     /// kept in sync on mutation. Kept separate so `Store::get_by_ip` is O(1).
     reverse: Mutex<HashMap<IpAddr, String>>,
+    dirty: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
 }
 
 impl FileStore {
@@ -177,31 +183,83 @@ impl FileStore {
             .iter()
             .map(|(h, ip)| (*ip, h.clone()))
             .collect();
-        Ok(Self {
+
+        let state = Arc::new(Mutex::new(snapshot));
+        let dirty = Arc::new(AtomicBool::new(false));
+        let notify = Arc::new(tokio::sync::Notify::new());
+
+        let store = Self {
             path,
-            state: Mutex::new(snapshot),
+            state,
             reverse: Mutex::new(reverse),
-        })
+            dirty,
+            notify,
+        };
+
+        store.spawn_flush_task();
+        Ok(store)
     }
 
-    fn persist(&self, snap: &PersistedSnapshot) {
-        let tmp = self.path.with_extension("json.tmp");
-        let result = (|| -> io::Result<()> {
-            let bytes = serde_json::to_vec(snap).map_err(io::Error::other)?;
-            if let Some(parent) = self.path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    fs::create_dir_all(parent)?;
+    fn spawn_flush_task(&self) {
+        let path = self.path.clone();
+        let state = Arc::clone(&self.state);
+        let dirty = Arc::clone(&self.dirty);
+        let notify = Arc::clone(&self.notify);
+
+        tokio::spawn(async move {
+            loop {
+                notify.notified().await;
+                // Debounce: wait for more mutations to settle.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+                if dirty.swap(false, Ordering::SeqCst) {
+                    let snap = {
+                        let s = state.lock();
+                        serialise(&s)
+                    };
+                    persist_to_file(&path, &snap);
                 }
             }
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-            drop(f);
-            fs::rename(&tmp, &self.path)
-        })();
-        if let Err(e) = result {
-            warn!("fakeip: persist {} failed: {}", self.path.display(), e);
+        });
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+}
+
+impl Drop for FileStore {
+    fn drop(&mut self) {
+        // Final synchronous flush so any pending dirty state lands on disk
+        // before the process exits. The background task may have already
+        // cleared `dirty` — in that case this is a no-op. We do not wake the
+        // task because it may be inside its own sleep and there is no
+        // guarantee the runtime is still pumping.
+        if self.dirty.swap(false, Ordering::SeqCst) {
+            let snap = serialise(&self.state.lock());
+            persist_to_file(&self.path, &snap);
         }
+    }
+}
+
+fn persist_to_file(path: &Path, snap: &PersistedSnapshot) {
+    let tmp = path.with_extension("json.tmp");
+    let result = (|| -> io::Result<()> {
+        let bytes = serde_json::to_vec(snap).map_err(io::Error::other)?;
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, path)
+    })();
+    if let Err(e) = result {
+        warn!("fakeip: persist {} failed: {}", path.display(), e);
     }
 }
 
@@ -212,9 +270,8 @@ impl Store for FileStore {
     fn put_by_host(&self, host: &str, ip: IpAddr) {
         let mut s = self.state.lock();
         s.entries.insert(host.to_string(), ip);
-        let snap_clone = serialise(&s);
         drop(s);
-        self.persist(&snap_clone);
+        self.mark_dirty();
     }
     fn get_by_ip(&self, ip: IpAddr) -> Option<String> {
         self.reverse.lock().get(&ip).cloned()
@@ -233,9 +290,8 @@ impl Store for FileStore {
         if let Some(host) = host {
             let mut s = self.state.lock();
             s.entries.remove(&host);
-            let snap_clone = serialise(&s);
             drop(s);
-            self.persist(&snap_clone);
+            self.mark_dirty();
         }
     }
     fn exists(&self, ip: IpAddr) -> bool {
@@ -247,17 +303,15 @@ impl Store for FileStore {
         s.entries.clear();
         s.offset = None;
         s.cycle = false;
-        let snap_clone = serialise(&s);
         drop(s);
-        self.persist(&snap_clone);
+        self.mark_dirty();
     }
     fn put_state(&self, offset: IpAddr, cycle: bool) {
         let mut s = self.state.lock();
         s.offset = Some(offset);
         s.cycle = cycle;
-        let snap_clone = serialise(&s);
         drop(s);
-        self.persist(&snap_clone);
+        self.mark_dirty();
     }
     fn get_state(&self) -> Option<(IpAddr, bool)> {
         let s = self.state.lock();
@@ -724,8 +778,8 @@ mod tests {
         assert!(!s.should_skip("foo.test"));
     }
 
-    #[test]
-    fn file_store_roundtrip() {
+    #[tokio::test]
+    async fn file_store_roundtrip() {
         let tmp = tempdir();
         let path = tmp.join("fakeip-v4.json");
         let net = IpNet::from_str("198.18.0.0/16").unwrap();
@@ -734,6 +788,8 @@ mod tests {
             let store = Arc::new(FileStore::open(&path).unwrap());
             let pool = Pool::new(net, store).unwrap();
             ip = pool.lookup("example.com");
+            // Wait for the debounced background persistence to complete.
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         }
         // Re-open; mapping must survive.
         {
