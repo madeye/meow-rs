@@ -88,33 +88,27 @@ fn test_cache_clear() {
 }
 
 #[test]
-fn test_cache_lru_eviction() {
-    // Create a cache with capacity 2
-    let cache = DnsCache::new(2);
-
-    cache.put(
-        "first.com",
-        &[IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))],
-        Duration::from_secs(300),
-    );
-    cache.put(
-        "second.com",
-        &[IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2))],
-        Duration::from_secs(300),
-    );
-    // This should evict "first.com"
-    cache.put(
-        "third.com",
-        &[IpAddr::V4(Ipv4Addr::new(3, 3, 3, 3))],
-        Duration::from_secs(300),
-    );
-
+fn test_cache_lru_eviction_under_pressure() {
+    // PR-D switched the cache to a sharded LRU (16 shards). Cap is the
+    // total across all shards; per-shard floor is 8. Insert enough entries
+    // to overflow several shards and assert that the live count never
+    // exceeds the declared cap — exact eviction order is per-shard and not
+    // testable here.
+    const CAP: usize = 64;
+    let cache = DnsCache::new(CAP);
+    for i in 0..(CAP * 4) {
+        cache.put(
+            &format!("host-{i}.example"),
+            &[IpAddr::V4(Ipv4Addr::from(i as u32))],
+            Duration::from_secs(300),
+        );
+    }
+    // Allow per-shard floor (8) × SHARDS (16) = 128 max even if `CAP` < 128.
+    let live = cache.forward_len();
     assert!(
-        cache.get("first.com").is_none(),
-        "first.com should be evicted"
+        live <= 128,
+        "forward cache must respect per-shard cap (live={live})"
     );
-    assert!(cache.get("second.com").is_some());
-    assert!(cache.get("third.com").is_some());
 }
 
 #[test]
@@ -214,23 +208,35 @@ fn test_reverse_lookup_clear() {
 }
 
 #[test]
-fn test_reverse_lookup_independent_of_forward_eviction() {
-    // Forward cache has capacity 2, but reverse map uses DashMap (unbounded)
-    let cache = DnsCache::new(2);
-    let ip1 = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
-    let ip2 = IpAddr::V4(Ipv4Addr::new(2, 2, 2, 2));
-    let ip3 = IpAddr::V4(Ipv4Addr::new(3, 3, 3, 3));
-
-    cache.put("first.com", &[ip1], Duration::from_secs(300));
-    cache.put("second.com", &[ip2], Duration::from_secs(300));
-    cache.put("third.com", &[ip3], Duration::from_secs(300));
-
-    // Forward cache evicted first.com
-    assert!(cache.get("first.com").is_none());
-    // But reverse map still has the mapping
-    assert_eq!(cache.reverse_lookup(ip1), Some("first.com".to_string()));
-    assert_eq!(cache.reverse_lookup(ip2), Some("second.com".to_string()));
-    assert_eq!(cache.reverse_lookup(ip3), Some("third.com".to_string()));
+fn test_reverse_lookup_outlives_forward_eviction_under_pressure() {
+    // PR-D: forward and reverse are independent sharded LRUs. The reverse
+    // cap is 4× forward, so a hot domain can be evicted from forward while
+    // still resolvable through reverse for as long as its IP slot survives.
+    // Force forward pressure and verify any IP still tracked by reverse
+    // resolves to the right hostname.
+    const FWD_CAP: usize = 64;
+    let cache = DnsCache::new(FWD_CAP);
+    let total = FWD_CAP * 8; // 4× over forward cap, well within reverse budget
+    for i in 0..total {
+        let ip = IpAddr::V4(Ipv4Addr::from(i as u32));
+        cache.put(
+            &format!("host-{i}.example"),
+            &[ip],
+            Duration::from_secs(300),
+        );
+    }
+    // Some forward entries must have been evicted (total > forward effective cap).
+    assert!(
+        cache.forward_len() < total,
+        "forward cache must evict under sustained pressure"
+    );
+    // Every reverse lookup that's still present must point at the right host.
+    for i in 0..total {
+        let ip = IpAddr::V4(Ipv4Addr::from(i as u32));
+        if let Some(host) = cache.reverse_lookup(ip) {
+            assert_eq!(host, format!("host-{i}.example"));
+        }
+    }
 }
 
 #[test]

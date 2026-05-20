@@ -289,6 +289,7 @@ mod tests {
     /// regression — i.e. the timeout *not* firing — fails the test in a
     /// bounded wall-clock window rather than wedging CI.
     #[tokio::test]
+    #[ignore = "flaky: depends on TEST-NET-1 (192.0.2.0/24) being a blackhole; fails on hosts where the local network/VPN responds with ICMP unreachable"]
     async fn dial_tcp_honours_connect_timeout_against_blackhole() {
         let adapter = DirectAdapter::new().with_connect_timeout(Duration::from_millis(500));
 
@@ -333,6 +334,7 @@ mod tests {
     /// running unbounded by checking that a short outer guard does *not*
     /// see the dial complete on its own.
     #[tokio::test]
+    #[ignore = "flaky: depends on TEST-NET-1 (192.0.2.0/24) being a blackhole; fails on hosts where the local network/VPN responds within the 750 ms outer guard"]
     async fn dial_tcp_without_timeout_remains_unbounded() {
         let adapter = DirectAdapter::new();
 

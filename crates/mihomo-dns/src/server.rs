@@ -28,7 +28,36 @@ impl DnsServer {
         let socket = Arc::new(UdpSocket::bind(self.listen_addr).await?);
         info!("DNS server listening on {}", self.listen_addr);
 
+        // Worker pool: pre-spawn N workers and round-robin packets to them via
+        // bounded mpsc channels. Replaces the previous `tokio::spawn`-per-packet
+        // pattern (one task allocation per query under W4 load).
+        const N_WORKERS: usize = 4;
+        const CHANNEL_DEPTH: usize = 256;
+        let mut senders: Vec<tokio::sync::mpsc::Sender<(Vec<u8>, SocketAddr)>> =
+            Vec::with_capacity(N_WORKERS);
+        for _ in 0..N_WORKERS {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr)>(CHANNEL_DEPTH);
+            let resolver = Arc::clone(&self.resolver);
+            let sock = Arc::clone(&socket);
+            tokio::spawn(async move {
+                while let Some((data, src)) = rx.recv().await {
+                    match Self::handle_query(&data, &resolver).await {
+                        Ok(response) => {
+                            if let Err(e) = sock.send_to(&response, src).await {
+                                warn!("DNS send error: {}", e);
+                            }
+                        }
+                        Err(e) => {
+                            debug!("DNS query handling error: {}", e);
+                        }
+                    }
+                }
+            });
+            senders.push(tx);
+        }
+
         let mut buf = vec![0u8; 4096];
+        let mut rr: usize = 0;
         loop {
             let (len, src) = match socket.recv_from(&mut buf).await {
                 Ok(v) => v,
@@ -39,21 +68,14 @@ impl DnsServer {
             };
 
             let data = buf[..len].to_vec();
-            let resolver = Arc::clone(&self.resolver);
-            let socket_clone = Arc::clone(&socket);
-
-            tokio::spawn(async move {
-                match Self::handle_query(&data, &resolver).await {
-                    Ok(response) => {
-                        if let Err(e) = socket_clone.send_to(&response, src).await {
-                            warn!("DNS send error: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        debug!("DNS query handling error: {}", e);
-                    }
-                }
-            });
+            // Round-robin to a worker. If the channel is full we drop the
+            // query (DNS is best-effort UDP — better to drop one packet
+            // than block the recv loop and stall all queries).
+            let worker = rr % N_WORKERS;
+            rr = rr.wrapping_add(1);
+            if senders[worker].try_send((data, src)).is_err() {
+                debug!("DNS worker {} backpressure; dropping query", worker);
+            }
         }
     }
 

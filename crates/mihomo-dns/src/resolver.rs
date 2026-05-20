@@ -213,32 +213,58 @@ fn url_to_plain_socketaddr(url: &NameServerUrl) -> SocketAddr {
 /// Query a pool of clients in parallel; return the first successful A+AAAA
 /// result. `select_ok` semantics — first `Ok` wins, remaining are cancelled.
 async fn query_pool(clients: &[Arc<DnsClient>], host: &str) -> Option<(Vec<IpAddr>, Duration)> {
-    if clients.is_empty() {
-        return None;
-    }
-    if clients.len() == 1 {
-        return match clients[0].lookup_ip(host).await {
+    match clients.len() {
+        0 => None,
+        1 => match clients[0].lookup_ip(host).await {
             Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
             _ => None,
-        };
-    }
-    let futs: Vec<_> = clients
-        .iter()
-        .map(|c| {
-            let c = Arc::clone(c);
-            let host = host.to_owned();
-            Box::pin(async move {
-                let (ips, ttl) = c.lookup_ip(&host).await.map_err(|e| format!("{e}"))?;
-                if ips.is_empty() {
-                    return Err("empty".to_string());
-                }
-                Ok((ips, clamp_ttl(ttl)))
-            })
-        })
-        .collect();
-    match futures::future::select_ok(futs).await {
-        Ok(((ips, ttl), _)) => Some((ips, ttl)),
-        Err(_) => None,
+        },
+        2 => {
+            // Common case: borrow `host` instead of String-cloning it per
+            // future, and stack-pin the two futures instead of going through
+            // Vec<Pin<Box<…>>>.
+            let f1 = clients[0].lookup_ip(host);
+            let f2 = clients[1].lookup_ip(host);
+            tokio::pin!(f1);
+            tokio::pin!(f2);
+            tokio::select! {
+                r = &mut f1 => match r {
+                    Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+                    _ => match (&mut f2).await {
+                        Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+                        _ => None,
+                    },
+                },
+                r = &mut f2 => match r {
+                    Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+                    _ => match (&mut f1).await {
+                        Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+                        _ => None,
+                    },
+                },
+            }
+        }
+        _ => {
+            // ≥ 3 nameservers: fall back to select_ok with Vec<Pin<Box<…>>>.
+            // host can still be borrowed because `select_ok` keeps the
+            // futures alive only until it resolves.
+            let futs: Vec<_> = clients
+                .iter()
+                .map(|c| {
+                    Box::pin(async move {
+                        let (ips, ttl) = c.lookup_ip(host).await.map_err(|e| format!("{e}"))?;
+                        if ips.is_empty() {
+                            return Err("empty".to_string());
+                        }
+                        Ok((ips, clamp_ttl(ttl)))
+                    })
+                })
+                .collect();
+            match futures::future::select_ok(futs).await {
+                Ok(((ips, ttl), _)) => Some((ips, ttl)),
+                Err(_) => None,
+            }
+        }
     }
 }
 
@@ -250,25 +276,31 @@ async fn query_pool_generic(
     host: &str,
     record_type: RecordType,
 ) -> Option<Message> {
-    if clients.is_empty() {
-        return None;
+    match clients.len() {
+        0 => None,
+        1 => clients[0].query(host, record_type).await.ok(),
+        2 => {
+            let f1 = clients[0].query(host, record_type);
+            let f2 = clients[1].query(host, record_type);
+            tokio::pin!(f1);
+            tokio::pin!(f2);
+            tokio::select! {
+                r = &mut f1 => r.ok().or((&mut f2).await.ok()),
+                r = &mut f2 => r.ok().or((&mut f1).await.ok()),
+            }
+        }
+        _ => {
+            let futs: Vec<_> = clients
+                .iter()
+                .map(|c| {
+                    Box::pin(
+                        async move { c.query(host, record_type).await.map_err(|e| format!("{e}")) },
+                    )
+                })
+                .collect();
+            futures::future::select_ok(futs).await.ok().map(|(m, _)| m)
+        }
     }
-    if clients.len() == 1 {
-        return clients[0].query(host, record_type).await.ok();
-    }
-    let futs: Vec<_> = clients
-        .iter()
-        .map(|c| {
-            let c = Arc::clone(c);
-            let host = host.to_owned();
-            Box::pin(async move {
-                c.query(&host, record_type)
-                    .await
-                    .map_err(|e| format!("{e}"))
-            })
-        })
-        .collect();
-    futures::future::select_ok(futs).await.ok().map(|(m, _)| m)
 }
 
 impl Resolver {
