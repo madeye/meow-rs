@@ -67,7 +67,14 @@ impl GeositeDB {
     /// True iff `domain` is in the named category. Category match is
     /// case-insensitive. Unknown categories return `false` (no error).
     pub fn lookup(&self, category: &str, domain: &str) -> bool {
-        let Some(trie) = self.categories.get(&category.to_ascii_lowercase()) else {
+        // Hot-path callers (GeoSiteRule) pre-lowercase the category; avoid
+        // the heap allocation when nothing needs folding.
+        let trie = if category.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.categories.get(&category.to_ascii_lowercase())
+        } else {
+            self.categories.get(category)
+        };
+        let Some(trie) = trie else {
             return false;
         };
         trie.search(&domain.to_ascii_lowercase()).is_some()

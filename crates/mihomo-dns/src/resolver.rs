@@ -150,7 +150,7 @@ pub struct Resolver {
     mode: DnsMode,
     hosts: DomainTrie<Vec<IpAddr>>,
     use_hosts: bool,
-    inflight: DashMap<String, InflightTx>,
+    inflight: DashMap<Arc<str>, InflightTx>,
     policy: Option<NameserverPolicy>,
     fallback_filter: Option<FallbackFilter>,
     /// IPv4 fake-IP pool (None when fake-ip mode is disabled or only v6 is configured).
@@ -166,14 +166,14 @@ pub struct Resolver {
 }
 
 struct InflightGuard<'a> {
-    map: &'a DashMap<String, InflightTx>,
-    key: String,
+    map: &'a DashMap<Arc<str>, InflightTx>,
+    key: Arc<str>,
     _armed: (),
 }
 
 impl Drop for InflightGuard<'_> {
     fn drop(&mut self) {
-        self.map.remove(&self.key);
+        self.map.remove(self.key.as_ref());
     }
 }
 
@@ -680,7 +680,11 @@ impl Resolver {
             drop(entry);
             return rx.recv().await.ok().flatten();
         }
-        let tx = match self.inflight.entry(host.to_string()) {
+        // Allocate the Arc<str> key only when we may need to insert. The
+        // Occupied path below still uses the early-`get` fast path most of
+        // the time; this Arc covers the racy gap between get() and entry().
+        let key: Arc<str> = Arc::from(host);
+        let tx = match self.inflight.entry(Arc::clone(&key)) {
             Entry::Occupied(existing) => {
                 let mut rx = existing.get().subscribe();
                 drop(existing);
@@ -694,7 +698,7 @@ impl Resolver {
         };
         let _guard = InflightGuard {
             map: &self.inflight,
-            key: host.to_string(),
+            key,
             _armed: (),
         };
         let result = self.do_lookup(host).await;
@@ -721,7 +725,7 @@ impl Resolver {
                             return self.try_fallback(host).await;
                         }
                     }
-                    self.cache.put(host, ips.clone(), ttl);
+                    self.cache.put(host, &ips, ttl);
                     return Some(ips);
                 }
                 // Policy lookup failed: fall through to global nameservers.
@@ -735,7 +739,7 @@ impl Resolver {
                     return self.try_fallback(host).await;
                 }
             }
-            self.cache.put(host, ips.clone(), ttl);
+            self.cache.put(host, &ips, ttl);
             return Some(ips);
         }
 
@@ -776,7 +780,7 @@ impl Resolver {
     async fn try_fallback(&self, host: &str) -> Option<Vec<IpAddr>> {
         let fallback = self.fallback.as_deref()?;
         if let Some((ips, ttl)) = query_pool(fallback, host).await {
-            self.cache.put(host, ips.clone(), ttl);
+            self.cache.put(host, &ips, ttl);
             return Some(ips);
         }
         None
@@ -880,7 +884,7 @@ mod tests {
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         resolver
             .cache
-            .put("cached.test", vec![real], Duration::from_secs(60));
+            .put("cached.test", &[real], Duration::from_secs(60));
         assert_eq!(resolver.resolve_ip("cached.test").await, Some(real));
     }
 

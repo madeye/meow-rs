@@ -54,11 +54,7 @@ fn dns_cache_does_not_leak_under_unique_ip_stream() {
     let warmup_inserts = (rate * 2).min(total_inserts);
     for i in 0..warmup_inserts {
         let ip = IpAddr::V4(Ipv4Addr::from(i as u32));
-        cache.put(
-            &format!("warm-{i}.example"),
-            vec![ip],
-            Duration::from_secs(60),
-        );
+        cache.put(&format!("warm-{i}.example"), &[ip], Duration::from_secs(60));
     }
     let baseline = rss_bytes(&mut sys, pid);
     println!(
@@ -83,7 +79,7 @@ fn dns_cache_does_not_leak_under_unique_ip_stream() {
             let ip = IpAddr::V4(Ipv4Addr::from(counter));
             cache.put(
                 &format!("soak-{counter}.example"),
-                vec![ip],
+                &[ip],
                 Duration::from_secs(60),
             );
             counter = counter.wrapping_add(1);

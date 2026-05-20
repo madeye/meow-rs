@@ -1,20 +1,22 @@
 // M2 layout change (ADR-0011 T7):
 //   CacheEntry.ips:      Vec<IpAddr>  (24 B: ptr+len+cap) → Box<[IpAddr]> (16 B: ptr+len, −8 B)
-//   ReverseEntry.domain: String       (24 B: ptr+len+cap) → Box<str>      (16 B: ptr+len, −8 B)
+//   ReverseEntry.domain: String       (24 B: ptr+len+cap) → Arc<str>      (16 B: ptr+len, −8 B)
 //
-// Removing the unused capacity word from both fields.  `Box<[T]>` and `Box<str>`
-// are fat pointers (ptr+len) with no spare capacity — correct for entries that are
-// written once and read many times.
+// Both fields are fat pointers (ptr+len) with no spare capacity — correct for
+// entries written once and read many times.
+//
+// The forward LRU key now shares an `Arc<str>` with the reverse entries that
+// reference the same domain: one allocation per `put` covers the forward key
+// plus N reverse entries, where N is the number of resolved IPs.
 //
 // Per-entry savings: CacheEntry 40 B → 32 B (−8 B); ReverseEntry 40 B → 32 B (−8 B).
-// At default caps (1024 fwd, 4096 rev): total struct savings ≈ 40 KiB.
-// (LRU list-node + hash-table overhead is the same either way.)
-//
-// CacheEntry and ReverseEntry are private — no public API break per ADR-0009.
+// At default caps (1024 fwd, 4096 rev): total struct savings ≈ 40 KiB; on top,
+// reverse-entry domain allocation drops from N+1 to 1 per cache write.
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 struct CacheEntry {
@@ -23,7 +25,7 @@ struct CacheEntry {
 }
 
 struct ReverseEntry {
-    domain: Box<str>,
+    domain: Arc<str>,
     expire_at: Instant,
 }
 
@@ -33,7 +35,7 @@ struct ReverseEntry {
 const REVERSE_CAP_MULTIPLIER: usize = 4;
 
 pub struct DnsCache {
-    cache: Mutex<LruCache<String, CacheEntry>>,
+    cache: Mutex<LruCache<Arc<str>, CacheEntry>>,
     /// Reverse mapping: IP → domain (for DNS snooping / tproxy hostname recovery).
     /// Bounded LRU — entries past capacity are evicted in least-recently-used order.
     reverse: Mutex<LruCache<IpAddr, ReverseEntry>>,
@@ -62,16 +64,19 @@ impl DnsCache {
         None
     }
 
-    pub fn put(&self, domain: &str, ips: Vec<IpAddr>, ttl: Duration) {
+    /// Insert a resolved-domain record. Takes the IP list by reference to
+    /// avoid forcing the caller to clone — the cache owns its own copy.
+    pub fn put(&self, domain: &str, ips: &[IpAddr], ttl: Duration) {
         let expire_at = Instant::now() + ttl;
+        let key: Arc<str> = Arc::from(domain);
 
         {
             let mut reverse = self.reverse.lock();
-            for &ip in &ips {
+            for &ip in ips {
                 reverse.put(
                     ip,
                     ReverseEntry {
-                        domain: domain.into(),
+                        domain: Arc::clone(&key),
                         expire_at,
                     },
                 );
@@ -79,10 +84,10 @@ impl DnsCache {
         }
 
         let entry = CacheEntry {
-            ips: ips.into_boxed_slice(),
+            ips: ips.into(),
             expire_at,
         };
-        self.cache.lock().put(domain.to_string(), entry);
+        self.cache.lock().put(key, entry);
     }
 
     /// Reverse lookup: given an IP, return the domain that resolved to it.

@@ -1,7 +1,13 @@
 use std::collections::HashMap;
 
+use smallvec::SmallVec;
+
 const WILDCARD: &str = "*";
 const DOT_WILDCARD: &str = ".";
+
+/// Most domains have 2–4 labels; size the inline buffer at 8 so realistic
+/// queries never heap-allocate while still tolerating absurdly deep names.
+type Labels<'a> = SmallVec<[&'a str; 8]>;
 
 pub struct DomainTrie<T> {
     root: Node<T>,
@@ -34,49 +40,65 @@ impl<T: Clone> DomainTrie<T> {
 
         // Handle +.domain (insert both * and . wildcards)
         if let Some(rest) = domain.strip_prefix("+.") {
-            let parts_star = Self::split_domain(&format!("*.{rest}"));
-            let parts_dot = Self::split_domain(&format!(".{rest}"));
-            if let Some(parts) = parts_star {
+            let star = format!("*.{rest}");
+            let dot = format!(".{rest}");
+            if let Some(parts) = Self::split_domain(&star) {
                 self.insert_parts(&parts, data.clone());
             }
-            if let Some(parts) = parts_dot {
+            if let Some(parts) = Self::split_domain(&dot) {
                 self.insert_parts(&parts, data);
             }
             return true;
         }
 
-        if let Some(parts) = Self::split_domain(&domain) {
-            self.insert_parts(&parts, data);
-            true
-        } else {
-            false
-        }
+        let Some(parts) = Self::split_domain(&domain) else {
+            return false;
+        };
+        self.insert_parts(&parts, data);
+        true
     }
 
-    fn insert_parts(&mut self, parts: &[String], data: T) {
+    fn insert_parts(&mut self, parts: &[&str], data: T) {
         let mut node = &mut self.root;
         for part in parts {
-            node = node.children.entry(part.clone()).or_insert_with(Node::new);
+            node = node
+                .children
+                .entry((*part).to_string())
+                .or_insert_with(Node::new);
         }
         node.data = Some(data);
     }
 
     pub fn search(&self, domain: &str) -> Option<&T> {
-        let domain = domain.trim().to_lowercase();
-        let parts = Self::split_domain(&domain)?;
+        let trimmed = domain.trim();
+        // Fast path: ASCII-lowercase input avoids the String allocation.
+        if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
+            let lower = trimmed.to_ascii_lowercase();
+            self.search_normalised(&lower)
+        } else {
+            self.search_normalised(trimmed)
+        }
+    }
+
+    fn search_normalised(&self, domain: &str) -> Option<&T> {
+        let domain = domain.trim_end_matches('.');
+        if domain.is_empty() {
+            return None;
+        }
+        let parts = Self::split_domain(domain)?;
         self.search_node(&self.root, &parts)
     }
 
-    fn search_node<'a>(&'a self, node: &'a Node<T>, parts: &[String]) -> Option<&'a T> {
+    fn search_node<'a>(&'a self, node: &'a Node<T>, parts: &[&str]) -> Option<&'a T> {
         if parts.is_empty() {
             return node.data.as_ref();
         }
 
-        let part = &parts[0];
+        let part = parts[0];
         let rest = &parts[1..];
 
         // Priority 1: exact match
-        if let Some(child) = node.children.get(part.as_str()) {
+        if let Some(child) = node.children.get(part) {
             if let Some(data) = self.search_node(child, rest) {
                 return Some(data);
             }
@@ -99,9 +121,10 @@ impl<T: Clone> DomainTrie<T> {
         None
     }
 
-    /// Split domain into reversed parts: "www.example.com" -> ["com", "example", "www"]
-    /// Leading dot means dot-wildcard: ".example.com" -> ["com", "example", "."]
-    fn split_domain(domain: &str) -> Option<Vec<String>> {
+    /// Split domain into reversed parts borrowing from the input:
+    /// "www.example.com" -> \["com", "example", "www"\]. Leading dot means
+    /// dot-wildcard: ".example.com" -> \["com", "example", "."\].
+    fn split_domain(domain: &str) -> Option<Labels<'_>> {
         let domain = domain.trim_end_matches('.');
         if domain.is_empty() {
             return None;
@@ -113,13 +136,9 @@ impl<T: Clone> DomainTrie<T> {
             (None, domain)
         };
 
-        let mut parts: Vec<String> = domain
-            .split('.')
-            .rev()
-            .map(std::string::ToString::to_string)
-            .collect();
+        let mut parts: Labels<'_> = domain.split('.').rev().collect();
         if let Some(p) = prefix {
-            parts.push(p.to_string());
+            parts.push(p);
         }
         Some(parts)
     }
