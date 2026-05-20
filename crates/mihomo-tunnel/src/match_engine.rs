@@ -77,10 +77,15 @@ pub fn match_rules(
     metadata: &Metadata,
     rules: &[Box<dyn Rule>],
     index: &DomainIndex,
+    needs_process_lookup: bool,
 ) -> Option<MatchResult> {
     let helper = RuleMatchHelper;
 
-    let enriched = maybe_enrich_with_process(metadata, rules);
+    let enriched = if needs_process_lookup {
+        maybe_enrich_with_process(metadata)
+    } else {
+        None
+    };
     let meta: &Metadata = enriched.as_ref().unwrap_or(metadata);
 
     let host = meta.rule_host();
@@ -132,11 +137,8 @@ pub fn match_rules(
     None
 }
 
-fn maybe_enrich_with_process(metadata: &Metadata, rules: &[Box<dyn Rule>]) -> Option<Metadata> {
+fn maybe_enrich_with_process(metadata: &Metadata) -> Option<Metadata> {
     if !metadata.process.is_empty() {
-        return None;
-    }
-    if !rules.iter().any(|r| r.should_find_process()) {
         return None;
     }
     let src_ip = metadata.src_ip?;
@@ -207,7 +209,7 @@ mod tests {
 
         let meta = base_metadata(local);
         let index = DomainIndex::build(&rules);
-        let result = match_rules(&meta, &rules, &index).expect("engine must return a match");
+        let result = match_rules(&meta, &rules, &index, true).expect("engine must return a match");
         assert_eq!(result.adapter_name, "Proxy");
         assert_eq!(result.rule_type.as_str(), "PROCESS-NAME");
     }
@@ -226,7 +228,7 @@ mod tests {
 
         let meta = base_metadata(local);
         let index = DomainIndex::build(&rules);
-        let result = match_rules(&meta, &rules, &index).expect("final rule should match");
+        let result = match_rules(&meta, &rules, &index, true).expect("final rule should match");
         assert_eq!(result.adapter_name, "DIRECT");
         assert_eq!(result.rule_type.as_str(), "MATCH");
     }
@@ -245,7 +247,7 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         };
-        let result = match_rules(&meta, &rules, &index).expect("final rule should match");
+        let result = match_rules(&meta, &rules, &index, true).expect("final rule should match");
         assert_eq!(result.adapter_name, "DIRECT");
     }
 
@@ -265,7 +267,7 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         };
-        let result = match_rules(&meta, &rules, &index).expect("must match");
+        let result = match_rules(&meta, &rules, &index, true).expect("must match");
         assert_eq!(result.adapter_name, "Proxy");
         assert_eq!(result.rule_type.as_str(), "DOMAIN-SUFFIX");
     }
@@ -288,7 +290,7 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         };
-        let result = match_rules(&meta, &rules, &index).expect("must match");
+        let result = match_rules(&meta, &rules, &index, true).expect("must match");
         assert_eq!(result.adapter_name, "Direct");
     }
 
@@ -316,7 +318,7 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         };
-        let result = match_rules(&meta, &rules, &index).expect("must match");
+        let result = match_rules(&meta, &rules, &index, true).expect("must match");
         assert_eq!(
             result.adapter_name, "Broad",
             "first-match-wins: broader rule at lower index must take precedence"

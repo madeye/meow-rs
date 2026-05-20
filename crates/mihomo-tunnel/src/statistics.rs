@@ -68,8 +68,10 @@ pub struct ConnectionInfo {
 pub struct Statistics {
     pub upload_total: AtomicI64,
     pub download_total: AtomicI64,
-    /// Key is the UUID as a hyphenated String for external-API stability.
-    pub connections: DashMap<String, ConnectionInfo>,
+    /// Keyed by `Uuid` (16 B Copy) — formerly `String`, which heap-allocated a
+    /// 36-byte hyphenated representation per insert.  REST handlers parse the
+    /// query path back into a `Uuid` at lookup time.
+    pub connections: DashMap<Uuid, ConnectionInfo>,
     pub rule_match: Arc<RuleMatchCounters>,
 }
 
@@ -97,9 +99,8 @@ impl Statistics {
         rule: &str,
         rule_payload: &str,
         chains: Vec<Arc<str>>,
-    ) -> String {
+    ) -> Uuid {
         let uuid = Uuid::new_v4();
-        let id_str = uuid.to_string();
         let info = ConnectionInfo {
             id: uuid,
             metadata: Arc::new(metadata),
@@ -110,12 +111,12 @@ impl Statistics {
             rule: rule.into(),
             rule_payload: rule_payload.into(),
         };
-        self.connections.insert(id_str.clone(), info);
-        id_str
+        self.connections.insert(uuid, info);
+        uuid
     }
 
-    pub fn close_connection(&self, id: &str) {
-        self.connections.remove(id);
+    pub fn close_connection(&self, id: Uuid) {
+        self.connections.remove(&id);
     }
 
     pub fn snapshot(&self) -> (i64, i64) {

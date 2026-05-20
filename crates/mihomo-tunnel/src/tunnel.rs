@@ -27,6 +27,10 @@ pub struct TunnelInner {
     /// Cached: true if any rule needs the dst_ip resolved (GeoIP / IP-CIDR).
     /// Recomputed by `Tunnel::update_rules`.
     pub needs_ip_resolution: AtomicBool,
+    /// Cached: true if any rule needs process-name enrichment (PROCESS-NAME /
+    /// PROCESS-PATH / UID). Recomputed by `Tunnel::update_rules`. Avoids an
+    /// O(n) virtual-dispatch scan of the rule list on every connection.
+    pub needs_process_lookup: AtomicBool,
 }
 
 impl TunnelInner {
@@ -118,7 +122,8 @@ impl TunnelInner {
             TunnelMode::Rule => {
                 let rules = self.rules.read();
                 let index = self.domain_index.read();
-                let result = match_engine::match_rules(metadata, &rules, &index);
+                let needs_proc = self.needs_process_lookup.load(Ordering::Relaxed);
+                let result = match_engine::match_rules(metadata, &rules, &index, needs_proc);
                 match result {
                     Some(m) => {
                         let action = if m.adapter_name == "DIRECT" {
@@ -173,6 +178,7 @@ impl Tunnel {
                 nat_table: udp::new_nat_table(),
                 stats: Arc::new(Statistics::new()),
                 needs_ip_resolution: AtomicBool::new(false),
+                needs_process_lookup: AtomicBool::new(false),
             }),
         }
     }
@@ -191,7 +197,8 @@ impl Tunnel {
     }
 
     pub fn update_rules(&self, rules: Vec<Box<dyn Rule>>) {
-        let needs = rules.iter().any(|r| r.should_resolve_ip());
+        let needs_ip = rules.iter().any(|r| r.should_resolve_ip());
+        let needs_proc = rules.iter().any(|r| r.should_find_process());
         let new_index = DomainIndex::build(&rules);
         {
             let mut rules_guard = self.inner.rules.write();
@@ -200,9 +207,15 @@ impl Tunnel {
             *index_guard = new_index;
             self.inner
                 .needs_ip_resolution
-                .store(needs, Ordering::Relaxed);
+                .store(needs_ip, Ordering::Relaxed);
+            self.inner
+                .needs_process_lookup
+                .store(needs_proc, Ordering::Relaxed);
         }
-        info!("Rules updated (needs_ip_resolution={})", needs);
+        info!(
+            "Rules updated (needs_ip_resolution={}, needs_process_lookup={})",
+            needs_ip, needs_proc
+        );
     }
 
     pub fn update_proxies(&self, proxies: HashMap<String, Arc<dyn Proxy>>) {

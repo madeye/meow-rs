@@ -4,7 +4,7 @@ mod orig_dest;
 use crate::sniffer::SnifferRuntime;
 use firewall::FirewallGuard;
 use mihomo_common::{ConnType, Metadata, Network};
-use mihomo_tunnel::{copy_bidirectional_buf, Tunnel, RELAY_BUF_SIZE};
+use mihomo_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -204,7 +204,8 @@ async fn handle_tproxy_conn(
         proxy.name()
     );
 
-    let conn_id = inner.stats.track_connection(
+    let _guard = ConnectionGuard::track(
+        &inner.stats,
         metadata.pure(),
         &rule_name,
         &rule_payload,
@@ -234,7 +235,6 @@ async fn handle_tproxy_conn(
         }
         Err(e) => warn!("TProxy dial error: {e}"),
     }
-
-    inner.stats.close_connection(&conn_id);
+    // _guard drops here, removing the entry from Statistics.
     Ok(())
 }

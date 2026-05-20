@@ -19,13 +19,13 @@ use tracing::{debug, info, warn};
 /// removed regardless of how the surrounding future ends. Holding an
 /// `&Statistics` is sufficient — the caller already owns an
 /// `Arc<Statistics>` (via `TunnelInner.stats`) that outlives the guard.
-struct ConnectionGuard<'a> {
+pub struct ConnectionGuard<'a> {
     stats: &'a Statistics,
-    id: String,
+    id: uuid::Uuid,
 }
 
 impl<'a> ConnectionGuard<'a> {
-    fn track(
+    pub fn track(
         stats: &'a Statistics,
         metadata: Metadata,
         rule: &str,
@@ -35,11 +35,15 @@ impl<'a> ConnectionGuard<'a> {
         let id = stats.track_connection(metadata, rule, rule_payload, chains);
         Self { stats, id }
     }
+
+    pub fn id(&self) -> uuid::Uuid {
+        self.id
+    }
 }
 
 impl Drop for ConnectionGuard<'_> {
     fn drop(&mut self) {
-        self.stats.close_connection(&self.id);
+        self.stats.close_connection(self.id);
     }
 }
 

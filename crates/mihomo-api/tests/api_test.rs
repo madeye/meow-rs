@@ -2255,7 +2255,7 @@ async fn delete_connection_by_id_returns_204_and_removes_entry() {
     let json = body_json(resp).await;
     let conns = json["connections"].as_array().unwrap();
     assert_eq!(conns.len(), 1);
-    assert_eq!(conns[0]["id"], conn_id);
+    assert_eq!(conns[0]["id"], conn_id.to_string());
 
     // DELETE the specific connection.
     let app = create_router(Arc::clone(&state));

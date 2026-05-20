@@ -393,8 +393,13 @@ async fn close_connection(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> StatusCode {
-    state.tunnel.statistics().close_connection(&id);
-    StatusCode::NO_CONTENT
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => {
+            state.tunnel.statistics().close_connection(uuid);
+            StatusCode::NO_CONTENT
+        }
+        Err(_) => StatusCode::BAD_REQUEST,
+    }
 }
 
 #[derive(Serialize)]

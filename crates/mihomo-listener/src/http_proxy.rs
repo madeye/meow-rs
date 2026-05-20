@@ -1,7 +1,7 @@
 use crate::sniffer::SnifferRuntime;
 use base64::Engine;
 use mihomo_common::{AuthConfig, ConnType, Metadata, Network};
-use mihomo_tunnel::{copy_bidirectional_buf, Tunnel, RELAY_BUF_SIZE};
+use mihomo_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -46,32 +46,35 @@ async fn handle_http_inner(
     let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];
     let mut relay_buf_dn = [0u8; RELAY_BUF_SIZE];
 
-    // Read the HTTP request line and headers byte by byte until we find \r\n\r\n.
-    // We avoid BufReader to prevent borrow issues with the stream.
+    // Read the HTTP request line and headers in chunks until we find
+    // \r\n\r\n. Reading one byte at a time costs ~100 syscalls per CONNECT;
+    // chunked reads cap the syscall count at ceil(headers / 1024).
+    //
+    // Bytes that arrive past the marker (e.g. POST body in a single TCP
+    // segment) are sliced off into `leftover` so the relay path can re-emit
+    // them after sending the rewritten request line.
+    const CHUNK: usize = 1024;
+    const MAX_HEADERS: usize = 8192;
     let mut request_buf = Vec::with_capacity(4096);
-    let mut headers_done = false;
-
-    while !headers_done {
-        let mut byte = [0u8; 1];
-        let n = stream.read(&mut byte).await?;
+    let mut chunk = [0u8; CHUNK];
+    let header_end = loop {
+        let n = stream.read(&mut chunk).await?;
         if n == 0 {
             return Err("connection closed before headers complete".into());
         }
-        request_buf.push(byte[0]);
-
-        // Check for \r\n\r\n at the end
-        if request_buf.len() >= 4 {
-            let len = request_buf.len();
-            if request_buf[len - 4..] == [b'\r', b'\n', b'\r', b'\n'] {
-                headers_done = true;
-            }
+        // Overlap the previous tail by 3 bytes so a marker straddling two
+        // reads (e.g. "\r\n\r" then "\n…") is still detected.
+        let search_start = request_buf.len().saturating_sub(3);
+        request_buf.extend_from_slice(&chunk[..n]);
+        if let Some(rel) = find_crlf_crlf(&request_buf[search_start..]) {
+            break search_start + rel + 4;
         }
-
-        // Safety limit
-        if request_buf.len() > 8192 {
+        if request_buf.len() > MAX_HEADERS {
             return Err("request headers too large".into());
         }
-    }
+    };
+    let leftover: Vec<u8> = request_buf[header_end..].to_vec();
+    request_buf.truncate(header_end);
 
     // Auth check: verify Proxy-Authorization before dispatching.
     let needs_auth = auth.is_some_and(|a| !a.credentials.is_empty())
@@ -168,7 +171,8 @@ async fn handle_http_inner(
             proxy.name()
         );
 
-        let conn_id = inner.stats.track_connection(
+        let _guard = ConnectionGuard::track(
+            &inner.stats,
             metadata.pure(),
             &rule_name,
             &rule_payload,
@@ -177,6 +181,13 @@ async fn handle_http_inner(
 
         match proxy.dial_tcp(&metadata).await {
             Ok(mut remote) => {
+                // Per RFC 7230 the client must wait for 200 OK before sending
+                // application data, but if a client pipelined bytes ahead of
+                // that we already read them — forward before relaying.
+                if !leftover.is_empty() {
+                    remote.write_all(&leftover).await?;
+                    inner.stats.add_upload(leftover.len() as i64);
+                }
                 match copy_bidirectional_buf(
                     stream,
                     &mut remote,
@@ -194,8 +205,7 @@ async fn handle_http_inner(
             }
             Err(e) => warn!("HTTP CONNECT dial error: {}", e),
         }
-
-        inner.stats.close_connection(&conn_id);
+        // _guard drops here, removing the entry from Statistics.
     } else {
         // Plain HTTP proxy (GET/POST/etc via proxy)
         let url = target;
@@ -241,7 +251,8 @@ async fn handle_http_inner(
             proxy.name()
         );
 
-        let conn_id = inner.stats.track_connection(
+        let _guard = ConnectionGuard::track(
+            &inner.stats,
             metadata.pure(),
             &rule_name,
             &rule_payload,
@@ -270,8 +281,14 @@ async fn handle_http_inner(
                 }
                 rewritten.push_str("\r\n");
 
-                // Send the rewritten request to remote
+                // Send the rewritten request to remote, then any body bytes
+                // that arrived in the same TCP segment as the headers (POST
+                // payloads typically do).
                 remote.write_all(rewritten.as_bytes()).await?;
+                if !leftover.is_empty() {
+                    remote.write_all(&leftover).await?;
+                    inner.stats.add_upload(leftover.len() as i64);
+                }
 
                 // Relay bidirectionally
                 match copy_bidirectional_buf(
@@ -296,11 +313,18 @@ async fn handle_http_inner(
                     .await?;
             }
         }
-
-        inner.stats.close_connection(&conn_id);
+        // _guard drops here, removing the entry from Statistics.
     }
 
     Ok(())
+}
+
+/// Locate `b"\r\n\r\n"` in `buf` and return the index of the first `\r`.
+fn find_crlf_crlf(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 4 {
+        return None;
+    }
+    buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
 fn parse_host_port(target: &str, default_port: u16) -> (String, u16) {

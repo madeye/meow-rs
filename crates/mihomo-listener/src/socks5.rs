@@ -1,6 +1,6 @@
 use crate::sniffer::SnifferRuntime;
 use mihomo_common::{AuthConfig, ConnType, Metadata, Network};
-use mihomo_tunnel::{copy_bidirectional_buf, Tunnel, RELAY_BUF_SIZE};
+use mihomo_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -176,7 +176,11 @@ async fn handle_socks5_inner(
         proxy.name()
     );
 
-    let conn_id = inner.stats.track_connection(
+    // RAII-tracked so the entry is removed from `Statistics.connections` even
+    // if the relay future is cancelled (listener shutdown, iOS idle sweeper,
+    // panic-unwind).
+    let _guard = ConnectionGuard::track(
+        &inner.stats,
         metadata.pure(),
         &rule_name,
         &rule_payload,
@@ -202,7 +206,6 @@ async fn handle_socks5_inner(
         Err(e) => warn!("SOCKS5 dial error: {}", e),
     }
 
-    inner.stats.close_connection(&conn_id);
     Ok(())
 }
 

@@ -87,7 +87,8 @@ impl TrojanAdapter {
     }
 
     fn build_header(&self, metadata: &Metadata, cmd: u8) -> Vec<u8> {
-        let mut buf = Vec::new();
+        // Worst case: 56 (hex password) + 2 (CRLF) + 1 (cmd) + 1+255 (FQDN) + 2 (port) + 2 (CRLF) = 319 B.
+        let mut buf = Vec::with_capacity(320);
         // hex password + CRLF
         buf.extend_from_slice(self.hex_password.as_bytes());
         buf.extend_from_slice(b"\r\n");

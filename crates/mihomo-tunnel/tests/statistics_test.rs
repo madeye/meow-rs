@@ -59,10 +59,10 @@ fn test_track_connection() {
         vec![Arc::from("DIRECT")],
     );
 
-    assert!(!id.is_empty());
+    assert!(!id.is_nil());
     let conns = stats.active_connections();
     assert_eq!(conns.len(), 1);
-    assert_eq!(conns[0].id.to_string(), id);
+    assert_eq!(conns[0].id, id);
     assert_eq!(&*conns[0].rule, "DOMAIN-SUFFIX");
     assert_eq!(&*conns[0].rule_payload, "google.com");
     assert_eq!(&*conns[0].chains[0], "DIRECT");
@@ -76,7 +76,7 @@ fn test_close_connection() {
     let id = stats.track_connection(metadata, "MATCH", "", vec![Arc::from("DIRECT")]);
     assert_eq!(stats.active_connections().len(), 1);
 
-    stats.close_connection(&id);
+    stats.close_connection(id);
     assert!(stats.active_connections().is_empty());
 }
 
@@ -84,7 +84,7 @@ fn test_close_connection() {
 fn test_close_nonexistent_connection() {
     let stats = Statistics::new();
     // Should not panic
-    stats.close_connection("nonexistent-id");
+    stats.close_connection(uuid::Uuid::nil());
     assert!(stats.active_connections().is_empty());
 }
 
@@ -108,12 +108,12 @@ fn test_multiple_connections() {
 
     assert_eq!(stats.active_connections().len(), 3);
 
-    stats.close_connection(&id2);
+    stats.close_connection(id2);
     assert_eq!(stats.active_connections().len(), 2);
 
     // Verify remaining connections
     let conns = stats.active_connections();
-    let ids: Vec<String> = conns.iter().map(|c| c.id.to_string()).collect();
+    let ids: Vec<uuid::Uuid> = conns.iter().map(|c| c.id).collect();
     assert!(ids.contains(&id1));
     assert!(!ids.contains(&id2));
     assert!(ids.contains(&id3));

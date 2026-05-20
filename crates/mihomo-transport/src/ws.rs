@@ -479,6 +479,14 @@ impl AsyncWrite for WsStream {
                         }
                         Poll::Pending => return Poll::Pending,
                     }
+                    // ADR-0008 HP-3: this `buf.to_vec()` allocates one
+                    // Vec<u8> per WS-relayed chunk and is the largest per-byte
+                    // allocation in the transport stack. tokio-tungstenite 0.24
+                    // requires `Message::Binary(Vec<u8>)`; 0.26+ accepts
+                    // `Bytes` and would let this be a refcount bump on a
+                    // shared `Bytes` buf. Tracked separately — upgrading the
+                    // tungstenite version is out of scope here because the
+                    // call/handshake API changed.
                     if let Err(e) =
                         Pin::new(&mut state.ws).start_send(Message::Binary(buf.to_vec()))
                     {

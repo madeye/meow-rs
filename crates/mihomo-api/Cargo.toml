@@ -25,6 +25,7 @@ futures = { workspace = true }
 parking_lot = { workspace = true }
 subtle = "2"
 sysinfo = "0.32"
+uuid = { workspace = true }
 time = { workspace = true }
 base64 = "0.22"
 prometheus-client = "0.22"
