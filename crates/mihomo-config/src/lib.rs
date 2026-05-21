@@ -168,7 +168,7 @@ pub type RebuildResult = (HashMap<String, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>);
 /// Does not resolve rule-provider cache paths; use
 /// [`rebuild_from_raw_with_cache_dir`] when a working directory is available.
 pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, None, None, &HashMap::new())
+    rebuild_from_raw_impl(raw, None, None, &HashMap::new(), None)
 }
 
 /// Rebuild proxies/rules and inject `resolver` into the built-in DIRECT
@@ -177,7 +177,7 @@ pub fn rebuild_from_raw_with_resolver(
     raw: &raw::RawConfig,
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, None, resolver, &HashMap::new())
+    rebuild_from_raw_impl(raw, None, resolver, &HashMap::new(), None)
 }
 
 /// Same as [`rebuild_from_raw`] but accepts a `cache_dir` used to resolve
@@ -188,7 +188,7 @@ pub fn rebuild_from_raw_with_cache_dir(
     cache_dir: Option<&Path>,
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new())
+    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None)
 }
 
 fn rebuild_from_raw_impl(
@@ -196,6 +196,7 @@ fn rebuild_from_raw_impl(
     cache_dir: Option<&Path>,
     resolver: Option<Arc<Resolver>>,
     providers: &HashMap<String, Arc<ProxyProvider>>,
+    selector_store: Option<&Arc<mihomo_proxy::SelectorStore>>,
 ) -> Result<RebuildResult, anyhow::Error> {
     let mut proxies: HashMap<String, Arc<dyn Proxy>> = HashMap::new();
     // Built-in proxies
@@ -242,7 +243,12 @@ fn rebuild_from_raw_impl(
         max_passes -= 1;
         let mut still_remaining = Vec::new();
         for raw_group in &remaining {
-            match proxy_parser::parse_proxy_group(raw_group, &proxies, providers) {
+            match proxy_parser::parse_proxy_group_with_store(
+                raw_group,
+                &proxies,
+                providers,
+                selector_store,
+            ) {
                 Ok(group) => {
                     let name = group.name().to_string();
                     proxies.insert(name, group);
@@ -258,7 +264,12 @@ fn rebuild_from_raw_impl(
             // Match upstream mihomo: warn-and-skip the missing members and
             // build the group with whatever resolved.
             for raw_group in &still_remaining {
-                match proxy_parser::parse_proxy_group_lenient(raw_group, &proxies, providers) {
+                match proxy_parser::parse_proxy_group_lenient_with_store(
+                    raw_group,
+                    &proxies,
+                    providers,
+                    selector_store,
+                ) {
                     Ok(group) => {
                         let name = group.name().to_string();
                         proxies.insert(name, group);
@@ -752,7 +763,18 @@ async fn build_config(
     //   3. Rebuild proxies with the real resolver attached. The two
     //      passes only differ in DIRECT's resolver field; nothing else
     //      depends on the placeholder built in step 1.
-    let (proxies, _) = rebuild_from_raw_impl(&raw, cache_dir, None, &proxy_providers)?;
+    // Open the persistent selector store (one JSON file in cache_dir).
+    // Missing/unreadable files yield an empty store — no fatal errors.
+    let selector_store =
+        cache_dir.map(|d| mihomo_proxy::SelectorStore::open(d.join("selector-cache.json")));
+
+    let (proxies, _) = rebuild_from_raw_impl(
+        &raw,
+        cache_dir,
+        None,
+        &proxy_providers,
+        selector_store.as_ref(),
+    )?;
 
     // DNS — pass the explicit mmdb path so fallback-filter GeoIP uses the
     // same path as the rule engine, plus the proxy registry from step 1
@@ -765,6 +787,7 @@ async fn build_config(
         cache_dir,
         Some(Arc::clone(&dns_config.resolver)),
         &proxy_providers,
+        selector_store.as_ref(),
     )?;
 
     // Rule providers share the same ParserContext as the top-level rules

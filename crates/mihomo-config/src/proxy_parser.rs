@@ -928,7 +928,18 @@ pub fn parse_proxy_group(
     existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
     providers: &HashMap<String, Arc<crate::proxy_provider::ProxyProvider>>,
 ) -> std::result::Result<Arc<dyn Proxy>, String> {
-    parse_proxy_group_inner(config, existing_proxies, true, providers)
+    parse_proxy_group_inner(config, existing_proxies, true, providers, None)
+}
+
+/// Variant of [`parse_proxy_group`] that wires a persistent [`SelectorStore`]
+/// into any `type: select` group it builds, so user picks survive restart.
+pub fn parse_proxy_group_with_store(
+    config: &crate::raw::RawProxyGroup,
+    existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
+    providers: &HashMap<String, Arc<crate::proxy_provider::ProxyProvider>>,
+    store: Option<&Arc<mihomo_proxy::SelectorStore>>,
+) -> std::result::Result<Arc<dyn Proxy>, String> {
+    parse_proxy_group_inner(config, existing_proxies, true, providers, store)
 }
 
 /// Lenient variant: unknown members are warned and skipped rather than
@@ -940,7 +951,18 @@ pub fn parse_proxy_group_lenient(
     existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
     providers: &HashMap<String, Arc<crate::proxy_provider::ProxyProvider>>,
 ) -> std::result::Result<Arc<dyn Proxy>, String> {
-    parse_proxy_group_inner(config, existing_proxies, false, providers)
+    parse_proxy_group_inner(config, existing_proxies, false, providers, None)
+}
+
+/// Lenient variant with persistent-selector wiring; see
+/// [`parse_proxy_group_with_store`].
+pub fn parse_proxy_group_lenient_with_store(
+    config: &crate::raw::RawProxyGroup,
+    existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
+    providers: &HashMap<String, Arc<crate::proxy_provider::ProxyProvider>>,
+    store: Option<&Arc<mihomo_proxy::SelectorStore>>,
+) -> std::result::Result<Arc<dyn Proxy>, String> {
+    parse_proxy_group_inner(config, existing_proxies, false, providers, store)
 }
 
 fn parse_proxy_group_inner(
@@ -948,6 +970,7 @@ fn parse_proxy_group_inner(
     existing_proxies: &HashMap<String, Arc<dyn Proxy>>,
     strict: bool,
     providers: &HashMap<String, Arc<crate::proxy_provider::ProxyProvider>>,
+    selector_store: Option<&Arc<mihomo_proxy::SelectorStore>>,
 ) -> std::result::Result<Arc<dyn Proxy>, String> {
     let mut proxies: Vec<Arc<dyn Proxy>> = Vec::new();
 
@@ -1010,11 +1033,13 @@ fn parse_proxy_group_inner(
     }
 
     match config.group_type.as_str() {
-        "select" => Ok(Arc::new(SelectorGroup::new_with_providers(
-            &config.name,
-            proxies,
-            slots,
-        ))),
+        "select" => {
+            let mut group = SelectorGroup::new_with_providers(&config.name, proxies, slots);
+            if let Some(store) = selector_store {
+                group = group.with_store(Arc::clone(store));
+            }
+            Ok(Arc::new(group))
+        }
         "url-test" => {
             let tolerance = config.tolerance.unwrap_or(150);
             Ok(Arc::new(UrlTestGroup::new_with_providers(

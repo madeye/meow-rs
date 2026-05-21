@@ -1,3 +1,4 @@
+use super::selector_store::SelectorStore;
 use async_trait::async_trait;
 use mihomo_common::{
     AdapterType, DelayHistory, Metadata, MihomoError, ProviderSlot, Proxy, ProxyAdapter, ProxyConn,
@@ -12,6 +13,8 @@ pub struct SelectorGroup {
     provider_slots: Vec<ProviderSlot>,
     /// Name of the currently selected proxy; `None` means use the first.
     selected: RwLock<Option<String>>,
+    /// Optional write-through persistence; primed at construction.
+    store: Option<Arc<SelectorStore>>,
     health: ProxyHealth,
 }
 
@@ -22,6 +25,7 @@ impl SelectorGroup {
             static_proxies: proxies,
             provider_slots: Vec::new(),
             selected: RwLock::new(None),
+            store: None,
             health: ProxyHealth::new(),
         }
     }
@@ -36,8 +40,21 @@ impl SelectorGroup {
             static_proxies: proxies,
             provider_slots: slots,
             selected: RwLock::new(None),
+            store: None,
             health: ProxyHealth::new(),
         }
+    }
+
+    /// Attach a persistent store. The previously-saved choice (if any) is
+    /// loaded into `selected` immediately so the group dials it on first use.
+    /// Subsequent successful `select()` calls flush back through the store.
+    #[must_use]
+    pub fn with_store(mut self, store: Arc<SelectorStore>) -> Self {
+        if let Some(prev) = store.get(&self.name) {
+            *self.selected.write() = Some(prev);
+        }
+        self.store = Some(store);
+        self
     }
 
     fn contains_name(&self, name: &str) -> bool {
@@ -58,6 +75,9 @@ impl SelectorGroup {
     pub fn select(&self, name: &str) -> bool {
         if self.contains_name(name) {
             *self.selected.write() = Some(name.to_string());
+            if let Some(store) = &self.store {
+                store.set(&self.name, name);
+            }
             true
         } else {
             false
