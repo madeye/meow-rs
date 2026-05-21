@@ -1,6 +1,9 @@
+use crate::internal_http;
 use crate::raw::RawGeoDataConfig;
 use anyhow::anyhow;
+use mihomo_common::adapter::Proxy;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -90,24 +93,44 @@ pub fn parse_geodata(raw: Option<&RawGeoDataConfig>) -> Result<GeoDataConfig, an
 
 /// Download `url` and atomically replace `dest` via a `.tmp` sibling.
 ///
+/// When `proxy` is `Some`, the HTTP fetch is tunneled through that proxy
+/// adapter (used so GFW-blocked CDNs stay reachable on background refresh);
+/// otherwise the OS handles connectivity directly.
+///
 /// Returns `Ok(())` on success. On failure the temp file is removed (best-
 /// effort) and the original `dest` is untouched.
-pub async fn download_and_replace(url: &str, dest: &Path) -> Result<(), anyhow::Error> {
+pub async fn download_and_replace(
+    url: &str,
+    dest: &Path,
+    proxy: Option<&Arc<dyn Proxy>>,
+) -> Result<(), anyhow::Error> {
     let tmp = dest.with_extension("tmp");
 
-    info!("auto-update: downloading {} from {}", dest.display(), url);
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(60))
-        .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-
-    let resp = client.get(url).send().await?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(anyhow!("HTTP {status} fetching {url}"));
+    if let Some(p) = proxy {
+        info!(
+            "auto-update: downloading {} from {} via proxy '{}'",
+            dest.display(),
+            url,
+            p.name()
+        );
+    } else {
+        info!("auto-update: downloading {} from {}", dest.display(), url);
     }
-    let bytes = resp.bytes().await?;
+
+    let bytes = if let Some(p) = proxy {
+        internal_http::fetch_via_proxy(url, p).await?
+    } else {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
+            .build()?;
+        let resp = client.get(url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow!("HTTP {status} fetching {url}"));
+        }
+        resp.bytes().await?.to_vec()
+    };
 
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;

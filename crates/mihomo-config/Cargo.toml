@@ -35,6 +35,12 @@ base64 = { workspace = true }
 regex = { workspace = true }
 parking_lot = { workspace = true }
 hickory-proto = { workspace = true }
+smol_str = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+url = "2"
+httparse = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

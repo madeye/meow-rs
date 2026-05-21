@@ -2,6 +2,7 @@ pub mod auth;
 pub mod dns_parser;
 pub mod ech_dns;
 pub mod geodata;
+pub mod internal_http;
 pub mod proxy_parser;
 pub mod proxy_provider;
 pub mod raw;
@@ -293,9 +294,14 @@ fn rebuild_from_raw_impl(
     let ctx = build_parser_context_from_raw(raw)?;
 
     // Load rule-providers before rule parsing so RULE-SET entries can
-    // resolve their named sets.
+    // resolve their named sets. Route HTTP fetches through the first
+    // upstream proxy from `proxies:` (if any) so providers hosted on
+    // GFW-blocked domains stay reachable.
+    let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
     let providers = match raw.rule_providers.as_ref() {
-        Some(map) if !map.is_empty() => rule_provider::load_providers(map, cache_dir, &ctx),
+        Some(map) if !map.is_empty() => {
+            rule_provider::load_providers(map, cache_dir, &ctx, download_proxy.as_ref())
+        }
         _ => HashMap::new(),
     };
     let ruleset_map = rule_provider::snapshot_ruleset_map(&providers);
@@ -829,10 +835,14 @@ async fn build_config(
     )?;
 
     // Rule providers share the same ParserContext as the top-level rules
-    // (same geodata paths, same lazy-loaded readers).
+    // (same geodata paths, same lazy-loaded readers). HTTP fetches route
+    // through the first upstream proxy from `proxies:` (if any).
     let ctx = build_parser_context_with_geo(&raw, &geodata)?;
+    let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
     let rule_providers = match raw.rule_providers.as_ref() {
-        Some(map) if !map.is_empty() => rule_provider::load_providers(map, cache_dir, &ctx),
+        Some(map) if !map.is_empty() => {
+            rule_provider::load_providers(map, cache_dir, &ctx, download_proxy.as_ref())
+        }
         _ => HashMap::new(),
     };
 
