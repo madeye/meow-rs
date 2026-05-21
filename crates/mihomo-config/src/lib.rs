@@ -233,8 +233,16 @@ fn rebuild_from_raw_impl(
     for raw_proxy in raw.proxies.as_deref().unwrap_or(&[]) {
         match proxy_parser::parse_proxy(raw_proxy) {
             Ok(proxy) => {
-                let name = proxy.name().to_string();
-                proxies.insert(name, proxy);
+                // Prefer the YAML `name:` as the registry key. `proxy.name()`
+                // is fine for SS/Trojan/VLESS (their parsers thread the name
+                // into the adapter) but `DirectAdapter::name()` is hardcoded
+                // to "DIRECT" and would overwrite the built-in, hiding any
+                // user-named direct proxy (e.g. `name: "直连"`) from groups.
+                let key = raw_proxy
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map_or_else(|| proxy.name().to_string(), str::to_string);
+                proxies.insert(key, proxy);
             }
             Err(e) => warn!("Failed to parse proxy: {}", e),
         }
