@@ -2028,6 +2028,7 @@ dependencies = [
  "async-trait",
  "base64",
  "hickory-proto",
+ "httparse",
  "ipnet",
  "libc",
  "maxminddb",
@@ -2040,12 +2041,17 @@ dependencies = [
  "parking_lot",
  "regex",
  "reqwest",
+ "rustls",
  "serde",
  "serde_yaml",
+ "smol_str",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

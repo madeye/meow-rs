@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
+use mihomo_common::adapter::Proxy;
 use mihomo_rules::{
     build_rule_set, build_rule_set_from_mrs, is_mrs_bytes, ParserContext, RuleSet, RuleSetBehavior,
     RuleSetFormat,
@@ -19,6 +20,7 @@ use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{info, warn};
 
+use crate::internal_http;
 use crate::raw::RawRuleProvider;
 
 // ---------------------------------------------------------------------------
@@ -56,6 +58,9 @@ pub struct RuleProvider {
     /// Unix timestamp (seconds) of last successful load/refresh.
     updated_at: AtomicU64,
     rules: RwLock<Arc<dyn RuleSet>>,
+    /// Upstream proxy to route HTTP fetches through. `None` = direct.
+    /// Captured at load time; reused on every periodic `refresh()`.
+    download_proxy: Option<Arc<dyn Proxy>>,
 }
 
 impl std::fmt::Debug for RuleProvider {
@@ -89,7 +94,7 @@ impl RuleProvider {
         if self.provider_type != ProviderType::Http {
             return Ok(());
         }
-        let bytes = fetch_http_async(&self.vehicle).await?;
+        let bytes = fetch_http_async(&self.vehicle, self.download_proxy.as_ref()).await?;
         let behavior = self.behavior;
         let ctx_clone = ctx.clone();
         let boxed: Box<dyn RuleSet> = tokio::task::spawn_blocking(move || {
@@ -126,13 +131,14 @@ pub fn load_providers(
     raw_providers: &HashMap<String, RawRuleProvider>,
     cache_dir: Option<&Path>,
     ctx: &ParserContext,
+    download_proxy: Option<&Arc<dyn Proxy>>,
 ) -> HashMap<String, Arc<RuleProvider>> {
     let mut out = HashMap::new();
     if raw_providers.is_empty() {
         return out;
     }
     for (name, cfg) in raw_providers {
-        match load_one(name, cfg, cache_dir, ctx) {
+        match load_one(name, cfg, cache_dir, ctx, download_proxy) {
             Ok(provider) => {
                 info!(
                     "Loaded rule-provider '{}' ({}/{}): {} entries",
@@ -168,12 +174,13 @@ fn load_one(
     cfg: &RawRuleProvider,
     cache_dir: Option<&Path>,
     ctx: &ParserContext,
+    download_proxy: Option<&Arc<dyn Proxy>>,
 ) -> Result<RuleProvider> {
     let behavior: RuleSetBehavior = cfg.behavior.parse().map_err(|e: String| anyhow!("{e}"))?;
     match cfg.provider_type.as_str() {
         "inline" => load_inline(name, cfg, behavior, ctx),
         "file" => load_file(name, cfg, cache_dir, behavior, ctx),
-        "http" => load_http(name, cfg, cache_dir, behavior, ctx),
+        "http" => load_http(name, cfg, cache_dir, behavior, ctx, download_proxy),
         other => Err(anyhow!("unknown rule-provider type: {other}")),
     }
 }
@@ -202,6 +209,7 @@ fn load_inline(
         String::new(),
         0,
         rules,
+        None,
     ))
 }
 
@@ -233,6 +241,7 @@ fn load_file(
         vehicle,
         0,
         rules,
+        None,
     ))
 }
 
@@ -242,13 +251,14 @@ fn load_http(
     cache_dir: Option<&Path>,
     behavior: RuleSetBehavior,
     ctx: &ParserContext,
+    download_proxy: Option<&Arc<dyn Proxy>>,
 ) -> Result<RuleProvider> {
     let url = cfg
         .url
         .as_deref()
         .ok_or_else(|| anyhow!("http provider '{name}' requires a 'url'"))?;
     let cache_path = resolve_path(cfg, cache_dir, name);
-    let bytes = fetch_http_blocking_with_cache(url, cache_path.as_deref())?;
+    let bytes = fetch_http_blocking_with_cache(url, cache_path.as_deref(), download_proxy)?;
     let explicit_format = parse_explicit_format(cfg)?;
     let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
     let interval = cfg.interval.unwrap_or(0);
@@ -259,6 +269,7 @@ fn load_http(
         url.to_string(),
         interval,
         rules,
+        download_proxy.cloned(),
     ))
 }
 
@@ -269,6 +280,7 @@ fn make_provider(
     vehicle: String,
     interval: u64,
     rules: Box<dyn RuleSet>,
+    download_proxy: Option<Arc<dyn Proxy>>,
 ) -> RuleProvider {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -283,6 +295,7 @@ fn make_provider(
         interval,
         updated_at: AtomicU64::new(now),
         rules: RwLock::new(rules_arc),
+        download_proxy,
     }
 }
 
@@ -369,8 +382,12 @@ fn resolve_path(cfg: &RawRuleProvider, cache_dir: Option<&Path>, name: &str) -> 
 // HTTP fetch
 // ---------------------------------------------------------------------------
 
-fn fetch_http_blocking_with_cache(url: &str, cache_path: Option<&Path>) -> Result<Vec<u8>> {
-    match fetch_http_blocking(url) {
+fn fetch_http_blocking_with_cache(
+    url: &str,
+    cache_path: Option<&Path>,
+    proxy: Option<&Arc<dyn Proxy>>,
+) -> Result<Vec<u8>> {
+    match fetch_http_blocking(url, proxy) {
         Ok(bytes) => {
             if let Some(path) = cache_path {
                 write_cache(path, &bytes);
@@ -394,15 +411,18 @@ fn fetch_http_blocking_with_cache(url: &str, cache_path: Option<&Path>) -> Resul
     }
 }
 
-fn fetch_http_blocking(url: &str) -> Result<Vec<u8>> {
+fn fetch_http_blocking(url: &str, proxy: Option<&Arc<dyn Proxy>>) -> Result<Vec<u8>> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("building temporary tokio runtime for rule-provider fetch")?;
-    rt.block_on(fetch_http_async(url))
+    rt.block_on(fetch_http_async(url, proxy))
 }
 
-pub(crate) async fn fetch_http_async(url: &str) -> Result<Vec<u8>> {
+pub(crate) async fn fetch_http_async(url: &str, proxy: Option<&Arc<dyn Proxy>>) -> Result<Vec<u8>> {
+    if let Some(p) = proxy {
+        return internal_http::fetch_via_proxy(url, p).await;
+    }
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
@@ -476,7 +496,7 @@ mod tests {
                 payload: None,
             },
         );
-        let out = load_providers(&providers, Some(dir.path()), &ctx());
+        let out = load_providers(&providers, Some(dir.path()), &ctx(), None);
         assert_eq!(out.len(), 1);
         let p = out.get("test").unwrap();
         assert_eq!(p.behavior, RuleSetBehavior::Domain);
@@ -498,7 +518,7 @@ mod tests {
                 payload: Some(vec!["example.com".to_string(), "+.foo.com".to_string()]),
             },
         );
-        let out = load_providers(&providers, None, &ctx());
+        let out = load_providers(&providers, None, &ctx(), None);
         assert_eq!(out.len(), 1);
         let p = out.get("my-rules").unwrap();
         assert_eq!(p.provider_type, ProviderType::Inline);
@@ -543,7 +563,7 @@ mod tests {
                 payload: None,
             },
         );
-        let out = load_providers(&providers, None, &ctx());
+        let out = load_providers(&providers, None, &ctx(), None);
         let p = out.get("mrs-test").expect("provider should load");
         assert_eq!(p.rule_count(), 2);
     }
@@ -567,7 +587,7 @@ mod tests {
                 payload: None,
             },
         );
-        let out = load_providers(&providers, None, &ctx());
+        let out = load_providers(&providers, None, &ctx(), None);
         assert_eq!(out.get("x").unwrap().rule_count(), 1);
     }
 
@@ -586,7 +606,7 @@ mod tests {
                 payload: None,
             },
         );
-        let out = load_providers(&providers, None, &ctx());
+        let out = load_providers(&providers, None, &ctx(), None);
         assert!(out.is_empty());
     }
 
@@ -608,7 +628,7 @@ mod tests {
                 payload: None,
             },
         );
-        let out = load_providers(&providers, None, &ctx());
+        let out = load_providers(&providers, None, &ctx(), None);
         assert_eq!(out.len(), 1);
     }
 
@@ -639,7 +659,7 @@ mod tests {
                 payload: Some(vec!["10.0.0.0/8".to_string()]),
             },
         );
-        let out = load_providers(&providers, None, &ctx());
+        let out = load_providers(&providers, None, &ctx(), None);
         let ruleset_map = snapshot_ruleset_map(&out);
         assert_eq!(ruleset_map.len(), 2);
         assert!(ruleset_map.contains_key("p1"));

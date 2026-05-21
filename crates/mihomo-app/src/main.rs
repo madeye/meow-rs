@@ -708,19 +708,33 @@ async fn geodata_auto_update_loop(
 
         let mut any_updated = false;
 
-        if let Err(e) = download_and_replace(&geo.mmdb_url, &mmdb_target).await {
+        // Look up the first upstream proxy on each tick — captures any
+        // selector/group changes since startup.
+        let proxies = tunnel.proxies();
+        let download_proxy = mihomo_config::internal_http::first_named_proxy(
+            raw_config.read().proxies.as_deref(),
+            &proxies,
+        );
+
+        if let Err(e) =
+            download_and_replace(&geo.mmdb_url, &mmdb_target, download_proxy.as_ref()).await
+        {
             warn!("geodata auto-update: GeoIP MMDB download failed: {:#}", e);
         } else {
             any_updated = true;
         }
 
-        if let Err(e) = download_and_replace(&geo.asn_url, &asn_target).await {
+        if let Err(e) =
+            download_and_replace(&geo.asn_url, &asn_target, download_proxy.as_ref()).await
+        {
             warn!("geodata auto-update: ASN MMDB download failed: {:#}", e);
         } else {
             any_updated = true;
         }
 
-        if let Err(e) = download_and_replace(&geo.geosite_url, &geosite_target).await {
+        if let Err(e) =
+            download_and_replace(&geo.geosite_url, &geosite_target, download_proxy.as_ref()).await
+        {
             warn!("geodata auto-update: geosite download failed: {:#}", e);
         } else {
             any_updated = true;
