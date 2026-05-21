@@ -81,6 +81,11 @@ pub struct NamedListener {
     pub port: u16,
     pub listen: String,
     pub tproxy_sni: bool,
+    /// Cap on concurrent in-flight inbound connections for this listener.
+    /// `0` (default) disables the cap. Resolved from the per-listener
+    /// `max-connections` field, falling back to the global `max-connections`.
+    #[serde(default)]
+    pub max_connections: usize,
 }
 
 pub struct ListenerConfig {
@@ -638,12 +643,14 @@ fn build_named_listeners(
     let mut result: Vec<NamedListener> = Vec::new();
     let mut used_ports: HashMap<u16, String> = HashMap::new();
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let global_max_conns = raw.max_connections.unwrap_or(0);
 
     let mut add = |name: &str,
                    ltype: ListenerType,
                    port: u16,
                    listen: &str,
-                   tproxy_sni: bool|
+                   tproxy_sni: bool,
+                   max_connections: usize|
      -> Result<(), anyhow::Error> {
         if let Some(existing) = used_ports.get(&port) {
             anyhow::bail!(
@@ -662,19 +669,41 @@ fn build_named_listeners(
             port,
             listen: listen.to_string(),
             tproxy_sni,
+            max_connections,
         });
         Ok(())
     };
 
-    // Shorthand fields → auto-named listeners
+    // Shorthand fields → auto-named listeners (inherit global max-connections)
     if let Some(port) = raw.mixed_port {
-        add("mixed", ListenerType::Mixed, port, default_bind, false)?;
+        add(
+            "mixed",
+            ListenerType::Mixed,
+            port,
+            default_bind,
+            false,
+            global_max_conns,
+        )?;
     }
     if let Some(port) = raw.socks_port {
-        add("socks", ListenerType::Socks5, port, default_bind, false)?;
+        add(
+            "socks",
+            ListenerType::Socks5,
+            port,
+            default_bind,
+            false,
+            global_max_conns,
+        )?;
     }
     if let Some(port) = raw.port {
-        add("http", ListenerType::Http, port, default_bind, false)?;
+        add(
+            "http",
+            ListenerType::Http,
+            port,
+            default_bind,
+            false,
+            global_max_conns,
+        )?;
     }
     if let Some(port) = raw.tproxy_port {
         add(
@@ -683,6 +712,7 @@ fn build_named_listeners(
             port,
             "127.0.0.1",
             global_tproxy_sni,
+            global_max_conns,
         )?;
     }
 
@@ -698,7 +728,15 @@ fn build_named_listeners(
                 default_bind
             });
         let tproxy_sni = raw_l.tproxy_sni.unwrap_or(global_tproxy_sni);
-        add(&raw_l.name, ltype, raw_l.port, listen, tproxy_sni)?;
+        let max_connections = raw_l.max_connections.unwrap_or(global_max_conns);
+        add(
+            &raw_l.name,
+            ltype,
+            raw_l.port,
+            listen,
+            tproxy_sni,
+            max_connections,
+        )?;
     }
 
     Ok(result)

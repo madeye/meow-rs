@@ -10,12 +10,13 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 /// Default cap on in-flight inbound connections per listener.
-/// Empirically, each live VLESS+WS+TLS+ECH tunnel costs ~90 KB of userland
-/// memory (rustls/BoringSSL state + WS framer + tokio future heap + relay
-/// buffers). 256 caps load RSS at ~50 MB on top of an ~18 MB idle baseline —
-/// the documented footprint cap. Excess clients block on `accept()` rather
-/// than driving RSS unbounded.
-pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+/// `0` means no cap — the listener accepts as many concurrent connections as
+/// the kernel and tokio runtime can hold. Set a positive value (via the
+/// `max-connections` config key, top-level or per-listener) to back-pressure
+/// the TCP listen queue and bound RSS under burst load: each live
+/// VLESS+WS+TLS+ECH tunnel costs ~90 KB of userland memory, so a cap of 256
+/// holds RSS to ~50 MB on top of an ~18 MB idle baseline.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 0;
 
 pub struct MixedListener {
     tunnel: Tunnel,
@@ -61,10 +62,17 @@ impl MixedListener {
 
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let listener = TcpListener::bind(self.listen_addr).await?;
-        info!(
-            "Mixed listener '{}' on {} (max_connections={})",
-            self.name, self.listen_addr, self.max_connections
-        );
+        if self.max_connections == 0 {
+            info!(
+                "Mixed listener '{}' on {} (max_connections=unlimited)",
+                self.name, self.listen_addr
+            );
+        } else {
+            info!(
+                "Mixed listener '{}' on {} (max_connections={})",
+                self.name, self.listen_addr, self.max_connections
+            );
+        }
 
         // Bound the number of in-flight connection-handler tasks so RSS stays
         // capped under burst load. The semaphore is None when max=0

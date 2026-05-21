@@ -75,6 +75,10 @@ pub struct RawConfig {
     pub authentication: Option<Vec<String>>,
     pub skip_auth_prefixes: Option<Vec<String>>,
     pub geodata: Option<RawGeoDataConfig>,
+    /// Global default cap on concurrent in-flight inbound connections per
+    /// listener. `0` (the default) disables the cap. Individual `listeners:`
+    /// entries can override this with their own `max-connections` field.
+    pub max_connections: Option<usize>,
 }
 
 /// A `hosts:` map value: either a single IP address or a list of addresses.
@@ -104,6 +108,9 @@ pub struct RawListener {
     pub port: u16,
     pub listen: Option<String>,
     pub tproxy_sni: Option<bool>,
+    /// Per-listener override of the global `max-connections` cap. `0`
+    /// disables the cap for this listener.
+    pub max_connections: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

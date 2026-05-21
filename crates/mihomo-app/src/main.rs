@@ -544,7 +544,8 @@ async fn run(
                 {
                     let listener = MixedListener::new(tunnel.clone(), addr, nl.name.clone())
                         .with_sniffer(Arc::clone(&sniffer_runtime))
-                        .with_auth(Arc::clone(&auth));
+                        .with_auth(Arc::clone(&auth))
+                        .with_max_connections(nl.max_connections);
                     tokio::spawn(async move {
                         if let Err(e) = listener.run().await {
                             error!("Listener error: {}", e);
