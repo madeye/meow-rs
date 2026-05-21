@@ -9,3 +9,5 @@ Dockerfile.debug
 dhat-heap.json
 dhat-ad-hoc.json
 dh_out.json
+.claude/scheduled_tasks.lock
+.antigravitycli/
