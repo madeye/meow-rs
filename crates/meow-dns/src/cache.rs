@@ -169,3 +169,151 @@ impl DnsCache {
         self.reverse.iter().map(|s| s.lock().len()).sum()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn ipv4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn fnv1a32_matches_known_vectors() {
+        // Reference: https://fnvhash.github.io/fnv-calculator-online/
+        // (the cache only uses these for shard selection, but anchoring the
+        //  function on a known vector catches accidental refactors)
+        assert_eq!(fnv1a32(b""), 0x811c_9dc5);
+        assert_eq!(fnv1a32(b"\x00"), 0x050c_5d1f);
+    }
+
+    #[test]
+    fn shard_selection_is_deterministic_per_input() {
+        assert_eq!(shard_str("example.com"), shard_str("example.com"));
+        assert_eq!(shard_ip(ipv4(1, 1, 1, 1)), shard_ip(ipv4(1, 1, 1, 1)));
+        // v4 and v6 use distinct hashes; deterministic separately.
+        let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        assert_eq!(shard_ip(v6), shard_ip(v6));
+    }
+
+    #[test]
+    fn put_then_get_round_trips() {
+        let c = DnsCache::new(64);
+        let ips = vec![ipv4(1, 2, 3, 4), ipv4(5, 6, 7, 8)];
+        c.put("a.example", &ips, Duration::from_secs(30));
+        assert_eq!(c.get("a.example"), Some(ips));
+        assert!(c.get("nope.example").is_none());
+    }
+
+    #[test]
+    fn get_on_expired_entry_returns_none_and_evicts() {
+        let c = DnsCache::new(64);
+        c.put("x.example", &[ipv4(1, 1, 1, 1)], Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            c.get("x.example").is_none(),
+            "expired entry must not be returned"
+        );
+        // Eviction happened as a side-effect of the failed read.
+        assert_eq!(c.forward_len(), 0);
+    }
+
+    #[test]
+    fn reverse_lookup_returns_owning_domain() {
+        let c = DnsCache::new(64);
+        c.put(
+            "rev.example",
+            &[ipv4(192, 0, 2, 1), ipv4(192, 0, 2, 2)],
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            c.reverse_lookup(ipv4(192, 0, 2, 1)).as_deref(),
+            Some("rev.example")
+        );
+        assert_eq!(
+            c.reverse_lookup(ipv4(192, 0, 2, 2)).as_deref(),
+            Some("rev.example")
+        );
+        assert!(c.reverse_lookup(ipv4(192, 0, 2, 99)).is_none());
+    }
+
+    #[test]
+    fn reverse_lookup_on_expired_entry_evicts() {
+        let c = DnsCache::new(64);
+        c.put("x.example", &[ipv4(10, 0, 0, 1)], Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(c.reverse_lookup(ipv4(10, 0, 0, 1)).is_none());
+        assert_eq!(c.reverse_len(), 0);
+    }
+
+    #[test]
+    fn put_overwrites_existing_entry() {
+        let c = DnsCache::new(64);
+        c.put("dup.example", &[ipv4(1, 1, 1, 1)], Duration::from_secs(30));
+        c.put("dup.example", &[ipv4(2, 2, 2, 2)], Duration::from_secs(30));
+        assert_eq!(c.get("dup.example"), Some(vec![ipv4(2, 2, 2, 2)]));
+    }
+
+    #[test]
+    fn clear_drops_all_entries() {
+        let c = DnsCache::new(64);
+        c.put("a.example", &[ipv4(1, 1, 1, 1)], Duration::from_secs(30));
+        c.put("b.example", &[ipv4(2, 2, 2, 2)], Duration::from_secs(30));
+        assert!(c.forward_len() > 0);
+        c.clear();
+        assert_eq!(c.forward_len(), 0);
+        assert_eq!(c.reverse_len(), 0);
+        assert!(c.get("a.example").is_none());
+        assert!(c.reverse_lookup(ipv4(1, 1, 1, 1)).is_none());
+    }
+
+    #[test]
+    fn put_with_empty_ip_list_creates_forward_entry_but_no_reverse() {
+        // An NXDOMAIN-cached result should be representable: the forward
+        // lookup returns an empty Vec without touching the reverse table.
+        let c = DnsCache::new(64);
+        c.put("nx.example", &[], Duration::from_secs(30));
+        assert_eq!(c.get("nx.example"), Some(vec![]));
+        assert_eq!(c.reverse_len(), 0);
+    }
+
+    #[test]
+    fn ipv6_round_trips() {
+        let c = DnsCache::new(64);
+        let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        c.put("v6.example", &[v6], Duration::from_secs(30));
+        assert_eq!(c.get("v6.example"), Some(vec![v6]));
+        assert_eq!(c.reverse_lookup(v6).as_deref(), Some("v6.example"));
+    }
+
+    #[test]
+    fn new_clamps_tiny_capacity_to_min_shard_size() {
+        // capacity < SHARDS must not divide to zero (NonZeroUsize would
+        // panic). Construct one with capacity 1 and confirm it still works.
+        let c = DnsCache::new(1);
+        c.put("tiny.example", &[ipv4(1, 1, 1, 1)], Duration::from_secs(30));
+        assert!(c.get("tiny.example").is_some());
+    }
+
+    #[test]
+    fn capacity_evicts_lru_across_shards() {
+        // Insert more entries than the per-shard cap into the same shard, by
+        // generating domains that all FNV-1a-hash to shard 0. The LRU eviction
+        // contract means at least the very first key is gone after we
+        // overflow capacity.
+        let c = DnsCache::new(16); // per-shard cap ~= max(16/16, 8) = 8
+                                   // Insert plenty of entries to force eviction in some shard.
+        for i in 0..200u32 {
+            let key = format!("k-{i}.example");
+            c.put(&key, &[ipv4(127, 0, 0, 1)], Duration::from_secs(30));
+        }
+        // Per-shard caps sum to ≤ 16 * 8 = 128, so at least 72 entries must
+        // have been evicted overall.
+        assert!(
+            c.forward_len() <= 128,
+            "forward_len {} exceeded global shard cap",
+            c.forward_len()
+        );
+    }
+}

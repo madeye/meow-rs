@@ -299,6 +299,34 @@ impl DnsServer {
         response
     }
 
+    #[cfg(test)]
+    pub(crate) fn build_response_for_test(
+        id: u16,
+        query: &[u8],
+        qtype: u16,
+        addr: std::net::IpAddr,
+        ttl_secs: u32,
+    ) -> Vec<u8> {
+        Self::build_response(id, query, qtype, addr, ttl_secs)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_nxdomain_for_test(id: u16, query: &[u8]) -> Vec<u8> {
+        Self::build_nxdomain(id, query)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_noerror_empty_for_test(id: u16, query: &[u8]) -> Vec<u8> {
+        Self::build_noerror_empty(id, query)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_question_for_test(
+        data: &[u8],
+    ) -> Result<(String, u16, usize), Box<dyn std::error::Error + Send + Sync>> {
+        Self::parse_question(data)
+    }
+
     /// NOERROR with zero answers: hosts entry matched but no IPs of the queried
     /// address family. Clients must not retry on an empty-answer NOERROR.
     fn build_noerror_empty(id: u16, query: &[u8]) -> Vec<u8> {
@@ -324,5 +352,145 @@ impl DnsServer {
         }
 
         response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    /// Build a minimal valid DNS query: header + single QNAME (`example.com`)
+    /// + QTYPE A + QCLASS IN.
+    fn sample_query(id: u16, qtype: u16) -> Vec<u8> {
+        let mut q = Vec::with_capacity(64);
+        q.extend_from_slice(&id.to_be_bytes());
+        q.extend_from_slice(&[0x01, 0x00]); // standard query, RD=1
+        q.extend_from_slice(&[0x00, 0x01]); // QDCOUNT=1
+        q.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // AN/NS/AR = 0
+                                                                    // QNAME: 7"example" 3"com" 0
+        q.push(7);
+        q.extend_from_slice(b"example");
+        q.push(3);
+        q.extend_from_slice(b"com");
+        q.push(0);
+        q.extend_from_slice(&qtype.to_be_bytes()); // QTYPE
+        q.extend_from_slice(&[0x00, 0x01]); // QCLASS IN
+        q
+    }
+
+    #[test]
+    fn parse_question_reads_qname_and_qtype() {
+        let q = sample_query(0xbeef, 0x0001);
+        let (name, qtype, _) = DnsServer::parse_question_for_test(&q[12..]).unwrap();
+        assert_eq!(name, "example.com");
+        assert_eq!(qtype, 1);
+    }
+
+    #[test]
+    fn parse_question_rejects_truncated_label() {
+        // Label length byte 5 but only 2 bytes follow → label-truncated error.
+        let bad = [5u8, b'a', b'b'];
+        let err = DnsServer::parse_question_for_test(&bad);
+        assert!(err.is_err(), "must reject truncated label");
+    }
+
+    #[test]
+    fn parse_question_rejects_missing_type_class() {
+        // Just a name terminator, no type/class.
+        let bad = [3u8, b'a', b'b', b'c', 0x00];
+        let err = DnsServer::parse_question_for_test(&bad);
+        assert!(err.is_err(), "must reject missing qtype/qclass");
+    }
+
+    #[test]
+    fn build_response_a_record_has_correct_header_and_rdata() {
+        let q = sample_query(0xabcd, 1);
+        let resp = DnsServer::build_response_for_test(
+            0xabcd,
+            &q,
+            1,
+            std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7)),
+            300,
+        );
+        // ID echoed
+        assert_eq!(&resp[0..2], &[0xab, 0xcd]);
+        // Flags = response + RA
+        assert_eq!(&resp[2..4], &[0x81, 0x80]);
+        // QDCOUNT=1, ANCOUNT=1
+        assert_eq!(&resp[4..8], &[0x00, 0x01, 0x00, 0x01]);
+        // Last 4 bytes of RDATA = the IPv4 octets.
+        assert_eq!(&resp[resp.len() - 4..], &[192, 0, 2, 7]);
+        // TTL is the four bytes immediately before RDLENGTH(2)+RDATA(4) = -10..-6
+        assert_eq!(
+            &resp[resp.len() - 10..resp.len() - 6],
+            &300u32.to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn build_response_aaaa_record_uses_16_byte_rdlength() {
+        let q = sample_query(1, 28);
+        let v6 = std::net::IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        let resp = DnsServer::build_response_for_test(1, &q, 28, v6, 60);
+        // The last 16 bytes are the v6 octets.
+        if let std::net::IpAddr::V6(v6_addr) = v6 {
+            assert_eq!(&resp[resp.len() - 16..], &v6_addr.octets());
+        }
+        // RDLENGTH at -18..-16 = 16.
+        assert_eq!(&resp[resp.len() - 18..resp.len() - 16], &[0x00, 0x10]);
+    }
+
+    #[test]
+    fn build_nxdomain_sets_rcode_3_and_zero_answers() {
+        let q = sample_query(0x4242, 1);
+        let resp = DnsServer::build_nxdomain_for_test(0x4242, &q);
+        assert_eq!(&resp[0..2], &[0x42, 0x42], "ID echoed");
+        // Flags low byte 0x83 → RA=1 + rcode=3 (NXDOMAIN)
+        assert_eq!(resp[2], 0x81);
+        assert_eq!(resp[3], 0x83);
+        // ANCOUNT = 0
+        assert_eq!(&resp[6..8], &[0x00, 0x00]);
+    }
+
+    #[test]
+    fn build_noerror_empty_has_rcode_0_and_zero_answers() {
+        let q = sample_query(7, 28);
+        let resp = DnsServer::build_noerror_empty_for_test(7, &q);
+        assert_eq!(resp[2], 0x81);
+        assert_eq!(
+            resp[3], 0x80,
+            "low flag byte = RA=1, rcode=0 (NoError) — not NXDOMAIN"
+        );
+        assert_eq!(&resp[6..8], &[0x00, 0x00], "ANCOUNT must be zero");
+    }
+
+    fn empty_resolver() -> crate::resolver::Resolver {
+        crate::resolver::Resolver::new(
+            Vec::new(),
+            Vec::new(),
+            DnsMode::Normal,
+            meow_trie::DomainTrie::new(),
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn handle_query_rejects_packet_shorter_than_header() {
+        let resolver = empty_resolver();
+        let err = DnsServer::handle_query(&[0u8; 5], &resolver).await;
+        assert!(err.is_err(), "must reject too-short packets");
+    }
+
+    #[tokio::test]
+    async fn handle_query_rejects_zero_questions() {
+        // Valid header but qdcount=0.
+        let mut q = [0u8; 12];
+        q[0] = 0x12;
+        q[1] = 0x34;
+        // qdcount bytes [4..6] left at zero
+        let resolver = empty_resolver();
+        let err = DnsServer::handle_query(&q, &resolver).await;
+        assert!(err.is_err(), "must reject queries with no question");
     }
 }
