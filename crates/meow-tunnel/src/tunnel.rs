@@ -6,6 +6,7 @@ use meow_common::{Metadata, Proxy, ProxyAdapter, Rule, TunnelMode};
 use meow_dns::Resolver;
 use meow_proxy::DirectAdapter;
 use parking_lot::RwLock;
+use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -115,31 +116,38 @@ impl TunnelInner {
         }
     }
 
-    /// Resolve which proxy to use for the given metadata
+    /// Resolve which proxy to use for the given metadata.
+    ///
+    /// The `(rule_name, rule_payload)` strings are `SmolStr` (inline ≤23 B)
+    /// rather than `String`, so the common-case fixed names (`Direct`,
+    /// `Global`, `Final`, short rule_type names like `DOMAIN`, `GEOIP`) and
+    /// short payloads (`example.com`, `192.168.1.0/24`) populate without
+    /// touching the heap. This is the HP-3 hot path (ADR-0008): every TCP
+    /// connection and every UDP NAT session creation flows through here.
     pub fn resolve_proxy(
         &self,
         metadata: &Metadata,
-    ) -> Option<(Arc<dyn ProxyAdapter>, String, String)> {
+    ) -> Option<(Arc<dyn ProxyAdapter>, SmolStr, SmolStr)> {
         let mode = *self.mode.read();
         match mode {
             TunnelMode::Direct => Some((
                 Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
-                "Direct".into(),
-                String::new(),
+                SmolStr::new_static("Direct"),
+                SmolStr::default(),
             )),
             TunnelMode::Global => {
                 let route = self.route.load();
                 if let Some(proxy) = route.proxies.get("GLOBAL") {
                     Some((
                         Arc::clone(proxy) as Arc<dyn ProxyAdapter>,
-                        "Global".into(),
-                        String::new(),
+                        SmolStr::new_static("Global"),
+                        SmolStr::default(),
                     ))
                 } else {
                     Some((
                         Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
-                        "Direct".into(),
-                        String::new(),
+                        SmolStr::new_static("Direct"),
+                        SmolStr::default(),
                     ))
                 }
             }
@@ -166,21 +174,31 @@ impl TunnelInner {
                         self.stats
                             .rule_match
                             .increment(m.rule_type.as_str(), action);
-                        let proxy = route.proxies.get(&m.adapter_name).cloned().map_or_else(
-                            || {
-                                debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
-                                Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>
-                            },
-                            |p| p as Arc<dyn ProxyAdapter>,
-                        );
-                        Some((proxy, m.rule_type.to_string(), m.rule_payload))
+                        let proxy = route
+                            .proxies
+                            .get(m.adapter_name.as_str())
+                            .cloned()
+                            .map_or_else(
+                                || {
+                                    debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
+                                    Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>
+                                },
+                                |p| p as Arc<dyn ProxyAdapter>,
+                            );
+                        // `rule_type.as_str()` is a `&'static str` — wrap it
+                        // inline without heap.
+                        Some((
+                            proxy,
+                            SmolStr::new_static(m.rule_type.as_str()),
+                            m.rule_payload,
+                        ))
                     }
                     None => {
                         // No rule matched, use DIRECT
                         Some((
                             Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
-                            "Final".into(),
-                            String::new(),
+                            SmolStr::new_static("Final"),
+                            SmolStr::default(),
                         ))
                     }
                 }

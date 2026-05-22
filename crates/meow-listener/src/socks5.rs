@@ -182,8 +182,8 @@ async fn handle_socks5_inner(
     let _guard = ConnectionGuard::track(
         &inner.stats,
         metadata.pure(),
-        &rule_name,
-        &rule_payload,
+        rule_name,
+        rule_payload,
         vec![Arc::from(proxy.name())],
     );
 

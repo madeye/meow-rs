@@ -2236,8 +2236,8 @@ async fn delete_connection_by_id_returns_204_and_removes_entry() {
     };
     let conn_id = state.tunnel.statistics().track_connection(
         meta,
-        "DOMAIN",
-        "example.com",
+        smol_str::SmolStr::new_static("DOMAIN"),
+        smol_str::SmolStr::new_static("example.com"),
         vec![Arc::from("DIRECT")],
     );
 
@@ -2299,8 +2299,18 @@ async fn delete_all_connections_clears_all() {
         dst_port: 80,
         ..Default::default()
     };
-    stats.track_connection(meta(), "MATCH", "", vec![Arc::from("DIRECT")]);
-    stats.track_connection(meta(), "MATCH", "", vec![Arc::from("DIRECT")]);
+    stats.track_connection(
+        meta(),
+        smol_str::SmolStr::new_static("MATCH"),
+        smol_str::SmolStr::default(),
+        vec![Arc::from("DIRECT")],
+    );
+    stats.track_connection(
+        meta(),
+        smol_str::SmolStr::new_static("MATCH"),
+        smol_str::SmolStr::default(),
+        vec![Arc::from("DIRECT")],
+    );
 
     let app = create_router(Arc::clone(&state));
     let resp = app

@@ -54,8 +54,8 @@ fn test_track_connection() {
 
     let id = stats.track_connection(
         metadata,
-        "DOMAIN-SUFFIX",
-        "google.com",
+        smol_str::SmolStr::new_static("DOMAIN-SUFFIX"),
+        smol_str::SmolStr::new_static("google.com"),
         vec![Arc::from("DIRECT")],
     );
 
@@ -73,7 +73,12 @@ fn test_close_connection() {
     let stats = Statistics::new();
     let metadata = Metadata::default();
 
-    let id = stats.track_connection(metadata, "MATCH", "", vec![Arc::from("DIRECT")]);
+    let id = stats.track_connection(
+        metadata,
+        smol_str::SmolStr::new_static("MATCH"),
+        smol_str::SmolStr::new_static(""),
+        vec![Arc::from("DIRECT")],
+    );
     assert_eq!(stats.active_connections().len(), 1);
 
     stats.close_connection(id);
@@ -94,17 +99,22 @@ fn test_multiple_connections() {
 
     let id1 = stats.track_connection(
         Metadata::default(),
-        "DOMAIN",
-        "a.com",
+        smol_str::SmolStr::new_static("DOMAIN"),
+        smol_str::SmolStr::new_static("a.com"),
         vec![Arc::from("proxy1")],
     );
     let id2 = stats.track_connection(
         Metadata::default(),
-        "DOMAIN",
-        "b.com",
+        smol_str::SmolStr::new_static("DOMAIN"),
+        smol_str::SmolStr::new_static("b.com"),
         vec![Arc::from("proxy2")],
     );
-    let id3 = stats.track_connection(Metadata::default(), "MATCH", "", vec![Arc::from("DIRECT")]);
+    let id3 = stats.track_connection(
+        Metadata::default(),
+        smol_str::SmolStr::new_static("MATCH"),
+        smol_str::SmolStr::new_static(""),
+        vec![Arc::from("DIRECT")],
+    );
 
     assert_eq!(stats.active_connections().len(), 3);
 
@@ -122,15 +132,30 @@ fn test_multiple_connections() {
 #[test]
 fn test_connection_unique_ids() {
     let stats = Statistics::new();
-    let id1 = stats.track_connection(Metadata::default(), "MATCH", "", vec![Arc::from("DIRECT")]);
-    let id2 = stats.track_connection(Metadata::default(), "MATCH", "", vec![Arc::from("DIRECT")]);
+    let id1 = stats.track_connection(
+        Metadata::default(),
+        smol_str::SmolStr::new_static("MATCH"),
+        smol_str::SmolStr::new_static(""),
+        vec![Arc::from("DIRECT")],
+    );
+    let id2 = stats.track_connection(
+        Metadata::default(),
+        smol_str::SmolStr::new_static("MATCH"),
+        smol_str::SmolStr::new_static(""),
+        vec![Arc::from("DIRECT")],
+    );
     assert_ne!(id1, id2, "Connection IDs must be unique");
 }
 
 #[test]
 fn test_connection_has_start_time() {
     let stats = Statistics::new();
-    let _id = stats.track_connection(Metadata::default(), "MATCH", "", vec![Arc::from("DIRECT")]);
+    let _id = stats.track_connection(
+        Metadata::default(),
+        smol_str::SmolStr::new_static("MATCH"),
+        smol_str::SmolStr::new_static(""),
+        vec![Arc::from("DIRECT")],
+    );
 
     let conns = stats.active_connections();
     assert!(!conns[0].start.is_empty());
@@ -147,8 +172,8 @@ fn test_connection_chains() {
     let stats = Statistics::new();
     let _id = stats.track_connection(
         Metadata::default(),
-        "DOMAIN",
-        "example.com",
+        smol_str::SmolStr::new_static("DOMAIN"),
+        smol_str::SmolStr::new_static("example.com"),
         vec![Arc::from("proxy-group"), Arc::from("ss-server")],
     );
 

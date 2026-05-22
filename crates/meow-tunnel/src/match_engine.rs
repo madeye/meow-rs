@@ -1,22 +1,31 @@
 use meow_common::{find_process, Metadata, Rule, RuleMatchHelper, RuleType};
 use meow_trie::DomainTrie;
+use smol_str::SmolStr;
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::trace;
 
+/// One match result. Both string fields are `SmolStr` (inline ≤23 bytes,
+/// heap-backed via `Arc<str>` above that) so a connection on the rule
+/// hot path (ADR-0008 HP-3) typically incurs zero heap allocations to
+/// populate this struct — the common DIRECT / REJECT / short-named
+/// proxy / short CIDR payload cases all inline.
 pub struct MatchResult {
-    pub adapter_name: String,
+    pub adapter_name: SmolStr,
     pub rule_type: RuleType,
-    pub rule_payload: String,
+    pub rule_payload: SmolStr,
 }
 
 /// Index of DOMAIN and DOMAIN-SUFFIX rules keyed by the trie.
 ///
 /// Stores `(rule_index, adapter_name)` for each pattern, keeping the
 /// minimum (earliest) rule index so the match algorithm can short-circuit
-/// the linear scan at the right position.
+/// the linear scan at the right position. The adapter name is shared as
+/// `Arc<str>` so the trie clone-on-lookup is a refcount bump rather than
+/// a string copy.
 pub struct DomainIndex {
-    trie: DomainTrie<(usize, String)>,
+    trie: DomainTrie<(usize, Arc<str>)>,
 }
 
 impl DomainIndex {
@@ -29,7 +38,7 @@ impl DomainIndex {
     /// Build an index from the rule list, recording the first (minimum-index)
     /// occurrence of each domain pattern.
     pub fn build(rules: &[Box<dyn Rule>]) -> Self {
-        let mut trie: DomainTrie<(usize, String)> = DomainTrie::new();
+        let mut trie: DomainTrie<(usize, Arc<str>)> = DomainTrie::new();
         let mut seen: HashSet<String> = HashSet::new();
         for (idx, rule) in rules.iter().enumerate() {
             match rule.rule_type() {
@@ -43,7 +52,7 @@ impl DomainIndex {
                         } else {
                             pattern
                         };
-                        trie.insert(&trie_key, (idx, rule.adapter().to_string()));
+                        trie.insert(&trie_key, (idx, Arc::from(rule.adapter())));
                     }
                 }
                 _ => {}
@@ -54,10 +63,10 @@ impl DomainIndex {
 
     /// Probe the trie for a hostname. Returns `(rule_index, adapter_name)` of
     /// the minimum-index matching DOMAIN/DOMAIN-SUFFIX rule, or `None`.
-    pub fn search(&self, host: &str) -> Option<(usize, &str)> {
-        self.trie
-            .search(host)
-            .map(|(idx, adapter)| (*idx, adapter.as_str()))
+    /// The returned `&Arc<str>` lives as long as `self` — the caller can
+    /// `Arc::clone` it for free if it needs to keep the name.
+    pub fn search(&self, host: &str) -> Option<(usize, &Arc<str>)> {
+        self.trie.search(host).map(|(idx, adapter)| (*idx, adapter))
     }
 }
 
@@ -108,7 +117,7 @@ pub fn match_rules(
             return Some(MatchResult {
                 adapter_name,
                 rule_type: rule.rule_type(),
-                rule_payload: rule.payload().to_string(),
+                rule_payload: SmolStr::from(rule.payload()),
             });
         }
     }
@@ -117,9 +126,9 @@ pub fn match_rules(
     if let Some((trie_idx, adapter)) = trie_hit {
         let rule = &rules[trie_idx];
         return Some(MatchResult {
-            adapter_name: adapter.to_string(),
+            adapter_name: SmolStr::from(adapter.as_ref()),
             rule_type: rule.rule_type(),
-            rule_payload: rule.payload().to_string(),
+            rule_payload: SmolStr::from(rule.payload()),
         });
     }
 
@@ -129,7 +138,7 @@ pub fn match_rules(
             return Some(MatchResult {
                 adapter_name,
                 rule_type: rule.rule_type(),
-                rule_payload: rule.payload().to_string(),
+                rule_payload: SmolStr::from(rule.payload()),
             });
         }
     }

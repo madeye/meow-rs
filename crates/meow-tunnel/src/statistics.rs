@@ -2,18 +2,23 @@
 //   id: String (24 B heap) → Uuid (16 B inline, −8 B)
 //   metadata: Metadata (272 B inline) → Arc<Metadata> (8 B thin-ptr, −264 B)
 //     Closing a connection drops a refcount, not a 272 B drop chain.
-//   rule: String (24 B) → Arc<str> (16 B fat-ptr, −8 B)
-//   rule_payload: String (24 B) → Arc<str> (16 B fat-ptr, −8 B)
+//   rule: String → SmolStr (inline ≤23 B, heap-backed above that, −8 B)
+//   rule_payload: String → SmolStr (same)
+//     ADR-0008 HP-3: previously these were `Arc<str>`, which always allocates
+//     on construction. SmolStr inlines the common cases (`Direct`, `DOMAIN`,
+//     `example.com`, `192.168.0.0/16`, …) — zero heap touches per connection
+//     for the rule-match record.
 //   chains: Vec<String> (24 B struct, heap elems) → Vec<Arc<str>> (24 B struct,
 //     ref-counted elems — no per-element allocation for proxy names)
 // Public JSON shape is unchanged: Uuid serialises as hyphenated string via the
-// `serde` feature; Arc<str> and Vec<Arc<str>> serialise as string/array.
-// Arc<Metadata> is serde-skipped so the wrapper type is invisible to the wire format.
+// `serde` feature; SmolStr / Arc<str> / Vec<Arc<str>> all serialise as
+// string/array. Arc<Metadata> is serde-skipped so the wrapper type is invisible.
 // Breaking change permitted by ADR-0009.
 
 use dashmap::DashMap;
 use meow_common::Metadata;
 use serde::Serialize;
+use smol_str::SmolStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -60,9 +65,11 @@ pub struct ConnectionInfo {
     /// Proxy chain; ref-counted so proxy-name strings are shared across entries.
     pub chains: Vec<Arc<str>>,
     /// Rule type that matched this connection (e.g. `"DOMAIN-SUFFIX"`).
-    pub rule: Arc<str>,
+    /// `SmolStr` so common short names inline (no heap on the connection
+    /// hot path).
+    pub rule: SmolStr,
     /// Rule payload (e.g. the domain pattern). Config-derived, low-cardinality.
-    pub rule_payload: Arc<str>,
+    pub rule_payload: SmolStr,
 }
 
 pub struct Statistics {
@@ -96,8 +103,8 @@ impl Statistics {
     pub fn track_connection(
         &self,
         metadata: Metadata,
-        rule: &str,
-        rule_payload: &str,
+        rule: SmolStr,
+        rule_payload: SmolStr,
         chains: Vec<Arc<str>>,
     ) -> Uuid {
         let uuid = Uuid::new_v4();
@@ -108,8 +115,8 @@ impl Statistics {
             download: 0,
             start: chrono_now(),
             chains,
-            rule: rule.into(),
-            rule_payload: rule_payload.into(),
+            rule,
+            rule_payload,
         };
         self.connections.insert(uuid, info);
         uuid

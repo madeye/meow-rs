@@ -131,18 +131,27 @@ pub trait Rule: Send + Sync {
 
     /// Match against metadata and, on match, return the routing target.
     ///
-    /// Default: `Some(self.adapter().to_string())` when `match_metadata`
+    /// Default: `Some(SmolStr::from(self.adapter()))` when `match_metadata`
     /// returns true, else `None`. Override only when the resolved target
     /// must come from some other source — notably `SUB-RULE`, whose
     /// target is the matched inner rule's adapter rather than any field
     /// stored on the outer rule.
     ///
+    /// Returns `SmolStr` rather than `String` to avoid a heap allocation
+    /// per matched connection: adapter names ≤23 bytes (the common case
+    /// for `DIRECT`, `REJECT`, and most user-named proxies) inline into
+    /// the SmolStr struct. This is HP-3 in ADR-0008.
+    ///
     /// upstream: `rules/logic/logic.go::matchSubRules` — returns
     /// `(bool, adapter)` from the inner rule, not from the SUB-RULE
     /// wrapper.
-    fn match_and_resolve(&self, metadata: &Metadata, helper: &RuleMatchHelper) -> Option<String> {
+    fn match_and_resolve(
+        &self,
+        metadata: &Metadata,
+        helper: &RuleMatchHelper,
+    ) -> Option<smol_str::SmolStr> {
         if self.match_metadata(metadata, helper) {
-            Some(self.adapter().to_string())
+            Some(smol_str::SmolStr::from(self.adapter()))
         } else {
             None
         }

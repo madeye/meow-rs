@@ -96,7 +96,11 @@ impl Rule for SubRuleRule {
         self.block.iter().any(|r| r.should_find_process())
     }
 
-    fn match_and_resolve(&self, metadata: &Metadata, helper: &RuleMatchHelper) -> Option<String> {
+    fn match_and_resolve(
+        &self,
+        metadata: &Metadata,
+        helper: &RuleMatchHelper,
+    ) -> Option<smol_str::SmolStr> {
         // upstream: rules/logic/logic.go::matchSubRules lines 179–190
         for rule in self.block.iter() {
             if let Some(target) = rule.match_and_resolve(metadata, helper) {
