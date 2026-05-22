@@ -24,7 +24,6 @@ use meow_common::{
     AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tracing::debug;
 
 use crate::stream_conn::StreamConn;
@@ -89,7 +88,7 @@ impl Socks5Adapter {
 
     /// Dial TCP to the proxy server, optionally wrapping in TLS.
     async fn dial_stream(&self) -> Result<Box<dyn meow_transport::Stream>> {
-        let tcp = TcpStream::connect(format!("{}:{}", self.server, self.port))
+        let tcp = meow_common::connect_tcp(format!("{}:{}", self.server, self.port))
             .await
             .map_err(MeowError::Io)?;
 

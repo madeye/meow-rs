@@ -9,6 +9,7 @@ pub mod network;
 pub mod process_lookup;
 pub mod rule;
 pub mod sniffer;
+pub mod socket_protect;
 pub mod tunnel_mode;
 
 pub use adapter::{DelayHistory, ProviderSlot, Proxy, ProxyAdapter, ProxyHealth, ProxyState};
@@ -22,4 +23,9 @@ pub use network::Network;
 pub use process_lookup::{find_process, ProcessInfo};
 pub use rule::{Rule, RuleMatchHelper, RuleType};
 pub use sniffer::SnifferConfig;
+pub use socket_protect::{bind_udp, connect_tcp};
+#[cfg(target_os = "android")]
+pub use socket_protect::{
+    clear_socket_protector, set_socket_protector, socket_protector, SocketProtector,
+};
 pub use tunnel_mode::TunnelMode;

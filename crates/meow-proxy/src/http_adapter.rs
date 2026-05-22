@@ -27,7 +27,6 @@ use meow_common::{
 };
 use std::fmt::Write as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tracing::debug;
 
 use crate::stream_conn::StreamConn;
@@ -81,7 +80,7 @@ impl HttpAdapter {
 
     /// Dial TCP to the proxy server, optionally wrapping in TLS.
     async fn dial_stream(&self) -> Result<Box<dyn meow_transport::Stream>> {
-        let tcp = TcpStream::connect(format!("{}:{}", self.server, self.port))
+        let tcp = meow_common::connect_tcp(format!("{}:{}", self.server, self.port))
             .await
             .map_err(MeowError::Io)?;
 
@@ -549,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn http_connect_over_relay() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
+        use tokio::net::{TcpListener, TcpStream};
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

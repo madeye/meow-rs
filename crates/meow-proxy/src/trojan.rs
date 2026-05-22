@@ -20,7 +20,6 @@ use meow_transport::{
 use sha2::{Digest, Sha224};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::debug;
 
@@ -106,7 +105,7 @@ impl TrojanAdapter {
         metadata: &Metadata,
         cmd: u8,
     ) -> Result<Box<dyn TransportStream>> {
-        let tcp = TcpStream::connect(&self.addr_str)
+        let tcp = meow_common::connect_tcp(self.addr_str.as_str())
             .await
             .map_err(MeowError::Io)?;
 

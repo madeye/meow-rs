@@ -15,7 +15,6 @@ use shadowsocks::relay::Address;
 use shadowsocks::ProxyClientStream;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpStream;
 use tracing::debug;
 
 /// Built-in (native, no external process) simple-obfs configuration.
@@ -325,7 +324,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
             PluginKind::Obfs(obfs) => {
                 // Open a raw TCP connection to the SS server, wrap it in the
                 // simple-obfs codec, then layer the SS crypto stream on top.
-                let tcp = TcpStream::connect((self.server.as_str(), self.port))
+                let tcp = meow_common::connect_tcp((self.server.as_str(), self.port))
                     .await
                     .map_err(|e| MeowError::Proxy(format!("ss obfs tcp connect: {e}")))?;
                 let _ = tcp.set_nodelay(true);
@@ -374,6 +373,14 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 Ok(Box::new(SsConn(stream)))
             }
             PluginKind::None | PluginKind::External(_) => {
+                // NOTE: Android VpnService.protect integration — the upstream
+                // `shadowsocks` crate dials this stream internally via tokio,
+                // bypassing our `meow_common::connect_tcp` helper, so the
+                // installed `meow_common::SocketProtector` does NOT see the
+                // fd. To protect SS standard-path outbound sockets on Android,
+                // plumb `ConnectOpts.vpn_protect_path` (Unix domain socket
+                // implementing shadowsocks-android's protect-fd cmsg protocol)
+                // — tracked as a follow-up.
                 let stream = ProxyClientStream::connect(
                     Arc::clone(&self.context),
                     &self.server_config,

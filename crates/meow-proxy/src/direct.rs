@@ -171,7 +171,10 @@ impl ProxyPacketConn for DirectPacketConn {
 }
 
 /// Create a TCP socket with an optional routing mark (SO_MARK on Linux)
-/// set BEFORE connecting, so the SYN packet is already marked.
+/// set BEFORE connecting, so the SYN packet is already marked. On Android
+/// the installed `meow_common::SocketProtector` is applied to the socket
+/// fd (also pre-connect) so the dial bypasses VpnService when meow-rs runs
+/// inside a VPN app.
 async fn connect_with_mark(
     dest: SocketAddr,
     routing_mark: Option<u32>,
@@ -203,7 +206,7 @@ async fn connect_with_mark(
     #[cfg(not(target_os = "linux"))]
     let _ = routing_mark;
 
-    TcpStream::connect(dest).await
+    meow_common::connect_tcp(dest).await
 }
 
 #[async_trait]
@@ -243,7 +246,9 @@ impl ProxyAdapter for DirectAdapter {
     }
 
     async fn dial_udp(&self, _metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
-        let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(MeowError::Io)?;
+        let socket = meow_common::bind_udp("0.0.0.0:0")
+            .await
+            .map_err(MeowError::Io)?;
         Ok(Box::new(DirectPacketConn(socket)))
     }
 

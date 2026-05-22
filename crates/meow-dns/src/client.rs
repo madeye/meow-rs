@@ -40,7 +40,9 @@ pub trait SocketFactory: Send + Sync + 'static {
     fn connect_tcp(&self, addr: SocketAddr) -> BoxFuture<'_, io::Result<TcpStream>>;
 }
 
-/// Tokio default factory: plain `UdpSocket::bind` / `TcpStream::connect`.
+/// Tokio default factory: routes through [`meow_common::bind_udp`] /
+/// [`meow_common::connect_tcp`] so the Android `VpnService.protect(fd)`
+/// hook (when installed) covers DNS upstream sockets too.
 struct DefaultSocketFactory;
 
 impl SocketFactory for DefaultSocketFactory {
@@ -49,12 +51,12 @@ impl SocketFactory for DefaultSocketFactory {
             // Bind to v4 unspecified; this is fine because we always
             // `connect()` the socket before sending, and connect() will
             // re-resolve the local address family.
-            UdpSocket::bind(SocketAddr::from(([0u8; 4], 0))).await
+            meow_common::bind_udp(SocketAddr::from(([0u8; 4], 0))).await
         })
     }
 
     fn connect_tcp(&self, addr: SocketAddr) -> BoxFuture<'_, io::Result<TcpStream>> {
-        Box::pin(async move { TcpStream::connect(addr).await })
+        Box::pin(async move { meow_common::connect_tcp(addr).await })
     }
 }
 
