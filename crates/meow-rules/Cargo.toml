@@ -11,6 +11,7 @@ maxminddb = { workspace = true }
 ipnet = { workspace = true }
 iprange = { workspace = true }
 regex = { workspace = true }
+smol_str = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 zstd = { workspace = true }

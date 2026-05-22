@@ -150,8 +150,8 @@ pub async fn handle_udp(
     let (proxy, rule_name, rule_payload) = if metadata.dst_port == 53 {
         (
             Arc::clone(&tunnel.direct) as Arc<dyn ProxyAdapter>,
-            "DnsBypass".to_string(),
-            String::new(),
+            smol_str::SmolStr::new_static("DnsBypass"),
+            smol_str::SmolStr::default(),
         )
     } else {
         let Some(matched) = tunnel.resolve_proxy(&metadata) else {

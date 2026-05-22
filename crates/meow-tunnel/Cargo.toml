@@ -18,6 +18,7 @@ parking_lot = { workspace = true }
 arc-swap = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
+smol_str = { workspace = true }
 
 [[bench]]
 name = "udp_bench"

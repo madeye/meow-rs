@@ -2,6 +2,7 @@ use crate::relay::{copy_bidirectional_buf, RELAY_BUF_SIZE};
 use crate::statistics::Statistics;
 use crate::tunnel::TunnelInner;
 use meow_common::{Metadata, ProxyConn};
+use smol_str::SmolStr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -28,8 +29,8 @@ impl<'a> ConnectionGuard<'a> {
     pub fn track(
         stats: &'a Statistics,
         metadata: Metadata,
-        rule: &str,
-        rule_payload: &str,
+        rule: SmolStr,
+        rule_payload: SmolStr,
         chains: Vec<Arc<str>>,
     ) -> Self {
         let id = stats.track_connection(metadata, rule, rule_payload, chains);
@@ -76,11 +77,13 @@ pub async fn handle_tcp(
 
     // Track the connection — guard drops it on every exit path, including
     // the abort case where the manual close call below would never run.
+    // `rule_name` / `rule_payload` are moved in (already `SmolStr`); the
+    // chains vec carries one `Arc<str>` for the proxy name.
     let _guard = ConnectionGuard::track(
         &tunnel.stats,
         metadata.pure(),
-        &rule_name,
-        &rule_payload,
+        rule_name,
+        rule_payload,
         vec![Arc::from(proxy.name())],
     );
 
@@ -133,7 +136,13 @@ mod tests {
     fn guard_removes_entry_on_drop() {
         let stats = Statistics::new();
         {
-            let _g = ConnectionGuard::track(&stats, metadata(), "DOMAIN", "example.com", vec![]);
+            let _g = ConnectionGuard::track(
+                &stats,
+                metadata(),
+                SmolStr::new_static("DOMAIN"),
+                SmolStr::new_static("example.com"),
+                vec![],
+            );
             assert_eq!(stats.active_connection_count(), 1, "entry tracked");
         }
         assert_eq!(
@@ -147,7 +156,13 @@ mod tests {
     fn guard_removes_entry_on_unwind() {
         let stats = Statistics::new();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _g = ConnectionGuard::track(&stats, metadata(), "DOMAIN", "example.com", vec![]);
+            let _g = ConnectionGuard::track(
+                &stats,
+                metadata(),
+                SmolStr::new_static("DOMAIN"),
+                SmolStr::new_static("example.com"),
+                vec![],
+            );
             assert_eq!(stats.active_connection_count(), 1);
             panic!("simulating mid-relay abort");
         }));
@@ -162,8 +177,20 @@ mod tests {
     #[test]
     fn multiple_guards_independent() {
         let stats = Statistics::new();
-        let g1 = ConnectionGuard::track(&stats, metadata(), "DOMAIN", "a", vec![]);
-        let g2 = ConnectionGuard::track(&stats, metadata(), "DOMAIN", "b", vec![]);
+        let g1 = ConnectionGuard::track(
+            &stats,
+            metadata(),
+            SmolStr::new_static("DOMAIN"),
+            SmolStr::new_static("a"),
+            vec![],
+        );
+        let g2 = ConnectionGuard::track(
+            &stats,
+            metadata(),
+            SmolStr::new_static("DOMAIN"),
+            SmolStr::new_static("b"),
+            vec![],
+        );
         assert_eq!(stats.active_connection_count(), 2);
         drop(g1);
         assert_eq!(stats.active_connection_count(), 1);

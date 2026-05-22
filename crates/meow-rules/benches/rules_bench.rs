@@ -52,7 +52,7 @@ fn scan_rules(rules: &[Box<dyn Rule>], metadata: &Metadata) -> Option<String> {
     let helper = RuleMatchHelper;
     for rule in rules {
         if let Some(adapter) = rule.match_and_resolve(metadata, &helper) {
-            return Some(adapter);
+            return Some(adapter.into());
         }
     }
     None
