@@ -217,3 +217,87 @@ impl Proxy for SelectorGroup {
         self.selected_proxy().map(|p| p.name().to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::group::test_support::MockProxy;
+    use meow_common::Metadata;
+
+    #[test]
+    fn unselected_falls_back_to_first_static() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        let g = SelectorGroup::new("sel", vec![a, b]);
+        assert_eq!(g.selected_proxy().unwrap().name(), "a");
+        assert_eq!(g.proxy_names(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn select_changes_target_and_returns_true_only_when_present() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        let g = SelectorGroup::new("sel", vec![a, b]);
+        assert!(g.select("b"));
+        assert_eq!(g.selected_proxy().unwrap().name(), "b");
+        assert!(!g.select("nope"));
+        // Unknown name must not clobber the previous choice.
+        assert_eq!(g.selected_proxy().unwrap().name(), "b");
+    }
+
+    #[test]
+    fn selection_falls_back_when_named_proxy_disappears() {
+        // Simulates a provider refresh that removed the previously-selected
+        // node. Manually poke the selection to a missing name (the public
+        // `select` would reject it; this mirrors the post-refresh state).
+        let a = MockProxy::new("a");
+        let g = SelectorGroup::new("sel", vec![a]);
+        *g.selected.write() = Some("ghost".into());
+        assert_eq!(g.selected_proxy().unwrap().name(), "a");
+    }
+
+    #[test]
+    fn store_primes_initial_selection_and_persists_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sel.json");
+        let store = crate::group::selector_store::SelectorStore::open(path.clone());
+        store.set("sel", "b");
+
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        let g = SelectorGroup::new("sel", vec![a, b]).with_store(Arc::clone(&store));
+        assert_eq!(
+            g.selected_proxy().unwrap().name(),
+            "b",
+            "primed selection should load from store"
+        );
+
+        assert!(g.select("a"));
+        drop(store);
+        let store2 = crate::group::selector_store::SelectorStore::open(path);
+        assert_eq!(store2.get("sel").as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn support_udp_reflects_selected_target() {
+        let tcp = MockProxy::new("tcp-only");
+        let udp = MockProxy::new_udp("udp-able");
+        let g = SelectorGroup::new("sel", vec![tcp, udp]);
+        assert!(!g.support_udp(), "default selection is tcp-only");
+        assert!(g.select("udp-able"));
+        assert!(g.support_udp(), "switching selection updates udp support");
+    }
+
+    #[tokio::test]
+    async fn dial_tcp_routes_to_selected_member() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        let a_ref = Arc::clone(&a);
+        let b_ref = Arc::clone(&b);
+        let g = SelectorGroup::new("sel", vec![a, b]);
+        assert!(g.select("b"));
+        let _ = g.dial_tcp(&Metadata::default()).await; // mock returns Err
+        assert_eq!(a_ref.dials(), 0);
+        assert_eq!(b_ref.dials(), 1);
+    }
+}

@@ -243,3 +243,102 @@ impl Proxy for UrlTestGroup {
         self.fastest_proxy().map(|p| p.name().to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::group::test_support::MockProxy;
+    use meow_common::Metadata;
+
+    fn pick(g: &UrlTestGroup) -> String {
+        g.pick_for_dial().unwrap().name().to_string()
+    }
+
+    #[test]
+    fn first_pick_chooses_lowest_delay_among_alive() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        let c = MockProxy::new("c");
+        a.set_delay(120);
+        b.set_delay(30);
+        c.set_delay(60);
+        let g = UrlTestGroup::new("ut", vec![a, b, c], 0);
+        assert_eq!(pick(&g), "b");
+    }
+
+    #[test]
+    fn tolerance_keeps_current_pick_until_strictly_better() {
+        // tolerance = 50: once an incumbent exists, a challenger must beat
+        // it by MORE than 50 ms before the selection flips.
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        a.set_delay(100);
+        b.set_delay(80);
+        let a_ref = Arc::clone(&a);
+        let g = UrlTestGroup::new("ut", vec![a, b], 50);
+        // First pick has no incumbent → goes to the lowest-delay member.
+        assert_eq!(pick(&g), "b");
+
+        // a comes in just inside the tolerance band — must stick with b.
+        a_ref.set_delay(40);
+        assert_eq!(pick(&g), "b", "tolerance prevents flapping");
+
+        // a improves enough to clear the band → must promote.
+        a_ref.set_delay(20);
+        assert_eq!(pick(&g), "a");
+    }
+
+    #[test]
+    fn dead_current_forces_repick_even_inside_tolerance() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        a.set_delay(50);
+        b.set_delay(80);
+        let a_ref = Arc::clone(&a);
+        let g = UrlTestGroup::new("ut", vec![a, b], 100);
+        assert_eq!(pick(&g), "a");
+        a_ref.set_alive(false);
+        assert_eq!(pick(&g), "b", "current died -> must promote next best");
+    }
+
+    #[test]
+    fn no_alive_members_returns_first_proxy_as_fallback() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        a.set_alive(false);
+        b.set_alive(false);
+        let g = UrlTestGroup::new("ut", vec![a, b], 0);
+        assert_eq!(
+            g.pick_for_dial().unwrap().name(),
+            "a",
+            "graceful degradation: surface a real network error from a, \
+             not a 'no proxy' config error"
+        );
+    }
+
+    #[test]
+    fn zero_delay_is_treated_as_unknown_not_best() {
+        // last_delay == 0 means "never probed / dead"; the picker must NOT
+        // consider it the lowest delay.
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        // a has no recorded delay (last_delay=0), b has 100.
+        b.set_delay(100);
+        let g = UrlTestGroup::new("ut", vec![a, b], 0);
+        assert_eq!(pick(&g), "b", "0-delay proxy must not win");
+    }
+
+    #[tokio::test]
+    async fn dial_tcp_routes_through_pick() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        a.set_delay(100);
+        b.set_delay(20);
+        let a_ref = Arc::clone(&a);
+        let b_ref = Arc::clone(&b);
+        let g = UrlTestGroup::new("ut", vec![a, b], 0);
+        let _ = g.dial_tcp(&Metadata::default()).await;
+        assert_eq!(a_ref.dials(), 0);
+        assert_eq!(b_ref.dials(), 1);
+    }
+}

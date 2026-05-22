@@ -150,3 +150,88 @@ impl Proxy for FallbackGroup {
         self.first_alive().map(|p| p.name().to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::group::test_support::MockProxy;
+    use meow_common::Metadata;
+
+    #[test]
+    fn picks_first_when_all_alive() {
+        let g = FallbackGroup::new("fb", vec![MockProxy::new("a"), MockProxy::new("b")]);
+        assert_eq!(g.first_alive().unwrap().name(), "a");
+    }
+
+    #[test]
+    fn skips_dead_to_next_alive() {
+        let a = MockProxy::new("a");
+        a.set_alive(false);
+        let g = FallbackGroup::new("fb", vec![a, MockProxy::new("b"), MockProxy::new("c")]);
+        assert_eq!(g.first_alive().unwrap().name(), "b");
+    }
+
+    #[test]
+    fn all_dead_returns_first_proxy_as_last_resort() {
+        // Upstream behaviour: when every member is dead, still return *something*
+        // (the first proxy) so the caller can attempt the dial and surface a
+        // real network error rather than a "no proxy" config error.
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        a.set_alive(false);
+        b.set_alive(false);
+        let g = FallbackGroup::new("fb", vec![a, b]);
+        assert_eq!(g.first_alive().unwrap().name(), "a");
+    }
+
+    #[test]
+    fn recovery_promotes_revived_member_back_to_head() {
+        let a = MockProxy::new("a");
+        a.set_alive(false);
+        let a_ref = Arc::clone(&a);
+        let g = FallbackGroup::new("fb", vec![a, MockProxy::new("b")]);
+        assert_eq!(g.first_alive().unwrap().name(), "b");
+        a_ref.set_alive(true);
+        assert_eq!(
+            g.first_alive().unwrap().name(),
+            "a",
+            "head proxy regaining health must reclaim primary slot"
+        );
+    }
+
+    #[test]
+    fn member_names_preserve_declaration_order() {
+        let g = FallbackGroup::new(
+            "fb",
+            vec![
+                MockProxy::new("a"),
+                MockProxy::new("b"),
+                MockProxy::new("c"),
+            ],
+        );
+        assert_eq!(g.member_names(), vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn dial_tcp_routes_through_first_alive() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        a.set_alive(false);
+        let a_ref = Arc::clone(&a);
+        let b_ref = Arc::clone(&b);
+        let g = FallbackGroup::new("fb", vec![a, b]);
+        let _ = g.dial_tcp(&Metadata::default()).await;
+        assert_eq!(a_ref.dials(), 0);
+        assert_eq!(b_ref.dials(), 1);
+    }
+
+    #[test]
+    fn support_udp_reflects_first_alive() {
+        let a = MockProxy::new("a"); // tcp-only
+        let a_ref = Arc::clone(&a);
+        let g = FallbackGroup::new("fb", vec![a, MockProxy::new_udp("b")]);
+        assert!(!g.support_udp(), "a is alive and tcp-only");
+        a_ref.set_alive(false);
+        assert!(g.support_udp(), "fallback to udp-capable b");
+    }
+}
