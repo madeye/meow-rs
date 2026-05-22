@@ -118,6 +118,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo test --lib
 ```
 
