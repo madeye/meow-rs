@@ -170,6 +170,34 @@ impl ProxyPacketConn for DirectPacketConn {
     }
 }
 
+/// Wrap a connect future in the adapter-configured timeout. Returns the
+/// stream on success, or a `MeowError::Io(TimedOut)` whose message identifies
+/// the destination and the budget that elapsed when the budget is hit.
+///
+/// Lives next to `dial_tcp` rather than inline so the timeout behaviour can
+/// be exercised in tests against a deterministic future (e.g. `pending()`)
+/// instead of relying on a real-network black-hole — see the unit tests at
+/// the bottom of this file.
+async fn apply_connect_timeout<F>(
+    connect: F,
+    timeout: Option<Duration>,
+    dest: SocketAddr,
+) -> Result<TcpStream>
+where
+    F: std::future::Future<Output = std::io::Result<TcpStream>>,
+{
+    match timeout {
+        Some(t) => match tokio::time::timeout(t, connect).await {
+            Ok(res) => res.map_err(MeowError::Io),
+            Err(_) => Err(MeowError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("direct: connect to {dest} timed out after {t:?}"),
+            ))),
+        },
+        None => connect.await.map_err(MeowError::Io),
+    }
+}
+
 /// Create a TCP socket with an optional routing mark (SO_MARK on Linux)
 /// set BEFORE connecting, so the SYN packet is already marked. On Android
 /// the installed `meow_common::SocketProtector` is applied to the socket
@@ -229,19 +257,12 @@ impl ProxyAdapter for DirectAdapter {
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
         let dest = self.resolve_target(metadata).await?;
-        let connect = connect_with_mark(dest, self.routing_mark);
-        let stream = match self.connect_timeout {
-            Some(t) => match tokio::time::timeout(t, connect).await {
-                Ok(res) => res.map_err(MeowError::Io)?,
-                Err(_) => {
-                    return Err(MeowError::Io(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!("direct: connect to {dest} timed out after {t:?}"),
-                    )));
-                }
-            },
-            None => connect.await.map_err(MeowError::Io)?,
-        };
+        let stream = apply_connect_timeout(
+            connect_with_mark(dest, self.routing_mark),
+            self.connect_timeout,
+            dest,
+        )
+        .await?;
         Ok(Box::new(DirectConn(stream)))
     }
 
@@ -277,82 +298,101 @@ impl ProxyAdapter for DirectAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meow_common::{ConnType, Network};
     use std::net::Ipv4Addr;
 
-    /// Dial against `192.0.2.1` (RFC 5737 TEST-NET-1, reserved as a
-    /// documentation black-hole — packets to this address never get a
-    /// response on a properly-routed network). Without the timeout the
-    /// connect would hang for the OS SYN-retransmit grid (~75 s on
-    /// macOS/iOS). With `with_connect_timeout` set, the dial must surface
-    /// a `TimedOut` error inside the configured budget.
-    ///
-    /// Wrapped in `tokio::time::timeout` with a generous outer cap so a
-    /// regression — i.e. the timeout *not* firing — fails the test in a
-    /// bounded wall-clock window rather than wedging CI.
-    #[tokio::test]
-    #[ignore = "flaky: depends on TEST-NET-1 (192.0.2.0/24) being a blackhole; fails on hosts where the local network/VPN responds with ICMP unreachable"]
-    async fn dial_tcp_honours_connect_timeout_against_blackhole() {
-        let adapter = DirectAdapter::new().with_connect_timeout(Duration::from_millis(500));
+    fn fake_dest() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 1)
+    }
 
-        let metadata = Metadata {
-            network: Network::Tcp,
-            conn_type: ConnType::Inner,
-            dst_ip: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
-            dst_port: 1,
-            ..Default::default()
-        };
-
-        let started = std::time::Instant::now();
-        let res = tokio::time::timeout(Duration::from_secs(5), adapter.dial_tcp(&metadata)).await;
-        let elapsed = started.elapsed();
-
-        let inner = res.expect("outer guard: timeout never fired within 5 s");
-        let Err(err) = inner else {
-            panic!("dial against TEST-NET-1 must fail, got success");
-        };
+    /// Drive `apply_connect_timeout` against a future that never completes,
+    /// using `tokio::time::pause()` so the timeout fires in virtual time.
+    /// Deterministic — no real network, no wall-clock dependence on test-net
+    /// blackholing.
+    #[tokio::test(start_paused = true)]
+    async fn apply_connect_timeout_fires_on_pending_future() {
+        let pending = std::future::pending::<std::io::Result<TcpStream>>();
+        let task = tokio::spawn(apply_connect_timeout(
+            pending,
+            Some(Duration::from_millis(500)),
+            fake_dest(),
+        ));
+        // Advance past the budget; the timeout must now have fired.
+        tokio::time::advance(Duration::from_millis(501)).await;
+        let res = task.await.expect("join");
+        let err = res.expect_err("must surface TimedOut");
         match err {
-            MeowError::Io(io_err) => {
-                assert_eq!(
-                    io_err.kind(),
-                    std::io::ErrorKind::TimedOut,
-                    "expected TimedOut, got {io_err:?}"
+            MeowError::Io(io) => {
+                assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+                let msg = io.to_string();
+                assert!(
+                    msg.contains("192.0.2.1") && msg.contains("500"),
+                    "error message should name the destination and budget: {msg}"
                 );
             }
             other => panic!("expected MeowError::Io(TimedOut), got {other:?}"),
         }
-        // 500 ms budget + scheduling slack — generous upper bound so CI
-        // jitter doesn't flake, tight enough to catch a regression where
-        // the timeout is silently ignored.
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "dial took {elapsed:?}, expected <2s",
-        );
     }
 
-    /// When no `connect_timeout` is configured, `dial_tcp` keeps its
-    /// historical unbounded behaviour. We can't easily wait out the OS
-    /// SYN grid in CI, so this test asserts the legacy path is still
-    /// running unbounded by checking that a short outer guard does *not*
-    /// see the dial complete on its own.
+    /// With `timeout = None`, the helper awaits the inner future to
+    /// completion. Verify it does not preempt a fast-succeeding connect.
     #[tokio::test]
-    #[ignore = "flaky: depends on TEST-NET-1 (192.0.2.0/24) being a blackhole; fails on hosts where the local network/VPN responds within the 750 ms outer guard"]
-    async fn dial_tcp_without_timeout_remains_unbounded() {
-        let adapter = DirectAdapter::new();
+    async fn apply_connect_timeout_none_passes_through_success() {
+        // Build a satisfied future by dialling a real local listener.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            // Hold open so the client's connect completes; drop after.
+            drop(s);
+        });
+        let connect = TcpStream::connect(addr);
+        let res = apply_connect_timeout(connect, None, addr).await;
+        assert!(res.is_ok(), "no timeout configured → must pass through");
+        let _ = accept.await;
+    }
 
-        let metadata = Metadata {
-            network: Network::Tcp,
-            conn_type: ConnType::Inner,
-            dst_ip: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
-            dst_port: 1,
-            ..Default::default()
-        };
-
-        let res =
-            tokio::time::timeout(Duration::from_millis(750), adapter.dial_tcp(&metadata)).await;
+    /// With `timeout = Some(..)` but the inner future is ready immediately,
+    /// we must NOT spuriously surface TimedOut.
+    #[tokio::test]
+    async fn apply_connect_timeout_does_not_fire_when_connect_is_fast() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let connect = TcpStream::connect(addr);
+        let res = apply_connect_timeout(connect, Some(Duration::from_secs(5)), addr).await;
         assert!(
-            res.is_err(),
-            "expected outer guard to fire; the unbounded dial finished too quickly",
+            res.is_ok(),
+            "successful local connect must not race the timeout"
+        );
+        let _ = accept.await;
+    }
+
+    /// When the inner connect itself errors (e.g. `ECONNREFUSED` from a
+    /// closed port), the helper surfaces the real IO error rather than
+    /// disguising it as a timeout.
+    #[tokio::test]
+    async fn apply_connect_timeout_propagates_io_error() {
+        // Bind a listener to claim a port, then drop it so connects RST.
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        let dest: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let connect = TcpStream::connect(dest);
+        let res = apply_connect_timeout(connect, Some(Duration::from_secs(5)), dest).await;
+        let Err(MeowError::Io(io)) = res else {
+            panic!("expected MeowError::Io(_), got {res:?}");
+        };
+        // The exact kind is OS-dependent (ConnectionRefused on most systems)
+        // — just assert it isn't TimedOut, which would be a wrong-bucket bug.
+        assert_ne!(
+            io.kind(),
+            std::io::ErrorKind::TimedOut,
+            "real IO error must not be relabeled as TimedOut: {io}"
         );
     }
 }
