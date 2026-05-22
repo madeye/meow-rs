@@ -20,7 +20,6 @@ use async_trait::async_trait;
 use meow_common::{
     AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
 };
-use tokio::net::TcpStream;
 use tracing::debug;
 
 use crate::stream_conn::StreamConn;
@@ -81,7 +80,7 @@ impl VlessAdapter {
 
     /// Dial a raw TCP + transport-chain stream to the VLESS server.
     async fn dial_stream(&self) -> Result<Box<dyn meow_transport::Stream>> {
-        let tcp = TcpStream::connect(&self.addr_str)
+        let tcp = meow_common::connect_tcp(self.addr_str.as_str())
             .await
             .map_err(MeowError::Io)?;
         self.transport.connect(Box::new(tcp)).await

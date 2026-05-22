@@ -18,11 +18,15 @@ httparse = { version = "1", default-features = false }
 ipnet = { workspace = true }
 subtle = { workspace = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-libproc = "0.14"
+[target.'cfg(target_os = "android")'.dependencies]
+socket2 = { workspace = true }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"
 libc = "0.2"
 
 [dev-dependencies]

@@ -22,7 +22,6 @@ use meow_transport::{
     ws::{WsConfig, WsLayer},
     Transport,
 };
-use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
 use crate::transport_to_proxy_err;
@@ -137,7 +136,7 @@ pub async fn dial(
     );
 
     // 1) Raw TCP.
-    let tcp = TcpStream::connect((server_host, server_port))
+    let tcp = meow_common::connect_tcp((server_host, server_port))
         .await
         .map_err(MeowError::Io)?;
 
