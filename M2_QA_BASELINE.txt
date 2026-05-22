@@ -24,7 +24,7 @@ Benchmarks:
 - No formal benchmarks found; M2 work will define methodology
 
 Non-Negotiables Active:
-1. NO CatchPanic on mihomo-api router
+1. NO CatchPanic on meow-api router
 2. Socket-IO tests use wall-clock tokio::time::timeout (not pause/advance)
 3. All PRs must pass local: fmt + clippy + test --lib
 4. Perf-claiming PRs require before/after numbers + methodology

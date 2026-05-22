@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>mihomo-rust - A High-Performance Proxy Kernel in Rust</title>
+<title>meow-rs - A High-Performance Proxy Kernel in Rust</title>
 <meta name="description" content="Rule-based tunneling proxy with Shadowsocks, Trojan, transparent proxy, DNS snooping, web dashboard, and subscription management. Written in Rust.">
 <style>
 :root {
@@ -91,11 +91,11 @@ footer a { color: var(--accent); }
 
 <section class="hero">
   <div class="container">
-    <h1><span>mihomo-rust</span></h1>
+    <h1><span>meow-rs</span></h1>
     <p>A high-performance rule-based tunneling proxy kernel written in Rust. Shadowsocks, Trojan, transparent proxy, DNS snooping, web dashboard, and subscription management.</p>
     <div class="hero-buttons">
-      <a href="https://github.com/madeye/mihomo-rust" class="btn btn-primary">View on GitHub</a>
-      <a href="https://github.com/madeye/mihomo-rust/releases/latest" class="btn btn-secondary">Download</a>
+      <a href="https://github.com/madeye/meow-rs" class="btn btn-primary">View on GitHub</a>
+      <a href="https://github.com/madeye/meow-rs/releases/latest" class="btn btn-secondary">Download</a>
       <a href="#quickstart" class="btn btn-secondary">Quick Start</a>
     </div>
   </div>
@@ -190,17 +190,17 @@ footer a { color: var(--accent); }
     <table>
       <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
       <tbody>
-        <tr><td>mihomo-common</td><td>Core traits and types (ProxyAdapter, Rule, Metadata)</td></tr>
-        <tr><td>mihomo-trie</td><td>Domain trie for efficient pattern matching</td></tr>
-        <tr><td>mihomo-transport</td><td>TLS (rustls + BoringSSL), WebSocket, gRPC, H2, HTTPUpgrade</td></tr>
-        <tr><td>mihomo-proxy</td><td>Proxy protocol implementations and groups</td></tr>
-        <tr><td>mihomo-rules</td><td>Rule matching engine and parser</td></tr>
-        <tr><td>mihomo-dns</td><td>DNS resolver, cache, DNS snooping, server</td></tr>
-        <tr><td>mihomo-tunnel</td><td>Core routing, TCP/UDP relay, statistics</td></tr>
-        <tr><td>mihomo-listener</td><td>Inbound handlers (Mixed / HTTP / SOCKS5 / TProxy)</td></tr>
-        <tr><td>mihomo-config</td><td>YAML config parsing, subscription fetcher, persistence</td></tr>
-        <tr><td>mihomo-api</td><td>REST API (Axum) + embedded web dashboard</td></tr>
-        <tr><td>mihomo-app</td><td>CLI entry point</td></tr>
+        <tr><td>meow-common</td><td>Core traits and types (ProxyAdapter, Rule, Metadata)</td></tr>
+        <tr><td>meow-trie</td><td>Domain trie for efficient pattern matching</td></tr>
+        <tr><td>meow-transport</td><td>TLS (rustls + BoringSSL), WebSocket, gRPC, H2, HTTPUpgrade</td></tr>
+        <tr><td>meow-proxy</td><td>Proxy protocol implementations and groups</td></tr>
+        <tr><td>meow-rules</td><td>Rule matching engine and parser</td></tr>
+        <tr><td>meow-dns</td><td>DNS resolver, cache, DNS snooping, server</td></tr>
+        <tr><td>meow-tunnel</td><td>Core routing, TCP/UDP relay, statistics</td></tr>
+        <tr><td>meow-listener</td><td>Inbound handlers (Mixed / HTTP / SOCKS5 / TProxy)</td></tr>
+        <tr><td>meow-config</td><td>YAML config parsing, subscription fetcher, persistence</td></tr>
+        <tr><td>meow-api</td><td>REST API (Axum) + embedded web dashboard</td></tr>
+        <tr><td>meow-app</td><td>CLI entry point</td></tr>
       </tbody>
     </table>
   </div>
@@ -227,7 +227,7 @@ footer a { color: var(--accent); }
         <div class="step-num">3</div>
         <h3>Run</h3>
         <p>Start the proxy and open the dashboard</p>
-        <code>./target/release/mihomo -f config.yaml
+        <code>./target/release/meow -f config.yaml
 # Open http://127.0.0.1:9090/ui</code>
       </div>
       <div class="step">
@@ -244,8 +244,8 @@ curl https://ipinfo.io</code>
 
 <footer>
   <div class="container">
-    <p>mihomo-rust is licensed under <a href="https://github.com/madeye/mihomo-rust/blob/main/LICENSE">GPL-3.0</a>.
-    <a href="https://github.com/madeye/mihomo-rust">GitHub</a></p>
+    <p>meow-rs is licensed under <a href="https://github.com/madeye/meow-rs/blob/main/LICENSE">GPL-3.0</a>.
+    <a href="https://github.com/madeye/meow-rs">GitHub</a></p>
   </div>
 </footer>
 
