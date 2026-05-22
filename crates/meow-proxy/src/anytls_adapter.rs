@@ -51,6 +51,13 @@ impl AnytlsAdapter {
         sni: Option<&str>,
         skip_cert_verify: bool,
     ) -> std::result::Result<Self, String> {
+        // Bridge meow_common's `SocketProtector` into anytls-rs's separate
+        // registry exactly once. anytls-rs ships its own protector trait
+        // (it can't depend on meow_common), so the host VPN only installs
+        // a `meow_common::SocketProtector` and this shim re-forwards every
+        // protect call into the anytls-rs registry.
+        install_anytls_protector_bridge();
+
         let server_addr = format!("{server}:{port}");
 
         let effective_sni = sni.filter(|s| !s.trim().is_empty()).unwrap_or(server);
@@ -337,3 +344,36 @@ fn build_tls_client_config(
 
     Ok(Arc::new(config))
 }
+
+// ─── meow_common ⇄ anytls_rs protector bridge ────────────────────────────────
+//
+// On Android, `meow_common` and `anytls_rs` each ship their own
+// `SocketProtector` registry — `anytls-rs` can't depend on `meow_common`
+// and vice-versa. The host VPN installs a `meow_common::SocketProtector`
+// once at startup; this bridge re-publishes every protect call into the
+// `anytls-rs` registry so the AnyTLS client-side dials (`connect_tcp`,
+// `bind_udp`) fire the same JNI hook. Installed exactly once via the
+// `Once` guard inside `AnytlsAdapter::new`.
+#[cfg(target_os = "android")]
+fn install_anytls_protector_bridge() {
+    use std::sync::Once;
+
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        struct Bridge;
+        impl anytls_rs::SocketProtector for Bridge {
+            fn protect(&self, fd: std::os::fd::RawFd) -> std::io::Result<()> {
+                match meow_common::socket_protector() {
+                    Some(p) => p.protect(fd),
+                    // No protector installed on the meow_common side — match
+                    // the off-Android no-protector behaviour: just allow.
+                    None => Ok(()),
+                }
+            }
+        }
+        anytls_rs::set_socket_protector(Arc::new(Bridge));
+    });
+}
+
+#[cfg(not(target_os = "android"))]
+fn install_anytls_protector_bridge() {}

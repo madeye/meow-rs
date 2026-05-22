@@ -77,7 +77,12 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Networking
-anytls-rs = "0.5"
+# Pinned to the madeye fork's `feat/android-protect-hook` branch — adds a
+# `SocketProtector` registry + `connect_tcp` / `bind_udp` helpers and
+# routes the client-side outbound dials through them, mirroring the
+# `meow_common::SocketProtector` API. Drop the pin once upstream merges
+# https://github.com/jxo-me/anytls-rs/pull/2.
+anytls-rs = { git = "https://github.com/madeye/anytls-rs.git", rev = "1d13befb2fdd40685f7e4f75b785e9e77ad5eefa" }
 shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "stream-cipher"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
