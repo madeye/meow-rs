@@ -50,6 +50,7 @@ path = "src/main.rs"
 ignored = ["meow-proxy"]
 
 [dependencies]
+meow-common = { workspace = true }
 meow-config = { workspace = true, default-features = false }
 meow-rules = { workspace = true }
 meow-tunnel = { workspace = true }

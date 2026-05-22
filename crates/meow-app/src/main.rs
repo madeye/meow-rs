@@ -698,26 +698,7 @@ async fn geodata_fetch_missing_on_startup(
     raw_config: Arc<RwLock<RawConfig>>,
     resolver: Arc<Resolver>,
 ) {
-    use meow_config::geodata::download_and_replace;
-
-    let mmdb_target = geo
-        .mmdb_path
-        .clone()
-        .unwrap_or_else(meow_config::default_geoip_path);
-    let asn_target = geo
-        .asn_path
-        .clone()
-        .unwrap_or_else(meow_config::default_asn_path);
-    let geosite_target = geo
-        .geosite_path
-        .clone()
-        .unwrap_or_else(meow_config::default_geosite_path);
-
-    let targets: [(&str, &std::path::Path, &str); 3] = [
-        ("GeoIP MMDB", &mmdb_target, &geo.mmdb_url),
-        ("ASN MMDB", &asn_target, &geo.asn_url),
-        ("geosite", &geosite_target, &geo.geosite_url),
-    ];
+    let targets = meow_app::geodata_fetch::compute_targets(&geo);
 
     let proxies = tunnel.proxies();
     let download_proxy = meow_config::internal_http::first_named_proxy(
@@ -725,22 +706,9 @@ async fn geodata_fetch_missing_on_startup(
         &proxies,
     );
 
-    let mut any_downloaded = false;
-    for (label, path, url) in targets {
-        if path.exists() {
-            continue;
-        }
-        info!(
-            "geodata startup-fetch: {label} missing at {}, downloading",
-            path.display()
-        );
-        match download_and_replace(url, path, download_proxy.as_ref()).await {
-            Ok(()) => any_downloaded = true,
-            Err(e) => warn!("geodata startup-fetch: {label} download failed: {:#}", e),
-        }
-    }
-
-    if !any_downloaded {
+    let downloaded =
+        meow_app::geodata_fetch::fetch_missing(&targets, download_proxy.as_ref()).await;
+    if downloaded.is_empty() {
         return;
     }
 

@@ -1,3 +1,5 @@
+pub mod geodata_fetch;
+
 /// Generate a systemd unit file for the meow service.
 ///
 /// Returns the unit file content as a string.

@@ -1973,6 +1973,7 @@ dependencies = [
  "dhat",
  "libc",
  "meow-api",
+ "meow-common",
  "meow-config",
  "meow-dns",
  "meow-listener",
