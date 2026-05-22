@@ -141,6 +141,98 @@ async fn anytls_round_trip_through_upstream_server() {
 }
 
 #[tokio::test]
+async fn anytls_concurrent_dials_each_get_independent_streams() {
+    install_crypto_provider();
+    let (echo_addr, _echo_h) = start_echo_server().await;
+    let (cert, key) = self_signed_cert();
+    let (server_addr, _server_h) = start_anytls_server(cert, key).await;
+
+    // Build the adapter once, share it across tasks — confirms the adapter
+    // itself doesn't serialise dials behind some internal mutex and that the
+    // upstream server tolerates multiple concurrent sessions.
+    let adapter = Arc::new(
+        AnytlsAdapter::new(
+            "test-anytls-concurrent",
+            &server_addr.ip().to_string(),
+            server_addr.port(),
+            PASSWORD,
+            Some("localhost"),
+            true,
+        )
+        .expect("adapter must build"),
+    );
+
+    let mut handles = Vec::new();
+    for i in 0..4u8 {
+        let adapter = Arc::clone(&adapter);
+        let echo_addr = echo_addr;
+        handles.push(tokio::spawn(async move {
+            let metadata = Metadata {
+                network: Network::Tcp,
+                host: smol_str::SmolStr::from(echo_addr.ip().to_string()),
+                dst_port: echo_addr.port(),
+                ..Default::default()
+            };
+            let mut conn = adapter.dial_tcp(&metadata).await.expect("dial");
+            // Per-task payload so a crossed-wires bug would surface as the
+            // wrong stamp coming back.
+            let payload = [b'#', b'a' + i, b'\n'];
+            conn.write_all(&payload).await.unwrap();
+            conn.flush().await.unwrap();
+            let mut got = [0u8; 3];
+            conn.read_exact(&mut got).await.unwrap();
+            assert_eq!(got, payload, "task {i} got crossed bytes");
+        }));
+    }
+    for h in handles {
+        timeout(T, h).await.expect("task timed out").expect("task");
+    }
+}
+
+#[tokio::test]
+async fn anytls_sequential_writes_same_connection() {
+    // The adapter must support multiple write/read cycles over one stream
+    // without re-handshaking or resetting state.
+    install_crypto_provider();
+    let (echo_addr, _echo_h) = start_echo_server().await;
+    let (cert, key) = self_signed_cert();
+    let (server_addr, _server_h) = start_anytls_server(cert, key).await;
+
+    let adapter = AnytlsAdapter::new(
+        "test-anytls-seq",
+        &server_addr.ip().to_string(),
+        server_addr.port(),
+        PASSWORD,
+        Some("localhost"),
+        true,
+    )
+    .expect("adapter must build");
+
+    let metadata = Metadata {
+        network: Network::Tcp,
+        host: smol_str::SmolStr::from(echo_addr.ip().to_string()),
+        dst_port: echo_addr.port(),
+        ..Default::default()
+    };
+    let mut conn = timeout(T, adapter.dial_tcp(&metadata))
+        .await
+        .expect("dial timeout")
+        .expect("dial");
+
+    for round in 0..5u8 {
+        let payload = [b'r', b'0' + round, b'\n'];
+        conn.write_all(&payload).await.unwrap();
+        conn.flush().await.unwrap();
+        let mut got = [0u8; 3];
+        timeout(T, conn.read_exact(&mut got))
+            .await
+            .expect("read timeout")
+            .expect("read");
+        assert_eq!(got, payload, "round {round}");
+    }
+}
+
+#[tokio::test]
 async fn anytls_rejects_wrong_password() {
     install_crypto_provider();
 
