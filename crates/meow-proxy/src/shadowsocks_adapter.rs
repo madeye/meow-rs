@@ -10,6 +10,7 @@ use shadowsocks::config::{Mode, ServerAddr, ServerConfig, ServerType};
 use shadowsocks::context::Context;
 use shadowsocks::crypto::CipherKind;
 use shadowsocks::plugin::{Plugin, PluginConfig, PluginMode};
+use shadowsocks::relay::udprelay::proxy_socket::UdpSocketType;
 use shadowsocks::relay::udprelay::{DatagramReceive, DatagramSend, DatagramSocket, ProxySocket};
 use shadowsocks::relay::Address;
 use shadowsocks::ProxyClientStream;
@@ -373,21 +374,27 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 Ok(Box::new(SsConn(stream)))
             }
             PluginKind::None | PluginKind::External(_) => {
-                // NOTE: Android VpnService.protect integration — the upstream
-                // `shadowsocks` crate dials this stream internally via tokio,
-                // bypassing our `meow_common::connect_tcp` helper, so the
-                // installed `meow_common::SocketProtector` does NOT see the
-                // fd. To protect SS standard-path outbound sockets on Android,
-                // plumb `ConnectOpts.vpn_protect_path` (Unix domain socket
-                // implementing shadowsocks-android's protect-fd cmsg protocol)
-                // — tracked as a follow-up.
-                let stream = ProxyClientStream::connect(
+                // Hand-roll the TCP connect so the installed
+                // `meow_common::SocketProtector` sees the fd before connect —
+                // otherwise the upstream `shadowsocks` crate would dial this
+                // stream internally via plain tokio and the Android
+                // `VpnService.protect(fd)` hook would never fire, so the
+                // outbound socket would loop back into our own VPN tunnel.
+                //
+                // For `PluginKind::External`, `tcp_external_addr` returns the
+                // SIP003 plugin's local listener (typically 127.0.0.1:<port>),
+                // so the connect is loopback and `protect()` is harmless;
+                // for `PluginKind::None` it's the remote SS server.
+                let server_addr = self.server_config.tcp_external_addr().to_string();
+                let tcp = meow_common::connect_tcp(&server_addr)
+                    .await
+                    .map_err(|e| MeowError::Proxy(format!("ss tcp connect: {e}")))?;
+                let stream = ProxyClientStream::from_stream(
                     Arc::clone(&self.context),
+                    tcp,
                     &self.server_config,
                     addr,
-                )
-                .await
-                .map_err(|e| MeowError::Proxy(format!("ss connect: {e}")))?;
+                );
                 Ok(Box::new(SsConn(stream)))
             }
         }
@@ -405,15 +412,115 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 "ech-tls-tunnel does not support UDP relay".into(),
             ));
         }
-        let socket = ProxySocket::connect(Arc::clone(&self.context), &self.server_config)
+
+        // Hand-roll the UDP bind+connect so the installed
+        // `meow_common::SocketProtector` sees the fd before bind — otherwise
+        // the upstream `shadowsocks::ProxySocket::connect` path binds via
+        // plain tokio and the Android `VpnService.protect(fd)` hook never
+        // fires, looping outbound UDP back into our own VPN tunnel.
+        //
+        // `udp_external_addr` returns a literal `SocketAddr` for the standard
+        // path and the SIP003 plugin's local listener for external plugins
+        // (where the connect is loopback — protect is harmless).
+        let remote = match self.server_config.udp_external_addr() {
+            ServerAddr::SocketAddr(sa) => *sa,
+            ServerAddr::DomainName(host, port) => tokio::net::lookup_host((host.as_str(), *port))
+                .await
+                .map_err(|e| MeowError::Proxy(format!("ss udp lookup: {e}")))?
+                .next()
+                .ok_or_else(|| MeowError::Proxy(format!("ss udp: no address for {host}:{port}")))?,
+        };
+        let bind_addr: SocketAddr = if remote.is_ipv4() {
+            "0.0.0.0:0".parse().expect("static")
+        } else {
+            "[::]:0".parse().expect("static")
+        };
+        let udp = meow_common::bind_udp(bind_addr)
+            .await
+            .map_err(|e| MeowError::Proxy(format!("ss udp bind: {e}")))?;
+        udp.connect(remote)
             .await
             .map_err(|e| MeowError::Proxy(format!("ss udp connect: {e}")))?;
-        debug!("SS UDP connected via {}", self.addr_str);
+        let socket = ProxySocket::<TokioUdpDatagram>::from_socket(
+            UdpSocketType::Client,
+            Arc::clone(&self.context),
+            &self.server_config,
+            TokioUdpDatagram(udp),
+        );
+        debug!("SS UDP connected via {}", remote);
         Ok(Box::new(SsPacketConn { socket }))
     }
 
     fn health(&self) -> &ProxyHealth {
         &self.health
+    }
+}
+
+// ─── Tokio UDP datagram adapter ─────────────────────────────────────────────
+//
+// `ProxySocket::<S>::from_socket` accepts any `S` that implements
+// `DatagramSocket + DatagramSend + DatagramReceive`. The upstream
+// `shadowsocks` crate ships these impls only for its own
+// `shadowsocks::net::UdpSocket`, whose constructors all bind the underlying
+// `tokio::net::UdpSocket` internally — bypassing our protect hook.
+//
+// `TokioUdpDatagram` is a thin newtype over `tokio::net::UdpSocket` that
+// implements the three traits as straight delegates, so the SS UDP adapter
+// can bind the fd through `meow_common::bind_udp` (firing the
+// `SocketProtector`) and then hand the connected socket to the SS codec.
+
+struct TokioUdpDatagram(tokio::net::UdpSocket);
+
+impl DatagramSocket for TokioUdpDatagram {
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.0.local_addr()
+    }
+}
+
+impl DatagramReceive for TokioUdpDatagram {
+    fn poll_recv(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.0.poll_recv(cx, buf)
+    }
+    fn poll_recv_from(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<SocketAddr>> {
+        self.0.poll_recv_from(cx, buf)
+    }
+    fn poll_recv_ready(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.0.poll_recv_ready(cx)
+    }
+}
+
+impl DatagramSend for TokioUdpDatagram {
+    fn poll_send(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.0.poll_send(cx, buf)
+    }
+    fn poll_send_to(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+        target: SocketAddr,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.0.poll_send_to(cx, buf, target)
+    }
+    fn poll_send_ready(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.0.poll_send_ready(cx)
     }
 }
 
