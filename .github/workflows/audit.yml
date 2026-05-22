@@ -25,16 +25,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Ignores live in `.cargo/audit.toml` (the workflow's `ignore:` input
+      # in audit-check@v2.0.0 mishandles multiline values).
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          # Pulled transitively via the `anytls-rs` fork's `trust-dns-resolver`
-          # dep. The idna CVE is privilege-escalation via URL hostname
-          # comparison — not applicable to a DNS resolver. The two
-          # unmaintained warnings (trust-dns-* rebrand to hickory; rustls-pemfile
-          # rolled into rustls-pki-types) are pending upstream `anytls-rs`
-          # migration.
-          ignore: |
-            RUSTSEC-2024-0421
-            RUSTSEC-2025-0017
-            RUSTSEC-2025-0134

@@ -1,0 +1,18 @@
+# cargo-audit configuration.
+#
+# Three advisories are ignored — all pulled transitively via the `anytls-rs`
+# fork's `trust-dns-resolver 0.23` dep, none applicable to this workspace:
+#
+# * RUSTSEC-2024-0421 (`idna` 0.4 — privilege escalation via URL hostname
+#   comparison). Our use is DNS resolution, not URL/origin comparison.
+# * RUSTSEC-2025-0017 (`trust-dns-proto` rebrand to `hickory-proto`). Cosmetic,
+#   pending upstream `anytls-rs` migration.
+# * RUSTSEC-2025-0134 (`rustls-pemfile` rolled into `rustls-pki-types`). Same,
+#   pending upstream `anytls-rs` migration.
+
+[advisories]
+ignore = [
+    "RUSTSEC-2024-0421",
+    "RUSTSEC-2025-0017",
+    "RUSTSEC-2025-0134",
+]
