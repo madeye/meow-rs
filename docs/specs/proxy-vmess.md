@@ -19,7 +19,7 @@ VMess is the native outbound protocol for v2ray/xray/mihomo subscription
 ecosystems. It predates the modern Trojan/Hysteria wave but remains
 ubiquitous: ~60 % of real Clash Meta subscription files sampled in the
 gap-analysis exercise contain at least one VMess node. Without it,
-mihomo-rust cannot load a "typical" user's config, which is the stated
+meow-rs cannot load a "typical" user's config, which is the stated
 M1 exit gate in `vision.md`.
 
 Upstream Go mihomo implements VMess in `transport/vmess/` as a family of
@@ -40,14 +40,14 @@ discrete sub-variants that must all work for real-world compat:
 
 The protocol runs over any byte stream, so transport composition (TLS,
 WS, gRPC, H2, HTTPUpgrade) happens *outside* the VMess adapter via the
-`mihomo-transport` layer chain. The VMess adapter only frames
+`meow-transport` layer chain. The VMess adapter only frames
 payload and header bytes.
 
 ## Scope
 
 In scope:
 
-1. New file `crates/mihomo-proxy/src/vmess.rs` implementing
+1. New file `crates/meow-proxy/src/vmess.rs` implementing
    `VmessAdapter: ProxyAdapter`.
 2. AEAD header mode (AES-128-GCM) — the default.
 3. Three body cipher suites: `aes-128-gcm`, `chacha20-poly1305`, and
@@ -62,7 +62,7 @@ In scope:
    tunnel UDP.
 7. Integration with the existing `ProxyHealth` field (per the
    api-delay-endpoints spec), connection stats, and rule matching.
-8. YAML config parser in `mihomo-config` for the `proxies: [{ type: vmess }]`
+8. YAML config parser in `meow-config` for the `proxies: [{ type: vmess }]`
    variant, matching upstream's field set.
 
 Out of scope (defer to follow-ups):
@@ -137,8 +137,8 @@ subsection below):
 | `alterId` | integer | no | `0` | Deprecated. `> 0` logs a warn-once and is coerced to `0`. Non-negative integers are parsed; negative values are a parse error. |
 | `cipher` | enum | no | `auto` | Body AEAD cipher. `auto` selects AES-GCM on AES-NI hardware, ChaCha20-Poly1305 otherwise. `none` uses no body encryption (payload is plaintext but header is still AEAD-encrypted). `zero` from upstream is **rejected** at parse time: it disables body encryption while the config still reads `vmess`, so a user inheriting the file has no visual cue their traffic is plaintext-over-VMess (security gap per [ADR-0002](../adr/0002-upstream-divergence-policy.md)). |
 | `udp` | bool | no | `false` | Enables UDP-over-TCP framing. When true, `ProxyAdapter::support_udp()` returns true. |
-| `network` | enum | no | `tcp` | Outer transport. Delegated to `mihomo-transport` layer chain per M1.A spec. `tcp` = naked TCP, no transport layers. |
-| `tls` | bool | no | `false` | Wrap the transport in TLS via `mihomo-transport::tls`. Set automatically when `network` requires TLS (e.g. `ws` with `wss://`-style path). |
+| `network` | enum | no | `tcp` | Outer transport. Delegated to `meow-transport` layer chain per M1.A spec. `tcp` = naked TCP, no transport layers. |
+| `tls` | bool | no | `false` | Wrap the transport in TLS via `meow-transport::tls`. Set automatically when `network` requires TLS (e.g. `ws` with `wss://`-style path). |
 
 **Divergences from upstream**:
 
@@ -341,7 +341,7 @@ upstream's preference order.
 ### Struct + trait impl
 
 ```rust
-// crates/mihomo-proxy/src/vmess.rs
+// crates/meow-proxy/src/vmess.rs
 
 pub struct VmessAdapter {
     name: String,
@@ -351,7 +351,7 @@ pub struct VmessAdapter {
     cmd_key: [u8; 16],
     body_cipher: BodyCipher,    // Aes128Gcm | ChaCha20Poly1305 | None
     udp: bool,
-    transport: TransportChain,  // from mihomo-transport
+    transport: TransportChain,  // from meow-transport
     health: ProxyHealth,
     dialer: Arc<dyn TcpDialer>,
 }
@@ -401,7 +401,7 @@ The transport chain is composed at config-load time from the `network` +
 layer). This is the payoff for the M1.A work — VMess becomes a 300-LOC
 adapter plus a 400-LOC protocol module, zero transport code.
 
-### File layout inside `mihomo-proxy/src/vmess/`
+### File layout inside `meow-proxy/src/vmess/`
 
 ```
 vmess.rs            // VmessAdapter, config parsing, trait impl (~250 LOC)
@@ -418,9 +418,9 @@ Total ~1000 LOC. Legacy MD5 mode adds ~150 LOC behind the
 
 ### Config parsing
 
-`mihomo-config/src/proxy_parser.rs::parse_vmess` grows to handle the
+`meow-config/src/proxy_parser.rs::parse_vmess` grows to handle the
 full field set above. The transport chain is built by calling into a
-new helper `mihomo-config::transport_chain::build(network, opts) ->
+new helper `meow-config::transport_chain::build(network, opts) ->
 TransportChain` which the other M1.B protocols (VLESS) will reuse.
 
 ### Error surface
@@ -459,7 +459,7 @@ but gates the legacy-header code path.
 
 A PR implementing this spec must:
 
-1. `cargo build -p mihomo-proxy --no-default-features --features vmess`
+1. `cargo build -p meow-proxy --no-default-features --features vmess`
    produces a working VMess outbound that compiles without `ws`, `grpc`,
    `h2`, or `httpupgrade` transports.
 2. `cargo build --no-default-features --features "vmess,ws,tls"`
@@ -467,7 +467,7 @@ A PR implementing this spec must:
    feature set needed to replace a real subscription.
 3. TCP relay works against a real upstream `xray` server configured for
    VMess AEAD. Integration test at
-   `crates/mihomo-proxy/tests/vmess_integration.rs` spawns a local
+   `crates/meow-proxy/tests/vmess_integration.rs` spawns a local
    `xray` binary (skipped in CI if binary absent, same pattern as
    `ssserver`), connects, and round-trips a payload.
 4. UDP relay works via the same `xray` server for a DNS query target.
@@ -612,7 +612,7 @@ test plan):**
 
 ## Implementation checklist (for engineer handoff)
 
-- [ ] Add the `vmess` feature to `crates/mihomo-proxy/Cargo.toml` with
+- [ ] Add the `vmess` feature to `crates/meow-proxy/Cargo.toml` with
       the dep list above.
 - [ ] Port `KDF` from `transport/vmess/aead/encrypt.go` line-by-line.
       Add the `aead_kdf_matches_upstream_vectors` test with reference
@@ -625,14 +625,14 @@ test plan):**
       nonce counter, `len = cipher + 16` prefix.
 - [ ] Implement `VmessConn` + `VmessPacketConn` in `conn.rs`.
 - [ ] Implement `VmessAdapter` in `vmess.rs` composing the above with
-      the `mihomo-transport` chain.
+      the `meow-transport` chain.
 - [ ] Register `AdapterType::Vmess` variant in
-      `crates/mihomo-common/src/adapter_type.rs`.
-- [ ] Wire YAML parsing in `mihomo-config/src/proxy_parser.rs` with
+      `crates/meow-common/src/adapter_type.rs`.
+- [ ] Wire YAML parsing in `meow-config/src/proxy_parser.rs` with
       all divergences (warn-coerce for alterId, hard-error for
       `cipher: zero`, warn-ignore for mux).
 - [ ] Add the transport-chain builder helper in
-      `mihomo-config/src/transport_chain.rs` (new file) for reuse by
+      `meow-config/src/transport_chain.rs` (new file) for reuse by
       M1.B-2 VLESS.
 - [ ] Add all unit + integration tests from §Test plan.
 - [ ] Grep upstream `transport/vmess/` one more time before submitting

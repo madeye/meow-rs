@@ -13,21 +13,21 @@ Rule: if p95 inline cap > 8 elements, stay with Vec.
 
 ## Candidates Evaluated
 
-### 1. `CacheEntry.ips: Vec<IpAddr>` (mihomo-dns/src/cache.rs)
+### 1. `CacheEntry.ips: Vec<IpAddr>` (meow-dns/src/cache.rs)
 
 - Typical response size: 1–4 IpAddr entries (A + AAAA).
 - `IpAddr` size: 17 B (alignment 1 B).
 - `SmallVec<[IpAddr; 4]>`: 4 × 17 + 8 = **76 B** vs Vec = **24 B**.
 - Verdict: **reject — struct grows +52 B**. Belongs to task #40 (M2.dns-cache-layout).
 
-### 2. `ConnectionInfo.chains: Vec<Arc<str>>` (mihomo-tunnel/src/statistics.rs)
+### 2. `ConnectionInfo.chains: Vec<Arc<str>>` (meow-tunnel/src/statistics.rs)
 
 - Typical chain depth: 1–4 hops (Selector → URLTest → SS, or just Direct).
 - `Arc<str>` size: 16 B (fat pointer).
 - `SmallVec<[Arc<str>; 4]>`: 4 × 16 + 8 = **72 B** vs Vec = **24 B**.
 - Verdict: **reject — struct grows +48 B**.
 
-### 3. `Metadata.src_geo_ip / dst_geo_ip: Vec<SmolStr>` (mihomo-common/src/metadata.rs)
+### 3. `Metadata.src_geo_ip / dst_geo_ip: Vec<SmolStr>` (meow-common/src/metadata.rs)
 
 - Typical GeoIP label count: 0–2 per IP (country code, ASN occasionally).
 - `SmolStr` size: 24 B.

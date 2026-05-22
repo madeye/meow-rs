@@ -62,7 +62,7 @@ handler won't compile. Verify in `Cargo.toml` before opening the PR.
 Tests that actually receive WS frames (§B, §C, §D, §F) need a WS client. Add:
 
 ```toml
-# mihomo-api/Cargo.toml [dev-dependencies]
+# meow-api/Cargo.toml [dev-dependencies]
 tokio-tungstenite = "0.24"
 ```
 
@@ -85,7 +85,7 @@ Add a `mod ws_support` block in `api_test.rs`:
 ```rust
 mod ws_support {
     use super::*;
-    use mihomo_api::routes::{create_router, AppState};
+    use meow_api::routes::{create_router, AppState};
     use tokio::net::TcpListener;
     use tokio::task::AbortHandle;
 
@@ -264,10 +264,10 @@ that are easy to violate silently.
 
 | # | Case | Asserts |
 |---|------|---------|
-| J1 | `log_broadcast_layer_no_blocking_send` **[guard-rail]** | `grep -r "blocking_send" crates/mihomo-api/src/` → empty. `on_event` must only call `broadcast::Sender::send` (sync, non-blocking). <br/> NOT `blocking_send` — that would park the tokio thread inside a tracing event, deadlocking if called from an async context. |
-| J2 | `no_catch_panic_on_api_router` **[guard-rail]** | `grep -r "CatchPanic\|catch_panic\|PanicHandler" crates/mihomo-api/src/` → zero matches in the `create_router` or middleware stack. NOT added as a "graceful WS error" shim — it swallows panics and defeats the soak-test panic-abort invariant (task #26). See `memory/feedback_api_no_catch_panic.md`. |
-| J3 | `no_chrono_dep_in_api` **[guard-rail]** | `grep "chrono" crates/mihomo-api/Cargo.toml` → empty. Use `time` crate only. <br/> Upstream: timestamp crate selected per architect 2026-04-11 (resolved Q3 in spec). |
-| J4 | `no_sysinfo_in_workspace_deps` **[guard-rail]** | `grep "sysinfo" Cargo.toml` (workspace root) → not present. `sysinfo` is per-crate (`mihomo-api/Cargo.toml` only) — it is not needed by any other crate and should not be promoted to workspace level. |
+| J1 | `log_broadcast_layer_no_blocking_send` **[guard-rail]** | `grep -r "blocking_send" crates/meow-api/src/` → empty. `on_event` must only call `broadcast::Sender::send` (sync, non-blocking). <br/> NOT `blocking_send` — that would park the tokio thread inside a tracing event, deadlocking if called from an async context. |
+| J2 | `no_catch_panic_on_api_router` **[guard-rail]** | `grep -r "CatchPanic\|catch_panic\|PanicHandler" crates/meow-api/src/` → zero matches in the `create_router` or middleware stack. NOT added as a "graceful WS error" shim — it swallows panics and defeats the soak-test panic-abort invariant (task #26). See `memory/feedback_api_no_catch_panic.md`. |
+| J3 | `no_chrono_dep_in_api` **[guard-rail]** | `grep "chrono" crates/meow-api/Cargo.toml` → empty. Use `time` crate only. <br/> Upstream: timestamp crate selected per architect 2026-04-11 (resolved Q3 in spec). |
+| J4 | `no_sysinfo_in_workspace_deps` **[guard-rail]** | `grep "sysinfo" Cargo.toml` (workspace root) → not present. `sysinfo` is per-crate (`meow-api/Cargo.toml` only) — it is not needed by any other crate and should not be promoted to workspace level. |
 
 ---
 

@@ -3,7 +3,7 @@
 Status: Approved (architect 2026-04-11)
 Owner: pm
 Tracks roadmap items: **M1.B-3** (HTTP CONNECT outbound), **M1.B-4** (SOCKS5 outbound)
-Depends on: `mihomo-transport` crate (M1.A) for TLS-wrapping support.
+Depends on: `meow-transport` crate (M1.A) for TLS-wrapping support.
 See also: [`docs/specs/transport-layer.md`](transport-layer.md) — TLS transport layer.
 Upstream reference: `adapter/outbound/http.go`, `adapter/outbound/socks5.go`.
 
@@ -11,7 +11,7 @@ Upstream reference: `adapter/outbound/http.go`, `adapter/outbound/socks5.go`.
 
 HTTP CONNECT and SOCKS5 are ubiquitous proxy protocols. Corporate networks
 typically expose an HTTP proxy; most proxy subscription formats include SOCKS5
-nodes. Both exist as `AdapterType` enum variants in `mihomo-common`
+nodes. Both exist as `AdapterType` enum variants in `meow-common`
 (`Http`, `Socks5`) with no implementation behind them. Without these, any
 config with `type: http` or `type: socks5` proxies fails to parse, blocking
 a significant fraction of real-world subscriptions.
@@ -24,15 +24,15 @@ the stream back as a `ProxyConn`.
 
 In scope (both adapters):
 
-1. `HttpAdapter` in `crates/mihomo-proxy/src/http_adapter.rs`.
-2. `Socks5Adapter` in `crates/mihomo-proxy/src/socks5_adapter.rs`.
+1. `HttpAdapter` in `crates/meow-proxy/src/http_adapter.rs`.
+2. `Socks5Adapter` in `crates/meow-proxy/src/socks5_adapter.rs`.
 3. TCP tunnel via HTTP CONNECT handshake (HTTP/1.1 only).
 4. SOCKS5 TCP tunnel (CMD `0x01` CONNECT).
 5. Username/password authentication for both protocols.
 6. Optional TLS-wrapping of the connection to the proxy server (`tls: true`),
-   using the `TlsTransport` from `mihomo-transport`. SNI defaults to `server`
+   using the `TlsTransport` from `meow-transport`. SNI defaults to `server`
    field; `skip-cert-verify` as in Trojan.
-7. YAML config parser wired in `mihomo-config`.
+7. YAML config parser wired in `meow-config`.
 8. `AdapterType::Http` and `AdapterType::Socks5` already present in enum —
    no enum change needed.
 
@@ -170,7 +170,7 @@ discarded — we don't use it for TCP relay. This matches upstream.
 ### Struct shapes
 
 ```rust
-// crates/mihomo-proxy/src/http_adapter.rs
+// crates/meow-proxy/src/http_adapter.rs
 pub struct HttpAdapter {
     name: String,
     server: String,
@@ -181,7 +181,7 @@ pub struct HttpAdapter {
     health: ProxyHealth,
 }
 
-// crates/mihomo-proxy/src/socks5_adapter.rs
+// crates/meow-proxy/src/socks5_adapter.rs
 pub struct Socks5Adapter {
     name: String,
     server: String,
@@ -194,13 +194,13 @@ pub struct Socks5Adapter {
 
 ### Error types
 
-Add to `MihomoError` in `mihomo-common`:
+Add to `MeowError` in `meow-common`:
 
 ```rust
-MihomoError::ProxyAuthFailed,          // 407 or SOCKS5 auth failure
-MihomoError::HttpConnectFailed(u16),   // non-2xx from HTTP CONNECT
-MihomoError::Socks5ConnectFailed(u8),  // non-zero rep from SOCKS5
-MihomoError::NoAcceptableMethod,       // SOCKS5 server returned 0xFF
+MeowError::ProxyAuthFailed,          // 407 or SOCKS5 auth failure
+MeowError::HttpConnectFailed(u16),   // non-2xx from HTTP CONNECT
+MeowError::Socks5ConnectFailed(u8),  // non-zero rep from SOCKS5
+MeowError::NoAcceptableMethod,       // SOCKS5 server returned 0xFF
 ```
 
 Error log messages must include a protocol prefix so debugging is unambiguous: log `"http proxy auth failed"` (not generic `"auth failed"`) for HTTP 407, and `"socks5 auth failed"` for SOCKS5 auth rejection.
@@ -297,11 +297,11 @@ This enables using HTTP CONNECT or SOCKS5 as hops in a relay chain.
 **Sequencing: M1.A-1 must land (TLS transport) before `tls: true` is wired.
 `connect_over` requires M1.B-1 (VMess) to have added the trait method.**
 
-- [ ] Add `MihomoError::ProxyAuthFailed`, `HttpConnectFailed(u16)`,
-      `Socks5ConnectFailed(u8)`, `NoAcceptableMethod` to `mihomo-common`.
+- [ ] Add `MeowError::ProxyAuthFailed`, `HttpConnectFailed(u16)`,
+      `Socks5ConnectFailed(u8)`, `NoAcceptableMethod` to `meow-common`.
 - [ ] Implement `http_adapter.rs`. Comment cites upstream:
       `// upstream: adapter/outbound/http.go`.
 - [ ] Implement `socks5_adapter.rs`. Comment cites upstream:
       `// upstream: adapter/outbound/socks5.go`.
-- [ ] Wire `parse_proxy` in `mihomo-config` for `type: "http"` and `type: "socks5"`.
+- [ ] Wire `parse_proxy` in `meow-config` for `type: "http"` and `type: "socks5"`.
 - [ ] Update `docs/roadmap.md` M1.B-3 and M1.B-4 rows with merged PR link.

@@ -53,7 +53,7 @@ jobs:
       - run: cargo install --locked cargo-zigbuild
 
       - name: Build release binary (static musl, default features)
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }} --bin mihomo
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }} --bin meow
 
       - name: Build minimal release binary (stripped, for size check)
         if: matrix.minimal_budget_bytes != 0
@@ -61,18 +61,18 @@ jobs:
           cargo zigbuild --release --locked \
             --no-default-features --features minimal \
             --target ${{ matrix.target }} \
-            --bin mihomo
+            --bin meow
           # Copy minimal binary aside before default binary overwrites artifact.
           # Binary is already stripped via [profile.release] strip = true in
           # the workspace Cargo.toml — no post-build strip needed (and the
           # host `strip` cannot read aarch64 ELF anyway).
-          cp "target/${{ matrix.target }}/release/mihomo" \
-             "target/${{ matrix.target }}/release/mihomo-minimal"
+          cp "target/${{ matrix.target }}/release/meow" \
+             "target/${{ matrix.target }}/release/meow-minimal"
 
       - name: Minimal binary size check
         if: matrix.minimal_budget_bytes != 0
         run: |
-          SIZE=$(stat -c%s "target/${{ matrix.target }}/release/mihomo-minimal")
+          SIZE=$(stat -c%s "target/${{ matrix.target }}/release/meow-minimal")
           BUDGET=${{ matrix.minimal_budget_bytes }}
           echo "Minimal binary size: ${SIZE} bytes (budget: ${BUDGET} bytes)"
           if [ "${SIZE}" -gt "${BUDGET}" ]; then
@@ -91,10 +91,10 @@ jobs:
         run: |
           set -euo pipefail
           ref="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
-          name="mihomo-${ref}-${{ matrix.target }}"
+          name="meow-${ref}-${{ matrix.target }}"
           staging="dist/${name}"
           mkdir -p "${staging}"
-          cp "target/${{ matrix.target }}/release/mihomo" "${staging}/"
+          cp "target/${{ matrix.target }}/release/meow" "${staging}/"
           cp README.md LICENSE "${staging}/" 2>/dev/null || true
           tar -C dist -czf "${name}.tar.gz" "${name}"
           sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
@@ -104,7 +104,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mihomo-${{ matrix.target }}
+          name: meow-${{ matrix.target }}
           path: |
             ${{ steps.pkg.outputs.archive }}
             ${{ steps.pkg.outputs.checksum }}

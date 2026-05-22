@@ -74,9 +74,9 @@ Go `NewSubRule` target slot stores the *block name*, not a fallback proxy.
 ## Test helpers
 
 All unit tests for `SubRule::apply()` live in `#[cfg(test)] mod tests` inside
-`crates/mihomo-rules/src/sub_rule.rs`.
+`crates/meow-rules/src/sub_rule.rs`.
 
-Config-parser tests live in `crates/mihomo-config/tests/config_test.rs`
+Config-parser tests live in `crates/meow-config/tests/config_test.rs`
 (existing integration test file).
 
 ### In-process block fixture
@@ -160,9 +160,9 @@ that match/no-match based on a predicate and return a fixed target string.
 | # | Case | Asserts |
 |---|------|---------|
 | F1 | `same_block_name_shares_one_arc` | Config with `SUB-RULE,SHARED` appearing twice in `rules:`; assert both `SubRule.block` fields satisfy `Arc::ptr_eq`. NOT two separate `Vec` allocations for the same block. Reference-count sharing confirmed per spec §Internal design. |
-| F2 | `no_default_target_field_in_subrule_struct` **[guard-rail]** | `grep -n "default_target" crates/mihomo-rules/src/sub_rule.rs` → zero matches. The `SubRule` struct has no `default_target` field. Confirmed: upstream `NewSubRule` target slot stores block name, not a fallback proxy. If this field appears it means the engineer misread spec. |
+| F2 | `no_default_target_field_in_subrule_struct` **[guard-rail]** | `grep -n "default_target" crates/meow-rules/src/sub_rule.rs` → zero matches. The `SubRule` struct has no `default_target` field. Confirmed: upstream `NewSubRule` target slot stores block name, not a fallback proxy. If this field appears it means the engineer misread spec. |
 | F3 | `sub_rules_section_parsed_before_rules_section` **[guard-rail]** | Config where `rules:` references a block defined in `sub-rules:`; assert no error (forward reference from `rules:` to `sub-rules:` resolves correctly). If `rules:` were parsed first, references would fail. |
-| F4 | `upstream_citation_present_in_sub_rule_rs` **[guard-rail]** | `grep -n "matchSubRules\|179\|180\|192\|193" crates/mihomo-rules/src/sub_rule.rs` → at least one match. Guards that the engineer pasted the upstream Go reference comment as required by spec §Implementation checklist. NOT absent. |
+| F4 | `upstream_citation_present_in_sub_rule_rs` **[guard-rail]** | `grep -n "matchSubRules\|179\|180\|192\|193" crates/meow-rules/src/sub_rule.rs` → at least one match. Guards that the engineer pasted the upstream Go reference comment as required by spec §Implementation checklist. NOT absent. |
 
 ---
 
@@ -172,7 +172,7 @@ that match/no-match based on a predicate and return a fixed target string.
 |---|------|---------|
 | G1 | `parser_dispatches_sub_rule_keyword` | Rule string `"SUB-RULE,MY-BLOCK"` (once YAML field layout is confirmed per P1); `parse_rule()` with a resolver that knows `MY-BLOCK` returns a `SubRule` (downcasted). NOT unknown rule type error. |
 | G2 | `parser_sub_rule_missing_block_name_hard_errors` | Rule string `"SUB-RULE"` (no block name field); assert `Err(...)`. NOT default block name assumed. |
-| G3 | `parser_sub_rule_field_layout_comment_present` **[guard-rail]** | `grep -n "rules/parser.go" crates/mihomo-rules/src/parser.rs` (or wherever the SUB-RULE dispatch lives) → at least one match. Guards that engineer pasted the upstream `rules/parser.go` SUB-RULE case before committing the Rust parser (per P1 and spec §YAML syntax note). |
+| G3 | `parser_sub_rule_field_layout_comment_present` **[guard-rail]** | `grep -n "rules/parser.go" crates/meow-rules/src/parser.rs` (or wherever the SUB-RULE dispatch lives) → at least one match. Guards that engineer pasted the upstream `rules/parser.go` SUB-RULE case before committing the Rust parser (per P1 and spec §YAML syntax note). |
 
 ---
 
@@ -180,7 +180,7 @@ that match/no-match based on a predicate and return a fixed target string.
 
 | # | Case | Asserts |
 |---|------|---------|
-| H1 | `special_rules_is_not_sub_rule` **[guard-rail]** | `grep -n "SpecialRules\|special_rules" crates/mihomo-rules/src/sub_rule.rs` → zero matches. `SpecialRules` is a per-listener rule-set swap in `tunnel.go` (lines 633–664). SUB-RULE is a rule type within the rule list. The two mechanisms are independent. NOT the same struct. NOT the same code path. |
+| H1 | `special_rules_is_not_sub_rule` **[guard-rail]** | `grep -n "SpecialRules\|special_rules" crates/meow-rules/src/sub_rule.rs` → zero matches. `SpecialRules` is a per-listener rule-set swap in `tunnel.go` (lines 633–664). SUB-RULE is a rule type within the rule list. The two mechanisms are independent. NOT the same struct. NOT the same code path. |
 | H2 | `sub_rule_evaluation_does_not_modify_global_rule_list` | Apply a `SubRule` that matches; assert the parent rule list (top-level `rules:`) is unchanged after evaluation. SUB-RULE evaluation is read-only against `Metadata`; it does not mutate the routing engine state. |
 
 ---

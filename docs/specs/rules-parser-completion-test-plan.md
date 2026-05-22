@@ -17,7 +17,7 @@ wins for test cases**; flag the discrepancy to PM so the spec can be updated.
 - Unit correctness of all eight new rule types against constructed `Metadata`
   values: IN-PORT, DSCP, UID, SRC-GEOIP, PROCESS-PATH, DOMAIN-WILDCARD,
   IP-SUFFIX, IP-ASN.
-- Parser dispatch: `parse_rule` in `mihomo-rules/src/parser.rs` reaches the
+- Parser dispatch: `parse_rule` in `meow-rules/src/parser.rs` reaches the
   correct handler for each new type and hard-errors on bad payloads.
 - `RuleType` enum coverage: three new variants (DomainWildcard, IpSuffix, IpAsn)
   round-trip through `rule_type()`.
@@ -48,10 +48,10 @@ to PM/architect before implementation starts.
 The `u8 → Option<u8>` change (architect-approved, Class A fix) has ~10–15
 call sites. Before any §B test can compile:
 
-- `crates/mihomo-common/src/metadata.rs` line 26: `pub dscp: u8` → `pub dscp: Option<u8>`.
+- `crates/meow-common/src/metadata.rs` line 26: `pub dscp: u8` → `pub dscp: Option<u8>`.
 - `metadata.rs` `Default::default()` (line 55): `dscp: 0` → `dscp: None`.
 - `metadata.rs` `pure()` method (line 110): `dscp: 0` → `dscp: None`.
-- `crates/mihomo-common/tests/common_test.rs` line 289: `dscp: 46` → `dscp: Some(46)`.
+- `crates/meow-common/tests/common_test.rs` line 289: `dscp: 46` → `dscp: Some(46)`.
 - `common_test.rs` line 313: `assert_eq!(pure.dscp, 0)` → `assert_eq!(pure.dscp, None)`.
 - Add `#[serde(skip_serializing_if = "Option::is_none")]` on the `dscp` field.
 - TProxy listener: set `dscp: Some(ip_tos >> 2)` from the `IP_RECVTOS` cmsg.
@@ -66,7 +66,7 @@ wrong reason — ensure the type change lands first.
 The existing `parse_geoip_error` test only verifies parse failure without a
 reader. Tests §D (SRC-GEOIP) and §H (IP-ASN) require a real MaxMindDB reader.
 
-**Required fixture files** (add to `crates/mihomo-rules/tests/fixtures/`):
+**Required fixture files** (add to `crates/meow-rules/tests/fixtures/`):
 
 - `GeoLite2-Country-Test.mmdb` — a minimal Country database. Use the
   test fixture from MaxMind's open reference suite
@@ -142,14 +142,14 @@ fn meta_process_path(path: &str) -> Metadata {
 }
 ```
 
-`parse_rule_raw` is already imported from `mihomo_rules`; use it with a
+`parse_rule_raw` is already imported from `meow_rules`; use it with a
 populated `ParserContext` for GEOIP/ASN cases.
 
 ---
 
 ## Case list
 
-### A. IN-PORT (`crates/mihomo-rules/src/in_port.rs`)
+### A. IN-PORT (`crates/meow-rules/src/in_port.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -168,7 +168,7 @@ populated `ParserContext` for GEOIP/ASN cases.
 
 ---
 
-### B. DSCP (`crates/mihomo-rules/src/dscp.rs`)
+### B. DSCP (`crates/meow-rules/src/dscp.rs`)
 
 **Prerequisite:** `Metadata.dscp: u8 → Option<u8>` (Issue 1 above) must land
 before any B case can compile correctly. See §Pre-flight §Issue 1.
@@ -186,7 +186,7 @@ before any B case can compile correctly. See §Pre-flight §Issue 1.
 
 ---
 
-### C. UID (`crates/mihomo-rules/src/uid.rs`)
+### C. UID (`crates/meow-rules/src/uid.rs`)
 
 Cases C1 and C2 are unconditional (None → false is platform-independent).
 Cases C3 and C4 are platform-conditional.
@@ -203,7 +203,7 @@ Cases C3 and C4 are platform-conditional.
 
 ---
 
-### D. SRC-GEOIP (`crates/mihomo-rules/src/geoip.rs` — extend existing, or new `src_geoip.rs`)
+### D. SRC-GEOIP (`crates/meow-rules/src/geoip.rs` — extend existing, or new `src_geoip.rs`)
 
 **Prerequisite:** Issue 2 (fixture DB) must be resolved. Cases D1–D4 require
 `country_reader()`. Cases D5–D6 use `ParserContext::empty()`.
@@ -219,7 +219,7 @@ Cases C3 and C4 are platform-conditional.
 
 ---
 
-### E. PROCESS-PATH (`crates/mihomo-rules/src/process_path.rs`)
+### E. PROCESS-PATH (`crates/meow-rules/src/process_path.rs`)
 
 The spec prescribes `Metadata.process_path: Option<String>`. If engineer
 keeps it as `String` with `""` = unset, adjust E4 accordingly — but note
@@ -238,7 +238,7 @@ the semantic must be identical: empty or None → rule never matches.
 
 ---
 
-### F. DOMAIN-WILDCARD (`crates/mihomo-rules/src/domain_wildcard.rs`)
+### F. DOMAIN-WILDCARD (`crates/meow-rules/src/domain_wildcard.rs`)
 
 **Prerequisite:** Issue 3 (upstream `*` semantics verification) must be resolved
 before finalising F2. Template assumes single-label per spec; add a `TODO` if
@@ -258,7 +258,7 @@ upstream verification is still pending at implementation time.
 
 ---
 
-### G. IP-SUFFIX (`crates/mihomo-rules/src/ip_suffix.rs`)
+### G. IP-SUFFIX (`crates/meow-rules/src/ip_suffix.rs`)
 
 **Engineer pre-work (spec §IP-SUFFIX):** derive all byte-exact test vectors
 from `rules/common/ipcidr.go::Match` in upstream Go mihomo, then fill in the
@@ -280,7 +280,7 @@ from `rules/common/ipcidr.go::Match` in upstream Go mihomo, then fill in the
 
 ---
 
-### H. IP-ASN (`crates/mihomo-rules/src/ip_asn.rs`)
+### H. IP-ASN (`crates/meow-rules/src/ip_asn.rs`)
 
 **Prerequisite:** Issue 2 (ASN fixture DB) must be resolved. Cases H1–H4
 require `asn_reader()`. Cases H5–H6 use `ParserContext::empty()`.
@@ -297,7 +297,7 @@ require `asn_reader()`. Cases H5–H6 use `ParserContext::empty()`.
 
 ---
 
-### I. Parser dispatch (`crates/mihomo-rules/src/parser.rs`)
+### I. Parser dispatch (`crates/meow-rules/src/parser.rs`)
 
 These cases verify that `parse_rule` reaches the correct handler for each new
 type and that the `_ => Err("unknown rule type")` arm no longer fires for them.
@@ -316,7 +316,7 @@ type and that the `_ => Err("unknown rule type")` arm no longer fires for them.
 
 ---
 
-### J. RuleType enum coverage (`crates/mihomo-common/src/rule.rs`)
+### J. RuleType enum coverage (`crates/meow-common/src/rule.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -335,7 +335,7 @@ These three can be a single `#[test]` or inline `assert!` statements inside a
 |---|------|---------|
 | K1 | Full suite passes | `cargo test --test rules_test` reports 78+ tests, 0 failed. Count must not decrease — no existing test may be deleted or renamed. |
 | K2 | `dscp_field_change_no_existing_test_regresses` **[guard-rail]** | The `Metadata.dscp: u8 → Option<u8>` change must compile without `allow(unused)` hacks in `common_test.rs`. Any `dscp: 0` literal in test fixtures that was relying on the old `u8` default must be updated to `dscp: None` or `dscp: Some(0)` as appropriate. |
-| K3 | `no_prost_dep_in_rules` **[guard-rail]** | `grep -r "prost" crates/mihomo-rules/Cargo.toml` → empty. No protobuf runtime introduced for IP-SUFFIX or IP-ASN. |
+| K3 | `no_prost_dep_in_rules` **[guard-rail]** | `grep -r "prost" crates/meow-rules/Cargo.toml` → empty. No protobuf runtime introduced for IP-SUFFIX or IP-ASN. |
 
 ---
 
@@ -370,4 +370,4 @@ All 6 spec divergence rows have test coverage above. Summary:
 | 3 — IP-ASN missing DB → hard-error | A | H5, H6, I8 |
 | 4 — DOMAIN-WILDCARD no `?` (matches upstream, not a divergence) | — | F5 |
 | 5 — Any of these absent from parser silently skipped (status-quo bug, now fixed) | A | I1–I8 |
-| 6 — DSCP `u8` → `Option<u8>` (Class A fix vs previous mihomo-rust behavior) | A | B4, B7 |
+| 6 — DSCP `u8` → `Option<u8>` (Class A fix vs previous meow-rs behavior) | A | B4, B7 |

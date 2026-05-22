@@ -1,0 +1,39 @@
+[package]
+name = "meow-tunnel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+meow-common = { workspace = true }
+meow-dns = { workspace = true, default-features = false }
+meow-rules = { workspace = true }
+meow-proxy = { workspace = true, default-features = false }
+meow-trie = { workspace = true }
+tokio = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+arc-swap = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+
+[[bench]]
+name = "udp_bench"
+harness = false
+
+[[bench]]
+name = "rules_bench"
+harness = false
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+meow-trie = { workspace = true }
+criterion = { workspace = true }
+dashmap = { workspace = true }
+ipnet = { workspace = true }
+meow-rules = { workspace = true }
+
+[lints]
+workspace = true

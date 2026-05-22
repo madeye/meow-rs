@@ -17,7 +17,7 @@ Two optimizations implemented per ADR-0008 §7:
 
 ## Sub-area 0: Domain Trie Early-Exit
 
-**What changed** (`crates/mihomo-tunnel/src/match_engine.rs`):
+**What changed** (`crates/meow-tunnel/src/match_engine.rs`):
 
 - Added `DomainIndex` struct: a `DomainTrie<(usize, String)>` keyed by domain pattern, storing the minimum rule index and adapter name.
 - `DomainIndex::build()` indexes all `DOMAIN` and `DOMAIN-SUFFIX` rules in one pass (O(n)). A `HashSet` prevents overwriting earlier indices.
@@ -27,7 +27,7 @@ Two optimizations implemented per ADR-0008 §7:
   3. Return trie hit if prefix scan finds nothing.
 - On trie miss: fall through to full linear scan (unchanged behaviour).
 
-### Benchmark Results (`cargo bench -p mihomo-tunnel --bench rules_bench`)
+### Benchmark Results (`cargo bench -p meow-tunnel --bench rules_bench`)
 
 Rule set: 2/3 DOMAIN-SUFFIX rules + 1/3 IP-CIDR rules, matching host = last DOMAIN-SUFFIX rule (worst-case position for the trie).
 
@@ -64,7 +64,7 @@ Decision: not implemented. IpCidr rules fail fast when `dst_ip.is_none()` (O(1))
 
 ## Sub-area 3: Rule-Provider Async Reload
 
-**What changed** (`crates/mihomo-config/src/rule_provider.rs`):
+**What changed** (`crates/meow-config/src/rule_provider.rs`):
 
 `RuleProvider::refresh()` now wraps `parse_bytes_to_ruleset()` in `tokio::task::spawn_blocking`. The HTTP fetch remains async; only the CPU-bound YAML/MRS parse moves to a blocking thread.
 

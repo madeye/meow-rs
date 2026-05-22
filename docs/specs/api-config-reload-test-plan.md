@@ -37,11 +37,11 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 ## File layout expected
 
 ```
-crates/mihomo-api/src/
+crates/meow-api/src/
   routes.rs            # MODIFIED: put_configs, get_configs handlers + routes
   state.rs             # MODIFIED: ArcSwap<Tunnel>, reload() method
 Cargo.toml             # MODIFIED: arc-swap = "1", base64 = "0.22"
-crates/mihomo-api/tests/
+crates/meow-api/tests/
   config_reload_test.rs  # NEW: handler unit tests (axum test client)
   config_reload_integration_test.rs  # NEW: full restart-reload integration test
 ```
@@ -61,7 +61,7 @@ Following ADR-0002 classification format:
 
 ## Case list
 
-### A. `PUT /configs` handler unit tests (`crates/mihomo-api/tests/config_reload_test.rs`)
+### A. `PUT /configs` handler unit tests (`crates/meow-api/tests/config_reload_test.rs`)
 
 All cases use an axum test client with a mock `AppState` that records reload
 calls. No real listeners spawned. Use `#[tokio::test]`.
@@ -125,7 +125,7 @@ controlled connection count.
 
 ### F. Integration test — full restart-reload cycle (`config_reload_integration_test.rs`)
 
-`#[tokio::test]`, spawns a real mihomo-rust process in-process via
+`#[tokio::test]`, spawns a real meow-rs process in-process via
 `AppState` + real listeners on loopback. Linux and macOS.
 
 | # | Case | Asserts |
@@ -168,9 +168,9 @@ controlled connection count.
 
 Add to `.github/workflows/test.yml`:
 
-1. `cargo test -p mihomo-api --test config_reload_test` — §A–D, §G cases.
+1. `cargo test -p meow-api --test config_reload_test` — §A–D, §G cases.
    Add to both `ubuntu-latest` and `macos-latest` jobs.
-2. `cargo test -p mihomo-api --test config_reload_integration_test` — §E–F
+2. `cargo test -p meow-api --test config_reload_integration_test` — §E–F
    integration cases. Linux only for TProxy-adjacent cases; F1–F3 run on both.
 
 ## Open questions for engineer

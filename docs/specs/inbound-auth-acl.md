@@ -40,7 +40,7 @@ In scope:
 4. HTTP listener: if `authentication` is non-empty, require
    `Proxy-Authorization: Basic <base64>` header on CONNECT requests.
    Return `407 Proxy Authentication Required` with
-   `Proxy-Authenticate: Basic realm="mihomo"` if absent or wrong.
+   `Proxy-Authenticate: Basic realm="meow"` if absent or wrong.
 5. Populate `Metadata.in_user: Option<String>` with the authenticated
    username on success. `None` when auth is skipped (LAN bypass or no auth configured).
 6. Mixed listener: delegates to HTTP or SOCKS5 sub-handler; auth is applied
@@ -99,7 +99,7 @@ loopback from the bypass (it would break local tooling).
 ### Credential store
 
 ```rust
-// mihomo-config/src/lib.rs (or a dedicated auth.rs)
+// meow-config/src/lib.rs (or a dedicated auth.rs)
 
 pub struct Credentials {
     /// username → password (plain text, not hashed — matches upstream)
@@ -201,7 +201,7 @@ aware listener code after successful credential verification.
 5. HTTP CONNECT with correct `Proxy-Authorization: Basic` → 200 established;
    `Metadata.in_user == Some("alice")`.
 6. HTTP CONNECT with wrong credentials → `407 Proxy Authentication Required`.
-7. HTTP CONNECT with no auth header → `407` with `Proxy-Authenticate: Basic realm="mihomo"`.
+7. HTTP CONNECT with no auth header → `407` with `Proxy-Authenticate: Basic realm="meow"`.
 8. Source IP in `skip-auth-prefixes` → admitted without credentials;
    `Metadata.in_user == None`.
 9. Loopback source IP (127.0.0.1) always bypasses auth, even when
@@ -247,7 +247,7 @@ aware listener code after successful credential verification.
   tunnel established; `Metadata.in_user` set.
   Upstream: `listener/http/proxy.go::handleConn`.
 - `http_connect_no_auth_header_returns_407` — no header → 407 with
-  `Proxy-Authenticate: Basic realm="mihomo"`.
+  `Proxy-Authenticate: Basic realm="meow"`.
   NOT 200. NOT 401.
 - `http_connect_wrong_credentials_returns_407` — bad credentials → 407.
 - `http_connect_skip_prefix_bypasses_auth` — src_ip in skip list → no auth
@@ -268,7 +268,7 @@ aware listener code after successful credential verification.
       to `RawConfig` in `raw.rs`.
 - [ ] Parse into `AuthConfig` in config parser; add loopback to skip list always.
 - [ ] Add `subtle` crate to workspace for constant-time comparison.
-- [ ] Add `in_user: Option<String>` to `Metadata` in `mihomo-common`.
+- [ ] Add `in_user: Option<String>` to `Metadata` in `meow-common`.
 - [ ] Pass `Arc<AuthConfig>` to all four listener constructors.
 - [ ] Implement auth check in `socks5.rs` (before proxy handshake).
 - [ ] Implement auth check in `http_proxy.rs` (after CONNECT line, before tunnel).

@@ -10,11 +10,11 @@ We already have a domain trie; this spec adds targeted improvements.
 
 ## Confirmed findings (engineer-a pre-audit)
 
-The rule engine in `mihomo-tunnel/src/match_engine.rs` (or `mihomo-rules/src/`) performs
+The rule engine in `meow-tunnel/src/match_engine.rs` (or `meow-rules/src/`) performs
 a **linear scan over `Vec<Box<dyn Rule>>`** for every connection. For configs with
 many rules, this is measurable latency. The obvious first improvement is an
 early-exit DOMAIN trie: domain rules are the most common rule type in real
-subscription configs, and the existing `mihomo-trie` can short-circuit the
+subscription configs, and the existing `meow-trie` can short-circuit the
 linear scan for domain lookups before checking IP/geo/logic rules.
 
 ## Sub-area 0 — Early-exit DOMAIN trie (primary target)
@@ -44,7 +44,7 @@ validation warning if such interleaving is detected.
 
 ## Sub-area 1 — Domain trie layout
 
-The current trie in `mihomo-trie` is a HashMap-per-node tree. On a lookup-heavy
+The current trie in `meow-trie` is a HashMap-per-node tree. On a lookup-heavy
 workload this generates pointer chasing. Investigate:
 
 1. Replace `HashMap<char, Node>` per-node with a compact sorted `Vec<(char, Node)>`
@@ -78,7 +78,7 @@ This is a correctness/latency improvement even if it shows no throughput delta.
 1. Early-exit DOMAIN trie (sub-area 0) is implemented; `cargo test --lib` passes;
    a new test verifies that a domain-rule match short-circuits before IP rules are
    evaluated.
-2. Criterion rule-scan benchmark (`mihomo-rules`) shows improved p50 for
+2. Criterion rule-scan benchmark (`meow-rules`) shows improved p50 for
    domain-heavy workloads after sub-area 0.
 3. At least one of sub-areas 1 or 2 is investigated; findings documented
    (`docs/benchmarks/rule-engine-findings.md`) even if no code change is made.

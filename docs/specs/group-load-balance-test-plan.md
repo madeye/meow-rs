@@ -38,16 +38,16 @@ PM so the spec can be updated.
 ## Test helpers
 
 Unit tests live in `#[cfg(test)] mod tests` inside
-`crates/mihomo-proxy/src/group/load_balance.rs`.
+`crates/meow-proxy/src/group/load_balance.rs`.
 
 Define a `MockProxy` that wraps `ProxyHealth` and records dial calls. Pattern
-mirrors `delay_support::TestAdapter` in `crates/mihomo-api/tests/api_test.rs`:
+mirrors `delay_support::TestAdapter` in `crates/meow-api/tests/api_test.rs`:
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mihomo_common::{ProxyHealth, Metadata};
+    use meow_common::{ProxyHealth, Metadata};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -143,7 +143,7 @@ consistent-hashing tests build on top of it.
 | D1 | `fnv1a_empty_input` | `fnv1a(&[])` → FNV offset basis `0x811c9dc5`. Spec: FNV-1a starts from the offset basis; empty input returns it unchanged. |
 | D2 | `fnv1a_single_byte` | `fnv1a(&[0x00])` → `0x050c5d2f` (known FNV-1a 32-bit vector). Add a `// Reference: https://fnvhash.github.io/fnv-calculator-online/ or upstream test vectors` comment. |
 | D3 | `fnv1a_ipv4_bytes` | `fnv1a(&[1, 1, 1, 1])` → a specific u32 constant. Engineer derives this constant and commits it as a comment: `// FNV-1a 32-bit of [1,1,1,1] = 0xXXXXXXXX`. Guards against regression on the hash function. |
-| D4 | `fnv1a_no_crate_dep` **[guard-rail]** | `grep "fnv\|fnv1" crates/mihomo-proxy/Cargo.toml` → empty. Inline 8-line implementation only. NOT a crate dep. Comment in source cites `// FNV-1a 32-bit, matching upstream adapter/outbound/loadbalance.go`. |
+| D4 | `fnv1a_no_crate_dep` **[guard-rail]** | `grep "fnv\|fnv1" crates/meow-proxy/Cargo.toml` → empty. Inline 8-line implementation only. NOT a crate dep. Comment in source cites `// FNV-1a 32-bit, matching upstream adapter/outbound/loadbalance.go`. |
 
 ---
 
@@ -158,7 +158,7 @@ consistent-hashing tests build on top of it.
 
 ---
 
-### F. Config parser (`mihomo-config`)
+### F. Config parser (`meow-config`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -178,7 +178,7 @@ consistent-hashing tests build on top of it.
 |---|------|---------|
 | G1 | `adapter_type_is_load_balance` | `group.adapter_type() == AdapterType::LoadBalance`. |
 | G2 | `adapter_type_serialises_to_load_balance` | `serde_json::to_string(&AdapterType::LoadBalance)` → `"LoadBalance"`. Matches the REST `/proxies` JSON shape. |
-| G3 | `adapter_type_enum_variant_exists` **[guard-rail]** | `AdapterType::LoadBalance` can be matched in a `match` arm without `#[allow(unused)]`. Guards that the variant was added to `mihomo-common/src/adapter_type.rs` and the `_` arm was not left to catch it. |
+| G3 | `adapter_type_enum_variant_exists` **[guard-rail]** | `AdapterType::LoadBalance` can be matched in a `match` arm without `#[allow(unused)]`. Guards that the variant was added to `meow-common/src/adapter_type.rs` and the `_` arm was not left to catch it. |
 | G4 | `group_name_returns_config_name` | `group.name()` returns the name supplied at construction. |
 | G5 | `group_addr_returns_empty` | `group.addr()` returns `""` (same as URLTest/Fallback — groups have no single address). |
 

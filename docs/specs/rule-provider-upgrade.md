@@ -278,16 +278,16 @@ M0-9 and adds mrs + inline. Do not merge M0-9 partial work; incorporate it here.
 
 - [ ] Add `zstd = "0.13"` and `arc-swap = "1"` to workspace `Cargo.toml`
       (arc-swap shared with M1.G-10 config reload).
-- [ ] Implement mrs binary parser in `mihomo-rules/src/mrs_parser.rs`.
+- [ ] Implement mrs binary parser in `meow-rules/src/mrs_parser.rs`.
       Read upstream `rules/provider/rule_set_mrs.go::Decode(reader io.Reader) (*RuleSet, error)` and
       the geosite sibling variant first. Byte-for-byte verification required.
 - [ ] Implement `RuleProvider` struct with `Arc<ArcSwap<RuleSet>>`.
 - [ ] Wire `interval` background task in `main.rs` for HTTP providers.
-- [ ] Add `type: inline` parsing in `mihomo-config`.
+- [ ] Add `type: inline` parsing in `meow-config`.
 - [ ] Add auto-format detection: check magic bytes `[0x4D,0x52,0x53,0x21]` first,
       or explicit `format: mrs` → mrs parser; everything else → YAML attempt.
       Do NOT rely on URL suffix or Content-Type as primary signal.
 - [ ] Implement `GET /providers/rules`, `GET /providers/rules/:name`,
-      `POST /providers/rules/:name` in `mihomo-api`.
+      `POST /providers/rules/:name` in `meow-api`.
       `POST` on inline provider returns 400 with specific message.
 - [ ] Update `docs/roadmap.md` M1.D-5, M1.G-5 rows with merged PR link.

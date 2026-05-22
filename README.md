@@ -1,4 +1,4 @@
-# mihomo-rust
+# meow-rs
 
 A high-performance Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. Rule-based tunneling with support for multiple proxy protocols, transparent proxy, DNS snooping, a REST API, and a built-in web dashboard.
 
@@ -118,7 +118,7 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 
 Side-by-side against upstream Go mihomo on the same host (Apple Silicon arm64, macOS 25.5, loopback `127.0.0.1`). Both binaries use identical config: `mode: direct`, SOCKS5 listener on port 17890, DNS disabled. Reproduce with `bash bench.sh` (auto-downloads the latest Go mihomo release).
 
-| Metric | mihomo (Go) | mihomo-rust v0.7.6 | Delta |
+| Metric | mihomo (Go) | meow-rs v0.7.6 | Delta |
 |--------|-------------|--------------------|-------|
 | Binary size (stripped) | 30.5 MB | **5.7 MB** | **−81%** |
 | RSS idle | 26.9 MB | **9.0 MB** | **−67%** |
@@ -152,17 +152,17 @@ Listeners (HTTP/SOCKS5/Mixed/TProxy)
 
 | Crate | Purpose |
 |-------|---------|
-| `mihomo-common` | Core traits and types (ProxyAdapter, Rule, Metadata) |
-| `mihomo-trie` | Domain trie for efficient pattern matching |
-| `mihomo-transport` | TLS (rustls + BoringSSL), WebSocket, gRPC, H2, HTTPUpgrade layers |
-| `mihomo-proxy` | Proxy protocol implementations and groups |
-| `mihomo-rules` | Rule matching engine and parser |
-| `mihomo-dns` | DNS resolver, cache, DNS snooping, server |
-| `mihomo-tunnel` | Core routing, TCP/UDP relay, statistics |
-| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
-| `mihomo-config` | YAML configuration parsing, subscription fetcher, config persistence |
-| `mihomo-api` | REST API (Axum) + embedded web UI |
-| `mihomo-app` | CLI entry point |
+| `meow-common` | Core traits and types (ProxyAdapter, Rule, Metadata) |
+| `meow-trie` | Domain trie for efficient pattern matching |
+| `meow-transport` | TLS (rustls + BoringSSL), WebSocket, gRPC, H2, HTTPUpgrade layers |
+| `meow-proxy` | Proxy protocol implementations and groups |
+| `meow-rules` | Rule matching engine and parser |
+| `meow-dns` | DNS resolver, cache, DNS snooping, server |
+| `meow-tunnel` | Core routing, TCP/UDP relay, statistics |
+| `meow-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
+| `meow-config` | YAML configuration parsing, subscription fetcher, config persistence |
+| `meow-api` | REST API (Axum) + embedded web UI |
+| `meow-app` | CLI entry point |
 
 ## Quick Start
 
@@ -182,10 +182,10 @@ cp config.example.yaml config.yaml
 # Edit config.yaml with your proxy servers...
 
 # Run
-./target/release/mihomo -f config.yaml
+./target/release/meow -f config.yaml
 
 # Test config validity
-./target/release/mihomo -f config.yaml -t
+./target/release/meow -f config.yaml -t
 ```
 
 ### Install as system service
@@ -193,33 +193,33 @@ cp config.example.yaml config.yaml
 **Linux (systemd):**
 
 ```bash
-sudo ./target/release/mihomo install -f /path/to/config.yaml
+sudo ./target/release/meow install -f /path/to/config.yaml
 
 # Manage the service
-sudo systemctl status mihomo
-sudo systemctl restart mihomo
-sudo journalctl -u mihomo -f
+sudo systemctl status meow
+sudo systemctl restart meow
+sudo journalctl -u meow -f
 
 # Uninstall
-sudo ./target/release/mihomo uninstall
+sudo ./target/release/meow uninstall
 ```
 
 **macOS (launchd user agent):**
 
 ```bash
-./target/release/mihomo install -f /path/to/config.yaml
+./target/release/meow install -f /path/to/config.yaml
 
-# Config is copied to ~/Library/Application Support/mihomo/config.yaml
-# Logs are written to ~/Library/Logs/mihomo/
+# Config is copied to ~/Library/Application Support/meow/config.yaml
+# Logs are written to ~/Library/Logs/meow/
 
 # Check status
-./target/release/mihomo status
+./target/release/meow status
 
 # View logs
-tail -f ~/Library/Logs/mihomo/mihomo.log
+tail -f ~/Library/Logs/meow/meow.log
 
 # Uninstall
-./target/release/mihomo uninstall
+./target/release/meow uninstall
 ```
 
 ### Open the Web UI

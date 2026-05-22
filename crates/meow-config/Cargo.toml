@@ -1,0 +1,58 @@
+[package]
+name = "meow-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["ss", "trojan", "vless", "vless-vision"]
+ss = ["meow-proxy/ss"]
+trojan = ["meow-proxy/trojan"]
+vless = ["meow-proxy/vless"]
+vless-vision = ["vless", "meow-proxy/vless-vision"]
+anytls = ["meow-proxy/anytls"]
+hysteria2 = ["meow-proxy/hysteria2"]
+boring-tls = ["meow-transport/boring-tls"]
+ech-tls-tunnel = ["ss", "meow-proxy/ech-tls-tunnel"]
+
+[dependencies]
+meow-common = { workspace = true }
+meow-trie = { workspace = true }
+meow-dns = { workspace = true, features = ["encrypted"] }
+meow-rules = { workspace = true }
+meow-proxy = { workspace = true, default-features = false }
+meow-transport = { workspace = true, features = ["grpc", "h2", "httpupgrade"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+maxminddb = { workspace = true }
+ipnet = { workspace = true }
+base64 = { workspace = true }
+regex = { workspace = true }
+parking_lot = { workspace = true }
+hickory-proto = { workspace = true }
+smol_str = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+url = "2"
+httparse = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"
+tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "vless_config_test"
+path = "tests/vless_config_test.rs"
+
+[lints]
+workspace = true

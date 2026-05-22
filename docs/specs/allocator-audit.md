@@ -35,7 +35,7 @@ inspect the flamegraph, and identify allocations on HP-1 and HP-2 paths.
 
 ```bash
 cargo build --release --features dhat-heap
-DHAT_PROFILING=1 ./target/release/mihomo -f bench/config-mihomo-rust.yaml &
+DHAT_PROFILING=1 ./target/release/meow -f bench/config-meow-rs.yaml &
 # run load for 30s, then kill, inspect dhat output
 ```
 
@@ -47,7 +47,7 @@ threshold. This confirms the dhat fix actually removed the allocation and didn't
 just move it out of the profiled window.
 
 ```bash
-cargo bench -p mihomo-tunnel --bench udp_bench --features audit-alloc \
+cargo bench -p meow-tunnel --bench udp_bench --features audit-alloc \
   -- --save-baseline post-fix
 ```
 
@@ -55,7 +55,7 @@ cargo bench -p mihomo-tunnel --bench udp_bench --features audit-alloc \
 
 ### TCP relay — already zero-copy (HP-2 reduced scope)
 
-`mihomo-tunnel/src/tunnel.rs` uses `tokio::io::copy_bidirectional`, which copies
+`meow-tunnel/src/tunnel.rs` uses `tokio::io::copy_bidirectional`, which copies
 directly between reader and writer buffers with no heap allocation per forwarded byte.
 Per-connection allocations (rule_name/payload `format!`, `track_connection` boxing)
 are one-time setup costs, not per-packet. **TCP relay hot path is already clean.**
@@ -65,7 +65,7 @@ and only if the connection-setup rate shows up in profiling.
 
 ### HP-1 confirmed: UDP NAT hot-path allocation
 
-`crates/mihomo-tunnel/src/udp.rs:30`:
+`crates/meow-tunnel/src/udp.rs:30`:
 
 ```rust
 let key = format!("{}:{}", src, metadata.remote_address());
@@ -113,13 +113,13 @@ Out of scope:
 
 ```bash
 # Before fix — save baseline:
-cargo bench -p mihomo-tunnel --bench udp_bench -- --save-baseline pre-hp1-fix
+cargo bench -p meow-tunnel --bench udp_bench -- --save-baseline pre-hp1-fix
 
 # After fix — compare:
-cargo bench -p mihomo-tunnel --bench udp_bench -- --baseline pre-hp1-fix
+cargo bench -p meow-tunnel --bench udp_bench -- --baseline pre-hp1-fix
 
 # Phase B — verify alloc count:
-cargo bench -p mihomo-tunnel --bench udp_bench --features audit-alloc \
+cargo bench -p meow-tunnel --bench udp_bench --features audit-alloc \
   -- --save-baseline post-hp1-fix
 # Target: ≤ 0.5 alloc/iter on udp_fastpath bench
 ```

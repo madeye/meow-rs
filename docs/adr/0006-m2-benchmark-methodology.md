@@ -6,13 +6,13 @@
 - **Supersedes:** —
 - **Related:** roadmap §M2 item 2 (benchmark harness vs Go mihomo),
   vision §M2 goal 2 ("materially faster…measured, not hand-waved"),
-  `crates/mihomo-bench/` (existing harness shipped in PR #17),
+  `crates/meow-bench/` (existing harness shipped in PR #17),
   [ADR-0007](0007-m2-footprint-budget.md) (footprint budget, uses the same binaries),
   [ADR-0008](0008-m2-allocator-audit.md) (hot-path alloc audit, reads this ADR's workloads)
 
 ## Context
 
-M1 shipped `mihomo-bench` (PR #17): a Rust+Go comparison harness that runs
+M1 shipped `meow-bench` (PR #17): a Rust+Go comparison harness that runs
 SOCKS5 throughput, connect+echo latency, connection-rate, idle/peak RSS, and
 binary size against both binaries. The roadmap M2 exit criterion is
 "**measurably** lower CPU and RSS than Go mihomo on a shared benchmark".
@@ -44,18 +44,18 @@ decide M2 exit from a single `bench/results.json` diff.
 
 ### 1. Workload set — five scenarios, all mandatory
 
-The existing `mihomo-bench` covers three (throughput, latency, conn-rate);
+The existing `meow-bench` covers three (throughput, latency, conn-rate);
 this ADR **adds** two (DNS QPS, rule-match throughput) and freezes the mix.
 An M2 exit claim must include results from all five.
 
 **Two harnesses, both required:**
 
-- **`mihomo-bench`** (macro; `cargo run --release -p mihomo-bench`) —
+- **`meow-bench`** (macro; `cargo run --release -p meow-bench`) —
   authoritative for W1/W2/W3/W4. End-to-end binary-under-test measurement.
-- **`criterion`** (micro; `cargo bench -p mihomo-rules` and similar) —
+- **`criterion`** (micro; `cargo bench -p meow-rules` and similar) —
   authoritative for W5 and any future sub-component work. No criterion
   benches exist at M1 tip; engineer-a adds the W5 harness under
-  `crates/mihomo-rules/benches/` as Task #27's first deliverable.
+  `crates/meow-rules/benches/` as Task #27's first deliverable.
 
 A run that skips either harness does not count toward M2 exit.
 
@@ -64,16 +64,16 @@ A run that skips either harness does not count toward M2 exit.
 | W1 | **Bulk throughput** | `bench_throughput` — 1× large transfer (16 MiB, 64 MiB) + small-msg round-trips | sustained Gbps (large), msgs/s (small) | does relay keep up with the NIC? |
 | W2 | **Round-trip latency** | `bench_latency` — 1000 iterations of connect+1B echo | p50, p95, p99 µs | does rule match + dial add user-visible delay? |
 | W3 | **Connection rate** | `bench_connrate` — `duration=30s concurrency=64` sustained connect+echo | conns/s, peak RSS during load | can the tunnel open connections as fast as Go? |
-| W4 | **DNS QPS** *(new)* | new `bench_dns` — UDP client floods mihomo's DNS server with 100k A queries (50% cache-hit after warmup, 50% uncached) | qps sustained, p99 resolution latency, RSS delta | does the resolver keep up with a DNS server load? |
+| W4 | **DNS QPS** *(new)* | new `bench_dns` — UDP client floods meow-rs's DNS server with 100k A queries (50% cache-hit after warmup, 50% uncached) | qps sustained, p99 resolution latency, RSS delta | does the resolver keep up with a DNS server load? |
 | W5 | **Rule match throughput** *(new)* | new `bench_rulematch` — in-process microbench (no proxy), matches 1M synthetic `Metadata` against a realistic rule-set (10k rules: DOMAIN-SUFFIX + IP-CIDR + GEOIP mix) | matches/s, allocations/match (ties into ADR-0008) | is the match engine itself competitive with Go's trie+MMDB? |
 
 W4 and W5 are gaps in the existing harness and land as tasks under Task #27
 (engineer-a). Implementation constraints:
 
-- W4 uses mihomo's own DNS server loop end-to-end (UDP 53), not a
+- W4 uses meow-rs's own DNS server loop end-to-end (UDP 53), not a
   resolver-library microbench. Snooping + dedup are in scope.
 - W5 is a plain `cargo bench` (criterion) microbench inside
-  `mihomo-rules` — it must not spin up a tunnel or a listener. It is the
+  `meow-rules` — it must not spin up a tunnel or a listener. It is the
   only workload where no Go comparison runs; the threshold is "Rust p99
   match time ≤ 2× Go's published `pkg/rules/common` benchmark if one
   exists, else absolute budget: ≤ 50 ns/match at 10k rules on the
@@ -106,7 +106,7 @@ do not count toward M2 exit.
 
 **Rationale for a single host:**
 
-- Across-host comparison is a different paper (how does mihomo scale with
+- Across-host comparison is a different paper (how does meow-rs scale with
   core count? with MMU page size?) and we do not have the time or users
   asking for it.
 - CI runners are a bad benchmark host — noisy neighbour, inconsistent CPU
@@ -143,7 +143,7 @@ are not.
 ### 5. M2 exit thresholds — the numbers
 
 An M2 release tag is earned when, on the reference hardware with the
-discipline in §2, mihomo-rust satisfies **all** of the following against
+discipline in §2, meow-rs satisfies **all** of the following against
 the current Go mihomo latest-release:
 
 | Metric | Threshold | Why this bar |
@@ -151,7 +151,7 @@ the current Go mihomo latest-release:
 | W1 bulk throughput (large transfer, Gbps, median) | **≥ 1.10× Go** (10% faster) | Throughput is the vision headline; anything less is not "materially faster". |
 | W2 latency p50, p99 (connect+echo µs, median) | **p99 ≤ 1.05× Go**, p50 ≤ Go | p99 is the user-perceived floor; allow 5% slack because we might spend it on rule-match features. p50 must at minimum match. |
 | W3 connection rate (conns/s, median) | **≥ Go** | We aren't the first to chase conn-rate; matching is fine. Slower is not. |
-| W3 peak RSS under load | **≤ 0.80× Go** (at least 20% smaller) | RSS is the vision's second headline; mihomo-rust has no GC, so 20% is a conservative floor. |
+| W3 peak RSS under load | **≤ 0.80× Go** (at least 20% smaller) | RSS is the vision's second headline; meow-rs has no GC, so 20% is a conservative floor. |
 | W4 DNS QPS (median) | **≥ 1.10× Go** | Rust's DNS path is a cache + hickory; must beat Go's `miekg/dns`-based path. |
 | W4 DNS p99 latency | **≤ Go** | Snooping insertion is on every uncached query — should not regress. |
 | Binary size (default features, stripped, x86_64-linux-musl) | **≤ Go** | We ship one binary; if the default is bigger than Go's we lost the small-footprint pitch. |
@@ -295,7 +295,7 @@ None — this ADR lands before any perf work begins. Engineer-a on
 Task #27 reads this ADR before implementing W4/W5. QA on Task #26
 builds §6 using this ADR's workload set. No existing code changes; the
 harness stays as shipped, the W4/W5 additions are new files under
-`crates/mihomo-bench/src/`.
+`crates/meow-bench/src/`.
 
 ## Open questions deferred
 
@@ -306,12 +306,12 @@ harness stays as shipped, the W4/W5 additions are new files under
   CPU model, cores, RAM, kernel, distro, allocator, governor). Engineer-b
   fills it in on the host.
 - **Multi-arch baselines**: if ADR-0007 binary-size budgets surface an
-  arch where mihomo-rust is a clear regression (e.g. aarch64 throughput
+  arch where meow-rs is a clear regression (e.g. aarch64 throughput
   < 1.0× Go), open a separate ADR; do not fold into §5.
 
 ## References
 
-- `crates/mihomo-bench/src/*.rs` — the M1 harness this ADR builds on.
+- `crates/meow-bench/src/*.rs` — the M1 harness this ADR builds on.
 - `bench.sh` — the one-command driver.
 - `docs/roadmap.md` §M2 — item 2 (benchmark harness) pinned by this ADR.
 - `docs/vision.md` §M2 — goal 2 ("measured, not hand-waved").

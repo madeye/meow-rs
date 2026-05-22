@@ -43,20 +43,20 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 ## File layout expected
 
 ```
-crates/mihomo-config/src/
+crates/meow-config/src/
   auth.rs              # NEW: Credentials, AuthConfig structs
   raw.rs               # MODIFIED: authentication, skip_auth_prefixes fields
   config_parser.rs     # MODIFIED: parse auth fields, build AuthConfig
-crates/mihomo-common/src/
+crates/meow-common/src/
   metadata.rs          # MODIFIED: in_user: Option<String> field
-crates/mihomo-listener/src/
+crates/meow-listener/src/
   socks5.rs            # MODIFIED: auth check before handshake
   http_proxy.rs        # MODIFIED: auth check after CONNECT line
   mixed.rs             # MODIFIED: Arc<AuthConfig> plumbed through
   tproxy/mod.rs        # MODIFIED: Arc<AuthConfig> accepted but not used (TProxy bypass)
-crates/mihomo-config/tests/
+crates/meow-config/tests/
   config_test.rs       # MODIFIED: auth config parse cases
-crates/mihomo-listener/tests/
+crates/meow-listener/tests/
   auth_integration_test.rs  # NEW: listener auth integration tests
 ```
 
@@ -75,7 +75,7 @@ Following ADR-0002 classification format:
 
 ## Case list
 
-### A. `Credentials` unit tests (`crates/mihomo-config/src/auth.rs`)
+### A. `Credentials` unit tests (`crates/meow-config/src/auth.rs`)
 
 Pure unit tests, no network, no tokio.
 
@@ -91,7 +91,7 @@ Pure unit tests, no network, no tokio.
 | A8 | `credentials_verify_uses_constant_time_comparison` **[guard-rail]** | Structural test: grep the implementation of `verify()` for `subtle::ConstantTimeEq` or equivalent. Assert it is NOT a bare `==` or `!=` comparison on `String`/`&str`. This is a code-review gate, not a timing test. Document the grep pattern in the PR checklist. |
 | A9 | `credentials_multiple_users_independent` **[guard-rail]** | Store `alice:pass1`, `bob:pass2`. `verify("alice", "pass2")` → `false`. `verify("bob", "pass1")` → `false`. Guards that credential pairs are not cross-matched. |
 
-### B. `AuthConfig::should_skip` unit tests (`crates/mihomo-config/src/auth.rs`)
+### B. `AuthConfig::should_skip` unit tests (`crates/meow-config/src/auth.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -104,7 +104,7 @@ Pure unit tests, no network, no tokio.
 | B7 | `should_skip_explicit_empty_list_still_skips_loopback` | `skip-auth-prefixes: []` explicitly. `should_skip("127.0.0.1")` → `true`. Loopback is unconditional regardless of explicit empty. |
 | B8 | `should_skip_false_for_public_ip` | No `skip-auth-prefixes`. `should_skip("8.8.8.8")` → `false`. |
 
-### C. SOCKS5 listener auth integration tests (`crates/mihomo-listener/tests/auth_integration_test.rs`)
+### C. SOCKS5 listener auth integration tests (`crates/meow-listener/tests/auth_integration_test.rs`)
 
 All `#[tokio::test]`, loopback connections only.
 
@@ -121,7 +121,7 @@ All `#[tokio::test]`, loopback connections only.
 | C9 | `socks5_in_user_populated_on_success` | Verify `Metadata.in_user` contains the exact username string from the credential that authenticated. Assert case-sensitive match. |
 | C10 | `socks5_in_user_none_on_skip_prefix` | Connection from skip-prefix IP. Assert `Metadata.in_user == None` (not `Some("")`). |
 
-### D. HTTP listener auth integration tests (`crates/mihomo-listener/tests/auth_integration_test.rs`)
+### D. HTTP listener auth integration tests (`crates/meow-listener/tests/auth_integration_test.rs`)
 
 All `#[tokio::test]`, loopback, real HTTP framing.
 
@@ -129,7 +129,7 @@ All `#[tokio::test]`, loopback, real HTTP framing.
 |---|------|---------|
 | D1 | `http_no_auth_config_admits_all` | No `authentication:`. CONNECT request with no `Proxy-Authorization`. Assert `200 Connection established`. Regression guard. |
 | D2 | `http_connect_correct_basic_auth_admitted` | `authentication: [alice:hunter2]`. CONNECT with `Proxy-Authorization: Basic YWxpY2U6aHVudGVyMg==` (base64 of `alice:hunter2`). Assert `200`. `Metadata.in_user == Some("alice")`. <br/> Upstream: `listener/http/proxy.go::handleConn` — Basic auth checked here. |
-| D3 | `http_connect_no_auth_header_returns_407` | Auth configured. CONNECT with no `Proxy-Authorization`. Assert `407 Proxy Authentication Required`. Assert response includes `Proxy-Authenticate: Basic realm="mihomo"`. <br/> Upstream: `listener/http/proxy.go` — returns 407. NOT 401 (Proxy auth uses 407, not 401). |
+| D3 | `http_connect_no_auth_header_returns_407` | Auth configured. CONNECT with no `Proxy-Authorization`. Assert `407 Proxy Authentication Required`. Assert response includes `Proxy-Authenticate: Basic realm="meow"`. <br/> Upstream: `listener/http/proxy.go` — returns 407. NOT 401 (Proxy auth uses 407, not 401). |
 | D4 | `http_connect_wrong_password_returns_407` | CONNECT with `Proxy-Authorization: Basic` containing wrong password. Assert `407`. |
 | D5 | `http_connect_unknown_user_returns_407` | User not in store. Assert `407`. |
 | D6 | `http_connect_malformed_base64_returns_407` **[guard-rail]** | `Proxy-Authorization: Basic not-valid-base64!!!`. Assert `407`. NOT panic or 500. |
@@ -139,14 +139,14 @@ All `#[tokio::test]`, loopback, real HTTP framing.
 | D10 | `http_407_closes_connection_after_failure` **[guard-rail]** | After a `407` response, assert the server does not leave the connection open for re-use. Prevents auth bypass via persistent connection reuse. |
 | D11 | `http_in_user_populated_correct_username` | Verify `Metadata.in_user == Some("alice")` not `Some("alice:hunter2")` (password not leaked into in_user). |
 
-### E. TProxy bypass tests (`crates/mihomo-listener/tests/auth_integration_test.rs`)
+### E. TProxy bypass tests (`crates/meow-listener/tests/auth_integration_test.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
 | E1 | `tproxy_auth_never_applied` | TProxy listener constructed with `authentication: [alice:hunter2]`. Accept a transparent connection. Assert connection proceeds without auth challenge. `Metadata.in_user == None`. <br/> Upstream: `listener/tproxy/` — no auth in TProxy path. We match by explicit design (§TProxy connections bypass auth unconditionally). |
 | E2 | `tproxy_in_user_always_none` | Any TProxy connection regardless of source IP. Assert `Metadata.in_user == None`, not `Some(...)`. |
 
-### F. Config parser tests (`crates/mihomo-config/tests/config_test.rs`)
+### F. Config parser tests (`crates/meow-config/tests/config_test.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -189,24 +189,24 @@ All `#[tokio::test]`, loopback, real HTTP framing.
 - §A8 constant-time comparison guard documented in PR checklist (code review,
   not a timing test).
 - No regression in existing SOCKS5 and HTTP integration tests.
-- `Metadata.in_user` field present in `mihomo-common` before any listener
+- `Metadata.in_user` field present in `meow-common` before any listener
   changes land — field addition is a separate, additive commit.
 
 ## CI wiring required
 
 Add to `.github/workflows/test.yml`:
 
-1. `cargo test -p mihomo-config --test config_test` — picks up §F cases.
-2. `cargo test -p mihomo-listener --test auth_integration_test` — new binary for
+1. `cargo test -p meow-config --test config_test` — picks up §F cases.
+2. `cargo test -p meow-listener --test auth_integration_test` — new binary for
    §C–E cases. Add to both `ubuntu-latest` and `macos-latest` jobs.
-3. `cargo test -p mihomo-common --lib` — picks up §G1 regression guard
+3. `cargo test -p meow-common --lib` — picks up §G1 regression guard
    (already wired if common lib tests run; new field addition is additive).
 
 ## Open questions for engineer
 
 1. **`subtle` crate placement.** The spec recommends adding `subtle` to the
    workspace. Confirm whether it should be a direct dependency of
-   `mihomo-config` (where `Credentials` lives) or `mihomo-common`. Add to
+   `meow-config` (where `Credentials` lives) or `meow-common`. Add to
    `Cargo.toml` workspace members only, not re-exported.
 2. **407 connection handling.** After sending a 407, confirm whether the
    server closes the TCP connection immediately or leaves it open for a retry

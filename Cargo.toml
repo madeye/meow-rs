@@ -1,18 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/mihomo-common",
-    "crates/mihomo-trie",
-    "crates/mihomo-dns",
-    "crates/mihomo-rules",
-    "crates/mihomo-transport",
-    "crates/mihomo-proxy",
-    "crates/mihomo-tunnel",
-    "crates/mihomo-listener",
-    "crates/mihomo-api",
-    "crates/mihomo-config",
-    "crates/mihomo-app",
-    "crates/mihomo-bench",
+    "crates/meow-common",
+    "crates/meow-trie",
+    "crates/meow-dns",
+    "crates/meow-rules",
+    "crates/meow-transport",
+    "crates/meow-proxy",
+    "crates/meow-tunnel",
+    "crates/meow-listener",
+    "crates/meow-api",
+    "crates/meow-config",
+    "crates/meow-app",
+    "crates/meow-bench",
 ]
 
 [profile.release]
@@ -85,7 +85,7 @@ quinn = { version = "0.11", default-features = false, features = ["log", "ring",
 webpki-roots = "0.26"
 
 # DNS — only hickory-proto for wire-format encode/decode; the upstream
-# transport (UDP/TCP/DoT/DoH) is implemented in-tree in `mihomo-dns::client`
+# transport (UDP/TCP/DoT/DoH) is implemented in-tree in `meow-dns::client`
 # so the sockets are owned by us and host integrations can intercept them
 # (Android `protect()`).
 hickory-proto = "0.26"
@@ -117,7 +117,7 @@ subtle = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
-# Time (used directly by mihomo-api log timestamps; formatting feature enabled)
+# Time (used directly by meow-api log timestamps; formatting feature enabled)
 time = { version = "0.3", features = ["formatting"] }
 
 # CLI
@@ -173,7 +173,7 @@ parking_lot = "0.12"
 # Wait-free read / atomic swap for hot-path rule-set + proxy-provider refreshes
 arc-swap = "1"
 
-# BoringSSL (pulled in by mihomo-transport's boring-tls feature)
+# BoringSSL (pulled in by meow-transport's boring-tls feature)
 boring      = { version = "5.0.2" }
 tokio-boring = { version = "5.0.0" }
 
@@ -193,13 +193,13 @@ proptest = "1"
 # Workspace crates
 # default-features = false on feature-gated crates so each consumer controls
 # which optional protocols/listeners are compiled (M2.E feature-flag infra).
-mihomo-common = { path = "crates/mihomo-common" }
-mihomo-trie = { path = "crates/mihomo-trie" }
-mihomo-dns = { path = "crates/mihomo-dns", default-features = false }
-mihomo-rules = { path = "crates/mihomo-rules" }
-mihomo-transport = { path = "crates/mihomo-transport" }
-mihomo-proxy = { path = "crates/mihomo-proxy", default-features = false }
-mihomo-tunnel = { path = "crates/mihomo-tunnel" }
-mihomo-listener = { path = "crates/mihomo-listener", default-features = false }
-mihomo-api = { path = "crates/mihomo-api" }
-mihomo-config = { path = "crates/mihomo-config", default-features = false }
+meow-common = { path = "crates/meow-common" }
+meow-trie = { path = "crates/meow-trie" }
+meow-dns = { path = "crates/meow-dns", default-features = false }
+meow-rules = { path = "crates/meow-rules" }
+meow-transport = { path = "crates/meow-transport" }
+meow-proxy = { path = "crates/meow-proxy", default-features = false }
+meow-tunnel = { path = "crates/meow-tunnel" }
+meow-listener = { path = "crates/meow-listener", default-features = false }
+meow-api = { path = "crates/meow-api" }
+meow-config = { path = "crates/meow-config", default-features = false }

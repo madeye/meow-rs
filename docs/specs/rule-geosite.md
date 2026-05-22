@@ -37,7 +37,7 @@ In scope:
    excluding entries with the `@cn` attribute. Deferred to M1.x — just
    parse and ignore the attribute for M1; warn-once.
 6. `AdapterType::GeoSite` already exists or is added to the rule type enum;
-   parse dispatch in `mihomo-rules/src/parser.rs`.
+   parse dispatch in `meow-rules/src/parser.rs`.
 
 Out of scope:
 
@@ -60,9 +60,9 @@ rules:
 
 # No extra YAML config needed in M1.
 # Geosite DB discovered automatically:
-#   $XDG_CONFIG_HOME/mihomo/geosite.mrs
-#   $HOME/.config/mihomo/geosite.mrs
-#   ./mihomo/geosite.mrs
+#   $XDG_CONFIG_HOME/meow/geosite.mrs
+#   $HOME/.config/meow/geosite.mrs
+#   ./meow/geosite.mrs
 ```
 
 **Rule syntax:** `GEOSITE,<category>[,<no-resolve>]`
@@ -81,7 +81,7 @@ startup error — operators who don't use GEOSITE don't need the DB.
 
 | # | Case | Class | Rationale |
 |---|------|:-----:|-----------|
-| 1 | `.dat` format — upstream supports | A | Not implemented. If a `.dat` file is found in the discovery path, log `error!` at startup: "geosite.dat detected; mihomo-rust requires geosite.mrs format. Use MetaCubeX convert-geo to convert." NOT silent ignore — the file is present but wrong format; user needs to act. |
+| 1 | `.dat` format — upstream supports | A | Not implemented. If a `.dat` file is found in the discovery path, log `error!` at startup: "geosite.dat detected; meow-rs requires geosite.mrs format. Use MetaCubeX convert-geo to convert." NOT silent ignore — the file is present but wrong format; user needs to act. |
 | 2 | `@` attribute suffix — upstream filters category by attribute | B | `@`-suffix stripped and ignored; warn-once per rule. |
 | 3 | GEOSITE rule with absent DB — upstream errors at parse time if GEOSITE rule present and no DB | A | We defer to runtime: warn at startup if GEOSITE rules exist but no DB is found. Always-no-match at query time. Allows configs that conditionally load the DB to still parse. |
 
@@ -90,7 +90,7 @@ startup error — operators who don't use GEOSITE don't need the DB.
 ### DB loader
 
 ```rust
-// mihomo-rules/src/geosite.rs
+// meow-rules/src/geosite.rs
 
 pub struct GeositeDB {
     // category name (lowercase) → trie of domains in that category
@@ -107,7 +107,7 @@ impl GeositeDB {
             // Return the error; do NOT log here. Callsite (main.rs / config/lib.rs)
             // knows the actual path and logs the actionable message:
             //   error!("geosite.dat detected at {path}; convert with: metacubex convert-geo")
-            return Err(MihomoError::GeositeWrongFormat);
+            return Err(MeowError::GeositeWrongFormat);
         }
     }
 
@@ -137,7 +137,7 @@ authoritative.
 ### Rule struct
 
 ```rust
-// mihomo-rules/src/geosite_rule.rs
+// meow-rules/src/geosite_rule.rs
 
 pub struct GeoSiteRule {
     category: String,           // lowercase, trimmed of @suffix
@@ -164,9 +164,9 @@ impl Rule for GeoSiteRule {
 ```rust
 fn find_geosite_db() -> Option<PathBuf> {
     let candidates = vec![
-        xdg_config_dir().join("mihomo/geosite.mrs"),
-        home_dir().join(".config/mihomo/geosite.mrs"),
-        PathBuf::from("./mihomo/geosite.mrs"),
+        xdg_config_dir().join("meow/geosite.mrs"),
+        home_dir().join(".config/meow/geosite.mrs"),
+        PathBuf::from("./meow/geosite.mrs"),
     ];
     let result = candidates.into_iter().find(|p| p.exists());
     if result.is_none() {
@@ -227,14 +227,14 @@ fn find_geosite_db() -> Option<PathBuf> {
 
 **Sequencing: M1.D-5 (rule-provider-upgrade) should land before this PR
 so the mrs parser is available. If both PRs merge concurrently, the mrs parser
-MUST be placed in a shared location — `mihomo-rules/src/mrs_parser.rs` — so
+MUST be placed in a shared location — `meow-rules/src/mrs_parser.rs` — so
 both the rule-provider loader and the geosite loader import the same
 implementation. Do not duplicate the parser across two files; a format bug
 would then need two fixes. The PR review should fail if two copies exist.**
 
 - [ ] Implement `GeositeDB::load_from_path()` using mrs parser (cross-reference D-5).
       Read upstream metaresource format spec first.
-- [ ] Implement `GeoSiteRule` in `mihomo-rules/src/`.
+- [ ] Implement `GeoSiteRule` in `meow-rules/src/`.
 - [ ] Wire GEOSITE parse dispatch in `parser.rs`.
 - [ ] Wire file discovery in `main.rs` / `config/lib.rs`; pass `Option<Arc<GeositeDB>>`
       to rule construction. On `GeositeWrongFormat` error, log at callsite with

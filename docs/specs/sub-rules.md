@@ -119,7 +119,7 @@ committing to a YAML shape.
 Sub-rules are resolved at parse time (not at dial time):
 
 ```rust
-// mihomo-config/src/rule_parser.rs
+// meow-config/src/rule_parser.rs
 
 pub struct SubRuleBlock {
     name: String,
@@ -143,7 +143,7 @@ fn parse_sub_rules(raw: &HashMap<String, Vec<String>>) -> Result<HashMap<String,
 ### SubRule struct
 
 ```rust
-// mihomo-rules/src/sub_rule.rs
+// meow-rules/src/sub_rule.rs
 
 pub struct SubRule {
     block_name: String,
@@ -238,7 +238,7 @@ The `sub-rules:` section is parsed before the main `rules:` section so that
       will use the pasted Go as the byte-for-byte reference during code review.
       Also verify the exact YAML field layout from `rules/parser.go` SUB-RULE
       case before committing the Rust parser (see §YAML syntax note above).
-- [ ] Implement `SubRule` in `mihomo-rules/src/sub_rule.rs`.
+- [ ] Implement `SubRule` in `meow-rules/src/sub_rule.rs`.
 - [ ] Implement cycle detection (DFS with recursion-stack set) in config parser.
 - [ ] Register `SUB-RULE` parse dispatch in `parser.rs`.
 - [ ] Update `docs/roadmap.md` M1.D-7 row with merged PR link.

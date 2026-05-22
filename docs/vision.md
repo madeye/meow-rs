@@ -1,4 +1,4 @@
-# mihomo-rust — Vision and Roadmap
+# meow-rs — Vision and Roadmap
 
 ## Vision
 
@@ -15,7 +15,7 @@ runtime-control surface that real users depend on — and do it well.
 ## Goals
 
 1. **Feature-compatible core.** A user with an existing Clash Meta YAML should
-   be able to point mihomo-rust at it and get equivalent routing behavior for
+   be able to point meow-rs at it and get equivalent routing behavior for
    the supported subset, including subscriptions, proxy groups, rule-providers,
    and the standard rule types.
 2. **Performance.** Lower per-connection CPU and memory than the Go
@@ -38,7 +38,7 @@ or implemented without an explicit product decision to reverse course:
 - **tun vpn / tun inbound.** Too much OS-specific surface area (Linux tun,
   macOS utun, Windows wintun) for the value it adds over transparent proxy
   on the platforms we target. Users who need whole-device VPN-style capture
-  should run mihomo-rust behind a tun provider they already trust.
+  should run meow-rs behind a tun provider they already trust.
 - **Full Clash Premium / Meta feature parity.** We pick what matters for
   real-world rule-based routing and leave the long tail (exotic transports,
   niche rule types, legacy compatibility shims) alone unless a user asks.
@@ -52,11 +52,11 @@ or implemented without an explicit product decision to reverse course:
   (config parsing, API surface), not in the packet path.
 - **Async, but not religiously.** Tokio multi-threaded runtime. No custom
   executors, no hand-rolled futures where an `async fn` will do.
-- **Trait contracts at crate boundaries.** `mihomo-common` owns the traits
+- **Trait contracts at crate boundaries.** `meow-common` owns the traits
   (`ProxyAdapter`, `Rule`, `Metadata`, `ConnContext`); every other crate
   depends on those, not on sibling implementations.
 - **Config is a boundary, not a god object.** YAML parsing lives in
-  `mihomo-config` and produces typed, validated structs. Runtime code does
+  `meow-config` and produces typed, validated structs. Runtime code does
   not re-parse strings.
 - **Feature flags for footprint.** Optional protocols and transports compile
   out cleanly. A minimal build should be meaningfully smaller than the
@@ -164,7 +164,7 @@ benchmark, and a minimal-build binary under the stated size budget.
 
 ### M3 — Operational maturity (target: after M2)
 
-The features a small-team operator actually needs once mihomo-rust is
+The features a small-team operator actually needs once meow-rs is
 running in production.
 
 Candidate scope:
@@ -172,7 +172,7 @@ Candidate scope:
   where safe.
 - **Structured tracing.** OpenTelemetry export for traces and metrics,
   opt-in.
-- **Config validation CLI.** `mihomo check` with actionable error messages,
+- **Config validation CLI.** `meow check` with actionable error messages,
   schema export.
 - **Subscription robustness.** Retry/backoff, signed subscriptions where
   the provider supports it, better error surfacing in the web UI.
@@ -182,7 +182,7 @@ Candidate scope:
 - **Stability guarantees.** Documented config-compat policy across
   releases, deprecation windows for removed fields.
 
-Exit criteria: mihomo-rust is the kind of thing you would leave running
+Exit criteria: meow-rs is the kind of thing you would leave running
 on a router for six months without touching.
 
 ## How this doc is maintained

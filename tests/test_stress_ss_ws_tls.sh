@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Local SS + WS + TLS stress: stand up ssserver with v2ray-plugin in
-# WS+TLS server mode, point mihomo at it, then run the gstatic crawl
+# WS+TLS server mode, point meow at it, then run the gstatic crawl
 # stress. Measures peak RSS the same way as test_stress_gstatic.sh.
 #
 # Requirements: ssserver, v2ray-plugin, openssl, curl.
@@ -28,12 +28,12 @@ for cmd in ssserver v2ray-plugin openssl curl; do
     command -v "$cmd" >/dev/null || { echo "ERROR: $cmd not on PATH" >&2; exit 1; }
 done
 
-WORK_DIR="$(mktemp -d -t mihomo-ss-stress.XXXXXX)"
-MIHOMO_LOG="$WORK_DIR/mihomo.log"
+WORK_DIR="$(mktemp -d -t meow-ss-stress.XXXXXX)"
+MEOW_LOG="$WORK_DIR/meow.log"
 RSS_LOG="$WORK_DIR/rss.log"
 SS_LOG="$WORK_DIR/ss.log"
 PLUGIN_LOG="$WORK_DIR/plugin.log"
-MIHOMO_CONFIG="$WORK_DIR/mihomo.yaml"
+MEOW_CONFIG="$WORK_DIR/meow.yaml"
 
 PIDS=()
 
@@ -71,8 +71,8 @@ PIDS+=($!)
 
 sleep 1
 
-# --- mihomo config: client uses built-in v2ray-plugin (ws+tls) ---
-cat > "$MIHOMO_CONFIG" <<EOF
+# --- meow config: client uses built-in v2ray-plugin (ws+tls) ---
+cat > "$MEOW_CONFIG" <<EOF
 mixed-port: $PROXY_PORT
 allow-lan: false
 bind-address: "127.0.0.1"
@@ -103,10 +103,10 @@ rules:
   - MATCH,local-ss
 EOF
 
-echo "==> Starting mihomo on :$PROXY_PORT"
-"$ROOT_DIR/target/release/mihomo" -f "$MIHOMO_CONFIG" >"$MIHOMO_LOG" 2>&1 &
-MIHOMO_PID=$!
-PIDS+=($MIHOMO_PID)
+echo "==> Starting meow on :$PROXY_PORT"
+"$ROOT_DIR/target/release/meow" -f "$MEOW_CONFIG" >"$MEOW_LOG" 2>&1 &
+MEOW_PID=$!
+PIDS+=($MEOW_PID)
 
 # Wait for the inbound port to come up.
 for _ in $(seq 1 30); do
@@ -114,9 +114,9 @@ for _ in $(seq 1 30); do
         -o /dev/null "http://www.gstatic.com/generate_204" 2>/dev/null; then
         break
     fi
-    if ! kill -0 "$MIHOMO_PID" 2>/dev/null; then
-        echo "ERROR: mihomo died. Log:" >&2
-        cat "$MIHOMO_LOG" >&2
+    if ! kill -0 "$MEOW_PID" 2>/dev/null; then
+        echo "ERROR: meow died. Log:" >&2
+        cat "$MEOW_LOG" >&2
         exit 1
     fi
     sleep 1
@@ -135,7 +135,7 @@ URLS=(
 (
     end=$(( $(date +%s) + DURATION + COOLDOWN + 5 ))
     while [[ $(date +%s) -lt $end ]]; do
-        rss_kb=$(ps -o rss= -p "$MIHOMO_PID" 2>/dev/null | tr -d ' ')
+        rss_kb=$(ps -o rss= -p "$MEOW_PID" 2>/dev/null | tr -d ' ')
         [[ -n "$rss_kb" ]] && echo "$(date +%s) $rss_kb" >> "$RSS_LOG"
         sleep 1
     done

@@ -52,12 +52,12 @@ affects latency tail or RSS growth over hours.
 
 **HP-1 — TCP relay inner loop.**
 
-Scope: the mihomo-side wrapping around `tokio::io::copy_bidirectional`
-in `crates/mihomo-tunnel/src/tcp.rs` — Statistics counter increments,
+Scope: the meow-rs-side wrapping around `tokio::io::copy_bidirectional`
+in `crates/meow-tunnel/src/tcp.rs` — Statistics counter increments,
 drop / teardown bookkeeping, any per-chunk logging or tracing spans.
 The relay itself is already zero-copy via tokio's
 `copy_bidirectional` (engineer-a findings 2026-04-18); HP-1's audit
-verifies the **mihomo wrapper** doesn't allocate per-chunk, not that
+verifies the **meow-rs wrapper** doesn't allocate per-chunk, not that
 tokio doesn't.
 
 Out of scope: TCP accept, TLS handshake, SOCKS5/HTTP inbound parsing, SS
@@ -74,8 +74,8 @@ someone accidentally allocates in a tight teardown loop.
 **HP-2 — UDP NAT per-datagram forwarding.**
 
 Scope: the `recvfrom → NAT lookup → sendto` loop inside
-`mihomo-tunnel::udp_nat` (and the per-adapter UDP relay in
-`mihomo-proxy/src/*`). For an existing NAT entry, a single datagram
+`meow-tunnel::udp_nat` (and the per-adapter UDP relay in
+`meow-proxy/src/*`). For an existing NAT entry, a single datagram
 traversal must not allocate.
 
 Out of scope: NAT entry creation on first packet (that IS allowed to
@@ -107,7 +107,7 @@ tolerates a small allocation).
 
 ### 2. Allocator choice: `mimalloc` as the M2 default
 
-mihomo-app binds `mimalloc` as the global allocator behind a default-on
+meow-app binds `mimalloc` as the global allocator behind a default-on
 feature (`alloc-mimalloc`). Rationale:
 
 - **Uniform measurement substrate.** All M2 benchmark numbers
@@ -180,9 +180,9 @@ against a reproducer binary that exercises each HP in a tight loop:
   `dhat::HeapStats::total_blocks` delta.
 - Assert the delta against the §3 rule (per-path, warmup-filtered).
 
-Reproducer binaries live under `crates/mihomo-tunnel/tests/alloc_audit/*`
-(HP-1 TCP relay), `crates/mihomo-proxy/tests/alloc_audit/*` (HP-2 UDP NAT
-via direct adapter), and `crates/mihomo-rules/benches/alloc_rulematch.rs`
+Reproducer binaries live under `crates/meow-tunnel/tests/alloc_audit/*`
+(HP-1 TCP relay), `crates/meow-proxy/tests/alloc_audit/*` (HP-2 UDP NAT
+via direct adapter), and `crates/meow-rules/benches/alloc_rulematch.rs`
 (HP-3 — same binary as ADR-0006 W5 with `dhat` feature).
 
 dhat output (`dhat-heap.json`) is attached to the M2-exit release as
@@ -219,7 +219,7 @@ or all three HPs.
 
 **Known M1-tip HP-2 failure (engineer-a findings 2026-04-18).**
 
-`crates/mihomo-tunnel/src/udp.rs:30` does:
+`crates/meow-tunnel/src/udp.rs:30` does:
 
 ```rust
 let key = format!("{}:{}", src, metadata.remote_address());
@@ -275,7 +275,7 @@ tolerance does. A silent acceptance of non-zero is blocked.
 ### 7. Divergence classification (per ADR-0002)
 
 Upstream Go mihomo has no allocator audit discipline. No Class A/B rows
-apply — the audit is a mihomo-rust-only concern.
+apply — the audit is a meow-rs-only concern.
 
 ### 8. "Adding a new hot-path feature" checklist
 
@@ -375,7 +375,7 @@ buffer-reuse; M3 can flatten further if profiling demands.
 
 1. **Workspace change** (engineer-b, can overlap with ADR-0007
    release-profile patch): add `mimalloc = { version = "...", default-
-   features = false, features = ["override"] }` to `mihomo-app`, bind
+   features = false, features = ["override"] }` to `meow-app`, bind
    `#[global_allocator]` behind a default-on feature `alloc-mimalloc`.
 2. **Reproducers** (engineer-a): Phase A alloc audit binaries per HP.
    Measures M1 tip, records in `docs/benchmarks/alloc-baseline.md`.
@@ -406,9 +406,9 @@ No user-visible change from this ADR alone.
   per match" is defined here.
 - [ADR-0007](0007-m2-footprint-budget.md) §3 — allocator choice is
   consistent here and there.
-- `crates/mihomo-tunnel/src/tcp.rs` — where HP-1 inner loop lives
+- `crates/meow-tunnel/src/tcp.rs` — where HP-1 inner loop lives
   (the wrapper around `tokio::io::copy_bidirectional`).
-- `crates/mihomo-tunnel/src/udp.rs` — HP-2 target path; line 30 is
+- `crates/meow-tunnel/src/udp.rs` — HP-2 target path; line 30 is
   the known-failing `format!` call (§6).
-- `crates/mihomo-rules/src/rule_set.rs` — HP-3 target path.
+- `crates/meow-rules/src/rule_set.rs` — HP-3 target path.
 - `dhat-rs` crate docs — Phase A instrumentation.

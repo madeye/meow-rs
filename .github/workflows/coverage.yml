@@ -49,7 +49,7 @@ jobs:
         run: |
           # `--include-ignored` runs local-process integration tests (ssserver,
           # simple-obfs, embedded mock servers). Tests in
-          # crates/mihomo-dns/tests/doh_dot_integration.rs require outbound
+          # crates/meow-dns/tests/doh_dot_integration.rs require outbound
           # internet (Cloudflare/Google DoH/DoT) and are not reachable from
           # GitHub-hosted runners — skip them by name.
           cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info \

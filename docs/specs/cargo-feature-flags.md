@@ -6,7 +6,7 @@ Tracks roadmap item: **M2** (Cargo feature flags, minimal-build)
 Lane: engineer-b (footprint + infra chain)
 ADR: [`docs/adr/0007-m2-footprint-budget.md`](../adr/0007-m2-footprint-budget.md)
 Upstream reference: Go mihomo uses build tags; not directly applicable to Rust.
-This is a mihomo-rust capability, not a parity feature.
+This is a meow-rs capability, not a parity feature.
 
 ## Motivation
 
@@ -25,37 +25,37 @@ exist yet.
 
 | Feature | Crate | What it gates |
 |---------|-------|---------------|
-| `ss` | `mihomo-proxy` | Shadowsocks adapter + `shadowsocks` crate dep |
-| `trojan` | `mihomo-proxy` | Trojan adapter + `tokio-rustls` dep |
-| `vless` | `mihomo-proxy` | VLESS adapter (M1.B-2) |
-| `http-outbound` | `mihomo-proxy` | HTTP CONNECT outbound |
-| `socks5-outbound` | `mihomo-proxy` | SOCKS5 outbound |
-| `load-balance` | `mihomo-proxy` | Load-balance group |
-| `relay` | `mihomo-proxy` | Relay group |
+| `ss` | `meow-proxy` | Shadowsocks adapter + `shadowsocks` crate dep |
+| `trojan` | `meow-proxy` | Trojan adapter + `tokio-rustls` dep |
+| `vless` | `meow-proxy` | VLESS adapter (M1.B-2) |
+| `http-outbound` | `meow-proxy` | HTTP CONNECT outbound |
+| `socks5-outbound` | `meow-proxy` | SOCKS5 outbound |
+| `load-balance` | `meow-proxy` | Load-balance group |
+| `relay` | `meow-proxy` | Relay group |
 
 ### Transport features
 
 | Feature | Crate | What it gates |
 |---------|-------|---------------|
-| `transport-tls` | `mihomo-transport` | TLS layer + `rustls`/`tokio-rustls` deps |
-| `transport-ws` | `mihomo-transport` | WebSocket layer |
-| `transport-grpc` | `mihomo-transport` | gRPC/gun layer |
-| `transport-h2` | `mihomo-transport` | H2 + HTTP-upgrade layers |
+| `transport-tls` | `meow-transport` | TLS layer + `rustls`/`tokio-rustls` deps |
+| `transport-ws` | `meow-transport` | WebSocket layer |
+| `transport-grpc` | `meow-transport` | gRPC/gun layer |
+| `transport-h2` | `meow-transport` | H2 + HTTP-upgrade layers |
 
 ### Inbound features
 
 | Feature | Crate | What it gates |
 |---------|-------|---------------|
-| `listener-http` | `mihomo-listener` | HTTP proxy inbound |
-| `listener-socks5` | `mihomo-listener` | SOCKS5 inbound |
-| `listener-tproxy` | `mihomo-listener` | TProxy (nftables/pf); Linux/macOS only |
-| `listener-mixed` | `mihomo-listener` | Mixed (HTTP+SOCKS5) inbound |
+| `listener-http` | `meow-listener` | HTTP proxy inbound |
+| `listener-socks5` | `meow-listener` | SOCKS5 inbound |
+| `listener-tproxy` | `meow-listener` | TProxy (nftables/pf); Linux/macOS only |
+| `listener-mixed` | `meow-listener` | Mixed (HTTP+SOCKS5) inbound |
 
 ### DNS features
 
 | Feature | Crate | What it gates |
 |---------|-------|---------------|
-| `dns-server` | `mihomo-dns` | `hickory-server` DNS server dep (currently unconditional) |
+| `dns-server` | `meow-dns` | `hickory-server` DNS server dep (currently unconditional) |
 
 ### Convenience bundles (workspace root)
 
@@ -77,8 +77,8 @@ achieve the size budget:
 
 | Dep | Currently in | Proposal |
 |-----|-------------|---------|
-| `shadowsocks` crate | `mihomo-proxy/Cargo.toml` unconditional | gate on `ss` feature |
-| `hickory-server` | `mihomo-dns/Cargo.toml` unconditional | gate on `dns-server` feature; `minimal` includes it |
+| `shadowsocks` crate | `meow-proxy/Cargo.toml` unconditional | gate on `ss` feature |
+| `hickory-server` | `meow-dns/Cargo.toml` unconditional | gate on `dns-server` feature; `minimal` includes it |
 | Direct + Reject adapters | compiled unconditionally | leave unconditional — they are load-bearing stubs with near-zero size |
 
 Direct and Reject have negligible binary contribution; do not add feature-gating
@@ -116,9 +116,9 @@ Measure with:
 
 ```bash
 cargo zigbuild --release --no-default-features --features minimal \
-  --target aarch64-unknown-linux-musl --bin mihomo
-llvm-strip target/aarch64-unknown-linux-musl/release/mihomo
-ls -lh target/aarch64-unknown-linux-musl/release/mihomo
+  --target aarch64-unknown-linux-musl --bin meow
+llvm-strip target/aarch64-unknown-linux-musl/release/meow
+ls -lh target/aarch64-unknown-linux-musl/release/meow
 ```
 
 Use `cargo bloat --release --crates` to identify the largest contributors if the
@@ -143,22 +143,22 @@ None — new capability.
 2. Stripped minimal binary for `aarch64-musl` is ≤ 8 MiB (hard gate — CI fails if exceeded).
 3. Stripped minimal binary for `mipsel-musl` is ≤ 7 MiB (soft gate — CI emits warning, does not fail).
 4. `cargo test --lib` passes for both `full` (default) and `minimal` feature sets.
-5. `cargo hack --feature-powerset check` passes for `mihomo-proxy`,
-   `mihomo-transport`, `mihomo-listener`, and `mihomo-dns` (wired in ci-quality-gates.md).
+5. `cargo hack --feature-powerset check` passes for `meow-proxy`,
+   `meow-transport`, `meow-listener`, and `meow-dns` (wired in ci-quality-gates.md).
 6. Binary sizes documented in `docs/benchmarks/binary-size.md`.
 7. Step 0 prerequisite satisfied: `--no-default-features --features minimal` produces a
    meaningfully smaller binary than default before any CI gate is added.
 
 ## Implementation checklist (engineer-b handoff)
 
-- [ ] Audit `mihomo-proxy/Cargo.toml`: add feature gates for `ss`, `trojan`, `vless`,
+- [ ] Audit `meow-proxy/Cargo.toml`: add feature gates for `ss`, `trojan`, `vless`,
       `http-outbound`, `socks5-outbound`, `load-balance`, `relay`.
-- [ ] Audit `mihomo-transport/Cargo.toml`: add `transport-*` feature gates.
-- [ ] Audit `mihomo-listener/Cargo.toml`: add `listener-*` feature gates.
-- [ ] Audit `mihomo-dns/Cargo.toml`: gate `hickory-server` dep on `dns-server` feature.
+- [ ] Audit `meow-transport/Cargo.toml`: add `transport-*` feature gates.
+- [ ] Audit `meow-listener/Cargo.toml`: add `listener-*` feature gates.
+- [ ] Audit `meow-dns/Cargo.toml`: gate `hickory-server` dep on `dns-server` feature.
 - [ ] Define `full` (default) and `minimal` bundle features at workspace root
       (`Cargo.toml` `[features]` table).
-- [ ] Update `mihomo-app/src/main.rs`: conditionally register only enabled adapters
+- [ ] Update `meow-app/src/main.rs`: conditionally register only enabled adapters
       and listeners using `#[cfg(feature = "...")]`.
 - [ ] Add `minimal-size-check` step to `release.yml` (parameterize budget from
       env var so architect-2's numbers can be dropped in without spec edit).

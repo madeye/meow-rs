@@ -23,7 +23,7 @@ refresh on an interval, expose via REST" substrate:
   health-check loop, `GET/PUT /providers/proxies[/:name]`).
 
 The proxy-providers spec already flags this explicitly: *"duplicate the refresh
-loop in `mihomo-config` and leave a `// TODO: unify with rule-provider refresh
+loop in `meow-config` and leave a `// TODO: unify with rule-provider refresh
 in M1.D-5` marker."* That is acceptable as a tactical shortcut but guarantees
 two near-identical refresh loops, two caching strategies, two failure policies,
 and two sets of test fixtures that drift apart over time.
@@ -73,11 +73,11 @@ cost a second `Box<dyn>` indirection for no gain. Keep them typed.
 
 ### 1. A single `ProviderSource` primitive
 
-Introduce one shared type in `mihomo-config` that owns everything
+Introduce one shared type in `meow-config` that owns everything
 non-payload-specific:
 
 ```rust
-// crates/mihomo-config/src/provider_source.rs
+// crates/meow-config/src/provider_source.rs
 
 pub enum ProviderSource {
     Http {
@@ -130,7 +130,7 @@ abstract across them, introduce a thin trait for the refresh-loop driver
 only:
 
 ```rust
-// crates/mihomo-config/src/provider_source.rs
+// crates/meow-config/src/provider_source.rs
 
 /// Implemented by ProxyProvider and RuleProvider. The only thing the
 /// refresh loop needs from a provider is "please attempt a refresh and
@@ -155,7 +155,7 @@ detail + health history; rules return a rule count).
 ### 3. A single `spawn_refresh_loop` helper
 
 ```rust
-// crates/mihomo-config/src/provider_source.rs
+// crates/meow-config/src/provider_source.rs
 
 /// Spawn one background refresh task for `target` using `interval`.
 ///
@@ -249,16 +249,16 @@ in mind (pass-through, not a type change) but not implement it now.
 
 ### 7. Where the substrate lives
 
-`crates/mihomo-config/src/provider_source.rs`. One new file:
+`crates/meow-config/src/provider_source.rs`. One new file:
 
 ```
-mihomo-config/src/
+meow-config/src/
   provider_source.rs      (new — this ADR)
   rule_provider.rs        (M1.D-5 rewrites to use provider_source)
   proxy_provider.rs       (M1.H-1 new file, uses provider_source)
 ```
 
-**Not a new crate.** Both provider types already depend on `mihomo-config`
+**Not a new crate.** Both provider types already depend on `meow-config`
 for parsing; extracting the substrate to a sibling crate would push the YAML
 parser behind the substrate interface and break the existing
 `ParserContext` threading (rule-providers need `ParserContext` for GEOIP
@@ -286,7 +286,7 @@ a third provider type (M3 signed subscriptions?) lands.
 ### Negative / risks
 
 - **One more `#[async_trait]`.** `RefreshTarget` is the third async-trait in
-  `mihomo-config` (after `ProxyAdapter` and `Rule`). Trivial cost; noted.
+  `meow-config` (after `ProxyAdapter` and `Rule`). Trivial cost; noted.
 - **`ProviderSource::fetch_blocking` vs `::fetch` split.** Engineer must
   keep the startup-vs-runtime distinction clear. I mitigated by keeping the
   existing `fetch_http_blocking` shape from `rule_provider.rs`; the split
@@ -331,10 +331,10 @@ of a complete value, which means holding two copies of the proxy list (old
 for rule-providers (`RuleSet` is cheap to rebuild); not acceptable for
 proxy-providers at 1k+ entries per provider. Keep storage typed per-impl.
 
-### A.3 — Extract to a new `mihomo-providers` crate
+### A.3 — Extract to a new `meow-providers` crate
 
-**Rejected.** `ParserContext` threading and the `mihomo-rules::RuleSet`
-dependency would push the new crate to re-export half of `mihomo-config`.
+**Rejected.** `ParserContext` threading and the `meow-rules::RuleSet`
+dependency would push the new crate to re-export half of `meow-config`.
 Revisit when a third provider type lands or the module grows past ~500 LOC.
 
 ### A.4 — Implement ETag / conditional GET now
@@ -351,7 +351,7 @@ reason about a single provider's refresh rate in isolation.
 
 ## Migration from existing code
 
-`crates/mihomo-config/src/rule_provider.rs` is today's reference
+`crates/meow-config/src/rule_provider.rs` is today's reference
 implementation for the fetch-and-cache path. M1.D-5 engineer does this
 migration in the same PR that implements `mrs` parsing:
 
@@ -387,7 +387,7 @@ addition.
   unification is resolved by this ADR.
 - `docs/adr/0002-upstream-divergence-policy.md` — failure-policy table
   classifies per this ADR.
-- `crates/mihomo-config/src/rule_provider.rs` — today's fetch+cache
+- `crates/meow-config/src/rule_provider.rs` — today's fetch+cache
   reference implementation.
 - Memory: `feedback_api_no_catch_panic.md` — panic-abort invariant applied
   to §5 background-task row.

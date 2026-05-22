@@ -83,7 +83,7 @@ jobs:
         run: cargo test --test dns_cache_test -- --nocapture
 
       - name: DNS upstream unit tests (DoH/DoT parser + bootstrap)
-        run: cargo test -p mihomo-dns --lib -- --nocapture
+        run: cargo test -p meow-dns --lib -- --nocapture
 
       - name: Config parsing tests
         run: cargo test --test config_test -- --nocapture
@@ -108,7 +108,7 @@ jobs:
         run: cargo test --test config_persistence_test -- --nocapture
 
       - name: Systemd config tests
-        run: cargo test -p mihomo-app --test systemd_config_test -- --nocapture
+        run: cargo test -p meow-app --test systemd_config_test -- --nocapture
 
       - name: Trojan integration tests
         run: cargo test --test trojan_integration -- --nocapture
@@ -120,35 +120,35 @@ jobs:
         run: cargo test --test pre_resolve_test -- --nocapture
 
       - name: Transport TLS tests
-        run: cargo test -p mihomo-transport --test tls_test -- --nocapture
+        run: cargo test -p meow-transport --test tls_test -- --nocapture
 
       - name: Transport WS tests
-        run: cargo test -p mihomo-transport --test ws_test -- --nocapture
+        run: cargo test -p meow-transport --test ws_test -- --nocapture
 
       - name: Transport gRPC tests
-        run: cargo test -p mihomo-transport --test grpc_test --features grpc -- --nocapture
+        run: cargo test -p meow-transport --test grpc_test --features grpc -- --nocapture
 
       - name: Transport H2 tests
-        run: cargo test -p mihomo-transport --test h2_test --features h2 -- --nocapture
+        run: cargo test -p meow-transport --test h2_test --features h2 -- --nocapture
 
       - name: Transport HTTPUpgrade tests
-        run: cargo test -p mihomo-transport --test httpupgrade_test --features httpupgrade -- --nocapture
+        run: cargo test -p meow-transport --test httpupgrade_test --features httpupgrade -- --nocapture
 
       - name: Transport crate invariants
-        run: cargo test -p mihomo-transport --test crate_invariants_test -- --nocapture
+        run: cargo test -p meow-transport --test crate_invariants_test -- --nocapture
 
       - name: Transport feature matrix (G1-G7)
         run: |
-          cargo check -p mihomo-transport --no-default-features
-          cargo check -p mihomo-transport --no-default-features --features "tls"
-          cargo check -p mihomo-transport --no-default-features --features "tls,ws"
-          cargo check -p mihomo-transport --no-default-features --features "grpc"
-          cargo check -p mihomo-transport --no-default-features --features "h2"
-          cargo check -p mihomo-transport --no-default-features --features "httpupgrade"
-          cargo check -p mihomo-transport --all-features
+          cargo check -p meow-transport --no-default-features
+          cargo check -p meow-transport --no-default-features --features "tls"
+          cargo check -p meow-transport --no-default-features --features "tls,ws"
+          cargo check -p meow-transport --no-default-features --features "grpc"
+          cargo check -p meow-transport --no-default-features --features "h2"
+          cargo check -p meow-transport --no-default-features --features "httpupgrade"
+          cargo check -p meow-transport --all-features
 
       - name: VLESS config parser tests
-        run: cargo test -p mihomo-config --test vless_config_test -- --nocapture
+        run: cargo test -p meow-config --test vless_config_test -- --nocapture
 
       - name: VLESS integration tests
         run: cargo test --test vless_integration -- --nocapture
@@ -156,22 +156,22 @@ jobs:
       - name: VLESS feature matrix (G1-G4)
         run: |
           # G1: plain vless, no Vision — vision.rs excluded
-          cargo check -p mihomo-proxy --no-default-features --features vless
+          cargo check -p meow-proxy --no-default-features --features vless
           # G2: vless + Vision
-          cargo check -p mihomo-proxy --no-default-features --features "vless,vless-vision"
+          cargo check -p meow-proxy --no-default-features --features "vless,vless-vision"
           # G3: all proxy features (default)
-          cargo check -p mihomo-proxy --all-features
+          cargo check -p meow-proxy --all-features
           # G4: vless-vision feature requires vless (transitive dep check)
-          cargo check -p mihomo-proxy --no-default-features --features "vless-vision"
+          cargo check -p meow-proxy --no-default-features --features "vless-vision"
 
       - name: DNS encrypted feature matrix (D1-D3)
         run: |
           # D1: plain UDP/TCP only, no encrypted features
-          cargo check -p mihomo-dns --no-default-features
+          cargo check -p meow-dns --no-default-features
           # D2: explicitly enable encrypted features
-          cargo check -p mihomo-dns --no-default-features --features encrypted
+          cargo check -p meow-dns --no-default-features --features encrypted
           # D3: default features (= encrypted on)
-          cargo check -p mihomo-dns
+          cargo check -p meow-dns
 
   features:
     runs-on: ubuntu-latest
@@ -189,16 +189,16 @@ jobs:
       - name: Install cargo-hack
         uses: taiki-e/install-action@cargo-hack
 
-      - name: Feature powerset — mihomo-transport
+      - name: Feature powerset — meow-transport
         # boring-tls excluded: requires C++ toolchain at build time; tested via
         # --all-features in the transport feature matrix step in the test job.
-        run: cargo hack check -p mihomo-transport --feature-powerset --exclude-features boring-tls
+        run: cargo hack check -p meow-transport --feature-powerset --exclude-features boring-tls
 
-      - name: Feature powerset — mihomo-proxy
-        run: cargo hack check -p mihomo-proxy --feature-powerset
+      - name: Feature powerset — meow-proxy
+        run: cargo hack check -p meow-proxy --feature-powerset
 
-      - name: Feature powerset — mihomo-listener
-        run: cargo hack check -p mihomo-listener --feature-powerset
+      - name: Feature powerset — meow-listener
+        run: cargo hack check -p meow-listener --feature-powerset
 
   msrv:
     runs-on: ubuntu-latest
@@ -249,9 +249,9 @@ jobs:
           cargo test --test rules_test -- --nocapture
           cargo test --test api_test -- --nocapture
           cargo test --test trojan_integration -- --nocapture
-          cargo test -p mihomo-dns --lib -- --nocapture
-          cargo test -p mihomo-transport --test tls_test -- --nocapture
-          cargo test -p mihomo-transport --test ws_test -- --nocapture
+          cargo test -p meow-dns --lib -- --nocapture
+          cargo test -p meow-transport --test tls_test -- --nocapture
+          cargo test -p meow-transport --test ws_test -- --nocapture
 
   tproxy:
     runs-on: ubuntu-latest

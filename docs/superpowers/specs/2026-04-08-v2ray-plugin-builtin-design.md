@@ -20,7 +20,7 @@ integration tests that exercise the new transport against the real `ssserver` +
   into SMUX, matching the behavior of the built-in v2ray-plugin transport in
   mihomo (Go). Each SS stream maps to one ws connection. The v2ray-plugin Go
   server with `mux=1` still accepts plain ws clients, so interop holds.
-- Changes to `serialize_plugin_opts` in `mihomo-config`: the existing YAML →
+- Changes to `serialize_plugin_opts` in `meow-config`: the existing YAML →
   SIP003 `k=v;k=v` conversion is reused; the built-in plugin re-parses that
   string.
 
@@ -48,7 +48,7 @@ When `plugin == "v2ray-plugin"`, `ShadowsocksAdapter::dial_tcp` for each call:
 
 ## Components
 
-### New module: `crates/mihomo-proxy/src/v2ray_plugin.rs`
+### New module: `crates/meow-proxy/src/v2ray_plugin.rs`
 
 ```rust
 pub struct V2rayPluginConfig {
@@ -61,13 +61,13 @@ pub struct V2rayPluginConfig {
     pub mux: bool,                // parsed but unused
 }
 
-pub fn parse_opts(s: &str) -> Result<V2rayPluginConfig, MihomoError>;
+pub fn parse_opts(s: &str) -> Result<V2rayPluginConfig, MeowError>;
 
 pub async fn dial(
     cfg: &V2rayPluginConfig,
     server_host: &str,
     server_port: u16,
-) -> Result<Box<dyn AsyncReadWrite>, MihomoError>;
+) -> Result<Box<dyn AsyncReadWrite>, MeowError>;
 ```
 
 - `parse_opts` accepts the SIP003 semicolon format:
@@ -118,7 +118,7 @@ enum PluginKind {
   - Other variants: unchanged.
 - In `dial_udp`:
   - `PluginKind::V2ray(_)`: return
-    `MihomoError::Proxy("v2ray-plugin does not support UDP relay")`.
+    `MeowError::Proxy("v2ray-plugin does not support UDP relay")`.
   - Other variants: unchanged.
 
 ### Dependency additions
@@ -131,13 +131,13 @@ futures-util = "0.3"
 http = "1"
 ```
 
-`crates/mihomo-proxy/Cargo.toml` adds `tokio-tungstenite`, `futures-util`, and
+`crates/meow-proxy/Cargo.toml` adds `tokio-tungstenite`, `futures-util`, and
 `http`. `tokio-rustls` and `rustls` are already present, so TLS comes for free.
 `rcgen` is already in dev-dependencies for the trojan tests — reused here.
 
 ### Config parser
 
-No change to `mihomo-config/src/proxy_parser.rs`. The YAML map is already
+No change to `meow-config/src/proxy_parser.rs`. The YAML map is already
 serialized into `k=v;k=v` by `serialize_plugin_opts` and passed through to
 `ShadowsocksAdapter::new`, which hands it off to `v2ray_plugin::parse_opts` when
 the plugin name is `v2ray-plugin`.
@@ -156,7 +156,7 @@ the plugin name is `v2ray-plugin`.
 
 ### Integration tests
 
-New file `crates/mihomo-proxy/tests/v2ray_plugin_integration.rs`.
+New file `crates/meow-proxy/tests/v2ray_plugin_integration.rs`.
 
 Helpers:
 
@@ -195,11 +195,11 @@ SIP003 local address.
 
 ## Error Handling
 
-- WebSocket handshake failure → `MihomoError::Proxy("v2ray-plugin ws handshake: <err>")`.
-- TLS handshake failure → `MihomoError::Proxy("v2ray-plugin tls: <err>")`.
+- WebSocket handshake failure → `MeowError::Proxy("v2ray-plugin ws handshake: <err>")`.
+- TLS handshake failure → `MeowError::Proxy("v2ray-plugin tls: <err>")`.
 - Unexpected text frame → `io::ErrorKind::InvalidData` propagated through
   `poll_read` as the SS layer will surface it.
-- `dial_udp` with `PluginKind::V2ray` → `MihomoError::Proxy("v2ray-plugin does
+- `dial_udp` with `PluginKind::V2ray` → `MeowError::Proxy("v2ray-plugin does
   not support UDP relay")`.
 
 ## Open Risks
@@ -208,7 +208,7 @@ SIP003 local address.
   flags may force a specific connector construction. We build the `TlsConnector`
   manually (already done for the Trojan adapter) to control verifier behavior
   and reuse webpki-roots.
-- If a future mihomo-rust release wants to interop with a v2ray-plugin *Go
+- If a future meow-rs release wants to interop with a v2ray-plugin *Go
   server* using `mux=1` at the SMUX layer (not just mihomo Go's relaxed
   behavior), Option B (real SMUX) becomes necessary. This design leaves the
   `mux: bool` field in place so adding SMUX later is a local change inside

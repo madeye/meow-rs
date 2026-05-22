@@ -14,7 +14,7 @@ per-proxy latency bars and to trigger on-demand "test now" buttons:
 - `GET /proxies/:name/delay` — probe a single proxy against a target URL.
 - `GET /group/:name/delay` — probe every member of a group concurrently.
 
-mihomo-rust currently exposes neither. `GET /proxies` already returns a
+meow-rs currently exposes neither. `GET /proxies` already returns a
 `history` array, but it is only populated by `UrlTestGroup`'s passive
 `update_fastest` path — standalone proxies (SS, Trojan, Direct) and
 `select` / `fallback` groups never accumulate history, so dashboard latency
@@ -23,7 +23,7 @@ bars are blank for them. Exposing an active probe endpoint fixes both the
 the dashboard side.
 
 The underlying probe function already exists at
-`crates/mihomo-proxy/src/health.rs::url_test` (connect-only; see
+`crates/meow-proxy/src/health.rs::url_test` (connect-only; see
 **Known limitation** below). This spec wires it to HTTP handlers and,
 for groups, adds a parallel dispatch.
 
@@ -154,14 +154,14 @@ group-wide `timeout` before responding (no streaming).
 ### Route mounting
 
 Both routes live on the upstream-compatible router in
-`crates/mihomo-api/src/routes.rs`, under the existing `/proxies` tree —
+`crates/meow-api/src/routes.rs`, under the existing `/proxies` tree —
 **not** under our bespoke `/api/` namespace. Dashboards probe the former.
 
 ## Internal design sketch
 
 ### Wiring
 
-`crates/mihomo-api/src/routes.rs`:
+`crates/meow-api/src/routes.rs`:
 
 ```rust
 Router::new()
@@ -198,7 +198,7 @@ Router::new()
 
 `ProxyHealth::record_delay` already exists; we need `ProxyAdapter` to
 surface the health handle. Add a **required** method to the trait in
-`mihomo-common/src/adapter.rs`:
+`meow-common/src/adapter.rs`:
 
 ```rust
 fn health(&self) -> &ProxyHealth;
@@ -246,14 +246,14 @@ the TCP handshake. It does **not** send an HTTP `GET` or wait for a
 response body. For `generate_204`-style endpoints the user-visible delay
 is therefore ~30–50 % lower than what Go mihomo reports, which will make
 side-by-side dashboard comparisons look suspiciously fast and generate
-spurious "mihomo-rust is lying about latency" bug reports.
+spurious "meow-rs is lying about latency" bug reports.
 
 The fix is a one-day follow-up, filed as **M1.G-2b** (task #29):
 
 - Extend `url_test` to write a minimal `GET /path HTTP/1.1\r\nHost:
   host\r\n\r\n` over the dialed connection and read the status line.
 - For `https://` targets, wrap the `ProxyConn` in a client-side TLS
-  handshake (via the new `mihomo-transport::tls::TlsLayer` once M1.A-1
+  handshake (via the new `meow-transport::tls::TlsLayer` once M1.A-1
   lands) before the GET.
 - Honour the `expected` query param by comparing the parsed status-line
   code against the provided ranges; delay is only recorded if it passes.
@@ -294,7 +294,7 @@ A PR implementing this spec must:
 
 ## Test plan (starting point — qa owns final shape)
 
-**Unit (`crates/mihomo-api/tests/api_test.rs`):**
+**Unit (`crates/meow-api/tests/api_test.rs`):**
 
 - `get_proxy_delay_direct_ok` — spin up a small Axum server with a
   `Direct` proxy in the registry, call the endpoint, expect `200` and
@@ -328,7 +328,7 @@ A PR implementing this spec must:
   `GET /proxies/:name` and assert the `history` array grew.
 
 **Integration (no new file needed):** pull Yacd into `test-assets/`,
-run `mihomo -f fixtures/m1g2.yaml`, open Yacd in a headless browser,
+run `meow -f fixtures/m1g2.yaml`, open Yacd in a headless browser,
 click "test all" — out of scope for M1.G-2 CI; capture in the M1 exit
 soak test (qa ask).
 

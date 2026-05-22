@@ -13,8 +13,8 @@ The `mihomo-cleanup` team is executing a three-milestone whole-project cleanup
 this ADR scoped to `M0`. Two facts surface up front:
 
 1. **CLAUDE.md is stale.** It lists 10 workspace crates. The real manifest
-   (`Cargo.toml`) has **12**: the missing entries are `mihomo-transport` and
-   `mihomo-bench`. CLAUDE.md must be patched as part of M0 closeout (see
+   (`Cargo.toml`) has **12**: the missing entries are `meow-transport` and
+   `meow-bench`. CLAUDE.md must be patched as part of M0 closeout (see
    subtask "docs-claudemd"), and the lead's M0.1 brief which said "11 crates"
    is also off-by-one.
 2. **The baseline is cleaner than expected.** `cargo build --workspace
@@ -45,10 +45,10 @@ cargo test --lib` + integration suites + tproxy QEMU script) is non-negotiable.
    feature combination the workspace supports, where the item is not part of
    a documented public API surface (re-exported from `lib.rs` or referenced
    in an ADR). Pre-existing `#[allow(dead_code)]` suppressions
-   (`mihomo-listener/src/socks5.rs:14`,
-   `mihomo-proxy/src/vless/vision.rs:74,89`,
-   `mihomo-proxy/src/vless/header.rs:53`,
-   `mihomo-config/src/lib.rs:1020`) get re-evaluated: each must be removed
+   (`meow-listener/src/socks5.rs:14`,
+   `meow-proxy/src/vless/vision.rs:74,89`,
+   `meow-proxy/src/vless/header.rs:53`,
+   `meow-config/src/lib.rs:1020`) get re-evaluated: each must be removed
    or accompanied by a comment justifying why the item stays.
 3. **Unused imports** flagged under non-default features (e.g. the
    `TransportChain` import in `vless_integration.rs` under
@@ -96,22 +96,22 @@ For each crate the engineer:
 
 ### Cross-crate ripples to watch
 
-- **`mihomo-app` removing `mihomo-common` / `mihomo-proxy` deps**: these are
+- **`meow-app` removing `meow-common` / `meow-proxy` deps**: these are
   only listed transitively; the binary doesn't import them directly. Removal
-  is safe but rebuild order in `cargo check -p mihomo-app` should be
+  is safe but rebuild order in `cargo check -p meow-app` should be
   re-verified after the Cargo.lock churn.
-- **`mihomo-dns` machete hits (`hickory-server`, `async-trait`, …)** are
+- **`meow-dns` machete hits (`hickory-server`, `async-trait`, …)** are
   *probably* feature-gated false positives — `hickory-server` is
   `optional = true` behind `dep:hickory-server`. The engineer must confirm
-  with `cargo check -p mihomo-dns --features dns-server` before removing
+  with `cargo check -p meow-dns --features dns-server` before removing
   any of these; expect to instead add a `[package.metadata.cargo-machete]
   ignored = […]` entry with a comment naming the feature.
-- **`mihomo-listener` `mihomo-dns` dep**: zero `src/` refs; safe to remove,
+- **`meow-listener` `meow-dns` dep**: zero `src/` refs; safe to remove,
   but verify against `--no-default-features --features listener-tproxy`
   (tproxy historically pulled DNS for hostname resolution before the
   Tunnel-driven refactor).
-- **`mihomo-transport` `mihomo-common` dep**: crate-boundary invariants in
-  `transport/src/lib.rs:14-19` explicitly forbid mihomo-common (transport
+- **`meow-transport` `meow-common` dep**: crate-boundary invariants in
+  `transport/src/lib.rs:14-19` explicitly forbid meow-common (transport
   must stay protocol-agnostic). The dep is safe to remove and *should* be —
   its presence violates the documented invariant.
 
@@ -119,29 +119,29 @@ For each crate the engineer:
 
 | Crate              | Unused deps to investigate                                                                       | Notes |
 |--------------------|--------------------------------------------------------------------------------------------------|-------|
-| `mihomo-common`    | `uuid`                                                                                           | 0 src refs; remove |
-| `mihomo-transport` | `mihomo-common`                                                                                  | violates documented invariant; remove |
-| `mihomo-proxy`     | `anyhow`, `dashmap`, `futures-util`, `http`, `regex`, `reqwest`, `serde`, `thiserror`, `tokio-tungstenite` | all 9 confirmed zero src refs (`anyhow` only in comments, `http` was `http_adapter` substring) |
-| `mihomo-tunnel`    | `bytes`, `serde_json`, `thiserror`                                                               | 0 src refs each; remove |
-| `mihomo-listener`  | `anyhow`, `bytes`, `futures`, `mihomo-dns`, `thiserror`                                          | 0 src refs each; tproxy edge case noted above |
-| `mihomo-rules`     | `serde`                                                                                          | 0 src refs (no derives); remove |
-| `mihomo-config`    | `serde_json`, `subtle`, `thiserror`                                                              | 0 src refs each; remove |
-| `mihomo-api`       | `arc-swap`, `thiserror`                                                                          | 0 src refs each; ADR-0003 declared arc-swap usage — verify if planned-but-unused or to-be-wired |
-| `mihomo-dns`       | `anyhow`, `async-trait`, `hickory-proto`, `hickory-server`, `serde`                              | several are feature-gated; expect machete ignore-list entries, not removals |
-| `mihomo-app`       | `mihomo-common`, `mihomo-proxy`                                                                  | only transitively wired; safe to remove |
+| `meow-common`    | `uuid`                                                                                           | 0 src refs; remove |
+| `meow-transport` | `meow-common`                                                                                  | violates documented invariant; remove |
+| `meow-proxy`     | `anyhow`, `dashmap`, `futures-util`, `http`, `regex`, `reqwest`, `serde`, `thiserror`, `tokio-tungstenite` | all 9 confirmed zero src refs (`anyhow` only in comments, `http` was `http_adapter` substring) |
+| `meow-tunnel`    | `bytes`, `serde_json`, `thiserror`                                                               | 0 src refs each; remove |
+| `meow-listener`  | `anyhow`, `bytes`, `futures`, `meow-dns`, `thiserror`                                          | 0 src refs each; tproxy edge case noted above |
+| `meow-rules`     | `serde`                                                                                          | 0 src refs (no derives); remove |
+| `meow-config`    | `serde_json`, `subtle`, `thiserror`                                                              | 0 src refs each; remove |
+| `meow-api`       | `arc-swap`, `thiserror`                                                                          | 0 src refs each; ADR-0003 declared arc-swap usage — verify if planned-but-unused or to-be-wired |
+| `meow-dns`       | `anyhow`, `async-trait`, `hickory-proto`, `hickory-server`, `serde`                              | several are feature-gated; expect machete ignore-list entries, not removals |
+| `meow-app`       | `meow-common`, `meow-proxy`                                                                  | only transitively wired; safe to remove |
 
-`mihomo-trie` and `mihomo-bench` have **no** machete hits.
+`meow-trie` and `meow-bench` have **no** machete hits.
 
 ## Dead-code (under `--no-default-features`)
 
-- `crates/mihomo-proxy/src/lib.rs:56` — `fn transport_to_proxy_err` —
+- `crates/meow-proxy/src/lib.rs:56` — `fn transport_to_proxy_err` —
   helper unreachable without `ss` or `trojan` or `vless`. Decision:
   gate behind `#[cfg(any(feature="ss", feature="trojan", feature="vless"))]`.
-- `crates/mihomo-config/src/proxy_parser.rs:689` — `fn parse_uuid` —
+- `crates/meow-config/src/proxy_parser.rs:689` — `fn parse_uuid` —
   used only by `vless`. Gate behind `#[cfg(feature="vless")]`.
-- `crates/mihomo-config/src/proxy_parser.rs:710` — `fn serialize_plugin_opts` —
+- `crates/meow-config/src/proxy_parser.rs:710` — `fn serialize_plugin_opts` —
   used only by `ss` (v2ray-plugin). Gate behind `#[cfg(feature="ss")]`.
-- `crates/mihomo-proxy/tests/vless_integration.rs:14` — `use … TransportChain`
+- `crates/meow-proxy/tests/vless_integration.rs:14` — `use … TransportChain`
   warning under `--no-default-features`. Gate the entire test file behind
   `#![cfg(feature="vless")]`. Same treatment owed to `trojan_integration`,
   `shadowsocks_integration`, `v2ray_plugin_integration` (their compile errors
@@ -164,7 +164,7 @@ For each crate the engineer:
 
 - `cargo machete --with-metadata` output, 2026-05-12
 - `cargo check --workspace --no-default-features --all-targets`, same date
-- [ADR-0001 mihomo-transport-crate](0001-mihomo-transport-crate.md) — the
+- [ADR-0001 meow-transport-crate](0001-meow-transport-crate.md) — the
   boundary invariant cited above
 - [ADR-0002 upstream-divergence-policy](0002-upstream-divergence-policy.md)
-- CLAUDE.md (note: pending update to list `mihomo-transport`/`mihomo-bench`)
+- CLAUDE.md (note: pending update to list `meow-transport`/`meow-bench`)

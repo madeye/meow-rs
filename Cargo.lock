@@ -1928,7 +1928,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "mihomo-api"
+name = "meow-api"
 version = "0.7.6"
 dependencies = [
  "async-trait",
@@ -1938,13 +1938,13 @@ dependencies = [
  "futures",
  "http-body-util",
  "libc",
- "mihomo-common",
- "mihomo-config",
- "mihomo-dns",
- "mihomo-proxy",
- "mihomo-rules",
- "mihomo-trie",
- "mihomo-tunnel",
+ "meow-common",
+ "meow-config",
+ "meow-dns",
+ "meow-proxy",
+ "meow-rules",
+ "meow-trie",
+ "meow-tunnel",
  "parking_lot",
  "prometheus-client",
  "serde",
@@ -1964,7 +1964,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-app"
+name = "meow-app"
 version = "0.7.6"
 dependencies = [
  "anyhow",
@@ -1972,13 +1972,13 @@ dependencies = [
  "dashmap",
  "dhat",
  "libc",
- "mihomo-api",
- "mihomo-config",
- "mihomo-dns",
- "mihomo-listener",
- "mihomo-proxy",
- "mihomo-rules",
- "mihomo-tunnel",
+ "meow-api",
+ "meow-config",
+ "meow-dns",
+ "meow-listener",
+ "meow-proxy",
+ "meow-rules",
+ "meow-tunnel",
  "parking_lot",
  "rustls",
  "serde_yaml",
@@ -1989,7 +1989,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-bench"
+name = "meow-bench"
 version = "0.7.6"
 dependencies = [
  "anyhow",
@@ -2001,7 +2001,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-common"
+name = "meow-common"
 version = "0.7.6"
 dependencies = [
  "async-trait",
@@ -2021,7 +2021,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-config"
+name = "meow-config"
 version = "0.7.6"
 dependencies = [
  "anyhow",
@@ -2032,12 +2032,12 @@ dependencies = [
  "ipnet",
  "libc",
  "maxminddb",
- "mihomo-common",
- "mihomo-dns",
- "mihomo-proxy",
- "mihomo-rules",
- "mihomo-transport",
- "mihomo-trie",
+ "meow-common",
+ "meow-dns",
+ "meow-proxy",
+ "meow-rules",
+ "meow-transport",
+ "meow-trie",
  "parking_lot",
  "regex",
  "reqwest",
@@ -2055,7 +2055,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-dns"
+name = "meow-dns"
 version = "0.7.6"
 dependencies = [
  "async-trait",
@@ -2065,8 +2065,8 @@ dependencies = [
  "ipnet",
  "lru",
  "maxminddb",
- "mihomo-common",
- "mihomo-trie",
+ "meow-common",
+ "meow-trie",
  "parking_lot",
  "rand 0.9.2",
  "rustls",
@@ -2082,21 +2082,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-listener"
+name = "meow-listener"
 version = "0.7.6"
 dependencies = [
  "base64",
  "libc",
- "mihomo-common",
- "mihomo-dns",
- "mihomo-trie",
- "mihomo-tunnel",
+ "meow-common",
+ "meow-dns",
+ "meow-trie",
+ "meow-tunnel",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "mihomo-proxy"
+name = "meow-proxy"
 version = "0.7.6"
 dependencies = [
  "anytls-rs",
@@ -2106,9 +2106,9 @@ dependencies = [
  "futures",
  "hex",
  "libc",
- "mihomo-common",
- "mihomo-dns",
- "mihomo-transport",
+ "meow-common",
+ "meow-dns",
+ "meow-transport",
  "parking_lot",
  "quinn",
  "rand 0.9.2",
@@ -2128,15 +2128,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-rules"
+name = "meow-rules"
 version = "0.7.6"
 dependencies = [
  "criterion",
  "ipnet",
  "iprange",
  "maxminddb",
- "mihomo-common",
- "mihomo-trie",
+ "meow-common",
+ "meow-trie",
  "regex",
  "tempfile",
  "thiserror 2.0.18",
@@ -2145,7 +2145,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-transport"
+name = "meow-transport"
 version = "0.7.6"
 dependencies = [
  "async-trait",
@@ -2173,7 +2173,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-trie"
+name = "meow-trie"
 version = "0.7.6"
 dependencies = [
  "criterion",
@@ -2182,7 +2182,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mihomo-tunnel"
+name = "meow-tunnel"
 version = "0.7.6"
 dependencies = [
  "arc-swap",
@@ -2190,11 +2190,11 @@ dependencies = [
  "criterion",
  "dashmap",
  "ipnet",
- "mihomo-common",
- "mihomo-dns",
- "mihomo-proxy",
- "mihomo-rules",
- "mihomo-trie",
+ "meow-common",
+ "meow-dns",
+ "meow-proxy",
+ "meow-rules",
+ "meow-trie",
  "parking_lot",
  "serde",
  "tokio",

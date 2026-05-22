@@ -24,8 +24,8 @@ why hardware documentation is mandatory for reproducible comparison.
 |-------|-------|
 | Rust toolchain | *(e.g., stable 1.88.0 x86_64-unknown-linux-gnu)* |
 | zig version | *(e.g., 0.13.0 — used by cargo-zigbuild for musl targets)* |
-| mihomo-rust commit SHA | *(filled in per-run; also captured in results JSON)* |
-| mihomo-rust build flags | `cargo build --release --locked` |
+| meow-rs commit SHA | *(filled in per-run; also captured in results JSON)* |
+| meow-rs build flags | `cargo build --release --locked` |
 | Go mihomo version | *(e.g., v1.19.2)* |
 | Go mihomo download | `gh release download` from MetaCubeX/mihomo |
 
@@ -33,7 +33,7 @@ why hardware documentation is mandatory for reproducible comparison.
 
 | Implementation | Allocator |
 |----------------|-----------|
-| mihomo-rust | system allocator (default; no jemalloc/mimalloc unless changed) |
+| meow-rs | system allocator (default; no jemalloc/mimalloc unless changed) |
 | Go mihomo | Go runtime GC allocator |
 
 Document any change to the Rust allocator (e.g., switching to `tikv-jemallocator`)

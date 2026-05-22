@@ -1,11 +1,11 @@
-# Migration guide: Go mihomo → mihomo-rust
+# Migration guide: Go mihomo → meow-rs
 
 Last updated: 2026-04-18. Tracks M1 feature state.
 Owner: pm. Tracks roadmap item: **M1.H-3**.
 Review cadence: updated at each milestone exit.
 
 This document is for operators migrating a working Go mihomo (Clash Meta)
-deployment to mihomo-rust. It covers:
+deployment to meow-rs. It covers:
 
 - What config surface is supported, partially supported, or not yet supported in M1.
 - Behavioral divergences and what to do about them.
@@ -22,10 +22,10 @@ milestones.
 
 ## Quick compatibility check
 
-Run mihomo-rust with `-t` to validate your config without starting:
+Run meow-rs with `-t` to validate your config without starting:
 
 ```bash
-mihomo -f config.yaml -t
+meow -f config.yaml -t
 ```
 
 Hard errors (Class A divergences) print the upstream field name and the
@@ -84,7 +84,7 @@ cause problems; items marked ~ work with caveats; items marked ✓ work.
 | `tproxy-port` | ✓ | Linux nftables / macOS pf. |
 | `proxy-providers:` | ~ | M1.H-1 — see §Providers. |
 | `geodata:` / `geox-url` | ✗ | M2+ (auto-update, path overrides). M1 uses XDG discovery. |
-| `/metrics` Prometheus endpoint | ✓ | mihomo-rust enhancement (no Go upstream equiv). |
+| `/metrics` Prometheus endpoint | ✓ | meow-rs enhancement (no Go upstream equiv). |
 
 ---
 
@@ -94,7 +94,7 @@ cause problems; items marked ~ work with caveats; items marked ✓ work.
 
 These fields parse without error but behave differently from Go mihomo:
 
-| Field | Go mihomo | mihomo-rust | Class |
+| Field | Go mihomo | meow-rs | Class |
 |-------|-----------|-------------|-------|
 | `secret` not set | API unprotected | API unprotected (warns at startup) | Same |
 | `authentication: ["user:pass"]` | Accepted | Malformed entry (no colon) is hard error | A |
@@ -115,13 +115,13 @@ These fields parse without error but behave differently from Go mihomo:
 | `GET /configs` response includes null Option fields | Full struct with nulls | Only non-null fields returned | B |
 | `geodata-mode`, `geodata-loader`, `geoip-matcher` | Valid fields | Ignored with warn-once (M2+) | B |
 
-### Fields that are silently ignored in Go mihomo but error in mihomo-rust
+### Fields that are silently ignored in Go mihomo but error in meow-rs
 
-Go mihomo ignores many config mistakes without any feedback. mihomo-rust
+Go mihomo ignores many config mistakes without any feedback. meow-rs
 follows the policy in [ADR-0002](adr/0002-upstream-divergence-policy.md):
 security gaps and typo-likely mistakes become hard errors (Class A).
 
-| Mistake | Go mihomo | mihomo-rust |
+| Mistake | Go mihomo | meow-rs |
 |---------|-----------|-------------|
 | Duplicate listener port | Silently overwrites last | Hard parse error naming both conflicting listeners |
 | Duplicate listener name | Silently overwrites last | Hard parse error |
@@ -184,7 +184,7 @@ proxies:
 
 **Divergences from Go mihomo:**
 
-| Field / behaviour | Go mihomo | mihomo-rust |
+| Field / behaviour | Go mihomo | meow-rs |
 |-------------------|-----------|-------------|
 | `flow: xtls-rprx-direct` / `xtls-rprx-splice` | Accepted (deprecated upstream) | Hard parse error — use `xtls-rprx-vision` instead. |
 | `encryption:` any value other than `""` or `"none"` | Accepted | Hard parse error — VLESS has no body cipher. |
@@ -216,7 +216,7 @@ proxies:
 
 **Divergences from Go mihomo:**
 
-| Behaviour | Go mihomo | mihomo-rust |
+| Behaviour | Go mihomo | meow-rs |
 |-----------|-----------|-------------|
 | Only `username` set (no `password`) | Undefined | Hard parse error — orphaned credential is almost certainly a typo (ADR-0002 Class A). |
 | Proxy auth schemes other than Basic (Digest, NTLM) | Supported | M1 supports Basic only. Unknown auth challenge → `Err(ProxyAuthFailed)`. |
@@ -244,7 +244,7 @@ proxies:
 
 **Divergences from Go mihomo:**
 
-| Behaviour | Go mihomo | mihomo-rust |
+| Behaviour | Go mihomo | meow-rs |
 |-----------|-----------|-------------|
 | `udp: true` | UDP ASSOCIATE supported | Accepted; warn-once at parse time. `dial_udp()` returns `UdpNotSupported`. UDP ASSOCIATE deferred to M1.x. |
 | Only `username` set (no `password`) | Undefined | Hard parse error (ADR-0002 Class A). |
@@ -300,7 +300,7 @@ proxy-groups:
 
 **Divergences from Go mihomo:**
 
-| Behaviour | Go mihomo | mihomo-rust |
+| Behaviour | Go mihomo | meow-rs |
 |-----------|-----------|-------------|
 | Unknown `strategy` value | Falls back to round-robin silently | Hard parse error — wrong strategy means wrong distribution (ADR-0002 Class A). |
 | All proxies dead | Returns a dead proxy slot; dial fails | Returns `NoProxyAvailable` immediately — fast, named failure (Class B). |
@@ -336,7 +336,7 @@ proxy-groups:
 
 **Divergences from Go mihomo:**
 
-| Behaviour | Go mihomo | mihomo-rust |
+| Behaviour | Go mihomo | meow-rs |
 |-----------|-----------|-------------|
 | Single-proxy relay (`proxies` length 1) | Silently acts as passthrough | Hard parse error — likely misconfiguration (ADR-0002 Class A). |
 | Empty `proxies` list | Panics | Hard parse error (Class A). |
@@ -370,9 +370,9 @@ See quick checklist above for status of each rule type.
 Supported. Uses MaxMind MMDB format (`Country.mmdb`). Discovery chain:
 
 ```
-$XDG_CONFIG_HOME/mihomo/Country.mmdb
-$HOME/.config/mihomo/Country.mmdb
-./mihomo/Country.mmdb
+$XDG_CONFIG_HOME/meow/Country.mmdb
+$HOME/.config/meow/Country.mmdb
+./meow/Country.mmdb
 ```
 
 ### GEOSITE
@@ -387,7 +387,7 @@ metacubex convert-geo geosite.dat -o geosite.mrs
 
 Discovery chain: same pattern as GEOIP but for `geosite.mrs`.
 
-Go mihomo supports both `.dat` and `.mrs`. mihomo-rust supports mrs only
+Go mihomo supports both `.dat` and `.mrs`. meow-rs supports mrs only
 (Class A divergence, ADR-0002).
 
 ### rule-providers
@@ -494,7 +494,7 @@ skip-auth-prefixes:
 
 ## Removed features
 
-These Go mihomo features are intentionally excluded from mihomo-rust. Configs
+These Go mihomo features are intentionally excluded from meow-rs. Configs
 using them will produce a clear error at startup.
 
 | Feature | Reason | Alternative |
@@ -506,16 +506,16 @@ using them will produce a clear error at startup.
 
 ---
 
-## mihomo-rust-only features
+## meow-rs-only features
 
-These exist in mihomo-rust but have no equivalent in Go mihomo. Dashboard
+These exist in meow-rs but have no equivalent in Go mihomo. Dashboard
 tools built for Go mihomo will ignore them.
 
 | Feature | Path / Field | Notes |
 |---------|-------------|-------|
 | Prometheus metrics | `GET /metrics` | Native scrape endpoint; Go mihomo has no equivalent (M1.H-2) |
-| Subscription management API | `GET\|POST\|DELETE /api/subscriptions[/:name]` | mihomo-rust-specific |
-| Extended proxy group API | `GET\|POST\|PUT\|DELETE /api/proxy-groups[/:name]` | mihomo-rust-specific |
+| Subscription management API | `GET\|POST\|DELETE /api/subscriptions[/:name]` | meow-rs-specific |
+| Extended proxy group API | `GET\|POST\|PUT\|DELETE /api/proxy-groups[/:name]` | meow-rs-specific |
 | Rule CRUD API | `POST\|PUT\|DELETE /rules[/:index]` | Runtime rule editing |
 
 Keep these under the `/api/` prefix so they do not collide with
@@ -525,11 +525,11 @@ Clash-compatible paths.
 
 ## Feature flags (Cargo features)
 
-mihomo-rust uses Cargo feature flags where Go mihomo uses build tags:
+meow-rs uses Cargo feature flags where Go mihomo uses build tags:
 
-| Go mihomo build tag / upstream | mihomo-rust Cargo feature | Default |
+| Go mihomo build tag / upstream | meow-rs Cargo feature | Default |
 |-------------------------------|--------------------------|:-------:|
-| Encrypted DNS (DoH, DoT) | `mihomo-dns/encrypted` | on |
+| Encrypted DNS (DoH, DoT) | `meow-dns/encrypted` | on |
 | *(M2: minimal build)* | `--no-default-features` | — |
 
 Note: the `vmess-legacy` feature flag is defined in the dropped VMess spec —
@@ -538,7 +538,7 @@ it does not exist in the codebase since VMess was not implemented.
 To build without encrypted DNS (smaller binary):
 
 ```bash
-cargo build --release --no-default-features -p mihomo-dns
+cargo build --release --no-default-features -p meow-dns
 ```
 
 ---
@@ -550,9 +550,9 @@ cargo build --release --no-default-features -p mihomo-dns
 Most common format from public providers. Typical issues:
 
 1. **VMess proxies** — replace with VLESS alternatives from your provider, or
-   remove them. mihomo-rust hard-errors on `type: vmess`.
+   remove them. meow-rs hard-errors on `type: vmess`.
 2. **`enhanced-mode: fake-ip`** — supported. Migration from a prior
-   mihomo-rust release that warned-and-fell-back to `normal` is automatic;
+   meow-rs release that warned-and-fell-back to `normal` is automatic;
    no config change required.
 3. **`fake-ip-range` / `fake-ip-filter`** — honoured. Defaults to
    `198.18.0.1/16` when range is omitted; filter defaults to empty
@@ -563,7 +563,7 @@ Most common format from public providers. Typical issues:
    ```
 5. **`quic://` nameservers** — replace with `tls://` or `https://` equivalents.
    `quic://` is a hard parse error with a message pointing at the roadmap.
-6. Run `-t` to validate: `mihomo -f config.yaml -t`
+6. Run `-t` to validate: `meow -f config.yaml -t`
 
 ### Type 2: Enterprise split-tunnel (nameserver-policy, IN-NAME rules)
 

@@ -46,14 +46,14 @@ code wins**.
 
 **Acceptable fixture sources:**
 - Hex-encoded bytes in test constants (document generation tool/commit).
-- Files under `crates/mihomo-rules/tests/fixtures/` checked in as binary.
+- Files under `crates/meow-rules/tests/fixtures/` checked in as binary.
 
 **Not acceptable:** Fixtures generated from the spec description without
 cross-checking upstream Go code.
 
 ### P2 — No duplicate mrs parser
 
-The spec requires a single `mihomo-rules/src/mrs_parser.rs` shared by both
+The spec requires a single `meow-rules/src/mrs_parser.rs` shared by both
 rule-provider loading and geosite loading. The PR review must fail if two
 copies exist. Test G1 (structural guard) enforces this.
 
@@ -77,12 +77,12 @@ inject a `notify` channel that fires immediately for test purposes.
 ## Test helpers
 
 All unit tests for the mrs parser live in `#[cfg(test)] mod tests` inside
-`crates/mihomo-rules/src/mrs_parser.rs`.
+`crates/meow-rules/src/mrs_parser.rs`.
 
-Provider tests live in `crates/mihomo-rules/src/rule_provider.rs` (or a
+Provider tests live in `crates/meow-rules/src/rule_provider.rs` (or a
 sibling test file).
 
-REST endpoint tests live in `crates/mihomo-api/tests/api_test.rs` following
+REST endpoint tests live in `crates/meow-api/tests/api_test.rs` following
 the existing `oneshot()` + `TestState` pattern.
 
 ### Binary fixture helpers
@@ -169,7 +169,7 @@ Go tool output before committing; add a comment with the verification command.
 |---|------|---------|
 | F1 | `snapshot_returns_arc_clone_not_lock_guard` | `provider.snapshot()` returns `Arc<RuleSet>`. The caller can hold the `Arc` indefinitely without blocking writers. Verify by calling `provider.refresh()` concurrently with a `snapshot()` hold; neither should deadlock. |
 | F2 | `refresh_swap_is_atomic` | Spawn 100 reader threads calling `snapshot()` in a tight loop while one writer calls `refresh()` repeatedly; assert no reader ever observes a partially-populated rule set (all snapshots have either N or M rules, never a count in between). Uses `Arc<RuleSet>` cardinality check. |
-| F3 | `no_rwlock_on_read_path` **[guard-rail]** | `grep -n "RwLock\|Mutex" crates/mihomo-rules/src/rule_provider.rs` → assert zero matches in the `snapshot()` path or the `rules` field type. `ArcSwap::load_full()` is wait-free; no lock is acceptable on the read path. |
+| F3 | `no_rwlock_on_read_path` **[guard-rail]** | `grep -n "RwLock\|Mutex" crates/meow-rules/src/rule_provider.rs` → assert zero matches in the `snapshot()` path or the `rules` field type. `ArcSwap::load_full()` is wait-free; no lock is acceptable on the read path. |
 
 ---
 
@@ -191,7 +191,7 @@ Go tool output before committing; add a comment with the verification command.
 
 | # | Case | Asserts |
 |---|------|---------|
-| H1 | `no_duplicate_mrs_parser` **[guard-rail]** | Search for the magic constant literal — either the byte array `0x4D, 0x52, 0x53, 0x21` or the string `b"MRS!"` — across all `.rs` files in `crates/`; assert exactly **one** file contains it. That file must be `mihomo-rules/src/mrs_parser.rs`. Use the literal bytes/string as the grep target, NOT a function name (function names can be renamed or inlined without moving the magic bytes). NOT two separate copies. A format bug in a duplicated parser would require two fixes. |
+| H1 | `no_duplicate_mrs_parser` **[guard-rail]** | Search for the magic constant literal — either the byte array `0x4D, 0x52, 0x53, 0x21` or the string `b"MRS!"` — across all `.rs` files in `crates/`; assert exactly **one** file contains it. That file must be `meow-rules/src/mrs_parser.rs`. Use the literal bytes/string as the grep target, NOT a function name (function names can be renamed or inlined without moving the magic bytes). NOT two separate copies. A format bug in a duplicated parser would require two fixes. |
 | H2 | `zstd_decompression_error_returns_error` | Mrs payload with valid header but corrupted zstd bytes → `Err(...)`. NOT panic. NOT empty rule set. |
 
 ---

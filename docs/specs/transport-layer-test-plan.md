@@ -1,6 +1,6 @@
-# Test Plan: `mihomo-transport` crate (M1.A-1..4)
+# Test Plan: `meow-transport` crate (M1.A-1..4)
 
-Status: **draft** — owner: qa. Last updated: 2026-04-11 (A8 reworded: SNI fallback in mihomo-config not TlsLayer; B8 split: layer trusts input, config-side clamp cases deferred to config_test.rs).
+Status: **draft** — owner: qa. Last updated: 2026-04-11 (A8 reworded: SNI fallback in meow-config not TlsLayer; B8 split: layer trusts input, config-side clamp cases deferred to config_test.rs).
 Tracks: task #35. Companion to `docs/specs/transport-layer.md` and ADR-0001.
 
 This is the QA-owned acceptance test plan. The spec's §Test plan is PM's
@@ -13,7 +13,7 @@ test cases** — flag the discrepancy so the spec can be updated.
 **In scope:**
 
 - Per-layer unit tests: `tls`, `ws`, `grpc` (gun), `h2`, `httpupgrade`.
-- Crate-level invariants: no outbound deps on `mihomo-proxy`/`dns`/
+- Crate-level invariants: no outbound deps on `meow-proxy`/`dns`/
   `config`, feature-gate compile matrix, no server-side code.
 - Integration-regression gates: `trojan_integration` after M1.A-1.migrate,
   `v2ray_plugin_integration` after M1.A-2.migrate. These must stay green
@@ -26,7 +26,7 @@ test cases** — flag the discrepancy so the spec can be updated.
 
 - **Any server-side code.** Acceptance criterion #8 forbids
   `accept`/`bind`/`listen`/`Server`/`Acceptor`/`TcpListener` inside
-  `mihomo-transport` outside `tests/`. Tests that need a loopback
+  `meow-transport` outside `tests/`. Tests that need a loopback
   server must put the server code in `tests/support/` and name it
   clearly (e.g. `tests/support/loopback.rs`) so the grep-check can
   whitelist `tests/**`.
@@ -34,7 +34,7 @@ test cases** — flag the discrepancy so the spec can be updated.
   this plan. If engineer asks about them, bounce to architect.
 - Server-side `Transport::accept` trait method. If it appears in any
   M1.A PR, fail the review.
-- Touching `crates/mihomo-proxy/src/simple_obfs.rs`. Any diff against
+- Touching `crates/meow-proxy/src/simple_obfs.rs`. Any diff against
   that file in an M1.A PR is a scope bug.
 - uTLS fingerprint spoofing behaviour. We accept, we warn, we do
   nothing. No test asserts "handshake bytes look like Chrome".
@@ -45,7 +45,7 @@ test cases** — flag the discrepancy so the spec can be updated.
 ## Dependencies and structure
 
 ```
-crates/mihomo-transport/
+crates/meow-transport/
   src/
     lib.rs            # Transport trait, TransportError, Stream blanket impl
     tls.rs
@@ -103,7 +103,7 @@ producing a self-signed cert on demand.
 | A5 | `tls_alpn_fallback_http11` | Server offers `["http/1.1"]` only; client prefers `["h2","http/1.1"]`; assert negotiated ALPN == `http/1.1`. Guards against an "h2 or bust" bug. |
 | A6 | `tls_alpn_empty_config` | `alpn = []`; assert the ClientHello omits the ALPN extension entirely (not `alpn: [""]`). |
 | A7 | `tls_sni_override` | `sni = Some("cdn.example.com")`, dial address `127.0.0.1:port`; server captures `server_name`, assert it equals `cdn.example.com`. |
-| A8 | `tls_sni_from_config_hostname` | `TlsConfig { sni: Some("hostname.example.com"), … }` (fallback already resolved in `mihomo-config` before layer construction — NOT in `TlsLayer`); assert the loopback server's captured `server_name` equals `"hostname.example.com"`. Guards against anyone adding SNI-fallback logic inside `TlsLayer`. Upstream: `adapter/outbound/trojan.go::DialContext` resolves SNI in proxy construction — NOT in transport layer. ADR-0002 Class A (mihomo-rust mirrors upstream: SNI resolved before layer construction, never inside the layer). |
+| A8 | `tls_sni_from_config_hostname` | `TlsConfig { sni: Some("hostname.example.com"), … }` (fallback already resolved in `meow-config` before layer construction — NOT in `TlsLayer`); assert the loopback server's captured `server_name` equals `"hostname.example.com"`. Guards against anyone adding SNI-fallback logic inside `TlsLayer`. Upstream: `adapter/outbound/trojan.go::DialContext` resolves SNI in proxy construction — NOT in transport layer. ADR-0002 Class A (meow-rs mirrors upstream: SNI resolved before layer construction, never inside the layer). |
 | A9 | `tls_sni_is_ip_omitted` | `sni = None`, dial to `127.0.0.1`; assert **no** SNI extension in the ClientHello (sending an IP as SNI is a protocol violation). |
 | A10 | `tls_client_cert_accepted` | Configure `ClientCert { cert_pem, key_pem }` with a test CA the server trusts; assert the loopback server observed the expected client-cert CN. |
 | A11 | `tls_fingerprint_warn_once_per_value` | Build two `TlsLayer`s with `fingerprint = Some("chrome")`; assert log capture shows **exactly one** `warn!` with the verbatim text from spec §"Fingerprint warn text" and substring `"chrome"`. |
@@ -123,7 +123,7 @@ Loopback server built on `tokio-tungstenite` in `tests/support/loopback.rs`.
 | B5 | `ws_path_forwarded` | Client path is `/custom/path?x=1`; assert the server saw the same path verbatim (no normalization). |
 | B6 | `ws_early_data_zero_no_protocol_header` | `max_early_data = 0`; write 100 bytes after the handshake; assert server received them as a **data frame**, not via `Sec-WebSocket-Protocol`. Locks the "0 disables entirely" default. |
 | B7 | `ws_early_data_encoded_in_protocol_header` | `max_early_data = 32`; write 16 bytes before the handshake completes; assert the server's received `Sec-WebSocket-Protocol` header is the base64url-no-padding encoding of those 16 bytes. |
-| B8 | `ws_early_data_layer_trusts_input` | `WsConfig { max_early_data: 4096, … }` passed directly to `WsLayer` (bypassing config); assert the layer produces a `Sec-WebSocket-Protocol` header of exactly 4096 bytes of early data — **NOT clamped to 2048 at the layer**. Upstream: `adapter/outbound/util.go::parseWebsocketOptions` clamps `max-early-data` at parse time — NOT in the transport layer. ADR-0002 Class A (mihomo-rust mirrors upstream: clamp lives in `mihomo-config`, never inside `WsLayer`). Config-side clamp tests belong in `crates/mihomo-config/tests/config_test.rs`: (a) `ws_early_data_clamp_warn` — parse fixture with `max-early-data: 65535`; assert one `warn!` + `WsConfig { max_early_data: 2048 }`; (b) `ws_early_data_zero_passes_through` — parse `max-early-data: 0`; assert `WsConfig { max_early_data: 0 }` (default-off path, no warn). Add those to `config_test.rs` when `WsConfig` lands in `mihomo-config`. |
+| B8 | `ws_early_data_layer_trusts_input` | `WsConfig { max_early_data: 4096, … }` passed directly to `WsLayer` (bypassing config); assert the layer produces a `Sec-WebSocket-Protocol` header of exactly 4096 bytes of early data — **NOT clamped to 2048 at the layer**. Upstream: `adapter/outbound/util.go::parseWebsocketOptions` clamps `max-early-data` at parse time — NOT in the transport layer. ADR-0002 Class A (meow-rs mirrors upstream: clamp lives in `meow-config`, never inside `WsLayer`). Config-side clamp tests belong in `crates/meow-config/tests/config_test.rs`: (a) `ws_early_data_clamp_warn` — parse fixture with `max-early-data: 65535`; assert one `warn!` + `WsConfig { max_early_data: 2048 }`; (b) `ws_early_data_zero_passes_through` — parse `max-early-data: 0`; assert `WsConfig { max_early_data: 0 }` (default-off path, no warn). Add those to `config_test.rs` when `WsConfig` lands in `meow-config`. |
 | B9 | `ws_handshake_failure_surfaces_websocket_error` | Loopback server closes the TCP socket before completing the upgrade; assert `connect` returns `Err(TransportError::WebSocket(_))`. |
 
 ### C. `grpc` layer (`tests/grpc_test.rs`) — the anti-regression wall
@@ -180,8 +180,8 @@ has drifted from ADR-0001.
 
 | # | Case | Asserts |
 |---|------|---------|
-| F1 | `no_proxy_dep` | Shell-out via `cargo tree -p mihomo-transport --edges normal`; parse output; assert no line mentions `mihomo-proxy`, `mihomo-dns`, or `mihomo-config`. Allowed workspace crates: `mihomo-common` only. Failure message includes the offending line for triage. |
-| F2 | `no_server_side_symbols_in_src` | Walk `crates/mihomo-transport/src/**/*.rs` and grep for `\baccept\b`, `\bbind\b`, `\blisten\b`, `\bServer\b`, `\bAcceptor\b`, `\bTcpListener\b`. Fail with the exact file + line for any match. **Must be a test, not a reviewer checklist item** — PM specifically asked for this to be mechanically enforced. |
+| F1 | `no_proxy_dep` | Shell-out via `cargo tree -p meow-transport --edges normal`; parse output; assert no line mentions `meow-proxy`, `meow-dns`, or `meow-config`. Allowed workspace crates: `meow-common` only. Failure message includes the offending line for triage. |
+| F2 | `no_server_side_symbols_in_src` | Walk `crates/meow-transport/src/**/*.rs` and grep for `\baccept\b`, `\bbind\b`, `\blisten\b`, `\bServer\b`, `\bAcceptor\b`, `\bTcpListener\b`. Fail with the exact file + line for any match. **Must be a test, not a reviewer checklist item** — PM specifically asked for this to be mechanically enforced. |
 | F3 | `transport_error_is_non_exhaustive` | `TransportError` is marked `#[non_exhaustive]` (or otherwise guarded) so adding variants is not a breaking change. Assert via a compile-fail doc-test or a `match` that includes a wildcard arm. Lightweight but catches a future silent-break. |
 | F4 | `no_anyhow_at_boundary` | Walk `src/**/*.rs` and assert no `use anyhow` or `anyhow::` reference in any public function's signature. Private helpers may use anyhow internally (engineer's call), but `TransportError` is the only thing that crosses the crate boundary. |
 
@@ -198,13 +198,13 @@ call):
 
 | # | Command | Asserts |
 |---|---------|---------|
-| G1 | `cargo check -p mihomo-transport --no-default-features` | Crate builds with zero features — trait + error type only. |
-| G2 | `cargo check -p mihomo-transport --no-default-features --features "tls"` | `tls` alone compiles. |
-| G3 | `cargo check -p mihomo-transport --no-default-features --features "tls,ws"` | Default-minus-h2/grpc compiles. |
-| G4 | `cargo check -p mihomo-transport --no-default-features --features "grpc"` | `grpc` alone compiles (pulls in `h2` crate transitively; guard against accidentally depending on `ws`). |
-| G5 | `cargo check -p mihomo-transport --no-default-features --features "h2"` | `h2` alone compiles. |
-| G6 | `cargo check -p mihomo-transport --no-default-features --features "httpupgrade"` | `httpupgrade` alone compiles (cheap, catches a forgotten `cfg_if`). |
-| G7 | `cargo check -p mihomo-transport --all-features` | Union compiles. |
+| G1 | `cargo check -p meow-transport --no-default-features` | Crate builds with zero features — trait + error type only. |
+| G2 | `cargo check -p meow-transport --no-default-features --features "tls"` | `tls` alone compiles. |
+| G3 | `cargo check -p meow-transport --no-default-features --features "tls,ws"` | Default-minus-h2/grpc compiles. |
+| G4 | `cargo check -p meow-transport --no-default-features --features "grpc"` | `grpc` alone compiles (pulls in `h2` crate transitively; guard against accidentally depending on `ws`). |
+| G5 | `cargo check -p meow-transport --no-default-features --features "h2"` | `h2` alone compiles. |
+| G6 | `cargo check -p meow-transport --no-default-features --features "httpupgrade"` | `httpupgrade` alone compiles (cheap, catches a forgotten `cfg_if`). |
+| G7 | `cargo check -p meow-transport --all-features` | Union compiles. |
 
 Total wall-time impact: six `cargo check` calls after the first build
 warms the cache — under 30s added to CI, worth it.
@@ -245,7 +245,7 @@ it pass") are scope bugs.
 
 ## Open questions for engineer (none blocking)
 
-1. ~~**`ws` early-data clamp location.**~~ **Resolved by architect**: clamp lives in `mihomo-config` at YAML parse time. B8 now asserts layer trusts input verbatim; config-side cases (`ws_early_data_clamp_warn`, `ws_early_data_zero_passes_through`) go in `config_test.rs` when `WsConfig` lands.
+1. ~~**`ws` early-data clamp location.**~~ **Resolved by architect**: clamp lives in `meow-config` at YAML parse time. B8 now asserts layer trusts input verbatim; config-side cases (`ws_early_data_clamp_warn`, `ws_early_data_zero_passes_through`) go in `config_test.rs` when `WsConfig` lands.
 2. **Loopback server hosting**. `tests/support/loopback.rs` will
    contain `TcpListener::bind` — that's the one case where the §F2
    grep-check needs a `tests/` whitelist. Make sure the grep walks
@@ -267,7 +267,7 @@ it pass") are scope bugs.
 - §G feature-matrix jobs green in CI.
 - §H integration gates stay green without edits during the two migration
   PRs.
-- `cargo tree -p mihomo-transport` shows only `mihomo-common` from the
+- `cargo tree -p meow-transport` shows only `meow-common` from the
   workspace (§F1 already asserts this; repeating as the human gate).
 
 ## CI wiring required

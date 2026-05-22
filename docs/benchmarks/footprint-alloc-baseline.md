@@ -3,8 +3,8 @@
 ## Reference: commit 9419421578f808c59db37fc7ec056a8971a741b9
 
 Platform: aarch64-apple-darwin (Apple Silicon), macOS 25.4.0, Rust stable 1.88  
-Binary: `--features dhat-heap --profile dhat` build of mihomo-app, commit `9419421578f808c59db37fc7ec056a8971a741b9`  
-Workload: W3 — 64-concurrent SOCKS5 connection-rate, 20 s run via `mihomo-bench --concurrency 64 --duration 20`  
+Binary: `--features dhat-heap --profile dhat` build of meow-app, commit `9419421578f808c59db37fc7ec056a8971a741b9`  
+Workload: W3 — 64-concurrent SOCKS5 connection-rate, 20 s run via `meow-bench --concurrency 64 --duration 20`  
 Tool: `dhat` crate 0.3.3, `dhat::Profiler::new_heap()` guard in `main()`, writes `dhat-heap.json` on process exit
 
 ---
@@ -24,7 +24,7 @@ strip = false
 debug = 1
 opt-level = 1
 
-# crates/mihomo-app/Cargo.toml
+# crates/meow-app/Cargo.toml
 [features]
 dhat-heap = ["dhat"]
 
@@ -33,7 +33,7 @@ dhat = { workspace = true, optional = true }
 ```
 
 ```rust
-// crates/mihomo-app/src/main.rs
+// crates/meow-app/src/main.rs
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
 }
 ```
 
-Build command: `cargo build -p mihomo-app --features dhat-heap --profile dhat`
+Build command: `cargo build -p meow-app --features dhat-heap --profile dhat`
 
 ---
 
@@ -133,8 +133,8 @@ All 9 allocation-focused lints at 0 hits at M2 open baseline (see `m1-addendum-l
 Re-run with the same command after M2 tasks #34–#36 land:
 
 ```
-cargo build -p mihomo-app --features dhat-heap --profile dhat
-cargo run -p mihomo-bench -- --rust-binary ./target/dhat/mihomo \
+cargo build -p meow-app --features dhat-heap --profile dhat
+cargo run -p meow-bench -- --rust-binary ./target/dhat/meow \
   --config config-bench.yaml --duration 20 --concurrency 64 --only connrate
 ```
 

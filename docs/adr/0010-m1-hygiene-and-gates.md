@@ -10,8 +10,8 @@
 ## Context
 
 M0 (task #1) landed three commits: 35 deps pruned, four dead-but-feature-gated
-items re-gated, a crate-boundary fix (`mihomo-transport` no longer depends on
-`mihomo-common`), and CLAUDE.md updated to list all 12 crates. The default-
+items re-gated, a crate-boundary fix (`meow-transport` no longer depends on
+`meow-common`), and CLAUDE.md updated to list all 12 crates. The default-
 feature regression bar (`cargo fmt --all -- --check && cargo clippy --all-targets
 -- -D warnings && cargo test --lib`) is green.
 
@@ -19,12 +19,12 @@ Two concrete diagnostics survive into M1:
 
 1. **6 pre-existing warnings at `cargo check --workspace --no-default-features
    --all-targets`**, all unrelated to clippy:
-   - `crates/mihomo-config/src/proxy_parser.rs:12` — `TransportChain` import
+   - `crates/meow-config/src/proxy_parser.rs:12` — `TransportChain` import
      unused without `vless` (its sole use is inside `parse_vless` at line 503).
-   - `crates/mihomo-config/tests/ech_dns_test.rs:27,29` — `base64::Engine` and
-     `mihomo_config::load_config_from_str` unused; this test exercises VLESS-
+   - `crates/meow-config/tests/ech_dns_test.rs:27,29` — `base64::Engine` and
+     `meow_config::load_config_from_str` unused; this test exercises VLESS-
      ECH config parsing and only compiles meaningfully with `vless`.
-   - `crates/mihomo-app/src/main.rs:516,517,523` — `sniffer_runtime`, `auth`,
+   - `crates/meow-app/src/main.rs:516,517,523` — `sniffer_runtime`, `auth`,
      `addr` are dead when **all** listener features are off (each consumer is
      inside a `#[cfg(feature = "listener-*")]` block).
 2. **Clippy at default features is clean (`-D warnings` passes), but no
@@ -42,22 +42,22 @@ integration files per crate:
 
 | Crate              | src LOC | inline tests | integration files |
 |--------------------|--------:|-------------:|------------------:|
-| `mihomo-common`    |   1545  |          23  |                 1 |
-| `mihomo-trie`      |    198  |           6  |                 0 |
-| `mihomo-dns`       |   1966  |          47  |                 3 |
-| `mihomo-rules`     |   4684  |         127  |                 1 |
-| `mihomo-transport` |   2280  |           0  |                10 |
-| `mihomo-proxy`     |   8643  |         149  |                 4 |
-| `mihomo-tunnel`    |   1110  |           9  |                 2 |
-| `mihomo-listener`  |   1878  |          15  |             **0** |
-| `mihomo-api`       |   1832  |       **0**  |                 2 |
-| `mihomo-config`    |   4949  |          72  |                 5 |
-| `mihomo-app`       |    774  |       **0**  |                 1 |
-| `mihomo-bench`     |   1013  |       **0**  |                 0 |
+| `meow-common`    |   1545  |          23  |                 1 |
+| `meow-trie`      |    198  |           6  |                 0 |
+| `meow-dns`       |   1966  |          47  |                 3 |
+| `meow-rules`     |   4684  |         127  |                 1 |
+| `meow-transport` |   2280  |           0  |                10 |
+| `meow-proxy`     |   8643  |         149  |                 4 |
+| `meow-tunnel`    |   1110  |           9  |                 2 |
+| `meow-listener`  |   1878  |          15  |             **0** |
+| `meow-api`       |   1832  |       **0**  |                 2 |
+| `meow-config`    |   4949  |          72  |                 5 |
+| `meow-app`       |    774  |       **0**  |                 1 |
+| `meow-bench`     |   1013  |       **0**  |                 0 |
 
-`mihomo-api`, `mihomo-listener`, `mihomo-app` are the three obvious gaps —
+`meow-api`, `meow-listener`, `meow-app` are the three obvious gaps —
 each is 700–1900 LOC of substantively branching code with effectively no
-unit-test coverage. (`mihomo-bench` is excluded — it is an executable
+unit-test coverage. (`meow-bench` is excluded — it is an executable
 harness whose "tests" are the bench runs themselves.)
 
 ## Decision
@@ -120,7 +120,7 @@ binding.
 
 | Site                                              | Fix |
 |---------------------------------------------------|-----|
-| `proxy_parser.rs:10-13` import line             | Split `TransportChain` out of the unconditional `use mihomo_proxy::{…}` and re-import under `#[cfg(feature = "vless")]` (or move it into the import block right above the existing `#[cfg(feature = "vless")] use mihomo_proxy::{VlessAdapter, VlessFlow};`). |
+| `proxy_parser.rs:10-13` import line             | Split `TransportChain` out of the unconditional `use meow_proxy::{…}` and re-import under `#[cfg(feature = "vless")]` (or move it into the import block right above the existing `#[cfg(feature = "vless")] use meow_proxy::{VlessAdapter, VlessFlow};`). |
 | `tests/ech_dns_test.rs:27,29` imports           | Gate the **whole file** behind `#![cfg(feature = "vless")]`. It is an ECH-for-VLESS test; with `vless` off, it has nothing to exercise. Mirrors the M0 treatment of `vless_integration.rs` (ADR-0009 §"Dead-code"). |
 | `main.rs:515-523` `sniffer_runtime/auth/addr` | Move the three bindings inside the `for nl in &config.listeners.named` loop, **into** the first arm that uses them (`ListenerType::Mixed \| Http \| Socks5`) under its existing `#[cfg(feature = "listener-mixed")]`. Same treatment for the other listener arms. The `addr` binding becomes a `let` inside each arm rather than at loop top. |
 
@@ -162,7 +162,7 @@ the M1 CI subtask.
 
 Five high-value additions, scoped to fit in M1 alongside the lint pass:
 
-1. **`mihomo-api` request-handler tests** (currently 0 inline tests on
+1. **`meow-api` request-handler tests** (currently 0 inline tests on
    1832 LOC). Target the handlers in `src/handlers/proxies.rs` and
    `src/handlers/rules.rs`: build an `axum::Router` in a `#[tokio::test]`,
    send synthetic requests via `tower::ServiceExt::oneshot`, assert response
@@ -170,26 +170,26 @@ Five high-value additions, scoped to fit in M1 alongside the lint pass:
    proxy, list rules, query connections, traffic stream). **Not** an
    exhaustive API surface test — pareto pick.
 
-2. **`mihomo-listener` per-listener acceptance tests** (currently 0
+2. **`meow-listener` per-listener acceptance tests** (currently 0
    integration files). Add `tests/socks5_handshake.rs`,
    `tests/http_connect.rs`, `tests/mixed_dispatch.rs`. Each binds to
    `127.0.0.1:0`, runs the listener against a `Tunnel` stub, and asserts
-   protocol round-trip. Mirrors the structure of `mihomo-proxy/tests/`.
+   protocol round-trip. Mirrors the structure of `meow-proxy/tests/`.
 
-3. **`mihomo-app` config-loading smoke test** (currently 0 inline tests).
+3. **`meow-app` config-loading smoke test** (currently 0 inline tests).
    A single `#[test]` that loads `examples/config.yaml` (or a fixture
-   under `tests/fixtures/`) via the same `mihomo_config::load_config`
+   under `tests/fixtures/`) via the same `meow_config::load_config`
    path `main.rs` uses, asserting it produces a non-empty `Tunnel`-ready
    structure. Catches breakage from config-parser refactors before
    integration tests do.
 
-4. **`mihomo-trie` property test for domain matching** (currently 6 tests
+4. **`meow-trie` property test for domain matching** (currently 6 tests
    on 198 LOC — small crate, but it's the hot path for rule matching).
    Add a `proptest`-based test: random domain string in/out of trie, the
    result is consistent with a naive `O(n*m)` substring-scan reference
    implementation. Catches subtle wildcard-edge bugs.
 
-5. **`mihomo-tunnel` connection-statistics RAII test** (commit `0f95043`
+5. **`meow-tunnel` connection-statistics RAII test** (commit `0f95043`
    introduced an RAII guard for stats cleanup on aborted `handle_tcp`).
    Add a test that aborts a `handle_tcp` future mid-flight (via `select!`
    timeout) and asserts the stats entry is gone. Regression guard for

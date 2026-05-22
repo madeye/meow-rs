@@ -63,7 +63,7 @@ calls and returns a known IP distinct from the hosts value.
 ## Test helpers
 
 All unit tests live in `#[cfg(test)] mod tests` inside
-`crates/mihomo-dns/src/resolver.rs` (or a sibling test file if the resolver
+`crates/meow-dns/src/resolver.rs` (or a sibling test file if the resolver
 tests are split).
 
 ### `HostsResolver` fixture
@@ -105,7 +105,7 @@ The `system_hosts_path: None` path skips `/etc/hosts` loading entirely
 | B2 | `wildcard_matches_different_subdomain` | Same `*.corp.internal` entry; query A `bar.corp.internal` → `10.0.0.50`. Guards that wildcard is not key-exact (NOT `foo.corp.internal` hardcoded). |
 | B3 | `wildcard_matches_root_domain` | Entry `*.corp.internal: 10.0.0.50`; query A `corp.internal` → `10.0.0.50`. Root is included per `+.` semantics. NOT NXDOMAIN. |
 | B4 | `wildcard_star_rewritten_to_plus_dot` **[guard-rail]** | Inspect the trie after loading `*.corp.internal`; assert the stored key is `+.corp.internal` NOT `*.corp.internal`. The `*` → `+.` rewrite must happen at parse time, not at query time. |
-| B5 | `wildcard_does_not_match_grandchild_beyond_one_label` | Entry `*.corp.internal`; query A `a.b.corp.internal`. If the DomainTrie `+.` semantics match only one label deep, assert NXDOMAIN / upstream. If `+.` is recursive (matches all depths), assert the hosts value. **Document the actual trie behavior here with a comment citing `mihomo-trie::search` — do not guess.** |
+| B5 | `wildcard_does_not_match_grandchild_beyond_one_label` | Entry `*.corp.internal`; query A `a.b.corp.internal`. If the DomainTrie `+.` semantics match only one label deep, assert NXDOMAIN / upstream. If `+.` is recursive (matches all depths), assert the hosts value. **Document the actual trie behavior here with a comment citing `meow-trie::search` — do not guess.** |
 
 ---
 

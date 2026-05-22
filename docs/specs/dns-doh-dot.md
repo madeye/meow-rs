@@ -9,7 +9,7 @@ Related gap-analysis rows: `dns.nameserver` scheme support,
 
 ## Motivation
 
-Today `crates/mihomo-config/src/dns_parser.rs::parse_nameservers` only
+Today `crates/meow-config/src/dns_parser.rs::parse_nameservers` only
 understands `udp://` / `tcp://` / bare `ip[:port]`. Every
 encrypted-DNS form a real Clash Meta subscription uses —
 `https://1.1.1.1/dns-query#cloudflare-dns.com`,
@@ -57,7 +57,7 @@ In scope:
      header (critical for cert validation).
    - Builds the real main/fallback resolvers against those
      `SocketAddr`s.
-4. Cargo feature plumbing on `mihomo-dns` to pull in
+4. Cargo feature plumbing on `meow-dns` to pull in
    `hickory-resolver`'s `tls-ring` and `https-ring` features (rustls
    ring backend, matches the rest of the workspace).
 5. A `bootstrap_error` structured error so a single bad hostname in
@@ -173,14 +173,14 @@ pointer because it is the one users most often try.
 ### New module layout
 
 ```
-crates/mihomo-dns/src/
+crates/meow-dns/src/
   resolver.rs        # existing; grows new NameServerUrl enum consumer
   upstream.rs        # NEW: NameServerUrl parser + unit tests
 ```
 
-Keeping the parser in `mihomo-dns`, not `mihomo-config`, so the
-`mihomo-dns` crate owns the single source of truth for "what's a
-nameserver URL". `mihomo-config::dns_parser` becomes a thin adapter:
+Keeping the parser in `meow-dns`, not `meow-config`, so the
+`meow-dns` crate owns the single source of truth for "what's a
+nameserver URL". `meow-config::dns_parser` becomes a thin adapter:
 string list → `Vec<NameServerUrl>` → `Resolver::new_with_bootstrap`.
 
 ### `NameServerUrl` enum
@@ -224,7 +224,7 @@ impl Resolver {
 
 **Async constructor — decided, not open.** The sync-constructor path
 (throwaway current-thread runtime via `Runtime::new().block_on()`)
-panics the moment any `#[tokio::test]` in `crates/mihomo-config/tests/`
+panics the moment any `#[tokio::test]` in `crates/meow-config/tests/`
 calls `load_config_from_str` with an encrypted upstream — default
 `#[tokio::test]` is a current-thread runtime, and tokio rejects
 nested runtimes with a "Cannot start a runtime from within a runtime"
@@ -294,7 +294,7 @@ successful response wins; remaining in-flight requests are dropped. This is the
 same model as `nameserver-policy:` parallel dispatch (M1.E-3); the struct
 change **must land in M1.E-1** so M1.E-3 can build on it without a second
 breaking refactor of `Resolver`. `fallback` similarly becomes `Vec<TokioResolver>`.
-Add `futures = { workspace = true }` to `crates/mihomo-dns/Cargo.toml` if not
+Add `futures = { workspace = true }` to `crates/meow-dns/Cargo.toml` if not
 already present.
 
 ### Error surface
@@ -322,7 +322,7 @@ so the printed message is always actionable.
 
 ### Cargo features
 
-`crates/mihomo-dns/Cargo.toml`:
+`crates/meow-dns/Cargo.toml`:
 
 ```toml
 [features]
@@ -334,7 +334,7 @@ hickory-resolver = { workspace = true }
 ```
 
 **Feature gate is introduced now, not deferred to M2.** Gating the
-encrypted-hickory features behind `mihomo-dns/encrypted` costs almost
+encrypted-hickory features behind `meow-dns/encrypted` costs almost
 nothing at implementation time — it's six lines in `Cargo.toml` plus
 `#[cfg(feature = "encrypted")]` on the `Tls` and `Https` arms of the
 `NameServerUrl::build_nameserver_config` match. Default-on, so every
@@ -353,7 +353,7 @@ VMess spec review.
 
 Following the convention locked in by `docs/specs/sniffer.md`:
 
-| Situation | Go mihomo | mihomo-rust | Classification |
+| Situation | Go mihomo | meow-rs | Classification |
 |-----------|-----------|-------------|----------------|
 | Unknown scheme silently dropped | warn-drop | **hard error** | security gap (silent auth downgrade → plaintext DNS) |
 | `default-nameserver` missing, encrypted upstream present | bootstrap fails at query time | **hard error at load** | fail-fast: same failure, just louder |
@@ -389,10 +389,10 @@ A PR implementing this spec must:
    the test harness peeking at the built `NameServerConfig.tls_dns_name`.
 10. `parse_nameservers` no longer emits `warn!("Failed to parse
     nameserver: …")` — every input either parses or hard-errors.
-11. `crates/mihomo-dns/Cargo.toml` declares an `encrypted` feature
+11. `crates/meow-dns/Cargo.toml` declares an `encrypted` feature
     (default-on) that pulls `hickory-resolver/tls-ring` and
     `hickory-resolver/https-ring`. `cargo build --no-default-features
-    -p mihomo-dns` compiles and produces a build that hard-errors at
+    -p meow-dns` compiles and produces a build that hard-errors at
     parse time on any `tls://` / `https://` nameserver with a message
     naming the `encrypted` feature. Both default and minimal builds
     are gated in CI once M2 footprint audit lands; for this PR, just
@@ -404,12 +404,12 @@ A PR implementing this spec must:
     are converted to `#[tokio::test]` — mechanical find-replace, no
     behaviour changes. See §Bootstrap flow for the rationale.
 13. A one-line note added to `docs/roadmap.md` M2 §footprint audit:
-    *"`mihomo-dns/encrypted` feature lands default-on in M1.E-1;
+    *"`meow-dns/encrypted` feature lands default-on in M1.E-1;
     M2 flips the default for minimal builds."*
 
 ## Test plan (starting point — qa owns final shape)
 
-**Unit (`crates/mihomo-dns/src/upstream.rs`):**
+**Unit (`crates/meow-dns/src/upstream.rs`):**
 
 - `parse_plain_bare_ip` — `"8.8.8.8"` → `Udp { 8.8.8.8:53 }`.
 - `parse_plain_bare_ip_with_port` — `"8.8.8.8:5353"` → port 5353.
@@ -443,7 +443,7 @@ A PR implementing this spec must:
   `HostOrIp::Host("dns.google")`. Needs bootstrap. Upstream: same
   function defaults bare entries to UDP; we match.
 
-**Unit (`crates/mihomo-dns/src/resolver.rs`):**
+**Unit (`crates/meow-dns/src/resolver.rs`):**
 
 - `bootstrap_dedupes_hostnames` — two `https://` entries pointing at
   the same hostname, assert bootstrap looked it up once.
@@ -468,7 +468,7 @@ A PR implementing this spec must:
   assert `tls_dns_name == Some("cloudflare-dns.com")` for the
   `#sni`-tagged entry.
 
-**Unit (`crates/mihomo-config/src/dns_parser.rs`):**
+**Unit (`crates/meow-config/src/dns_parser.rs`):**
 
 - `parse_dns_encrypted_upstream_loads` — YAML fixture with a full
   `default-nameserver` + DoH+DoT `nameserver`, assert `parse_dns`
@@ -487,7 +487,7 @@ A PR implementing this spec must:
   NOT: do not re-introduce the warn-drop path as a "lenient mode"
   escape hatch — fail the load.
 
-**Integration (`crates/mihomo-dns/tests/doh_dot_integration.rs`, NEW):**
+**Integration (`crates/meow-dns/tests/doh_dot_integration.rs`, NEW):**
 
 - `dot_resolves_example_com` — gated behind `#[ignore]` + manual
   `cargo test -- --ignored`, uses `tls://1.1.1.1:853#cloudflare-dns.com`.
@@ -503,7 +503,7 @@ A PR implementing this spec must:
 
 ## Implementation checklist (for engineer handoff)
 
-- [ ] New `crates/mihomo-dns/src/upstream.rs` with `NameServerUrl`,
+- [ ] New `crates/meow-dns/src/upstream.rs` with `NameServerUrl`,
       `HostOrIp`, `NameServerParseError`, and the full unit test
       list above.
 - [ ] Extend `Resolver` with `async fn new_with_bootstrap`; keep
@@ -517,19 +517,19 @@ A PR implementing this spec must:
       `runtime.block_on(async { load_config(...).await?; run(...).await })`.
 - [ ] Before converting tests: run two precheck greps and expect zero
       hits each.
-      (a) `grep -rn "tokio::runtime::Builder\|Runtime::new" crates/mihomo-config/tests/`
+      (a) `grep -rn "tokio::runtime::Builder\|Runtime::new" crates/meow-config/tests/`
       — any hit means that test manually builds its own runtime; converting
       it with the mechanical replace creates the exact nested-runtime panic
       the async constructor was meant to avoid. Convert those tests manually
       (drop the inner builder, use the outer `#[tokio::test]` runtime directly).
-      (b) `grep -rn "tokio::spawn\|tokio::task::spawn" crates/mihomo-config/tests/`
+      (b) `grep -rn "tokio::spawn\|tokio::task::spawn" crates/meow-config/tests/`
       — any hit means a test may rely on real parallelism; `#[tokio::test]`
       defaults to current-thread and will deadlock. Those tests need
       `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`.
-- [ ] Convert every `#[test]` in `crates/mihomo-config/tests/` that
+- [ ] Convert every `#[test]` in `crates/meow-config/tests/` that
       calls `load_config_from_str` to `#[tokio::test]`. Mechanical
       find-replace; no behaviour changes.
-- [ ] Introduce `encrypted` default-on Cargo feature on `mihomo-dns`
+- [ ] Introduce `encrypted` default-on Cargo feature on `meow-dns`
       gating `hickory-resolver/tls-ring` + `hickory-resolver/https-ring`.
       `#[cfg(feature = "encrypted")]` on the `Tls`/`Https` match arms
       of `NameServerUrl → NameServerConfig`. Hard-error path for the

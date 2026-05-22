@@ -3,7 +3,7 @@
 ## Reference: commit 9419421578f808c59db37fc7ec056a8971a741b9
 
 Platform: aarch64-apple-darwin (Apple Silicon), macOS 25.4.0, Rust stable 1.88  
-Workspace: mihomo-rust, commit `9419421578f808c59db37fc7ec056a8971a741b9`  
+Workspace: meow-rs, commit `9419421578f808c59db37fc7ec056a8971a741b9`  
 Tool: `cargo clippy --all-targets 2>&1`
 
 This document records the ADR-0010 addendum A §A1 lint probe: nine allocation-focused lints
@@ -68,8 +68,8 @@ Zero hits confirms:
 3. Any `warn` hit introduced by future M2 PRs will be visible in CI immediately.
 
 The `large_enum_variant` lint (default threshold: 200 B difference between largest and next-largest variant)
-did not fire. This is consistent with the `MihomoError` pre-probe result: at 32 B total, all variants
-are well within the threshold. See `footprint-types-baseline.md` §MihomoError for the full variant table.
+did not fire. This is consistent with the `MeowError` pre-probe result: at 32 B total, all variants
+are well within the threshold. See `footprint-types-baseline.md` §MeowError for the full variant table.
 
 ---
 

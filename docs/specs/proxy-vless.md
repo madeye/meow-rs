@@ -32,7 +32,7 @@ Upstream Go mihomo implements VLESS in `adapter/outbound/vless.go`
 
 In scope:
 
-1. New file `crates/mihomo-proxy/src/vless.rs` implementing
+1. New file `crates/meow-proxy/src/vless.rs` implementing
    `VlessAdapter: ProxyAdapter`.
 2. Plain VLESS — UUID auth header, raw stream passthrough, no body
    cipher. Requires outer TLS to be safe; we do **not** gate on
@@ -41,7 +41,7 @@ In scope:
 3. `flow: xtls-rprx-vision` — XTLS-Vision TLS-splice mode. Bundled
    in M1.B-2 (architect 2026-04-18). See §XTLS-Vision.
 4. TCP outbound. `network: tcp | ws | grpc | h2 | httpupgrade` via
-   the `mihomo-transport` chain (`vless::transport::build_chain` in
+   the `meow-transport` chain (`vless::transport::build_chain` in
    `vless.rs`).
 5. UDP-over-TCP (VLESS `cmd: 0x02`). Implemented inline in
    `vless/conn.rs`.
@@ -207,8 +207,8 @@ response or the TLS layer is missing.
 ### Address encoding
 
 Inline ~80 LOC in `vless/header.rs`. When a second consumer appears
-(e.g. VMess), promote to `mihomo-proxy/src/common/addr.rs` — not
-`mihomo-common`, which is for core traits, not protocol encoding
+(e.g. VMess), promote to `meow-proxy/src/common/addr.rs` — not
+`meow-common`, which is for core traits, not protocol encoding
 details. Do not create the shared module pre-emptively.
 
 | addr_type | Layout |
@@ -242,7 +242,7 @@ silently to the normal pass-through path.
 ### Vision mode algorithm
 
 ```
-1. Establish outer TLS (via mihomo-transport tls layer) + VLESS header.
+1. Establish outer TLS (via meow-transport tls layer) + VLESS header.
 2. Receive the first chunk of application data the caller wants to send.
 3. Read the first 5 bytes (the TLS record header) from the application:
    - byte[0] == 0x16 (TLS handshake record type)
@@ -329,7 +329,7 @@ and the vision-splice logic orthogonal.
 ### File layout
 
 ```
-crates/mihomo-proxy/src/
+crates/meow-proxy/src/
   vless.rs            // VlessAdapter + config parsing + transport::build_chain (~200 LOC)
   vless/
   ├── mod.rs          // pub use
@@ -339,8 +339,8 @@ crates/mihomo-proxy/src/
 ```
 
 Address encoding lives inline in `vless/header.rs` (~80 LOC). When a
-second consumer appears, promote to `mihomo-proxy/src/common/addr.rs`
-(not `mihomo-common` — this is a protocol encoding detail, not a core
+second consumer appears, promote to `meow-proxy/src/common/addr.rs`
+(not `meow-common` — this is a protocol encoding detail, not a core
 trait). No pre-emptive shared module.
 
 Total ~500 LOC for plain VLESS, ~700 LOC with Vision. Substantially
@@ -349,7 +349,7 @@ smaller than VMess because there is no crypto.
 ### Struct
 
 ```rust
-// crates/mihomo-proxy/src/vless.rs
+// crates/meow-proxy/src/vless.rs
 
 pub struct VlessAdapter {
     name: String,
@@ -358,7 +358,7 @@ pub struct VlessAdapter {
     uuid: Uuid,                    // 16-byte binary form stored
     flow: Option<VlessFlow>,       // None | Some(XtlsRprxVision)
     udp: bool,
-    transport: TransportChain,     // from mihomo-transport
+    transport: TransportChain,     // from meow-transport
     health: ProxyHealth,
     dialer: Arc<dyn TcpDialer>,
 }
@@ -395,7 +395,7 @@ impl ProxyAdapter for VlessAdapter {
 
 ### Config parser
 
-`mihomo-config/src/proxy_parser.rs::parse_vless` calls
+`meow-config/src/proxy_parser.rs::parse_vless` calls
 `vless::transport::build_chain(network, opts)` defined inline in
 `vless.rs`. The `flow` field is parsed to `Option<VlessFlow>` with
 the hard-errors listed in §Divergences.
@@ -409,7 +409,7 @@ message. This prevents silent ignore.
 ### Feature flags
 
 ```toml
-# crates/mihomo-proxy/Cargo.toml
+# crates/meow-proxy/Cargo.toml
 [features]
 default = ["vless"]
 vless = []               # no extra crypto deps — VLESS itself is dep-free
@@ -441,13 +441,13 @@ closes). Differentiate in logs:
 
 A PR implementing this spec must:
 
-1. `cargo build -p mihomo-proxy --features vless` compiles without any
+1. `cargo build -p meow-proxy --features vless` compiles without any
    transport layers.
 2. `cargo build --features "vless,tls,ws"` compiles and produces a
    VLESS-over-WS-over-TLS adapter — the real-world minimum.
 3. TCP relay works against a real upstream `xray` server configured
    for plain VLESS+TLS. Integration test at
-   `crates/mihomo-proxy/tests/vless_integration.rs` — same skip-if-absent
+   `crates/meow-proxy/tests/vless_integration.rs` — same skip-if-absent
    pattern as `vmess_integration.rs`.
 4. UDP relay works for a DNS query through the same `xray` server.
 5. `flow: xtls-rprx-vision` round-trips against an xray server with
@@ -576,7 +576,7 @@ Same skip-if-absent pattern as `vmess_integration.rs`. Binary name:
 ## Implementation checklist (for engineer handoff)
 
 - [ ] Add `vless` and `vless-vision` features to
-      `crates/mihomo-proxy/Cargo.toml`. No new crypto deps for `vless`;
+      `crates/meow-proxy/Cargo.toml`. No new crypto deps for `vless`;
       `vless-vision` depends only on standard tokio IO.
 - [ ] Implement `vless/header.rs`: request encoder (addon + command
       + port + addr), response decoder, addr encoding inline (~80 LOC).
@@ -591,11 +591,11 @@ Same skip-if-absent pattern as `vmess_integration.rs`. Binary name:
       splice. Add the upstream-cite comment
       `// upstream: transport/vless/vision/vision.go`.
 - [ ] Implement `VlessAdapter` in `vless.rs` composing the above with
-      the `mihomo-transport` chain. Define `vless::transport::build_chain`
+      the `meow-transport` chain. Define `vless::transport::build_chain`
       inline in `vless.rs` (VLESS is the first M1 consumer of this pattern).
 - [ ] Register `AdapterType::Vless` in
-      `crates/mihomo-common/src/adapter_type.rs`.
-- [ ] Wire YAML parsing in `mihomo-config/src/proxy_parser.rs`:
+      `crates/meow-common/src/adapter_type.rs`.
+- [ ] Wire YAML parsing in `meow-config/src/proxy_parser.rs`:
       - hard-errors for `flow: xtls-rprx-direct`, `flow: xtls-rprx-splice`,
         unknown flow strings.
       - hard-error for `reality-opts` presence.
@@ -616,7 +616,7 @@ Same skip-if-absent pattern as `vmess_integration.rs`. Binary name:
 
 1. **Addr-encoding dedup → inline, no pre-emptive shared module.**
    Inline ~80 LOC in `vless/header.rs`. When a second consumer appears,
-   promote to `mihomo-proxy/src/common/addr.rs` — not `mihomo-common`
+   promote to `meow-proxy/src/common/addr.rs` — not `meow-common`
    (protocol encoding detail, not a core trait). VLESS is the first
    consumer; create the shared module when the second appears.
 

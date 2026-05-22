@@ -1,6 +1,6 @@
 # `ech-tls-tunnel` — native client transport
 
-mihomo-rust ships a built-in (no-subprocess) client for the
+meow-rs ships a built-in (no-subprocess) client for the
 [`ech-tls-tunnel`](https://github.com/shadowsocks/ech-tls-tunnel)
 SIP003 plugin. The plugin wraps each Shadowsocks stream in a
 WebSocket-over-TLS connection on port 443, with the TLS `ClientHello`
@@ -20,13 +20,13 @@ brings in `aws-lc-rs` for HPKE primitives (rustls' `ring` provider does
 not expose HPKE):
 
 ```bash
-cargo build --release --features mihomo-app/ech-tls-tunnel
+cargo build --release --features meow-app/ech-tls-tunnel
 ```
 
-Or, when consuming `mihomo-app` directly:
+Or, when consuming `meow-app` directly:
 
 ```toml
-mihomo-app = { workspace = true, features = ["ech-tls-tunnel"] }
+meow-app = { workspace = true, features = ["ech-tls-tunnel"] }
 ```
 
 ## Server setup (upstream)
@@ -56,9 +56,9 @@ ech_key=/var/lib/ech-tls-tunnel/ech/ech.key"
 
 Note the base64-encoded `ECHConfigList` printed by `ech-gen-keys` (or
 `base64 -w0 /var/lib/ech-tls-tunnel/ech/ech.config_list`). You'll paste
-it into the mihomo client config below.
+it into the meow-rs client config below.
 
-## Client config (mihomo-rust)
+## Client config (meow-rs)
 
 ```yaml
 proxies:
@@ -77,7 +77,7 @@ proxies:
       ech_config: '<base64 ECHConfigList>'
 ```
 
-`mihomo-config` serialises `plugin-opts` to the SIP003 `key=value;…`
+`meow-config` serialises `plugin-opts` to the SIP003 `key=value;…`
 form internally, so you can equally write the opts as a single string.
 
 ## Options reference
@@ -88,7 +88,7 @@ form internally, so you can equally write the opts as a single string.
 | `sni`          | yes      | Inner SNI / cert-validation name / `Host:` header for the WebSocket upgrade. |
 | `path`         | yes      | Must start with `/`. Anything else gets a fake 404 from the server. |
 | `ech_config`   | yes      | Base64 of the wire-format `ECHConfigList`. Decoded once at parse time; invalid base64 or zero bytes errors. |
-| `fast_open`    | no       | Accepted for compatibility, currently ignored — mihomo-rust does not enable TCP Fast Open on outbound today. |
+| `fast_open`    | no       | Accepted for compatibility, currently ignored — meow-rs does not enable TCP Fast Open on outbound today. |
 
 `ech-config` (hyphen form) is accepted as an alias for `ech_config`.
 

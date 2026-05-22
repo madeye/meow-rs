@@ -1,0 +1,63 @@
+[package]
+name = "meow-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["ss", "trojan", "vless", "vless-vision"]
+ss = ["dep:shadowsocks"]
+trojan = []
+vless = []
+vless-vision = ["vless"]
+# Opt-in anytls outbound (uses the `anytls-rs` crate). Adds ~one extra TLS
+# provider to the binary because the upstream crate pins default rustls
+# features — accept the bloat in exchange for not re-implementing the
+# wire protocol. Off by default.
+anytls = ["dep:anytls-rs"]
+# Hysteria 2 outbound (issue #72). Tracer-bullet implementation: parser
+# wired and QUIC dial path stubbed, but the HTTP/3 auth handshake and
+# the data-stream framing land in follow-up PRs. Off by default.
+hysteria2 = ["dep:quinn"]
+# Native client for the `ech-tls-tunnel` SIP003 plugin
+# (https://github.com/shadowsocks/ech-tls-tunnel). Requires ECH on rustls,
+# which pulls aws-lc-rs in via meow-transport.
+ech-tls-tunnel = ["ss", "meow-transport/ech"]
+
+[dependencies]
+meow-common = { workspace = true }
+meow-dns = { workspace = true }
+meow-transport = { workspace = true }
+tokio = { workspace = true }
+anytls-rs = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+shadowsocks = { workspace = true, optional = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+base64 = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+serde_json = { workspace = true }
+socket2 = { workspace = true }
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+rcgen = "0.13"
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }
+smol_str = { workspace = true }
+
+[lints]
+workspace = true

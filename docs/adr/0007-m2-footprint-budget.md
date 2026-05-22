@@ -7,7 +7,7 @@
 - **Related:** roadmap §M2 items 3 (feature flags + minimal build) and 5
   (release CI), vision §M2 goal 3 ("single static binary, minimal runtime
   allocations… aggressive feature-gating"),
-  [ADR-0001](0001-mihomo-transport-crate.md) (feature-gating scheme),
+  [ADR-0001](0001-meow-transport-crate.md) (feature-gating scheme),
   [ADR-0006](0006-m2-benchmark-methodology.md) (also includes a default-build
   size threshold vs Go),
   [ADR-0008](0008-m2-allocator-audit.md) (allocator choice affects binary size)
@@ -21,13 +21,13 @@ small." `docs/roadmap.md` §M2 item 3 translates that into:
 > Cargo feature flags for every optional protocol/transport; minimal-build
 > size budget for `aarch64-musl` and `mipsel-musl`.
 
-M1 landed the plumbing (ADR-0001's `mihomo-transport` feature set, per-crate
+M1 landed the plumbing (ADR-0001's `meow-transport` feature set, per-crate
 Cargo features in every optional protocol). What's missing is the **budget**:
 a concrete byte count per (target, feature-profile) that the release CI
 enforces.
 
 Without numbers, "feature flags" means only "flags exist". A user running on
-a 16 MB / 32 MB flash router has no way to tell whether mihomo-rust fits
+a 16 MB / 32 MB flash router has no way to tell whether meow-rs fits
 and the team has no target to tune against. Same unfalsifiability problem
 as ADR-0006's perf claim.
 
@@ -47,7 +47,7 @@ The concrete decisions this ADR settles:
 
 ### 1. Two build profiles, two hard-gated targets + one soft target
 
-mihomo-rust releases in M2 publish **four hard-gated binaries** —
+meow-rs releases in M2 publish **four hard-gated binaries** —
 `{minimal, default} × {aarch64-linux-musl, x86_64-linux-musl}` — and
 **two soft-gated binaries** on `mipsel-linux-musl` (measured and
 published, not release-blocking). See §4 for what hard vs soft means.
@@ -92,7 +92,7 @@ Rationale for the minimal feature list:
 Feature set: whatever `cargo build --release` emits with default features.
 This is the "everything reasonable is on" binary that matches the typical
 Clash Meta install (`tls,ws,grpc,h2,httpupgrade,vless,...`). The feature list
-is defined by `mihomo-app/Cargo.toml`'s `[features] default = [...]`, not
+is defined by `meow-app/Cargo.toml`'s `[features] default = [...]`, not
 here — this ADR freezes the *budget*, not the *contents* of the default set.
 
 **Targets — why two hard, one soft:**
@@ -138,7 +138,7 @@ headroom across M2 feature growth.
 **Rationale for the numbers (not pulled from thin air):**
 
 - **mipsel `minimal` = 7 MiB.** The common legacy mipsel router flash is
-  16 MiB with ~6–8 MiB free after the OpenWRT base. 7 MiB lets mihomo-rust
+  16 MiB with ~6–8 MiB free after the OpenWRT base. 7 MiB lets meow-rs
   fit with overlayfs + config + logs, matching the tightest real user target
   we have.
 - **aarch64 `minimal` = 8 MiB.** Slightly looser — aarch64 codegen is ~8%
@@ -269,9 +269,9 @@ of a loaded config.
 ### Negative / risks
 
 - **`panic = "abort"` removes unwind.** Any non-abort panic handling in
-  `mihomo-api` (e.g. catch_unwind for per-request isolation) is blocked.
+  `meow-api` (e.g. catch_unwind for per-request isolation) is blocked.
   Already ruled out by QA invariant (memory
-  `feedback_api_no_catch_panic.md` — "no CatchPanic on mihomo-api
+  `feedback_api_no_catch_panic.md` — "no CatchPanic on meow-api
   router"), so this is consistent.
 - **`lto = "fat"` lengthens release builds.** Maybe 3–6 minutes added on
   x86_64-linux-musl. Acceptable at release cadence; dev builds use
@@ -341,9 +341,9 @@ Engineer-b (Task #28) executes:
    rustls (TLS), and hickory-server are unconditionally compiled. Before
    any §2 measurement is meaningful, add Cargo features for each:
    - `ss` (Shadowsocks + AEAD crates),
-   - `trojan` (Trojan adapter — already partly gated via `mihomo-transport`),
+   - `trojan` (Trojan adapter — already partly gated via `meow-transport`),
    - `tls` (rustls + webpki + ALPN — may already exist via
-     `mihomo-transport::tls`; verify),
+     `meow-transport::tls`; verify),
    - `dns-server` (hickory-server; distinct from `dns-client` for DoH/DoT
      upstream, so a minimal build can keep the UDP server without pulling
      rustls into the resolver path),
@@ -382,13 +382,13 @@ architect commitment, the `Cargo.toml` flags are the implementation.
 
 - `docs/roadmap.md` §M2 items 3 + 5 — pinned by this ADR.
 - `docs/vision.md` §M2 goal 3.
-- [ADR-0001](0001-mihomo-transport-crate.md) §5 — the feature-flag
+- [ADR-0001](0001-meow-transport-crate.md) §5 — the feature-flag
   scheme this ADR's profiles consume.
 - [ADR-0006](0006-m2-benchmark-methodology.md) §5 — the default-build
   size row vs Go; this ADR's §2 absolute cap complements it.
 - [ADR-0008](0008-m2-allocator-audit.md) §2 — allocator choice drives
   part of the §3 build discipline.
-- `crates/mihomo-bench/src/bench_binary_size.rs` — existing
+- `crates/meow-bench/src/bench_binary_size.rs` — existing
   file-size-via-`metadata().len()` measurement; reuse in CI gate.
 - `docs/ci-status.md` — CI baseline this ADR's release workflow lands
   into.

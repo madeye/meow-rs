@@ -40,7 +40,7 @@ or get an inline `#[allow(reason = "…")]`.
 | `format_push_string`              | `s.push_str(&format!(…))` allocates a temporary `String`; the lint suggests `write!(s, …)`. |
 | `string_add`                      | `a + &b` allocates a new `String` per concatenation; replace with `format!` or pre-sized push. |
 | `useless_format`                  | `format!("{}", x)` where `x.to_string()` (or just `x`) suffices — a guaranteed-redundant heap allocation. |
-| `large_enum_variant`              | One bloated variant balloons every instance to its size. Top suspect: `MihomoError` enum (size unknown — measure in M2.baseline). |
+| `large_enum_variant`              | One bloated variant balloons every instance to its size. Top suspect: `MeowError` enum (size unknown — measure in M2.baseline). |
 | `large_types_passed_by_value`     | Functions taking `Metadata` by value force a 200+ byte memcpy at every call. M2.layout-metadata cares about this. |
 | `unnecessary_box_returns`         | `Box<T>` return for a small T is one alloc per call with no purpose. |
 | `vec_init_then_push`              | `let mut v = Vec::new(); v.push(a); v.push(b);` → `vec![a, b]` (single alloc with right capacity). |

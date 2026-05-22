@@ -1,6 +1,6 @@
 #!/bin/bash
 # run-tests.sh — Runs inside a privileged Docker container.
-# Starts mihomo with tproxy config, verifies nftables rules,
+# Starts meow with tproxy config, verifies nftables rules,
 # tests transparent proxy interception, and prints results.
 
 set -uo pipefail
@@ -22,23 +22,23 @@ done) &
 ECHO_PID=$!
 echo "Echo server started on 10.88.0.1:9999 (PID $ECHO_PID)"
 
-# --- Start mihomo ---
-mihomo -f /etc/mihomo-tproxy.yaml > /tmp/mihomo.log 2>&1 &
-MIHOMO_PID=$!
-echo "mihomo started (PID $MIHOMO_PID)"
+# --- Start meow ---
+meow -f /etc/meow-tproxy.yaml > /tmp/meow.log 2>&1 &
+MEOW_PID=$!
+echo "meow started (PID $MEOW_PID)"
 
 # --- Wait for TProxy listener to be ready (up to 10s) ---
 READY=0
 for i in $(seq 1 20); do
     # Match both legacy "TProxy listener started" and current
     # "TProxy listener '<name>' started on <addr>" formats.
-    if grep -qE "TProxy listener( '[^']*')? started" /tmp/mihomo.log 2>/dev/null; then
+    if grep -qE "TProxy listener( '[^']*')? started" /tmp/meow.log 2>/dev/null; then
         READY=1
         echo "TProxy listener ready after $((i * 500))ms"
         break
     fi
-    if ! kill -0 "$MIHOMO_PID" 2>/dev/null; then
-        echo "mihomo exited prematurely"
+    if ! kill -0 "$MEOW_PID" 2>/dev/null; then
+        echo "meow exited prematurely"
         break
     fi
     sleep 0.5
@@ -54,36 +54,36 @@ else
     fail "tproxy_ready"
 fi
 
-# Test 2: mihomo_alive — mihomo process is still running
-if kill -0 "$MIHOMO_PID" 2>/dev/null; then
-    pass "mihomo_alive"
+# Test 2: meow_alive — meow process is still running
+if kill -0 "$MEOW_PID" 2>/dev/null; then
+    pass "meow_alive"
 else
-    fail "mihomo_alive"
+    fail "meow_alive"
 fi
 
 # Test 3: nftables_table — nftables table was created
-if nft list table inet mihomo_tproxy >/dev/null 2>&1; then
+if nft list table inet meow_tproxy >/dev/null 2>&1; then
     pass "nftables_table"
 else
     fail "nftables_table"
 fi
 
 # Test 4: nftables_redirect — redirect rule exists in output chain
-if nft list chain inet mihomo_tproxy output 2>/dev/null | grep -q "redirect to :7893"; then
+if nft list chain inet meow_tproxy output 2>/dev/null | grep -q "redirect to :7893"; then
     pass "nftables_redirect"
 else
     fail "nftables_redirect"
 fi
 
 # Test 5: nftables_bypass — bypass rule for upstream proxy IP (10.99.0.1) exists
-if nft list chain inet mihomo_tproxy output 2>/dev/null | grep -q "10.99.0.1"; then
+if nft list chain inet meow_tproxy output 2>/dev/null | grep -q "10.99.0.1"; then
     pass "nftables_bypass"
 else
     fail "nftables_bypass"
 fi
 
 # Test 5b: nftables_mark — SO_MARK bypass rule exists (routing-mark: 9527 = 0x2537)
-if nft list chain inet mihomo_tproxy output 2>/dev/null | grep -q "meta mark"; then
+if nft list chain inet meow_tproxy output 2>/dev/null | grep -q "meta mark"; then
     pass "nftables_mark"
 else
     fail "nftables_mark"
@@ -102,8 +102,8 @@ RESPONSE=""
 RESPONSE=$(echo "HELLO" | timeout 5 nc -w 3 10.88.0.1 9999 2>/dev/null) || true
 sleep 1
 
-# Verify mihomo logged the intercepted connection to 10.88.0.1:9999
-if grep -q "10.88.0.1:9999" /tmp/mihomo.log 2>/dev/null; then
+# Verify meow logged the intercepted connection to 10.88.0.1:9999
+if grep -q "10.88.0.1:9999" /tmp/meow.log 2>/dev/null; then
     pass "tproxy_intercept"
 else
     fail "tproxy_intercept"
@@ -141,24 +141,24 @@ fi
 } | timeout 3 nc -w 2 10.88.0.1 443 2>/dev/null || true
 sleep 1
 
-if grep -q "sni.example.com" /tmp/mihomo.log 2>/dev/null; then
+if grep -q "sni.example.com" /tmp/meow.log 2>/dev/null; then
     pass "tproxy_sni_extract"
 else
     fail "tproxy_sni_extract"
 fi
 
-# Test 10: firewall_teardown — stop mihomo, verify nftables rules cleaned up
-kill -TERM "$MIHOMO_PID" 2>/dev/null
+# Test 10: firewall_teardown — stop meow, verify nftables rules cleaned up
+kill -TERM "$MEOW_PID" 2>/dev/null
 # Wait for process to exit (up to 5s)
 for i in $(seq 1 10); do
-    kill -0 "$MIHOMO_PID" 2>/dev/null || break
+    kill -0 "$MEOW_PID" 2>/dev/null || break
     sleep 0.5
 done
 # Force kill if still alive
-kill -9 "$MIHOMO_PID" 2>/dev/null || true
+kill -9 "$MEOW_PID" 2>/dev/null || true
 sleep 1
 
-if nft list table inet mihomo_tproxy >/dev/null 2>&1; then
+if nft list table inet meow_tproxy >/dev/null 2>&1; then
     fail "firewall_teardown"
 else
     pass "firewall_teardown"
@@ -166,8 +166,8 @@ fi
 
 # --- Debug output ---
 echo ""
-echo "=== mihomo log ==="
-cat /tmp/mihomo.log 2>/dev/null || echo "(no log)"
+echo "=== meow log ==="
+cat /tmp/meow.log 2>/dev/null || echo "(no log)"
 echo "=== end log ==="
 
 echo ""

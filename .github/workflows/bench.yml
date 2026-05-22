@@ -35,7 +35,7 @@ jobs:
           restore-keys: bench-${{ runner.os }}-
 
       - name: Build release binaries
-        run: cargo build --release -p mihomo-app -p mihomo-bench
+        run: cargo build --release -p meow-app -p meow-bench
 
       - name: Run benchmark harness
         env:

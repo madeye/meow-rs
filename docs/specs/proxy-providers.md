@@ -15,7 +15,7 @@ Related gap-analysis rows: §5 `/providers/proxies*` endpoints, §6
 A real Clash Meta subscription file almost always uses proxy-providers
 rather than an inline `proxies:` list. The YAML file is a few lines;
 the actual proxy list is fetched at startup from an HTTP subscription
-URL. Without proxy-providers, mihomo-rust cannot load typical
+URL. Without proxy-providers, meow-rs cannot load typical
 real-world configs that point at managed subscription services — which
 is the principal barrier to M1 exit.
 
@@ -89,7 +89,7 @@ Out of scope:
 - Sharing the background-refresh tokio task structure with rule-
   providers in the same PR. The patterns are similar; dedup can happen
   naturally in M1.D-5 when the rule-provider spec absorbs the interval
-  story. For now, duplicate the refresh loop in `mihomo-config` and
+  story. For now, duplicate the refresh loop in `meow-config` and
   leave a `// TODO: unify with rule-provider refresh in M1.D-5` marker.
 
 ## User-facing config
@@ -206,19 +206,19 @@ silently no-ops (with a warn). The warn makes the gap visible.
 
 ## Internal design
 
-### New crate: `mihomo-providers` or module in `mihomo-config`?
+### New crate: `meow-providers` or module in `meow-config`?
 
-**Recommendation: module inside `mihomo-config`**, not a new crate.
+**Recommendation: module inside `meow-config`**, not a new crate.
 Reasoning:
 
 - The provider loading logic (HTTP fetch → YAML parse → `Vec<ProxyConfig>`)
-  depends heavily on `mihomo-config`'s proxy parser. A separate crate
-  would either depend on `mihomo-config` (creating a near-circular
+  depends heavily on `meow-config`'s proxy parser. A separate crate
+  would either depend on `meow-config` (creating a near-circular
   reference) or duplicate the parser.
-- Rule-providers already live in `crates/mihomo-config/src/rule_provider.rs`.
+- Rule-providers already live in `crates/meow-config/src/rule_provider.rs`.
   Proxy-providers are the natural sibling: `proxy_provider.rs`.
 - The only new external dep is `reqwest` (HTTP client), which belongs
-  in `mihomo-config` rather than a separate crate.
+  in `meow-config` rather than a separate crate.
 
 If the provider manager grows significantly in M2 (hot-reload, signed
 subscriptions), extract to a crate then.
@@ -230,7 +230,7 @@ of the rest of the system. They are a concrete record with two
 runtime variants (http, file) expressed as an enum:
 
 ```rust
-// crates/mihomo-config/src/proxy_provider.rs
+// crates/meow-config/src/proxy_provider.rs
 
 pub struct ProxyProvider {
     pub name: String,
@@ -376,7 +376,7 @@ the same URL probe mechanism as the delay endpoint.
 
 ### reqwest dependency
 
-`mihomo-config` gains a `reqwest` dep for HTTP provider fetch:
+`meow-config` gains a `reqwest` dep for HTTP provider fetch:
 
 ```toml
 [dependencies]
@@ -397,9 +397,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 Net new dep tree: ~12 crates. The `proxy-providers` feature gate allows
 minimal builds to drop reqwest entirely.
 
-**Feature gate:** `proxy-providers` feature on `mihomo-config` gates
+**Feature gate:** `proxy-providers` feature on `meow-config` gates
 the reqwest dep. Default-on. M2 footprint audit flips if the dep
-tree is significant. Same pattern as `mihomo-dns/encrypted`.
+tree is significant. Same pattern as `meow-dns/encrypted`.
 
 ```toml
 [features]
@@ -416,7 +416,7 @@ the provider would drop all proxies from the group without diagnostic.
 
 ### REST API additions
 
-All three endpoints live in `crates/mihomo-api/src/routes.rs` under
+All three endpoints live in `crates/meow-api/src/routes.rs` under
 the existing `/providers` router.
 
 ```
@@ -484,7 +484,7 @@ A PR implementing this spec must:
     (not one per proxy). Class B per ADR-0002.
 11. `interval:` on a `file` provider logs exactly one `warn!` at load.
 12. Unknown `use:` provider name logs exactly one `warn!` per group.
-13. `crates/mihomo-config` with `--no-default-features` compiles; a
+13. `crates/meow-config` with `--no-default-features` compiles; a
     config with `proxy-providers:` entries hard-errors at load with
     the "rebuild with --features proxy-providers" message.
 14. Selector group falls back to the **first proxy in the provider's
@@ -518,7 +518,7 @@ A PR implementing this spec must:
 
 ## Test plan (starting point — qa owns final shape)
 
-**Unit (`crates/mihomo-config/src/proxy_provider.rs`):**
+**Unit (`crates/meow-config/src/proxy_provider.rs`):**
 
 - `filter_regex_keeps_matching_names` — provider with `filter: "^HK"`,
   fixture YAML with 3 proxies, assert only the HK-named proxy survives.
@@ -588,7 +588,7 @@ A PR implementing this spec must:
 - `get_providers_proxies_name_healthcheck_returns_204` — assert 204
   and that health-check results eventually appear in the provider state.
 
-**Integration (`crates/mihomo-config/tests/proxy_provider_test.rs`,
+**Integration (`crates/meow-config/tests/proxy_provider_test.rs`,
 new file):**
 
 - `load_config_with_http_provider` — starts a local HTTP server
@@ -604,13 +604,13 @@ new file):**
 
 ## Implementation checklist (for engineer handoff)
 
-- [ ] Add `raw::RawProxyProvider` to `crates/mihomo-config/src/raw.rs`;
+- [ ] Add `raw::RawProxyProvider` to `crates/meow-config/src/raw.rs`;
       add `proxy_providers: Option<HashMap<String, RawProxyProvider>>`
       to `RawConfig`.
 - [ ] Add `use`, `filter`, `exclude_filter`, `exclude_type`,
       `include_all` fields to `raw::RawProxyGroup` (and the existing
       `ProxyGroup` parsed struct).
-- [ ] Implement `crates/mihomo-config/src/proxy_provider.rs`:
+- [ ] Implement `crates/meow-config/src/proxy_provider.rs`:
       - `ProxyProvider` struct + `ProviderConfig` enum.
       - `load_proxy_providers(raw, cache_dir, proxy_parser_ctx)
          -> HashMap<String, Arc<ProxyProvider>>`.
@@ -624,12 +624,12 @@ new file):**
 - [ ] Update proxy group resolution in `lib.rs` to merge provider
       proxies into each group's proxy list after provider loading.
 - [ ] Add `proxy_providers: HashMap<String, Arc<ProxyProvider>>` to
-      `AppState` in `mihomo-app/src/main.rs`.
+      `AppState` in `meow-app/src/main.rs`.
 - [ ] Spawn background refresh tasks (one per http provider with
       interval > 0) and health-check tasks (one per provider with
       health-check.enable) in `main.rs`.
 - [ ] Add `selector_falls_back_when_selection_removed` guard in
-      `mihomo-proxy/src/group/selector.rs`. Fallback is deterministic:
+      `meow-proxy/src/group/selector.rs`. Fallback is deterministic:
       first proxy in provider's current Vec iteration order (YAML order).
       `GET /proxies/:name` must report actual post-fallback proxy name.
       Re-selection consults live provider list, not a cached snapshot.
@@ -640,12 +640,12 @@ new file):**
       at construction time. Add a comment at the local-cache footgun:
       `// do not store proxy_list as a field — re-read from provider
       // on each sweep; see docs/specs/proxy-providers.md §concern-2`.
-- [ ] Add REST API routes in `mihomo-api/src/routes.rs`:
+- [ ] Add REST API routes in `meow-api/src/routes.rs`:
       - `GET /providers/proxies`
       - `GET /providers/proxies/:name`
       - `PUT /providers/proxies/:name`
       - `GET /providers/proxies/:name/healthcheck`
-- [ ] Add `proxy-providers` Cargo feature to `mihomo-config/Cargo.toml`
+- [ ] Add `proxy-providers` Cargo feature to `meow-config/Cargo.toml`
       gating `reqwest`. Hard-error path in `load_proxy_providers` when
       feature absent.
 - [ ] Add `// TODO: unify with rule-provider refresh in M1.D-5` comment

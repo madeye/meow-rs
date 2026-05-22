@@ -14,7 +14,7 @@ port-only flows where the client hands the listener an IP literal (common
 for browsers that resolved DNS locally, for transparent-proxy traffic,
 and for SOCKS5 clients that pass `dst_ip` instead of `dst_host`).
 
-Today, mihomo-rust sniffs SNI only inside `tproxy/mod.rs`, only on port
+Today, meow-rs sniffs SNI only inside `tproxy/mod.rs`, only on port
 443, only when `enable_sni` is true. The mixed / HTTP / SOCKS5 listeners
 never sniff, so IP-literal traffic through them skips domain rules
 entirely. Users hit this as "my `DOMAIN-SUFFIX` rule doesn't match even
@@ -31,32 +31,32 @@ Upstream exposes a config block that:
   (`override-destination`) or is only used when `host` is an IP literal
   (`parse-pure-ip`).
 
-This spec wires all of that into mihomo-rust with one shared sniffer
+This spec wires all of that into meow-rs with one shared sniffer
 module and one call-site per inbound.
 
 ## Scope
 
 In scope:
 
-1. **Pure parsers live in `crates/mihomo-common/src/sniffer/`** — no async,
+1. **Pure parsers live in `crates/meow-common/src/sniffer/`** — no async,
    no `TcpStream`, no trie. Just:
    - `pub fn sniff_tls(buf: &[u8]) -> Option<String>` (SNI)
    - `pub fn sniff_http(buf: &[u8]) -> Option<String>` (`Host:` header)
 
-   **Runtime glue lives in `crates/mihomo-listener/src/sniffer.rs`** — the
+   **Runtime glue lives in `crates/meow-listener/src/sniffer.rs`** — the
    async entry point that listeners call, plus the compiled trie state:
    - `pub struct SnifferRuntime { cfg, skip, force }`
    - `pub async fn SnifferRuntime::sniff(&TcpStream, &mut Metadata) -> Result<...>`
 
    This split (pure-in-common, runtime-in-listener) matches the CLAUDE.md
-   convention that `mihomo-common` holds trait contracts + types, not
+   convention that `meow-common` holds trait contracts + types, not
    `TcpStream::peek` glue. It also lets pure parser tests run against
-   `&[u8]` fixtures in `mihomo-common/tests/` while runtime integration
-   tests bind real sockets under `mihomo-listener/tests/`.
-2. Move the existing TLS parser out of `mihomo-listener/src/tproxy/sni.rs`
-   into `mihomo-common/src/sniffer/tls.rs`. Tproxy keeps a one-line
+   `&[u8]` fixtures in `meow-common/tests/` while runtime integration
+   tests bind real sockets under `meow-listener/tests/`.
+2. Move the existing TLS parser out of `meow-listener/src/tproxy/sni.rs`
+   into `meow-common/src/sniffer/tls.rs`. Tproxy keeps a one-line
    call-site against `SnifferRuntime` (which lives in the same crate).
-3. New `SnifferConfig` struct in `mihomo-config` matching the upstream
+3. New `SnifferConfig` struct in `meow-config` matching the upstream
    YAML schema (see §User-facing config).
 4. Wire `SnifferRuntime::sniff` into the Mixed, HTTP, SOCKS5, and TProxy
    inbound dispatch paths. TProxy keeps its existing fallback chain
@@ -131,7 +131,7 @@ Field semantics (ordered by spec impact, not alphabetically):
 | `skip-domain` | list<glob> | empty | Domains in this list are never sniffed even if eligible. Applied *after* extraction — if the sniffed SNI matches a `skip-domain` entry, the result is discarded and `sniff_host` is left empty. |
 | `force-dns-mapping` | bool | `false` | **Accepted and ignored.** Upstream uses it to reuse fake-ip reverse mappings when sniffing. We do not implement fake-ip (`vision.md` non-goal); parser warns once on `true` and proceeds. Divergence documented here so config compat stays. |
 
-Glob matcher: reuse `mihomo-trie::DomainTrie` for `skip-domain` and
+Glob matcher: reuse `meow-trie::DomainTrie` for `skip-domain` and
 `force-domain`. The existing trie already handles `+.example.com`,
 `*.example.com`, and literal matches. No new matcher code.
 
@@ -187,7 +187,7 @@ warn-and-ignore vs hard-error on an unimplemented upstream knob.
 2. **No `QUIC` sniffer.** Upstream ships one; we do not. Parser warns
    and ignores `sniff.QUIC.ports` if present.
 3. **No `tls-fingerprint` key.** Upstream has an undocumented feature
-   gate that mihomo-rust does not implement. Rejected at parse time with
+   gate that meow-rs does not implement. Rejected at parse time with
    a clear error (not silent) so users don't assume it's active.
 
 ## Internal design sketch
@@ -195,26 +195,26 @@ warn-and-ignore vs hard-error on an unimplemented upstream knob.
 ### Module layout (split across two crates)
 
 ```
-crates/mihomo-common/src/sniffer/
+crates/meow-common/src/sniffer/
 ├── mod.rs          // pub use {sniff_tls, sniff_http}; no async, no TcpStream
 ├── tls.rs          // sniff_tls(&[u8]) -> Option<String>
 └── http.rs         // sniff_http(&[u8]) -> Option<String>
 
-crates/mihomo-listener/src/sniffer.rs
+crates/meow-listener/src/sniffer.rs
 // SnifferRuntime::sniff, timeout wrap, DomainTrie state
 ```
 
-`mihomo-common` gets only pure parsing functions. No `tokio`, no
-`TcpStream`, no `DomainTrie` — CLAUDE.md reserves `mihomo-common` for
+`meow-common` gets only pure parsing functions. No `tokio`, no
+`TcpStream`, no `DomainTrie` — CLAUDE.md reserves `meow-common` for
 trait contracts and types, not inbound dispatch glue. The runtime
-(`SnifferRuntime`) lives in `mihomo-listener` alongside the other
+(`SnifferRuntime`) lives in `meow-listener` alongside the other
 `Arc<AppState>`-held structs the listeners already depend on, so
 there's no round-trip through common for state that only listeners
 read.
 
 Testability split: pure parsers get byte-fixture unit tests under
-`mihomo-common/tests/`. Runtime + timeout + trie behaviour get
-integration tests under `mihomo-listener/tests/` binding real sockets.
+`meow-common/tests/`. Runtime + timeout + trie behaviour get
+integration tests under `meow-listener/tests/` binding real sockets.
 
 ### Entry point
 
@@ -335,9 +335,9 @@ return `None` and the rule engine falls back to the IP literal, same as
 today.
 
 **`httparse` dependency**: add `httparse = "1"` (default-features off,
-it's no-std-compatible) explicitly to `mihomo-common/Cargo.toml`. Do
+it's no-std-compatible) explicitly to `meow-common/Cargo.toml`. Do
 **not** rely on transitive availability through axum — Cargo enforces
-crate-visibility and `mihomo-common` cannot `use httparse` without its
+crate-visibility and `meow-common` cannot `use httparse` without its
 own dep line. This is a 2-line Cargo.toml change, non-negotiable.
 
 ### Listener integration points
@@ -345,13 +345,13 @@ own dep line. This is a 2-line Cargo.toml change, non-negotiable.
 Exactly four call sites. Each is a single line before the existing
 tunnel dispatch:
 
-1. `crates/mihomo-listener/src/mixed.rs` — after peeking HTTP vs SOCKS,
+1. `crates/meow-listener/src/mixed.rs` — after peeking HTTP vs SOCKS,
    before metadata dispatch.
-2. `crates/mihomo-listener/src/http_proxy.rs` — after parsing the
+2. `crates/meow-listener/src/http_proxy.rs` — after parsing the
    `CONNECT` target, before tunnel dispatch.
-3. `crates/mihomo-listener/src/socks5.rs` — after parsing the SOCKS5
+3. `crates/meow-listener/src/socks5.rs` — after parsing the SOCKS5
    target, before tunnel dispatch.
-4. `crates/mihomo-listener/src/tproxy/mod.rs` — replace the existing
+4. `crates/meow-listener/src/tproxy/mod.rs` — replace the existing
    port-443-hardcoded SNI path with `runtime.sniff(...)`. Keep the
    DNS-snoop reverse-lookup fallback on the `sniff_host` being empty.
 
@@ -362,7 +362,7 @@ already hold `AppState` / `Tunnel` references.
 ### Interaction with existing tproxy SNI path
 
 `tproxy/sni.rs::extract_sni` gets deleted; its test module moves to
-`mihomo-common/src/sniffer/tls.rs`. The tproxy call site changes from:
+`meow-common/src/sniffer/tls.rs`. The tproxy call site changes from:
 
 ```rust
 let mut hostname = if enable_sni && orig_dst.port() == 443 {
@@ -405,7 +405,7 @@ per-connection.
 
 ### Config parser
 
-`mihomo-config/src/lib.rs` grows a `SnifferConfig` struct and a
+`meow-config/src/lib.rs` grows a `SnifferConfig` struct and a
 `sniffer:` top-level field. The runtime compiles `skip-domain` and
 `force-domain` into `DomainTrie` at load, and builds a
 `HashMap<u16, Proto>` for the port dispatch. An empty `sniff` map with
@@ -432,7 +432,7 @@ derived from existing per-connection logs.
 
 A PR implementing this spec must:
 
-1. `crates/mihomo-common/src/sniffer/` exists with `tls.rs` + `http.rs` +
+1. `crates/meow-common/src/sniffer/` exists with `tls.rs` + `http.rs` +
    `mod.rs`. `tproxy/sni.rs` is deleted.
 2. `SnifferConfig` parses the YAML block above, including all eight
    fields: `enable`, `timeout`, `parse-pure-ip`, `override-destination`,
@@ -476,7 +476,7 @@ A PR implementing this spec must:
 13. Partial ClientHello: a peek that returns only the TLS record
     header (5 bytes) followed by a truncated handshake does not panic
     and returns `None` from `sniff_tls`. Verified by a migrated or
-    newly-added test in `mihomo-common/src/sniffer/tls.rs`.
+    newly-added test in `meow-common/src/sniffer/tls.rs`.
 
 ## Test plan (starting point — qa owns final shape)
 
@@ -485,7 +485,7 @@ Apply the divergence-comment convention from
 upstream-compat divergence; the first three bullets below show the
 format.
 
-**Unit (`crates/mihomo-common/src/sniffer/tls.rs`):** keep the existing
+**Unit (`crates/meow-common/src/sniffer/tls.rs`):** keep the existing
 seven parse-level tests from `tproxy/sni.rs` verbatim after the move,
 **plus** one new case if none of the seven already covers it:
 
@@ -500,7 +500,7 @@ seven parse-level tests from `tproxy/sni.rs` verbatim after the move,
   ClientHellos legally span segments and a regression here would
   be silent for users on slow links.
 
-**Unit (`crates/mihomo-common/src/sniffer/http.rs`):**
+**Unit (`crates/meow-common/src/sniffer/http.rs`):**
 
 - `sniff_http_basic_host_header` — `GET / HTTP/1.1\r\nHost: example.com\r\n\r\n`
   → `Some("example.com")`.
@@ -516,8 +516,8 @@ seven parse-level tests from `tproxy/sni.rs` verbatim after the move,
 - `sniff_http_no_host_header_none` — valid HTTP/1.0 request without
   `Host:` → `None`.
 
-**Unit (`crates/mihomo-listener/src/sniffer.rs`):** runtime behaviour
-tests live alongside the runtime, not in `mihomo-common`.
+**Unit (`crates/meow-listener/src/sniffer.rs`):** runtime behaviour
+tests live alongside the runtime, not in `meow-common`.
 
 - `sniffer_disabled_noop` — `enable: false`, verify no `peek()` call.
 - `sniffer_parse_pure_ip_skips_domain` — `host = "example.com"`,
@@ -547,10 +547,10 @@ tests live alongside the runtime, not in `mihomo-common`.
   another await.
 - `sniffer_force_dns_mapping_true_emits_one_warn` — use a
   tracing-capture layer. Upstream: dispatcher/sniffer reuses fake-ip
-  reverse mappings here. NOT implemented in mihomo-rust (fake-ip is a
+  reverse mappings here. NOT implemented in meow-rs (fake-ip is a
   `vision.md` non-goal); accept-and-warn is the documented divergence.
 
-**Unit (`crates/mihomo-config/tests/config_test.rs`):** config-parser
+**Unit (`crates/meow-config/tests/config_test.rs`):** config-parser
 tests for the synthesis and validation paths — these are load-time
 behaviour, not runtime.
 
@@ -570,7 +570,7 @@ behaviour, not runtime.
 - `parse_sniffer_timeout_out_of_range_errors` — `timeout: 0` and
   `timeout: 60001` both rejected with a range error.
 
-**Integration (`crates/mihomo-listener/tests/sniffer_integration.rs`,
+**Integration (`crates/meow-listener/tests/sniffer_integration.rs`,
 new file):**
 
 - `socks5_ip_literal_with_tls_clienthello_matches_domain_rule` — spin
@@ -595,26 +595,26 @@ Granularity: ~14 starter bullets, same shape as the api-delay test plan.
 ## Implementation checklist (for engineer handoff)
 
 - [ ] Create pure parsers in
-      `crates/mihomo-common/src/sniffer/{mod.rs,tls.rs,http.rs}`. No
+      `crates/meow-common/src/sniffer/{mod.rs,tls.rs,http.rs}`. No
       async, no `TcpStream`, no trie.
-- [ ] Create runtime in `crates/mihomo-listener/src/sniffer.rs`
+- [ ] Create runtime in `crates/meow-listener/src/sniffer.rs`
       (`SnifferRuntime::sniff`, trie state, timeout wrap). Signature
       is `async fn sniff(&self, &TcpStream, &mut Metadata)` — no
       `Result` return; every failure mode collapses to a silent
       no-op (§Error surface).
-- [ ] Delete `crates/mihomo-listener/src/tproxy/sni.rs`, move tests to
-      `mihomo-common/src/sniffer/tls.rs`. Verify at least one migrated
+- [ ] Delete `crates/meow-listener/src/tproxy/sni.rs`, move tests to
+      `meow-common/src/sniffer/tls.rs`. Verify at least one migrated
       test covers a peek that returns < full ClientHello; add one if
       not.
 - [ ] Add `httparse = "1"` (default-features off) to
-      `mihomo-common/Cargo.toml` explicitly. Do not rely on transitive.
-- [ ] Add `SnifferConfig` to `mihomo-config` with all seven fields
+      `meow-common/Cargo.toml` explicitly. Do not rely on transitive.
+- [ ] Add `SnifferConfig` to `meow-config` with all seven fields
       (including `timeout`). Implement the `enable-sni` deprecated-alias
       path with warn-once.
 - [ ] Grep `dispatcher/sniffer/dispatcher.go` for upstream's default
       peek timeout and confirm 100 ms matches. If it diverges, adopt
       upstream's value and update the spec.
-- [ ] Build `SnifferRuntime` once in `mihomo-app/src/main.rs` and stash
+- [ ] Build `SnifferRuntime` once in `meow-app/src/main.rs` and stash
       it in `AppState`.
 - [ ] Wire `runtime.sniff(...)` into Mixed, HTTP, SOCKS5, TProxy
       listeners (four one-liners). TProxy's DNS-snoop reverse-lookup

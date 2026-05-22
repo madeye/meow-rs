@@ -6,14 +6,14 @@ Tracks roadmap item: **M2** (benchmark harness)
 Lane: engineer-a (perf measurement chain)
 ADR: [`docs/adr/0006-m2-benchmark-workloads.md`](../adr/0006-m2-benchmark-workloads.md) — workload definitions, hardware record format, comparison thresholds
 Blocks: allocator-audit.md (M2.B-2), rule-engine-micro-opt.md (M2.B-2)
-Upstream reference: none — mihomo-rust capability, not a parity feature.
+Upstream reference: none — meow-rs capability, not a parity feature.
 
 ## Current state
 
 The bench infrastructure is partially implemented:
-- `crates/mihomo-bench/` — standalone binary that runs both implementations
+- `crates/meow-bench/` — standalone binary that runs both implementations
 - `bench.sh` — orchestration script: builds both binaries, downloads Go mihomo via
-  `gh release download`, runs `mihomo-bench`, writes `target/bench/results.json`
+  `gh release download`, runs `meow-bench`, writes `target/bench/results.json`
 - `config-bench.yaml` — shared workload config
 
 **What is missing:**
@@ -40,7 +40,7 @@ Deliverables:
    - Runs `bench.sh`
    - Uploads `target/bench/results.json` as a workflow artifact
 
-The baseline numbers are the M2 starting point. If mihomo-rust is already faster, record
+The baseline numbers are the M2 starting point. If meow-rs is already faster, record
 it and note the delta. If Go mihomo is faster, record it as the target.
 
 ## M2.B-2 — Criterion microbenchmarks
@@ -49,7 +49,7 @@ Add `criterion` microbenchmarks to the crates that M2.C and M2.D will optimize.
 These are the measurement tool for in-process work; they must exist before the
 optimization passes can claim a quantified win.
 
-### mihomo-trie benchmarks (`crates/mihomo-trie/benches/trie_bench.rs`)
+### meow-trie benchmarks (`crates/meow-trie/benches/trie_bench.rs`)
 
 ```rust
 // Measure lookup throughput at N = {100, 1000, 10_000} entries
@@ -58,7 +58,7 @@ criterion_group!(benches, lookup_100, lookup_1000, lookup_10000);
 
 Domains sampled from a realistic distribution (mix of TLDs, subdomains, wildcards).
 
-### mihomo-rules benchmarks (`crates/mihomo-rules/benches/rules_bench.rs`)
+### meow-rules benchmarks (`crates/meow-rules/benches/rules_bench.rs`)
 
 ```rust
 // Measure rule-list scan at N = {50, 200, 500} rules
@@ -68,7 +68,7 @@ criterion_group!(benches, rule_scan_50, rule_scan_200, rule_scan_500);
 
 Include both domain-heavy and IP-CIDR-heavy workload mixes.
 
-### mihomo-tunnel UDP benchmarks (`crates/mihomo-tunnel/benches/udp_bench.rs`)
+### meow-tunnel UDP benchmarks (`crates/meow-tunnel/benches/udp_bench.rs`)
 
 ```rust
 // Measure handle_udp fast-path (existing session) throughput
@@ -84,8 +84,8 @@ criterion_group!(benches, udp_fastpath);
 3. `bench` CI job runs successfully on `workflow_dispatch` and uploads results artifact.
 
 ### M2.B-2
-1. `cargo bench -p mihomo-trie`, `cargo bench -p mihomo-rules`, and
-   `cargo bench -p mihomo-tunnel` all run without error.
+1. `cargo bench -p meow-trie`, `cargo bench -p meow-rules`, and
+   `cargo bench -p meow-tunnel` all run without error.
 2. Baseline numbers are printed to stdout and can be used as `--save-baseline` reference.
 3. `cargo test --lib` still passes after adding benches.
 
@@ -98,11 +98,11 @@ criterion_group!(benches, udp_fastpath);
 - [ ] Commit both files.
 
 ### M2.B-2
-- [ ] Add `criterion` dev-dependency to `mihomo-trie/Cargo.toml` with `[[bench]]`.
-- [ ] Write `crates/mihomo-trie/benches/trie_bench.rs` with lookup benchmarks.
-- [ ] Add `criterion` dev-dependency to `mihomo-rules/Cargo.toml`.
-- [ ] Write `crates/mihomo-rules/benches/rules_bench.rs` with rule-scan benchmarks.
-- [ ] Add `criterion` dev-dependency to `mihomo-tunnel/Cargo.toml`.
-- [ ] Write `crates/mihomo-tunnel/benches/udp_bench.rs` with UDP fast-path benchmark
+- [ ] Add `criterion` dev-dependency to `meow-trie/Cargo.toml` with `[[bench]]`.
+- [ ] Write `crates/meow-trie/benches/trie_bench.rs` with lookup benchmarks.
+- [ ] Add `criterion` dev-dependency to `meow-rules/Cargo.toml`.
+- [ ] Write `crates/meow-rules/benches/rules_bench.rs` with rule-scan benchmarks.
+- [ ] Add `criterion` dev-dependency to `meow-tunnel/Cargo.toml`.
+- [ ] Write `crates/meow-tunnel/benches/udp_bench.rs` with UDP fast-path benchmark
       (isolating the `format!` allocation at `udp.rs:30`).
 - [ ] Run all benches, save baselines as `--save-baseline m2-start`.

@@ -18,7 +18,7 @@ Related gap-analysis rows: §3 rule table, rows for each type below.
 
 Eight rule types appear in real Clash Meta subscription `rules:` lists
 but silently fall through to the `unknown rule type: …` error branch
-in `crates/mihomo-rules/src/parser.rs`. Configs that use them either
+in `crates/meow-rules/src/parser.rs`. Configs that use them either
 fail to load (if the config is strict) or silently misroute traffic
 (if the parse error is logged and the rule is skipped). This is a
 silent-misroute bug — Class A per ADR-0002 for any rule whose absence
@@ -71,7 +71,7 @@ IN-PORT,1000-2000,PROXY
 If `in_port` is 0 (not populated by the listener — legacy path), the
 rule never matches. Document with a comment; do not hard-error.
 
-Implementation: `InPortRule` struct in `crates/mihomo-rules/src/in_port.rs`.
+Implementation: `InPortRule` struct in `crates/meow-rules/src/in_port.rs`.
 Parse payload as `u16` or `u16-u16` range (two values, dash separator).
 Invalid port or range → parse error.
 
@@ -109,7 +109,7 @@ indistinguishable from "unset". Fix:
   (compiler finds them). Most are trivial: `metadata.dscp == payload`
   → `metadata.dscp == Some(payload)`.
 
-Implementation: `DscpRule` struct in `crates/mihomo-rules/src/dscp.rs`.
+Implementation: `DscpRule` struct in `crates/meow-rules/src/dscp.rs`.
 Parse payload as `u8`, validate 0–63. Out-of-range → parse error.
 
 Upstream reference: `rules/common/dscp.go`.
@@ -136,7 +136,7 @@ Linux-only. On non-Linux platforms:
 process-lookup mechanism (M0-3) on Linux. `None` if lookup failed or
 platform is non-Linux.
 
-Implementation: `UidRule` struct in `crates/mihomo-rules/src/uid.rs`.
+Implementation: `UidRule` struct in `crates/meow-rules/src/uid.rs`.
 `#[cfg(target_os = "linux")]` guard on the match logic. Parse succeeds
 cross-platform; match is always false on non-Linux.
 
@@ -191,8 +191,8 @@ If `None` (lookup failed or not supported), the rule never matches.
 No warn at match time (we'd emit a warn on every packet).
 
 Implementation: `ProcessPathRule` struct in
-`crates/mihomo-rules/src/process_path.rs`. Reuse or refactor
-`crates/mihomo-rules/src/process.rs` — the logic is nearly identical.
+`crates/meow-rules/src/process_path.rs`. Reuse or refactor
+`crates/meow-rules/src/process.rs` — the logic is nearly identical.
 
 Upstream reference: `rules/common/process.go`.
 
@@ -229,7 +229,7 @@ Cite the upstream line number in a comment in `domain_wildcard.rs`.
 
 Upstream reference: `rules/common/domain_wildcard.go`.
 
-Add `RuleType::DomainWildcard` to `mihomo-common/src/rule.rs`.
+Add `RuleType::DomainWildcard` to `meow-common/src/rule.rs`.
 
 ### IP-SUFFIX
 
@@ -255,8 +255,8 @@ right-masked, not left-masked. The parse error message must be distinct
 from IP-CIDR errors: `"invalid IP-SUFFIX: expected addr/prefix_len
 where prefix_len ≤ 32 (IPv4) or 128 (IPv6)"`.
 
-Add `RuleType::IpSuffix` to `mihomo-common/src/rule.rs`.
-New file: `crates/mihomo-rules/src/ip_suffix.rs`.
+Add `RuleType::IpSuffix` to `meow-common/src/rule.rs`.
+New file: `crates/meow-rules/src/ip_suffix.rs`.
 
 **IP-SUFFIX endianness note (engineer must verify before writing
 byte-exact test vectors):** The "right-mask on low N bits" semantic is
@@ -308,9 +308,9 @@ ADR-0002: silently skipping the rule causes misrouting.
 **ASN DB discovery chain** (architect approved, 2026-04-11 — no new
 YAML key in M1; mirrors the existing GEOIP Country.mmdb pattern):
 
-1. `$XDG_CONFIG_HOME/mihomo/GeoLite2-ASN.mmdb`
-2. `$HOME/.config/mihomo/GeoLite2-ASN.mmdb`
-3. `./mihomo/GeoLite2-ASN.mmdb`
+1. `$XDG_CONFIG_HOME/meow/GeoLite2-ASN.mmdb`
+2. `$HOME/.config/meow/GeoLite2-ASN.mmdb`
+3. `./meow/GeoLite2-ASN.mmdb`
 
 Lazy-load: scan rules at parse time for any `IP-ASN` entries; only
 load the DB if at least one `IP-ASN` rule exists (same pattern as
@@ -324,8 +324,8 @@ path today drop the file at the discovery path or symlink it.
 Migration guide (#14) notes that `geox-url` is currently ignored and
 ASN loads from the discovery chain.
 
-Add `RuleType::IpAsn` to `mihomo-common/src/rule.rs`.
-New file: `crates/mihomo-rules/src/ip_asn.rs`.
+Add `RuleType::IpAsn` to `meow-common/src/rule.rs`.
+New file: `crates/meow-rules/src/ip_asn.rs`.
 
 Upstream reference: `rules/common/ipasn.go`.
 
@@ -341,7 +341,7 @@ Upstream reference: `rules/common/ipasn.go`.
 | 3 | `IP-ASN` | Missing ASN DB → hard-error | A | Silently skipping causes misrouting (ASN-gated traffic bypasses intended proxy). Class A. |
 | 4 | `DOMAIN-WILDCARD` | No `?` wildcard support | B | Upstream does not support `?` either; this is a match, not a divergence. |
 | 5 | Any of these rule types | Absent from parser → silently skipped today | A | The status quo is the bug. This spec fixes it. |
-| 6 | `DSCP` | `Metadata.dscp` changed from `u8` to `Option<u8>` | A | Previous `u8` default `0` caused `DSCP,0` to match every HTTP/SOCKS5 connection silently. Fix: `None` (non-TProxy) never matches. This is a Class A fix relative to previous mihomo-rust behavior (not Go mihomo, which also sets DSCP only on TProxy). |
+| 6 | `DSCP` | `Metadata.dscp` changed from `u8` to `Option<u8>` | A | Previous `u8` default `0` caused `DSCP,0` to match every HTTP/SOCKS5 connection silently. Fix: `None` (non-TProxy) never matches. This is a Class A fix relative to previous meow-rs behavior (not Go mihomo, which also sets DSCP only on TProxy). |
 
 ## Acceptance criteria
 
@@ -369,8 +369,8 @@ A PR implementing this spec must:
 10. `IP-ASN,13335,PROXY` matches a Cloudflare IP when ASN reader is
     present; hard-errors at parse time when ASN reader is absent.
 11. `RuleType::DomainWildcard`, `RuleType::IpSuffix`, `RuleType::IpAsn`
-    added to the enum in `mihomo-common/src/rule.rs`.
-12. `parse_rule` in `mihomo-rules/src/parser.rs` dispatches all eight
+    added to the enum in `meow-common/src/rule.rs`.
+12. `parse_rule` in `meow-rules/src/parser.rs` dispatches all eight
     types; the `_ => Err("unknown rule type")` arm no longer fires for
     any of them.
 13. `cargo test --test rules_test` passes with no regressions.
@@ -482,8 +482,8 @@ A PR implementing this spec must:
 ## Implementation checklist (for engineer handoff)
 
 - [ ] Add `RuleType::DomainWildcard`, `RuleType::IpSuffix`,
-      `RuleType::IpAsn` to `mihomo-common/src/rule.rs`.
-- [ ] Implement new rule files in `crates/mihomo-rules/src/`:
+      `RuleType::IpAsn` to `meow-common/src/rule.rs`.
+- [ ] Implement new rule files in `crates/meow-rules/src/`:
       `in_port.rs`, `dscp.rs`, `uid.rs`, `src_geoip.rs` (or extend
       `geoip.rs`), `process_path.rs`, `domain_wildcard.rs`,
       `ip_suffix.rs`, `ip_asn.rs`.

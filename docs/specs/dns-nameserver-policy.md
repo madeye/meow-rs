@@ -31,7 +31,7 @@ directly to the M1 "typical subscription loads and routes correctly" goal.
 In scope:
 
 1. `nameserver_policy: { pattern: [nameservers] }` YAML field parsed
-   in `mihomo-config/src/dns_parser.rs`.
+   in `meow-config/src/dns_parser.rs`.
 2. Domain patterns: exact domain and `+.` prefix (sub-domain wildcard:
    `+.corp.internal` matches `corp.internal` and all subdomains).
    No `geosite:` or `rule-set:` references in M1 — defer to M1.D-2
@@ -146,7 +146,7 @@ steps 3 and 4 (skips primary entirely) and goes straight to step 5.
 ### NameserverPolicy struct
 
 ```rust
-// in mihomo-dns/src/resolver.rs
+// in meow-dns/src/resolver.rs
 
 pub struct PolicyEntry {
     nameservers: Vec<TokioResolver>,   // one per URL, pre-built at startup
@@ -156,7 +156,7 @@ pub struct NameserverPolicy {
     // Exact matches: "example.com" → entry
     exact: HashMap<String, PolicyEntry>,
     // Wildcard matches: trie for "+.corp.internal" patterns
-    // Uses DomainTrie from mihomo-trie (same trie as rule matching)
+    // Uses DomainTrie from meow-trie (same trie as rule matching)
     wildcard: DomainTrie<PolicyEntry>,
 }
 
@@ -168,7 +168,7 @@ impl NameserverPolicy {
 }
 ```
 
-**Trie reuse**: `DomainTrie` from `mihomo-trie` already supports the
+**Trie reuse**: `DomainTrie` from `meow-trie` already supports the
 `+.` wildcard semantics used in rule matching. No new trie implementation
 needed — import and reuse.
 
@@ -310,7 +310,7 @@ boilerplate of a manual `FuturesUnordered` loop.
       — value string OR list → Vec<String> URLs.
       — warn-once and skip unknown-prefix entries (`geosite:`, `rule-set:`).
 - [ ] Parse `fallback-filter` fields in `dns_parser.rs`.
-- [ ] Build `NameserverPolicy` trie in `Resolver::new()`, reusing `DomainTrie` from `mihomo-trie`.
+- [ ] Build `NameserverPolicy` trie in `Resolver::new()`, reusing `DomainTrie` from `meow-trie`.
 - [ ] Build `FallbackFilter` in `Resolver::new()`:
       — `geoip: true` with no MMDB: warn at startup, set `geoip_enabled = false`.
 - [ ] Change `main` from single `TokioResolver` to `Vec<TokioResolver>` with parallel dispatch.

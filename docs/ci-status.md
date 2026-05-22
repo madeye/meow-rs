@@ -25,7 +25,7 @@ Jobs:
    - Explicit per-suite invocations for integration tests:
      - `common_test`, `dns_cache_test`, `config_test`, `statistics_test`,
        `rules_test`, `shadowsocks_integration`, `api_test`,
-       `config_persistence_test`, `systemd_config_test` (via `-p mihomo-app`),
+       `config_persistence_test`, `systemd_config_test` (via `-p meow-app`),
        `trojan_integration`, `v2ray_plugin_integration`, `pre_resolve_test`.
 
 3. **tproxy** (`ubuntu-latest`, `needs: lint`)
@@ -52,18 +52,18 @@ Deploys `docs/` to GitHub Pages on pushes to `main`. Not test-gating.
 | Area | Location | In CI? |
 |------|----------|--------|
 | Unit tests (all crates) | `cargo test --lib` | Yes (ubuntu + macos) |
-| Rule matching | `crates/mihomo-rules/tests/rules_test.rs` | Yes (ubuntu + macos) |
-| Trojan protocol (embedded mock) | `crates/mihomo-proxy/tests/trojan_integration.rs` | Yes (ubuntu + macos) |
-| Shadowsocks + simple-obfs | `crates/mihomo-proxy/tests/shadowsocks_integration.rs` | Yes (ubuntu only) |
-| v2ray-plugin (WS+TLS) integration | `crates/mihomo-proxy/tests/v2ray_plugin_integration.rs` | Yes (ubuntu + macos) |
-| Pre-resolve / DNS-before-dial | `crates/mihomo-tunnel/tests/pre_resolve_test.rs` | Yes (ubuntu + macos) |
-| REST API | `crates/mihomo-api/tests/api_test.rs` | Yes (ubuntu + macos) |
-| Config parsing | `crates/mihomo-config/tests/config_test.rs` | Yes (ubuntu + macos) |
-| Config persistence | `crates/mihomo-config/tests/config_persistence_test.rs` | Yes (ubuntu + macos) |
-| DNS cache | `crates/mihomo-dns/tests/dns_cache_test.rs` | Yes (ubuntu + macos) |
-| Tunnel statistics | `crates/mihomo-tunnel/tests/statistics_test.rs` | Yes (ubuntu + macos) |
-| Common types | `crates/mihomo-common/tests/common_test.rs` | Yes (ubuntu + macos) |
-| Systemd config | `crates/mihomo-app/tests/systemd_config_test.rs` | Yes (ubuntu only) |
+| Rule matching | `crates/meow-rules/tests/rules_test.rs` | Yes (ubuntu + macos) |
+| Trojan protocol (embedded mock) | `crates/meow-proxy/tests/trojan_integration.rs` | Yes (ubuntu + macos) |
+| Shadowsocks + simple-obfs | `crates/meow-proxy/tests/shadowsocks_integration.rs` | Yes (ubuntu only) |
+| v2ray-plugin (WS+TLS) integration | `crates/meow-proxy/tests/v2ray_plugin_integration.rs` | Yes (ubuntu + macos) |
+| Pre-resolve / DNS-before-dial | `crates/meow-tunnel/tests/pre_resolve_test.rs` | Yes (ubuntu + macos) |
+| REST API | `crates/meow-api/tests/api_test.rs` | Yes (ubuntu + macos) |
+| Config parsing | `crates/meow-config/tests/config_test.rs` | Yes (ubuntu + macos) |
+| Config persistence | `crates/meow-config/tests/config_persistence_test.rs` | Yes (ubuntu + macos) |
+| DNS cache | `crates/meow-dns/tests/dns_cache_test.rs` | Yes (ubuntu + macos) |
+| Tunnel statistics | `crates/meow-tunnel/tests/statistics_test.rs` | Yes (ubuntu + macos) |
+| Common types | `crates/meow-common/tests/common_test.rs` | Yes (ubuntu + macos) |
+| Systemd config | `crates/meow-app/tests/systemd_config_test.rs` | Yes (ubuntu only) |
 | TProxy e2e (nftables, Docker) | `tests/test_tproxy_qemu.sh` | Yes (ubuntu only) |
 | MSRV check | `cargo check` on pinned `rust-version` | Yes |
 | Dependency advisories | `rustsec/audit-check` | Yes (weekly + lockfile changes) |
@@ -72,7 +72,7 @@ Deploys `docs/` to GitHub Pages on pushes to `main`. Not test-gating.
 
 ## Baseline
 
-`cargo test --lib` on 2026-04-11 (updated): **100 passed, 0 failed, 0 ignored** across 10 crates (mihomo-proxy 37, mihomo-rules 18, mihomo-config 18, mihomo-dns 8, mihomo-trie 6, mihomo-tunnel 3, mihomo-common 3; api/app/listener crates have no lib tests). `api_test` integration suite: **82 passed, 0 failed**.
+`cargo test --lib` on 2026-04-11 (updated): **100 passed, 0 failed, 0 ignored** across 10 crates (meow-proxy 37, meow-rules 18, meow-config 18, meow-dns 8, meow-trie 6, meow-tunnel 3, meow-common 3; api/app/listener crates have no lib tests). `api_test` integration suite: **82 passed, 0 failed**.
 
 ## Gaps
 
@@ -102,7 +102,7 @@ Deploys `docs/` to GitHub Pages on pushes to `main`. Not test-gating.
    - Broken doc-links go unnoticed. Cheap to add: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`.
 
 9. **`--all-features` only in clippy, not in test**
-   - `cargo test --lib` uses default features. If a crate gates code behind a feature, that code is never exercised. Worth a `cargo hack --feature-powerset check` pass (at least for `mihomo-proxy` and `mihomo-config`).
+   - `cargo test --lib` uses default features. If a crate gates code behind a feature, that code is never exercised. Worth a `cargo hack --feature-powerset check` pass (at least for `meow-proxy` and `meow-config`).
 
 10. **No flakiness protection**
     - Integration tests that start real servers (ssserver, embedded mock Trojan, Docker tproxy) are prime flake candidates. No retry, no `--test-threads=1` gating, no timing metrics. Recommend: add `--test-threads=1` for integration suites that bind ports, and consider `nextest` with retries for the `test` job.

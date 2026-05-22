@@ -110,7 +110,7 @@ cd "$ROOT_DIR"
 
 # Build first to separate compile errors from test failures
 echo "Building..."
-cargo build -p mihomo-proxy 2>&1
+cargo build -p meow-proxy 2>&1
 
 echo "Running integration test..."
 if cargo test --test shadowsocks_integration -- --nocapture 2>&1; then

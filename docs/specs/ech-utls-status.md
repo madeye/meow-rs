@@ -7,7 +7,7 @@
 
 ## Summary
 
-Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are implemented in mihomo-rust's TLS transport via a new `boring-tls` cargo feature backed by BoringSSL (boring 5.0.2 + tokio-boring 5.0.0). Six fingerprint profiles ship, inline-config and DNS-sourced ECH both work end-to-end, ECH key rotation self-heals on `ech_required` rejection, and all C1–C16 tests pass against a real loopback BoringSSL server with a live ECH keypair.
+Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are implemented in meow-rs's TLS transport via a new `boring-tls` cargo feature backed by BoringSSL (boring 5.0.2 + tokio-boring 5.0.0). Six fingerprint profiles ship, inline-config and DNS-sourced ECH both work end-to-end, ECH key rotation self-heals on `ech_required` rejection, and all C1–C16 tests pass against a real loopback BoringSSL server with a live ECH keypair.
 
 ---
 
@@ -27,7 +27,7 @@ Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are imp
 
 ### Added since v1
 
-- **DNS-sourced ECH** (`ech-opts.enable: true` with no inline `config:`) — async pre-resolution pass over the proxy YAML map (`mihomo_config::ech_dns::preresolve_ech`) uses `hickory-resolver` against the system DNS config to fetch the wire-format `ECHConfigList` from the HTTPS (RR 65) record, then writes it back as base64 so the sync `parse_proxy` path stays sync. Wired into `build_config`, the API config-reload handlers, the proxy-provider refresh, and the subscription auto-update path.
+- **DNS-sourced ECH** (`ech-opts.enable: true` with no inline `config:`) — async pre-resolution pass over the proxy YAML map (`meow_config::ech_dns::preresolve_ech`) uses `hickory-resolver` against the system DNS config to fetch the wire-format `ECHConfigList` from the HTTPS (RR 65) record, then writes it back as base64 so the sync `parse_proxy` path stays sync. Wired into `build_config`, the API config-reload handlers, the proxy-provider refresh, and the subscription auto-update path.
 - **ECH retry self-heal** — when the server returns `ech_required` with fresh `retry_configs`, `BoringInner` (now holding `ech: Mutex<Option<EchOpts>>`) rotates its stored ECH bytes to the server-signed key. The current connect still fails (the inner stream is consumed by `tokio_boring::connect`), but every subsequent connect through the same `TlsLayer` uses the refreshed key. Validated end-to-end by `c16_ech_self_heal_uses_retry_configs_on_next_connect`.
 
 ### Still deferred / out of scope
@@ -89,6 +89,6 @@ Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are imp
 - Design doc: `docs/specs/ech-utls-design.md`
 - Test plan: `docs/specs/ech-utls-test-plan.md`
 - Branch: `feat/tls-ech-utls`
-- Primary code: `crates/mihomo-transport/src/tls.rs`
-- Test file: `crates/mihomo-transport/tests/boring_tls_test.rs`
-- Harness: `crates/mihomo-transport/tests/support/loopback.rs`
+- Primary code: `crates/meow-transport/src/tls.rs`
+- Test file: `crates/meow-transport/tests/boring_tls_test.rs`
+- Harness: `crates/meow-transport/tests/support/loopback.rs`

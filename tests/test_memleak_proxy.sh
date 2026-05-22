@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Memory-leak detector: download a large file through mihomo's SOCKS5
+# Memory-leak detector: download a large file through meow's SOCKS5
 # listener (DIRECT mode) and check that RSS does not grow beyond a
 # threshold across repeated transfers.
 #
@@ -48,18 +48,18 @@ if ! curl -sS --max-time 10 -o /dev/null -I "https://speed.cloudflare.com/"; the
 fi
 
 # --- Build release binary (no-op if already up to date) ---
-echo "==> Building mihomo (release)..."
-cargo build --release --quiet --bin mihomo
+echo "==> Building meow (release)..."
+cargo build --release --quiet --bin meow
 
 # --- Generate a minimal DIRECT-mode config ---
-CONFIG="$(mktemp -t mihomo-memleak.XXXXXX)"
-LOG="$(mktemp -t mihomo-memleak.log.XXXXXX)"
-MIHOMO_PID=""
+CONFIG="$(mktemp -t meow-memleak.XXXXXX)"
+LOG="$(mktemp -t meow-memleak.log.XXXXXX)"
+MEOW_PID=""
 
 cleanup() {
-    if [[ -n "$MIHOMO_PID" ]]; then
-        kill "$MIHOMO_PID" 2>/dev/null || true
-        wait "$MIHOMO_PID" 2>/dev/null || true
+    if [[ -n "$MEOW_PID" ]]; then
+        kill "$MEOW_PID" 2>/dev/null || true
+        wait "$MEOW_PID" 2>/dev/null || true
     fi
     rm -f "$CONFIG" "$LOG"
 }
@@ -77,10 +77,10 @@ dns:
   enable: false
 EOF
 
-# --- Spawn mihomo ---
-echo "==> Starting mihomo on SOCKS5/HTTP port $MIXED_PORT (direct mode)..."
-"$ROOT_DIR/target/release/mihomo" -f "$CONFIG" >"$LOG" 2>&1 &
-MIHOMO_PID=$!
+# --- Spawn meow ---
+echo "==> Starting meow on SOCKS5/HTTP port $MIXED_PORT (direct mode)..."
+"$ROOT_DIR/target/release/meow" -f "$CONFIG" >"$LOG" 2>&1 &
+MEOW_PID=$!
 
 # Wait for readiness by probing the mixed port.
 ready=0
@@ -90,21 +90,21 @@ for _ in $(seq 1 30); do
         ready=1
         break
     fi
-    if ! kill -0 "$MIHOMO_PID" 2>/dev/null; then
-        echo "Error: mihomo exited during startup. Log:" >&2
+    if ! kill -0 "$MEOW_PID" 2>/dev/null; then
+        echo "Error: meow exited during startup. Log:" >&2
         cat "$LOG" >&2
         exit 1
     fi
     sleep 1
 done
 if [[ "$ready" -ne 1 ]]; then
-    echo "Error: mihomo did not become ready within 30s. Log:" >&2
+    echo "Error: meow did not become ready within 30s. Log:" >&2
     cat "$LOG" >&2
     exit 1
 fi
 
 # --- RSS sampler (ps -o rss= returns KB on both darwin and linux) ---
-rss_kb() { ps -o rss= -p "$MIHOMO_PID" | tr -d ' '; }
+rss_kb() { ps -o rss= -p "$MEOW_PID" | tr -d ' '; }
 
 # Warmup transfer so the first-use allocations aren't attributed to the loop.
 echo "==> Warmup transfer ($BYTES bytes)..."

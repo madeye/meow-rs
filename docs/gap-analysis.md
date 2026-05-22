@@ -1,4 +1,4 @@
-# mihomo-rust vs mihomo (Go) — Feature Gap Analysis
+# meow-rs vs mihomo (Go) — Feature Gap Analysis
 
 Authored by: architect
 Date: 2026-04-11
@@ -6,11 +6,11 @@ Upstream reference: https://github.com/MetaCubeX/mihomo (Alpha branch)
 
 ## Scope
 
-This document compares the current `mihomo-rust` implementation against the upstream Go `mihomo` (Clash Meta) kernel, enumerating features that exist upstream but are missing, partial, or divergent in this port.
+This document compares the current `meow-rs` implementation against the upstream Go `mihomo` (Clash Meta) kernel, enumerating features that exist upstream but are missing, partial, or divergent in this port.
 
 ### Explicitly excluded (non-goals)
 
-The following upstream features are **intentionally out of scope** for `mihomo-rust` and are **not** counted as gaps:
+The following upstream features are **intentionally out of scope** for `meow-rs` and are **not** counted as gaps:
 
 - **tun vpn / tun inbound** — we do not ship an in-process TUN device or sing-tun integration. Transparent proxy is served via `tproxy` (nftables/pf) only.
 - **VMess outbound** — dropped from M1 scope 2026-04-11. Protocol complexity (AEAD KDF, auth-id cache, legacy cipher quirks) for diminishing returns as modern users have migrated to VLESS. Spec preserved in `docs/specs/proxy-vmess.md` as a design record. Use VLESS instead.
@@ -19,7 +19,7 @@ The following upstream features are **intentionally out of scope** for `mihomo-r
 
 ## 1. Proxy / Outbound Protocols
 
-Upstream lives in `adapter/outbound/`. Current Rust adapters live in `crates/mihomo-proxy/src/`.
+Upstream lives in `adapter/outbound/`. Current Rust adapters live in `crates/meow-proxy/src/`.
 
 | Protocol        | Upstream | Rust port | Status  | Notes |
 |-----------------|:--------:|:---------:|---------|-------|
@@ -50,8 +50,8 @@ Upstream `adapter/outbound` supports these pluggable transports layered on top o
 
 Rust port currently supports:
 
-- `v2ray-plugin` (websocket + TLS) — `crates/mihomo-proxy/src/v2ray_plugin.rs`
-- `simple-obfs` — `crates/mihomo-proxy/src/simple_obfs.rs`
+- `v2ray-plugin` (websocket + TLS) — `crates/meow-proxy/src/v2ray_plugin.rs`
+- `simple-obfs` — `crates/meow-proxy/src/simple_obfs.rs`
 
 | Transport        | Upstream | Rust | Status |
 |------------------|:--------:|:----:|--------|
@@ -82,7 +82,7 @@ Upstream supports: `select`, `url-test`, `fallback`, `load-balance`, `relay`, `s
 
 ## 2. Inbound Listeners
 
-Upstream lives in `listener/`. Rust listeners live in `crates/mihomo-listener/src/`.
+Upstream lives in `listener/`. Rust listeners live in `crates/meow-listener/src/`.
 
 | Listener      | Upstream | Rust | Status |
 |---------------|:--------:|:----:|--------|
@@ -106,7 +106,7 @@ Upstream lives in `listener/`. Rust listeners live in `crates/mihomo-listener/sr
 
 ## 3. Rule Types
 
-Upstream rules in `rules/common/` plus `logic/` and `provider/`. Rust rules in `crates/mihomo-rules/src/`.
+Upstream rules in `rules/common/` plus `logic/` and `provider/`. Rust rules in `crates/meow-rules/src/`.
 
 | Rule Type       | Upstream | Rust (enum) | Rust (parser) | Status |
 |-----------------|:--------:|:-----------:|:-------------:|--------|
@@ -116,7 +116,7 @@ Upstream rules in `rules/common/` plus `logic/` and `provider/`. Rust rules in `
 | DOMAIN-REGEX    | Yes      | Yes         | Yes           | OK |
 | DOMAIN-WILDCARD | Yes      | No          | No            | **Gap** |
 | GEOSITE         | Yes      | Yes (enum)  | No            | **Gap** — parser path missing; no geosite DB loader |
-| GEOIP           | Yes      | Yes         | Yes           | OK — parser threads shared `Arc<Reader>` via `ParserContext`; `mihomo-config` lazy-loads `~/.config/mihomo/Country.mmdb` when any rule references GEOIP and fail-fasts with path + offending-rule on error |
+| GEOIP           | Yes      | Yes         | Yes           | OK — parser threads shared `Arc<Reader>` via `ParserContext`; `meow-config` lazy-loads `~/.config/meow/Country.mmdb` when any rule references GEOIP and fail-fasts with path + offending-rule on error |
 | SRC-GEOIP       | Yes      | Yes (enum)  | No            | **Gap** |
 | IP-CIDR / IP-CIDR6 | Yes   | Yes         | Yes           | OK |
 | IP-SUFFIX       | Yes      | No          | No            | **Gap** |
@@ -151,7 +151,7 @@ Rust port (`config/rule_provider.rs`) supports: http + file, domain/ipcidr/class
 
 ## 4. DNS Features
 
-Upstream `dns/` directory covers client/server/policy/middleware with numerous transport protocols. Rust crate is `mihomo-dns`.
+Upstream `dns/` directory covers client/server/policy/middleware with numerous transport protocols. Rust crate is `meow-dns`.
 
 | Feature                     | Upstream | Rust | Status |
 |-----------------------------|:--------:|:----:|--------|
@@ -180,7 +180,7 @@ Upstream `dns/` directory covers client/server/policy/middleware with numerous t
 
 ## 5. REST API Endpoints
 
-Upstream `hub/route/` mounts these sub-routers, and Clash Dashboard / Yacd expects them. Rust routes are in `crates/mihomo-api/src/routes.rs`.
+Upstream `hub/route/` mounts these sub-routers, and Clash Dashboard / Yacd expects them. Rust routes are in `crates/meow-api/src/routes.rs`.
 
 | Endpoint group    | Upstream | Rust | Status |
 |-------------------|:--------:|:----:|--------|
@@ -215,7 +215,7 @@ Upstream `hub/route/` mounts these sub-routers, and Clash Dashboard / Yacd expec
 | CORS                         | Yes | Yes | OK (permissive) |
 | `/ui` static                 | Yes | Yes | OK |
 
-### Non-standard endpoints (mihomo-rust additions)
+### Non-standard endpoints (meow-rs additions)
 
 These are unique to this port; document them for API consumers:
 
@@ -230,7 +230,7 @@ Recommendation: keep these under `/api/` namespace (already done for most) so th
 
 ## 6. Config Schema (YAML top-level keys)
 
-Upstream config keys documented at https://wiki.metacubex.one/. Checking `crates/mihomo-config/src/raw.rs`.
+Upstream config keys documented at https://wiki.metacubex.one/. Checking `crates/meow-config/src/raw.rs`.
 
 ### Supported
 
@@ -289,7 +289,7 @@ These surfaced during the audit and warrant engineer follow-up even before new f
 5. **Rule-providers `interval`**: accepted and ignored. Either drop from schema or implement periodic refresh.
 6. **Hosts trie**: allocated in `Resolver::new` but never populated from config.
 7. **In-flight dedup**: allocated but unused (`#[allow(dead_code)]`).
-8. **Logic rules reachability**: `mihomo-rules/src/logic.rs` exists but `parser.rs` never dispatches `AND/OR/NOT` — verify whether logic rules can be loaded from YAML at all.
+8. **Logic rules reachability**: `meow-rules/src/logic.rs` exists but `parser.rs` never dispatches `AND/OR/NOT` — verify whether logic rules can be loaded from YAML at all.
 9. **`AdapterType` enum has variants without implementations**: `RejectDrop`, `Compatible`, `Pass`, `Dns`, `Relay`, `LoadBalance`, plus many protocol variants. Either implement or remove to avoid false signals.
 
 ---

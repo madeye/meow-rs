@@ -162,8 +162,8 @@ at construction. These tests mechanically enforce that contract.**
 |---|------|---------|
 | G1 | `urltest_sweep_picks_up_refreshed_provider_list` | **Acceptance criterion #17.** URLTest group backed by a provider. First sweep runs against initial list (proxies A, B). Trigger `provider.refresh()` with new list (proxies C, D). Run a second sweep. Assert the second sweep dialed proxies C and D, NOT A and B. <br/> Upstream: `adapter/provider/proxy.go` reads proxies from the provider's `Arc` on each health-check sweep. We match. <br/> NOT local cache — URLTest must read `provider.proxies.read()` on each sweep call, not a `Vec` stored at construction time. This is the primary guard for `// do not store proxy_list as a field` comment required by the spec. |
 | G2 | `fallback_sweep_picks_up_refreshed_provider_list` | Same as G1 for Fallback group. The Fallback group's health-check trigger-and-try-first logic must also re-read from the provider. Separate case because Fallback and URLTest share similar code paths but are distinct group types. |
-| G3 | `urltest_no_local_proxy_vec_field` **[guard-rail]** | Walk `crates/mihomo-proxy/src/group/urltest.rs` and assert it contains no field declaration of type `Vec<Arc<dyn ProxyAdapter>>` or `Vec<Box<dyn ProxyAdapter>>`. Use a `grep`-based test (Rust test using `std::fs::read_to_string` + assertion). Same mechanical-enforcement pattern as transport-layer plan §F2. <br/> NOT a review checklist item — must be a failing test to be enforced in CI. |
-| G4 | `fallback_no_local_proxy_vec_field` **[guard-rail]** | Same grep for `crates/mihomo-proxy/src/group/fallback.rs`. |
+| G3 | `urltest_no_local_proxy_vec_field` **[guard-rail]** | Walk `crates/meow-proxy/src/group/urltest.rs` and assert it contains no field declaration of type `Vec<Arc<dyn ProxyAdapter>>` or `Vec<Box<dyn ProxyAdapter>>`. Use a `grep`-based test (Rust test using `std::fs::read_to_string` + assertion). Same mechanical-enforcement pattern as transport-layer plan §F2. <br/> NOT a review checklist item — must be a failing test to be enforced in CI. |
+| G4 | `fallback_no_local_proxy_vec_field` **[guard-rail]** | Same grep for `crates/meow-proxy/src/group/fallback.rs`. |
 
 ### H. Proxy group resolution (use: / include-all: / filter chains)
 
@@ -195,7 +195,7 @@ using fixture providers constructed directly (no HTTP).
 
 ### J. REST API handler tests
 
-All live in `crates/mihomo-api/tests/api_test.rs`. Use a
+All live in `crates/meow-api/tests/api_test.rs`. Use a
 `test_state_with_providers(...)` helper that builds an `AppState` with
 pre-loaded `Arc<ProxyProvider>` fixtures.
 
@@ -217,12 +217,12 @@ pre-loaded `Arc<ProxyProvider>` fixtures.
 
 | # | Case | Asserts |
 |---|------|---------|
-| K1 | `cargo_check_no_default_features_compiles` | `cargo check -p mihomo-config --no-default-features`. Crate compiles without `reqwest`. |
-| K2 | `cargo_check_with_proxy_providers_feature_compiles` | `cargo check -p mihomo-config --features proxy-providers`. Compiles with `reqwest`. |
+| K1 | `cargo_check_no_default_features_compiles` | `cargo check -p meow-config --no-default-features`. Crate compiles without `reqwest`. |
+| K2 | `cargo_check_with_proxy_providers_feature_compiles` | `cargo check -p meow-config --features proxy-providers`. Compiles with `reqwest`. |
 | K3 | `proxy_providers_feature_disabled_hard_errors_per_entry` | In a build compiled without `proxy-providers`, load a config with one `proxy-providers:` entry. Assert `Err` with message containing `"proxy-providers"` Cargo feature name. <br/> Upstream: N/A (upstream never ships without provider support). <br/> NOT silent empty group — Class A per ADR-0002: silent skip causes misrouting without diagnostic. |
 | K4 | `proxy_providers_feature_disabled_two_entries_both_error` **[guard-rail]** | Two provider entries, feature disabled. Assert both produce hard errors (not just the first). Guards against a short-circuit that makes partial configs appear to succeed. |
 
-### L. Integration tests (`crates/mihomo-config/tests/proxy_provider_test.rs`)
+### L. Integration tests (`crates/meow-config/tests/proxy_provider_test.rs`)
 
 End-to-end: start a local mock HTTP server, load a full config, assert
 proxies appear in the expected groups. These are `#[tokio::test]`.
@@ -265,8 +265,8 @@ proxies appear in the expected groups. These are `#[tokio::test]`.
 Three additions to `.github/workflows/test.yml`:
 
 1. Add `proxy_provider_unit_test` (unit tests in
-   `mihomo-config/src/proxy_provider.rs`) and `proxy_provider_test`
-   (integration tests in `mihomo-config/tests/proxy_provider_test.rs`)
+   `meow-config/src/proxy_provider.rs`) and `proxy_provider_test`
+   (integration tests in `meow-config/tests/proxy_provider_test.rs`)
    to both `test` and `macos` per-suite invocation lists.
 2. Add `providers_api_test` cases to the existing `api_test` invocation
    (or run the full `api_test` suite as today — the new cases extend the

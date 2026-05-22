@@ -16,11 +16,11 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 
 **In scope:**
 
-- `NameServerUrl` parser (`crates/mihomo-dns/src/upstream.rs`) — all URL
+- `NameServerUrl` parser (`crates/meow-dns/src/upstream.rs`) — all URL
   grammar forms, defaults, error variants, `needs_bootstrap()` predicate.
 - Bootstrap flow (`Resolver::new_with_bootstrap`) — dedup, short-circuit,
   fail-fast, error variants.
-- Config adapter (`crates/mihomo-config/src/dns_parser.rs`) — YAML round-trip,
+- Config adapter (`crates/meow-config/src/dns_parser.rs`) — YAML round-trip,
   encrypted-without-default error, quic rejection, unknown-scheme error.
 - Cargo feature gate — `encrypted` default-on feature gates
   `hickory-resolver/tls-ring` + `hickory-resolver/https-ring`; no-feature
@@ -42,14 +42,14 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 ## File layout expected
 
 ```
-crates/mihomo-dns/src/
+crates/meow-dns/src/
   upstream.rs          # NEW: NameServerUrl enum + parser + unit tests
   resolver.rs          # MODIFIED: new_with_bootstrap + existing tests
-crates/mihomo-dns/tests/
+crates/meow-dns/tests/
   doh_dot_integration.rs  # NEW: network-gated #[ignore] tests
-crates/mihomo-config/src/
+crates/meow-config/src/
   dns_parser.rs        # MODIFIED: encrypted upstream handling
-crates/mihomo-config/tests/
+crates/meow-config/tests/
   config_test.rs       # MODIFIED: new dns_parser cases (all tokio::test now)
 ```
 
@@ -69,7 +69,7 @@ Following ADR-0002 classification format:
 
 ## Case list
 
-### A. `NameServerUrl::parse` unit tests (`crates/mihomo-dns/src/upstream.rs`)
+### A. `NameServerUrl::parse` unit tests (`crates/meow-dns/src/upstream.rs`)
 
 These are pure-parser unit tests. No network, no tokio runtime.
 
@@ -99,7 +99,7 @@ These are pure-parser unit tests. No network, no tokio runtime.
 | A22 | `needs_bootstrap_ip_literal_returns_none` | Any variant with `Ip(...)` addr → `needs_bootstrap()` == `None`. |
 | A23 | `needs_bootstrap_hostname_returns_some` | Any variant with `Host(...)` addr → `needs_bootstrap()` == `Some(&host_str)`. |
 
-### B. Bootstrap flow unit tests (`crates/mihomo-dns/src/resolver.rs`)
+### B. Bootstrap flow unit tests (`crates/meow-dns/src/resolver.rs`)
 
 These require a tokio runtime (`#[tokio::test]`) because bootstrap is
 async. Use a mock bootstrap resolver that counts lookups and returns
@@ -120,7 +120,7 @@ controlled results — do **not** make real DNS calls.
 | B11 | `built_nameserver_preserves_sni` | After successful bootstrap, peek at the built `main` resolver's first `NameServerConfig` and assert `tls_dns_name == Some("cloudflare-dns.com")` for the `#sni`-tagged entry. Verifies the SNI flows from the URL all the way into the hickory config. |
 | B12 | `built_nameserver_uses_bootstrapped_ip_not_hostname` **[guard-rail]** | After bootstrap resolves `dns.google → 8.8.8.8`, the built `NameServerConfig` for that entry uses `SocketAddr { 8.8.8.8:853 }`, not a `ToSocketAddrs`-style hostname. Guards against hickory silently re-resolving the hostname and bypassing bootstrap. |
 
-### C. Config adapter unit tests (`crates/mihomo-config/tests/config_test.rs`)
+### C. Config adapter unit tests (`crates/meow-config/tests/config_test.rs`)
 
 All cases in this section are `#[tokio::test]` (required because
 `parse_dns` / `load_config_from_str` are now `async` per spec §Bootstrap
@@ -147,9 +147,9 @@ or a new `dns-feature-matrix` job (engineer's call).
 
 | # | Command | Asserts |
 |---|---------|---------|
-| D1 | `cargo check -p mihomo-dns --no-default-features` | Builds without encrypted features — plain UDP/TCP resolver only. |
-| D2 | `cargo check -p mihomo-dns --no-default-features --features encrypted` | Builds with encrypted features. |
-| D3 | `cargo check -p mihomo-dns` (default) | Builds with default features (= encrypted on). |
+| D1 | `cargo check -p meow-dns --no-default-features` | Builds without encrypted features — plain UDP/TCP resolver only. |
+| D2 | `cargo check -p meow-dns --no-default-features --features encrypted` | Builds with encrypted features. |
+| D3 | `cargo check -p meow-dns` (default) | Builds with default features (= encrypted on). |
 
 Additionally, **one functional check** (not just `cargo check`):
 
@@ -157,9 +157,9 @@ Additionally, **one functional check** (not just `cargo check`):
 |---|------|---------|
 | D4 | `parse_tls_without_encrypted_feature_hard_errors` | In a `cfg(not(feature = "encrypted"))` build, passing `"tls://8.8.8.8"` to `NameServerUrl::parse` returns `Err` with message containing `"encrypted"` Cargo feature name. **Do not silently downgrade to plain.** |
 
-### E. Network-dependent integration tests (`crates/mihomo-dns/tests/doh_dot_integration.rs`)
+### E. Network-dependent integration tests (`crates/meow-dns/tests/doh_dot_integration.rs`)
 
-All cases below are `#[ignore]`. Run with `cargo test -p mihomo-dns --test
+All cases below are `#[ignore]`. Run with `cargo test -p meow-dns --test
 doh_dot_integration -- --ignored`. **Not wired into CI.** Document in the
 PR description which DNS providers were used for manual verification.
 
@@ -219,8 +219,8 @@ that re-introduces a blocking call inside the async load path.
 Two additions to `.github/workflows/test.yml`:
 
 1. Add `doh_dot_unit_test` (or whatever the test binary name is for
-   `crates/mihomo-dns/src/upstream.rs` unit tests and
-   `crates/mihomo-dns/tests/` non-ignored tests) to both the `test` and
+   `crates/meow-dns/src/upstream.rs` unit tests and
+   `crates/meow-dns/tests/` non-ignored tests) to both the `test` and
    `macos` job per-suite invocation lists.
 2. Add §D `cargo check` rows (D1–D3) — three lines, under 5 seconds
    each after the cache warms.

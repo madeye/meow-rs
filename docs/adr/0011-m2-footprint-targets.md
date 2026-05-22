@@ -34,11 +34,11 @@ binary size (0007) or throughput (0006).
 
 | Site | Observation | Impact |
 |------|-------------|--------|
-| `mihomo-common/src/metadata.rs:7` `Metadata` | 6 owned `String` + 2 `Vec<String>` + 1 `Option<String>` fields. On 64-bit, `String` is 24 B even when empty; 8 empty Strings = 192 B of struct overhead alone, before any heap content. Cloned on every match-engine call (`large_types_passed_by_value` candidate). | High — `Metadata` is on the per-connection path, often via the by-value `pure()` method. |
-| `mihomo-tunnel/src/udp.rs:18` `UdpSession.proxy_name: String` | One String per NAT entry. With ~10k UDP flows, that's ~10k separate heap allocations holding identical proxy names. | Medium — interning to `Arc<str>` collapses to one allocation per distinct proxy. |
-| `mihomo-tunnel/src/statistics.rs:38` `ConnectionInfo` | `id: String` (UUID-4 = 36 chars = 36 B heap), `chains: Vec<String>`, `rule: String`, `rule_payload: String`, plus owned `Metadata` (~200+ B). Per active TCP connection. | High — at 10k active conns this is ~5+ MiB of stats overhead in addition to the actual relay buffers. |
-| `mihomo-common/src/adapter_type.rs:5` `AdapterType` enum | 14 unit variants → 1 byte discriminant. Already tight. | None. |
-| `mihomo-common/src/error.rs:4` `MihomoError` enum | Not yet read; size unknown. `large_enum_variant` lint (added in addendum) will surface if any variant dominates. | TBD baseline. |
+| `meow-common/src/metadata.rs:7` `Metadata` | 6 owned `String` + 2 `Vec<String>` + 1 `Option<String>` fields. On 64-bit, `String` is 24 B even when empty; 8 empty Strings = 192 B of struct overhead alone, before any heap content. Cloned on every match-engine call (`large_types_passed_by_value` candidate). | High — `Metadata` is on the per-connection path, often via the by-value `pure()` method. |
+| `meow-tunnel/src/udp.rs:18` `UdpSession.proxy_name: String` | One String per NAT entry. With ~10k UDP flows, that's ~10k separate heap allocations holding identical proxy names. | Medium — interning to `Arc<str>` collapses to one allocation per distinct proxy. |
+| `meow-tunnel/src/statistics.rs:38` `ConnectionInfo` | `id: String` (UUID-4 = 36 chars = 36 B heap), `chains: Vec<String>`, `rule: String`, `rule_payload: String`, plus owned `Metadata` (~200+ B). Per active TCP connection. | High — at 10k active conns this is ~5+ MiB of stats overhead in addition to the actual relay buffers. |
+| `meow-common/src/adapter_type.rs:5` `AdapterType` enum | 14 unit variants → 1 byte discriminant. Already tight. | None. |
+| `meow-common/src/error.rs:4` `MeowError` enum | Not yet read; size unknown. `large_enum_variant` lint (added in addendum) will surface if any variant dominates. | TBD baseline. |
 | Proxy adapter dispatch | `Box<dyn ProxyAdapter>` — heap indirection per adapter instance. There is **no** sum-type / enum dispatch. Adapter count is small and bounded; trait-object indirection cost is amortised across the proxy's lifetime. | Low priority; mention in baseline, do not refactor in M2. |
 | String interning crates | Zero usage of `Arc<str>` / `SmolStr` / `CompactString` / `SmartString` / `SmallVec` anywhere in the workspace. | Greenfield — pick once, apply broadly. |
 | DNS cache entry layout | Not yet probed; ADR-0011 baseline measures. | TBD. |
@@ -85,7 +85,7 @@ a. **`footprint-types-baseline.md`** — `cargo +nightly rustc --crate-type
    `-Zprint-type-sizes` source). Filter output to types ≥ 64 B; sort
    descending; capture the top 50.
 b. **`footprint-rss-baseline.md`** — RSS under synthetic load: bench
-   harness already exists at `crates/mihomo-bench/`. Run `bench_connrate
+   harness already exists at `crates/meow-bench/`. Run `bench_connrate
    duration=60s concurrency=64`; record peak RSS via `getrusage` or
    `/proc/self/status` sampling at 1 Hz. Also: a "10k idle TCP" scenario
    (10 000 concurrent SOCKS5 sessions, no traffic) to isolate per-
@@ -173,7 +173,7 @@ Per ADR-0008 §6, `tokio::io::copy_bidirectional` is already zero-copy
   vs reuses a per-task buffer).
 - UDP datagram buffer for sendto/recvfrom — a per-flow `Box<[u8; 2048]>`
   vs a per-task scratch buffer.
-- The DNS response buffer in `mihomo-dns` — likely already pooled; verify.
+- The DNS response buffer in `meow-dns` — likely already pooled; verify.
 
 Goal: zero per-packet allocation (already enforced by ADR-0008 §3);
 additionally, **zero per-connection-setup allocation** for the relay
@@ -202,7 +202,7 @@ no sum-type carrying inline variants. So the bullet doesn't directly
 apply to the current code.
 
 If `large_enum_variant` lint (M1 addendum A1) flags any **other** enum
-during M2.baseline — most likely `MihomoError`, possibly a config-side
+during M2.baseline — most likely `MeowError`, possibly a config-side
 adapter-config enum — that enum's largest variant gets boxed in a
 dedicated M2.enum-variant subtask. Otherwise no work happens here.
 
@@ -246,12 +246,12 @@ Concretely:
   assignment. Acceptable — it's the largest single footprint win in the
   ADR.
 - T2 changes `ConnectionInfo.id` from `String` to `Uuid`. Breaks the
-  Stats API surface; mihomo-api JSON serialisation still emits the
+  Stats API surface; meow-api JSON serialisation still emits the
   string form at the wire, so the API surface for external callers is
   unchanged.
 - T3 is internal-only (NAT table value).
-- T4/T5 are type-system changes that ripple through `mihomo-common` and
-  `mihomo-tunnel`. M2-breaking by definition.
+- T4/T5 are type-system changes that ripple through `meow-common` and
+  `meow-tunnel`. M2-breaking by definition.
 
 Each subtask description names the breaks it ships.
 
@@ -273,7 +273,7 @@ Each subtask description names the breaks it ships.
 ```
 
 The `M2.layout-*` and `M2.smallvec-audit` subtasks run **sequentially**,
-not in parallel — each touches `mihomo-common` and a parallel branch will
+not in parallel — each touches `meow-common` and a parallel branch will
 cause merge conflicts on `Metadata` / `ConnectionInfo`. The
 `M2.relay-buffer-pool` and `M2.dns-cache-layout` can run in parallel
 with layout work (different crates).
@@ -345,9 +345,9 @@ Recorded so a future reviewer doesn't re-ask:
 
 ## References
 
-- `crates/mihomo-common/src/metadata.rs:7` — `Metadata` struct; T1.
-- `crates/mihomo-tunnel/src/statistics.rs:38` — `ConnectionInfo`; T2.
-- `crates/mihomo-tunnel/src/udp.rs:18,56` — UdpSession (T3); NAT key
+- `crates/meow-common/src/metadata.rs:7` — `Metadata` struct; T1.
+- `crates/meow-tunnel/src/statistics.rs:38` — `ConnectionInfo`; T2.
+- `crates/meow-tunnel/src/udp.rs:18,56` — UdpSession (T3); NAT key
   already-fixed marker.
 - [ADR-0006](0006-m2-benchmark-methodology.md) §5 — throughput gate.
 - [ADR-0007](0007-m2-footprint-budget.md) §2, §4 — binary-size caps.

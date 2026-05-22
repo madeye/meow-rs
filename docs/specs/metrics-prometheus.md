@@ -9,14 +9,14 @@ shares `sysinfo` RSS probe added in M1.G-4.
 Upstream reference: `hub/server.go` (exposes `/debug/vars` + `expvar`);
 note that upstream Go mihomo does NOT expose a native Prometheus `/metrics`
 endpoint — Prometheus scraping is done via `clashtui` or separate exporters.
-This is a mihomo-rust enhancement, not a parity feature.
+This is a meow-rs enhancement, not a parity feature.
 
 ## Motivation
 
-Operators running mihomo-rust in server environments want Prometheus scraping
+Operators running meow-rs in server environments want Prometheus scraping
 for traffic, connection, proxy health, and rule-match metrics without running
 a separate exporter. Go mihomo has no native `/metrics` endpoint; this is a
-conscious feature gap that mihomo-rust can fill as a differentiator.
+conscious feature gap that meow-rs can fill as a differentiator.
 
 The data already exists: `Statistics` tracks upload/download totals and
 active connections; `ProxyHealth` tracks alive state and delay per proxy.
@@ -63,7 +63,7 @@ enabled (same `external-controller` address). Operators point Prometheus at:
 
 ```
 scrape_configs:
-  - job_name: mihomo
+  - job_name: meow
     static_configs:
       - targets: ["127.0.0.1:9090"]
     bearer_token: "<secret>"
@@ -72,17 +72,17 @@ scrape_configs:
 
 ## Metric catalog
 
-All metrics are prefixed `mihomo_`.
+All metrics are prefixed `meow_`.
 
 | Registered name | Type | Labels | Description |
 |-----------------|------|--------|-------------|
-| `mihomo_traffic_bytes` | counter | `direction={upload,download}` | Cumulative bytes transferred since process start. `prometheus-client` auto-appends `_total`; wire label as a single metric with `direction` label. |
-| `mihomo_connections_active` | gauge | — | Number of currently open connections. |
-| `mihomo_proxy_alive` | gauge | `proxy_name`, `adapter_type` | 1 = alive, 0 = dead. One series per configured proxy/group. |
-| `mihomo_proxy_delay_ms` | gauge | `proxy_name`, `adapter_type` | Last measured round-trip delay in milliseconds. **Omitted entirely when `last_delay = None`** (no health check has run). NOT -1. |
-| `mihomo_rules_matched_total` | counter | `rule_type`, `action` | Cumulative rule matches by type and action. |
-| `mihomo_memory_rss_bytes` | gauge | — | Current process RSS in bytes (from sysinfo). |
-| `mihomo_info` | gauge | `version`, `mode` | Always 1; carries build-time labels (version string, tunnel mode). |
+| `meow_traffic_bytes` | counter | `direction={upload,download}` | Cumulative bytes transferred since process start. `prometheus-client` auto-appends `_total`; wire label as a single metric with `direction` label. |
+| `meow_connections_active` | gauge | — | Number of currently open connections. |
+| `meow_proxy_alive` | gauge | `proxy_name`, `adapter_type` | 1 = alive, 0 = dead. One series per configured proxy/group. |
+| `meow_proxy_delay_ms` | gauge | `proxy_name`, `adapter_type` | Last measured round-trip delay in milliseconds. **Omitted entirely when `last_delay = None`** (no health check has run). NOT -1. |
+| `meow_rules_matched_total` | counter | `rule_type`, `action` | Cumulative rule matches by type and action. |
+| `meow_memory_rss_bytes` | gauge | — | Current process RSS in bytes (from sysinfo). |
+| `meow_info` | gauge | `version`, `mode` | Always 1; carries build-time labels (version string, tunnel mode). |
 
 **Label value constraints:**
 
@@ -94,21 +94,21 @@ All metrics are prefixed `mihomo_`.
 - `action`: `"DIRECT"`, `"REJECT"`, `"PROXY"` (for all non-direct/non-reject
   actions, use `"PROXY"`).
 
-**High-cardinality note**: `mihomo_proxy_alive` and `mihomo_proxy_delay_ms` emit
+**High-cardinality note**: `meow_proxy_alive` and `meow_proxy_delay_ms` emit
 one series per proxy/group (O(num_proxies)). A typical subscription has 20–500
 proxies. This is the expected cardinality for this endpoint; operators running
 large subscriptions (500+) should be aware that per-scrape encoding cost scales
 linearly. Per-connection labels are intentionally excluded (unbounded cardinality).
 
-**`mihomo_rules_matched_total` instrumentation**: requires a new
-`RuleMatchCounters` struct in `mihomo-tunnel/src/statistics.rs` with a
+**`meow_rules_matched_total` instrumentation**: requires a new
+`RuleMatchCounters` struct in `meow-tunnel/src/statistics.rs` with a
 `DashMap<(&'static str, &'static str), u64>`. Keys are `&'static str` (not
 `String`) — `increment()` is on the hot path (called per connection); owned
 `String` keys allocate on every call. Rule type and action strings must be
 `'static` constants. The tunnel's `match_engine.rs` increments the counter at
 each rule match. This is the only new hot-path instrumentation in M1.
 
-**`mihomo_proxy_delay_ms` omit-when-None**: when `proxy.health().last_delay()`
+**`meow_proxy_delay_ms` omit-when-None**: when `proxy.health().last_delay()`
 is `None` (no health check has run), do NOT emit a series at all — not even
 `-1`. A `-1` gauge value pollutes aggregations (`avg`, `histogram_quantile`).
 Absence is the correct signal: alert rules should use `absent()` or `unless`
@@ -122,13 +122,13 @@ Use `prometheus-client = "0.22"` (pure Rust, no global state, async-friendly).
 Do not use the older `prometheus` crate (global static registry, not compatible
 with per-request scraping model).
 
-Add to `crates/mihomo-api/Cargo.toml`:
+Add to `crates/meow-api/Cargo.toml`:
 
 ```toml
 prometheus-client = "0.22"
 ```
 
-No workspace-level pin needed — only `mihomo-api` uses it.
+No workspace-level pin needed — only `meow-api` uses it.
 
 ### Route and handler
 
@@ -142,12 +142,12 @@ pub async fn get_metrics(State(state): State<AppState>) -> Response {
     let upload = <Family<Vec<(String, String)>, Counter>>::default();
     let download = <Family<Vec<(String, String)>, Counter>>::default();
     // ... populate from state.tunnel.statistics()
-    registry.register("mihomo_traffic_bytes", "Cumulative bytes", upload.clone());
+    registry.register("meow_traffic_bytes", "Cumulative bytes", upload.clone());
 
     // Active connections
     let active_conns = Gauge::<i64, AtomicI64>::default();
     active_conns.set(state.tunnel.statistics().active_connection_count() as i64);
-    registry.register("mihomo_connections_active", "Active connections", active_conns);
+    registry.register("meow_connections_active", "Active connections", active_conns);
 
     // ... additional metrics
 
@@ -169,7 +169,7 @@ intervals (15–60s) the allocation overhead is negligible.
 ### Rule-match counter instrumentation
 
 ```rust
-// crates/mihomo-tunnel/src/statistics.rs
+// crates/meow-tunnel/src/statistics.rs
 
 pub struct RuleMatchCounters {
     /// (&'static str rule_type, &'static str action) → count
@@ -211,7 +211,7 @@ all other REST endpoints). No separate auth handling.
 ## Divergences from upstream
 
 Go mihomo has no native Prometheus endpoint — this entire feature is a
-mihomo-rust addition. No ADR-0002 classification needed.
+meow-rs addition. No ADR-0002 classification needed.
 
 The metric names follow Prometheus naming conventions (snake_case, `_total`
 suffix for counters, `_bytes`/`_ms` units). They are NOT required to match
@@ -222,17 +222,17 @@ API and define their own metric names.
 
 1. `GET /metrics` returns `200 OK` with `Content-Type: text/plain; version=0.0.4`.
 2. Response is valid Prometheus text format (parseable by `promtool check metrics`).
-3. `mihomo_traffic_bytes_total{direction="upload"}` and `{direction="download"}`
+3. `meow_traffic_bytes_total{direction="upload"}` and `{direction="download"}`
    are present and match `GET /traffic` values.
-4. `mihomo_connections_active` matches the count from `GET /connections`.
-5. `mihomo_proxy_alive` has one series per proxy/group; value is 1 for alive,
+4. `meow_connections_active` matches the count from `GET /connections`.
+5. `meow_proxy_alive` has one series per proxy/group; value is 1 for alive,
    0 for dead. Label `proxy_name` matches the name from `GET /proxies`.
-6. `mihomo_proxy_delay_ms` present for proxies with a known delay; **absent** for
+6. `meow_proxy_delay_ms` present for proxies with a known delay; **absent** for
    proxies where no health check has run (`last_delay = None`). NOT -1, NOT 0.
-7. `mihomo_rules_matched_total` increments after each proxied connection.
+7. `meow_rules_matched_total` increments after each proxied connection.
    Unit test: route one connection through a DOMAIN rule → counter increases by 1.
-8. `mihomo_memory_rss_bytes` is a positive integer.
-9. `mihomo_info` always equals 1; carries `version` and `mode` labels.
+8. `meow_memory_rss_bytes` is a positive integer.
+9. `meow_info` always equals 1; carries `version` and `mode` labels.
 10. `GET /metrics` with wrong/missing Bearer token → 401 (same as other routes).
 11. No global mutable registry — two concurrent scrape requests do not race.
 
@@ -242,19 +242,19 @@ API and define their own metric names.
 
 - `metrics_endpoint_returns_prometheus_text_format` — call handler with mock
   AppState; parse response with `prometheus_parse` or regex; assert
-  `mihomo_traffic_bytes_total` present.
-  Upstream: N/A (mihomo-rust enhancement). NOT JSON — must be Prometheus text.
+  `meow_traffic_bytes_total` present.
+  Upstream: N/A (meow-rs enhancement). NOT JSON — must be Prometheus text.
 - `metrics_traffic_bytes_match_statistics` — pre-populate statistics with known
   upload/download values; assert metric values match.
 - `metrics_connections_active_reflects_count` — add 3 mock connections to
-  statistics; assert `mihomo_connections_active` = 3.
+  statistics; assert `meow_connections_active` = 3.
 - `metrics_proxy_alive_label_per_proxy` — mock tunnel with 2 proxies (one alive,
   one dead); assert two series, correct values.
 - `metrics_proxy_delay_absent_when_unknown` — proxy with `last_delay = None`;
-  assert NO `mihomo_proxy_delay_ms` series emitted for that proxy. NOT -1, NOT 0.
-  Upstream: N/A (mihomo-rust enhancement). Omitting series is correct Prometheus
+  assert NO `meow_proxy_delay_ms` series emitted for that proxy. NOT -1, NOT 0.
+  Upstream: N/A (meow-rs enhancement). Omitting series is correct Prometheus
   practice; sentinel values corrupt aggregations.
-- `metrics_info_label_always_one` — assert `mihomo_info` = 1 with version label.
+- `metrics_info_label_always_one` — assert `meow_info` = 1 with version label.
 - `metrics_auth_required` — no Bearer token → 401. Same as other REST routes.
 
 **Unit (`statistics.rs`):**
@@ -272,9 +272,9 @@ API and define their own metric names.
 
 ## Implementation checklist (engineer handoff)
 
-- [ ] Add `prometheus-client = "0.22"` to `crates/mihomo-api/Cargo.toml`.
-- [ ] Add `RuleMatchCounters` to `mihomo-tunnel/src/statistics.rs`.
-- [ ] Wire `rule_match.increment(...)` in `mihomo-tunnel/src/match_engine.rs`.
+- [ ] Add `prometheus-client = "0.22"` to `crates/meow-api/Cargo.toml`.
+- [ ] Add `RuleMatchCounters` to `meow-tunnel/src/statistics.rs`.
+- [ ] Wire `rule_match.increment(...)` in `meow-tunnel/src/match_engine.rs`.
 - [ ] Expose `active_connection_count()` method on `Statistics`.
 - [ ] Implement `get_metrics` handler in `routes.rs`.
 - [ ] Register `/metrics` route in `build_router()`.

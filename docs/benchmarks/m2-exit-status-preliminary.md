@@ -37,7 +37,7 @@ cargo test --lib: pass (451 tests, 11 suites)
 
 **Status**: Can build on macOS; cannot measure against ADR-0007 caps without musl cross-compile.
 
-- `target/release/mihomo` (macOS arm64): **5.2 MB**
+- `target/release/meow` (macOS arm64): **5.2 MB**
 - ADR-0007 §4 hard-gate targets require `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` stripped binaries with release profile (lto=fat, codegen-units=1, strip=symbols).
 - **Action required**: Run on reference Linux host with musl toolchain.
 
@@ -78,7 +78,7 @@ Soft-gated (measured, warn on overrun):
 
 ### 5. ADR-0008 Dhat Audit (Phase A) 🔶 PARTIAL
 
-**Status**: dhat feature is wired in mihomo-app; reproducers not yet run.
+**Status**: dhat feature is wired in meow-app; reproducers not yet run.
 
 Required audits:
 - **HP-1** (TCP relay inner loop): zero-alloc rule per §3 (< 0.5 allocs/iter)

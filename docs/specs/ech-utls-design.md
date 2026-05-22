@@ -68,14 +68,14 @@ pub ech: Option<EchOpts>,
 /// Source of the ECH config list. DNS sourcing is deferred (see §9).
 pub enum EchOpts {
     /// Inline base64-decoded ECH config list bytes.
-    /// YAML key: `ech-opts.config` (base64 string, decoded by mihomo-config before
+    /// YAML key: `ech-opts.config` (base64 string, decoded by meow-config before
     /// constructing TlsConfig).
     Config(Vec<u8>),
 }
 ```
 
 DNS-sourced ECH (`ech-opts.enable = true` without `ech-opts.config`) is **deferred** until
-`mihomo-dns` gains SVCB/HTTPS record query support. The enum is defined now so the config schema
+`meow-dns` gains SVCB/HTTPS record query support. The enum is defined now so the config schema
 is stable.
 
 ### YAML keys (mirror Go upstream)
@@ -83,7 +83,7 @@ is stable.
 | YAML key | TlsConfig field | Notes |
 |----------|----------------|-------|
 | `ech-opts.enable` | triggers `ech: Some(EchOpts::Config(...))` when `config` also set | `enable: true` alone (DNS path) is a parse error in v1 |
-| `ech-opts.config` | `EchOpts::Config(base64_decoded_bytes)` | decoded by mihomo-config |
+| `ech-opts.config` | `EchOpts::Config(base64_decoded_bytes)` | decoded by meow-config |
 | `ech-opts.query-server-name` | deferred | reserved, parse-and-ignore in v1 |
 | `client-fingerprint` | `fingerprint: Option<String>` | existing field, same YAML key |
 
@@ -231,7 +231,7 @@ their `_Auto` equivalents in v1 (same boring parameters).
 
 `tokio_boring::SslStream<S>` implements `AsyncRead + AsyncWrite + Unpin + Send + Sync` when
 `S: AsyncRead + AsyncWrite + Unpin + Send + Sync` (verified from docs.rs/tokio-boring/5.0.0).
-`mihomo-transport`'s `Stream` trait (defined at `crates/mihomo-transport/src/lib.rs:53`) is a
+`meow-transport`'s `Stream` trait (defined at `crates/meow-transport/src/lib.rs:53`) is a
 blanket impl over exactly that bound:
 
 ```rust
@@ -270,9 +270,9 @@ Three proxy files call `TlsLayer::new`:
 
 | File | TlsConfig fields set | Path after change |
 |------|---------------------|------------------|
-| `crates/mihomo-proxy/src/trojan.rs:55–61` | `skip_cert_verify`, `sni` | rustls (no fingerprint/ECH) — **zero change** |
-| `crates/mihomo-proxy/src/v2ray_plugin.rs:147–151` | `skip_cert_verify`, `sni` | rustls — **zero change** |
-| `crates/mihomo-proxy/src/vless_adapter.rs` (test helpers) | `sni` only | rustls — **zero change** |
+| `crates/meow-proxy/src/trojan.rs:55–61` | `skip_cert_verify`, `sni` | rustls (no fingerprint/ECH) — **zero change** |
+| `crates/meow-proxy/src/v2ray_plugin.rs:147–151` | `skip_cert_verify`, `sni` | rustls — **zero change** |
+| `crates/meow-proxy/src/vless_adapter.rs` (test helpers) | `sni` only | rustls — **zero change** |
 
 The `TlsLayer::new` call signature does not change. The dispatch happens internally based on the
 presence of `fingerprint`/`ech` fields. Existing callers need no modifications.
@@ -309,7 +309,7 @@ profile or via a workspace feature.
 
 | Item | Reason |
 |------|--------|
-| DNS HTTPS-record ECH config sourcing (`ech-opts.enable` without `ech-opts.config`) | Requires SVCB/HTTPS record query support in `mihomo-dns` (hickory-resolver HTTPS records exist but no wrapper in this repo) |
+| DNS HTTPS-record ECH config sourcing (`ech-opts.enable` without `ech-opts.config`) | Requires SVCB/HTTPS record query support in `meow-dns` (hickory-resolver HTTPS records exist but no wrapper in this repo) |
 | ECH retry-on-rejection | Needs per-connection `SslConnector` rebuild with `get_ech_retry_configs()` result; complex async flow |
 | `randomized` fingerprint profile | Requires per-connection weight-sampled extension list; deferred until boring extension-level API is better understood |
 | `randomized` custom profiles | Requires per-connection weight-sampled extension list; deferred until boring extension-level API is better understood |

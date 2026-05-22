@@ -22,7 +22,7 @@ with subscription nodes; geographically distributed double-hop for
 censorship circumvention.
 
 Relay groups appear frequently in advanced Clash Meta configs. Without
-them, mihomo-rust silently drops the group (parse error → group absent
+them, meow-rs silently drops the group (parse error → group absent
 → any rule referencing it matches `DIRECT` or errors, depending on
 tunnel mode).
 
@@ -33,7 +33,7 @@ Upstream Go mihomo implements relay in ~200 LOC at
 
 In scope:
 
-1. `RelayGroup` struct in `crates/mihomo-proxy/src/group/relay.rs`
+1. `RelayGroup` struct in `crates/meow-proxy/src/group/relay.rs`
    implementing `ProxyAdapter`.
 2. TCP relay through a chain of ≥2 proxies. Each intermediate hop
    is connected via its predecessor using `ProxyAdapter::dial_tcp`
@@ -44,7 +44,7 @@ In scope:
    if any chain member lacks UDP support.
 4. Minimum chain length: 2 proxies. Single-proxy `relay` is a
    configuration error — hard-error at parse time.
-5. `AdapterType::Relay` added to `mihomo-common/src/adapter_type.rs`.
+5. `AdapterType::Relay` added to `meow-common/src/adapter_type.rs`.
 6. YAML config parser for `type: relay` groups.
 
 Out of scope:
@@ -172,7 +172,7 @@ implement `connect_over`. The compiler enforces this.
 - `DirectAdapter::connect_over` — returns the passed stream unchanged.
   A direct hop in a relay chain is a no-op (useful for
   `relay: [direct, ss-node]`).
-- `RejectAdapter::connect_over` — returns `Err(MihomoError::Rejected)`.
+- `RejectAdapter::connect_over` — returns `Err(MeowError::Rejected)`.
 
 **Breaking change scope:** this trait change touches every
 `ProxyAdapter` impl (Direct, Reject, Shadowsocks, Trojan, and M1.B
@@ -193,19 +193,19 @@ async fn relay_tcp(
     // proxy[0]: real TCP connect, target = proxy[1]'s server:port
     let mut meta = metadata_for_proxy(&proxies[1]);
     let mut conn: Box<dyn ProxyConn> = proxies[0].dial_tcp(&meta).await
-        .map_err(|e| MihomoError::relay_hop_failed(0, e))?;
+        .map_err(|e| MeowError::relay_hop_failed(0, e))?;
 
     // proxy[1..N-2]: connect_over the previous hop's established stream
     for i in 1..proxies.len() - 1 {
         meta = metadata_for_proxy(&proxies[i + 1]);
         conn = proxies[i].connect_over(conn, &meta).await
-            .map_err(|e| MihomoError::relay_hop_failed(i, e))?;
+            .map_err(|e| MeowError::relay_hop_failed(i, e))?;
     }
 
     // proxy[N-1]: final hop connects to the actual target
     let last = proxies.len() - 1;
     conn = proxies[last].connect_over(conn, final_target).await
-        .map_err(|e| MihomoError::relay_hop_failed(last, e))?;
+        .map_err(|e| MeowError::relay_hop_failed(last, e))?;
     Ok(conn)
 }
 ```
@@ -219,7 +219,7 @@ architect.
 ### Struct
 
 ```rust
-// crates/mihomo-proxy/src/group/relay.rs
+// crates/meow-proxy/src/group/relay.rs
 
 pub struct RelayGroup {
     name: String,
@@ -241,7 +241,7 @@ impl ProxyAdapter for RelayGroup {
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         if !self.support_udp() {
-            return Err(MihomoError::UdpNotSupported);
+            return Err(MeowError::UdpNotSupported);
         }
         relay_udp(&self.proxies, metadata).await
     }
@@ -250,16 +250,16 @@ impl ProxyAdapter for RelayGroup {
 
 ### Error handling
 
-Intermediate hop failures surface wrapped in `MihomoError::RelayHopFailed`:
+Intermediate hop failures surface wrapped in `MeowError::RelayHopFailed`:
 
 ```rust
-MihomoError::RelayHopFailed { hop: usize, source: Box<MihomoError> }
+MeowError::RelayHopFailed { hop: usize, source: Box<MeowError> }
 ```
 
 Error message shape: `"relay chain failed at hop 1 (proxy-b → proxy-c): <inner error>"`.
 
-Add `RelayHopFailed` to `MihomoError` in `mihomo-common`. Do NOT use
-`anyhow::Context::context()` at the public boundary — `MihomoError`
+Add `RelayHopFailed` to `MeowError` in `meow-common`. Do NOT use
+`anyhow::Context::context()` at the public boundary — `MeowError`
 is the error type for all `ProxyAdapter` results. Use anyhow only for
 internal plumbing within the relay implementation, not at the return
 boundary.
@@ -284,7 +284,7 @@ boundary.
     resolves correctly at dial time via the Selector's `connect_over`.
 11. Nested relay-of-relay (outer relay whose proxy[0] is itself a
     RelayGroup) delivers bytes to mock target without panicking.
-12. `MihomoError::RelayHopFailed { hop, source }` is used at hop
+12. `MeowError::RelayHopFailed { hop, source }` is used at hop
     boundaries — NOT `anyhow::Context` at the public return type.
 
 ## Test plan (starting point — qa owns final shape)
@@ -312,7 +312,7 @@ boundary.
   Run this variant three times: lacking-UDP proxy is at position 0
   (first hop), middle position, and last position — all must error.
 - `relay_hop_failure_includes_hop_index` — mock proxy[1] errors;
-  assert the returned `MihomoError::RelayHopFailed` contains `hop == 1`.
+  assert the returned `MeowError::RelayHopFailed` contains `hop == 1`.
   NOT a raw inner error with no relay context. `anyhow` NOT at boundary.
 - `relay_url_interval_fields_warn_once` — YAML with `url:` +
   `interval:` on a relay group → exactly one `warn!` per unexpected
@@ -342,17 +342,17 @@ with VLESS.** VLESS must still add its own `connect_over` override before
 a relay chain can use a VLESS hop, but that does not block the relay group
 implementation or its tests (use SS/HTTP/Direct hops in tests instead).
 
-- [ ] Add `AdapterType::Relay` to `mihomo-common/src/adapter_type.rs`.
+- [ ] Add `AdapterType::Relay` to `meow-common/src/adapter_type.rs`.
 - [ ] Add `connect_over(&self, stream: Box<dyn ProxyConn>, meta: &Metadata) -> Result<Box<dyn ProxyConn>>`
-      to the `ProxyAdapter` trait in `mihomo-common`. Required method —
+      to the `ProxyAdapter` trait in `meow-common`. Required method —
       no default impl. Update ALL existing adapters (Direct, Reject,
       Shadowsocks, Trojan) before implementing RelayGroup.
-- [ ] Add `MihomoError::RelayHopFailed { hop: usize, source: Box<MihomoError> }`
-      to `mihomo-common`.
+- [ ] Add `MeowError::RelayHopFailed { hop: usize, source: Box<MeowError> }`
+      to `meow-common`.
 - [ ] Implement `group/relay.rs`. Comment at top cites upstream:
       `// upstream: adapter/outbound/relay.go`.
       Add `debug_assert!(proxies.len() >= 2)` in `RelayGroup::new`.
-- [ ] Wire `parse_proxy_group` in `mihomo-config` to recognise
+- [ ] Wire `parse_proxy_group` in `meow-config` to recognise
       `type: relay`. Hard-errors for `proxies.len() < 2`.
 - [ ] Update `docs/roadmap.md` M1.C-2 row with merged PR link.
 

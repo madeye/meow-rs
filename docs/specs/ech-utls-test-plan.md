@@ -2,7 +2,7 @@
 
 **Document Status:** Refined (v2 for BoringSSL)  
 **Team:** tls-ech-utls (QA: this document)  
-**Scope:** `crates/mihomo-transport/src/tls.rs` — ECH (Encrypted Client Hello) + uTLS client fingerprint spoofing via **BoringSSL** backend  
+**Scope:** `crates/meow-transport/src/tls.rs` — ECH (Encrypted Client Hello) + uTLS client fingerprint spoofing via **BoringSSL** backend  
 **Backend:** `tokio-boring` + `boring-sys` (replaces rustls for ECH/uTLS paths)  
 **Extends:** `docs/specs/transport-layer-test-plan.md` (cases A1-A13 remain rustls; new cases C1-C14 use boring)
 
@@ -326,7 +326,7 @@
 ### Test Server
 
 - **Type:** Real local TLS server with BoringSSL backend (no mocks at API boundary per convention #5)
-- **Tools:** Extend `crates/mihomo-transport/tests/support/loopback.rs`:
+- **Tools:** Extend `crates/meow-transport/tests/support/loopback.rs`:
   - `spawn_boring_server()` — basic BoringSSL server, standard TLS (no ECH, no fingerprint requirements)
   - `spawn_ech_server(ech_key_pair)` — BoringSSL server with ECH enabled; stores provided public key and private key for decryption
   - Capture ClientHello bytes (raw wire format for JA3 computation)
@@ -380,7 +380,7 @@
 
 ```bash
 # Build with boring-tls feature (smoke test for C++ toolchain + cmake integration)
-cargo build --release -p mihomo-transport --features boring-tls
+cargo build --release -p meow-transport --features boring-tls
 
 # Run all uTLS fingerprint tests (C1-C11)
 cargo test --features boring-tls --lib --test tls_test C1 C2 C3 C4 C5 C6 C7 C8 C9 C10 C11
@@ -392,10 +392,10 @@ cargo test --features boring-tls --lib --test tls_test C12 C13 C14 C15
 RUST_LOG=debug cargo test --features boring-tls --test tls_test C1 -- --nocapture
 
 # Lint
-cargo clippy -p mihomo-transport --all-targets
+cargo clippy -p meow-transport --all-targets
 
 # Build without boring-tls (verify rustls path still works, fingerprint/ech produce expected errors/stubs)
-cargo build --release -p mihomo-transport  # no --features boring-tls
+cargo build --release -p meow-transport  # no --features boring-tls
 cargo test --lib --test tls_test A1 A2 A3  # rustls tests still pass
 ```
 

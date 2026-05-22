@@ -228,9 +228,9 @@ panicking publisher is a bug — let it abort.
 | Item | Location | Why |
 |---|---|---|
 | `log_tx: broadcast::Sender<LogMessage>` | `AppState` | Shared by publisher (installed in `main.rs` before API server starts) and all WS subscribers (each handler calls `.subscribe()`). |
-| `LogMessage`, `LogLevel`, `MessageVisitor` | `mihomo-api/src/log_stream.rs` | Per-feature. |
-| `LogBroadcastLayer` | `mihomo-api/src/log_stream.rs` | Same. |
-| Panic hook install | `mihomo-app/src/main.rs`, above `run()` | Process-wide. |
+| `LogMessage`, `LogLevel`, `MessageVisitor` | `meow-api/src/log_stream.rs` | Per-feature. |
+| `LogBroadcastLayer` | `meow-api/src/log_stream.rs` | Same. |
+| Panic hook install | `meow-app/src/main.rs`, above `run()` | Process-wide. |
 | Future `traffic_tx` (if `/traffic` moves to stream) | `AppState` | Same pattern. |
 | `sysinfo::System` / memory sampler state | **Not** in `AppState` — per-connection local variable | Avoids shared-state locking; approved spec shape. |
 

@@ -12,7 +12,7 @@ ASN file-discovery chain used in M1 for IP-ASN rule;
 
 Upstream Go mihomo exposes a `geodata:` (and scattered `geo-*`) config section
 that lets users override DB file paths, set download URLs, and enable periodic
-auto-update. In M1 mihomo-rust discovers DB files via a XDG-compliant path chain
+auto-update. In M1 meow-rs discovers DB files via a XDG-compliant path chain
 and never downloads them — the user is expected to provision them manually or
 via their package manager.
 
@@ -24,13 +24,13 @@ M2 adds the full config surface so operators can:
 
 ## M1 state (no action required — document only)
 
-In M1 mihomo-rust discovers each DB file at runtime in order:
+In M1 meow-rs discovers each DB file at runtime in order:
 
 | DB | Discovery chain (tried in order, first found wins) |
 |----|-----------------------------------------------------|
-| GeoIP MMDB | `$XDG_CONFIG_HOME/mihomo/Country.mmdb` → `$HOME/.config/mihomo/Country.mmdb` → `./mihomo/Country.mmdb` |
-| ASN MMDB | `$XDG_CONFIG_HOME/mihomo/GeoLite2-ASN.mmdb` → `$HOME/.config/mihomo/GeoLite2-ASN.mmdb` → `./mihomo/GeoLite2-ASN.mmdb` |
-| Geosite | `$XDG_CONFIG_HOME/mihomo/geosite.mrs` → `$HOME/.config/mihomo/geosite.mrs` → `./mihomo/geosite.mrs` |
+| GeoIP MMDB | `$XDG_CONFIG_HOME/meow/Country.mmdb` → `$HOME/.config/meow/Country.mmdb` → `./meow/Country.mmdb` |
+| ASN MMDB | `$XDG_CONFIG_HOME/meow/GeoLite2-ASN.mmdb` → `$HOME/.config/meow/GeoLite2-ASN.mmdb` → `./meow/GeoLite2-ASN.mmdb` |
+| Geosite | `$XDG_CONFIG_HOME/meow/geosite.mrs` → `$HOME/.config/meow/geosite.mrs` → `./meow/geosite.mrs` |
 
 If a DB is absent, any rule requiring it returns an error at rule-match time
 (not at parse time), matching the error-at-use behaviour described in
@@ -43,9 +43,9 @@ No auto-update, no `geodata:` YAML key, no explicit-path override in M1.
 ```yaml
 geodata:
   # Path overrides — skip file-discovery for that DB
-  mmdb-path: /etc/mihomo/Country.mmdb        # optional
-  asn-path: /etc/mihomo/GeoLite2-ASN.mmdb   # optional
-  geosite-path: /etc/mihomo/geosite.mrs      # optional
+  mmdb-path: /etc/meow/Country.mmdb        # optional
+  asn-path: /etc/meow/GeoLite2-ASN.mmdb   # optional
+  geosite-path: /etc/meow/geosite.mrs      # optional
 
   # Auto-update
   auto-update: false            # default: false
@@ -169,8 +169,8 @@ Class A or B divergence — it is a feature interaction, not a correctness trade
 
 ## Implementation checklist (engineer handoff — M2)
 
-- [ ] Add `GeoDataConfig` struct to `mihomo-config` for the `geodata:` subsection.
-- [ ] Update `resolve_db_path()` in `mihomo-rules` and `mihomo-dns` to accept
+- [ ] Add `GeoDataConfig` struct to `meow-config` for the `geodata:` subsection.
+- [ ] Update `resolve_db_path()` in `meow-rules` and `meow-dns` to accept
       optional explicit path before discovery chain.
 - [ ] Spawn auto-update task in `main.rs` when `auto-update: true`; wrap each
       DB in `Arc<RwLock<_>>` if not already.

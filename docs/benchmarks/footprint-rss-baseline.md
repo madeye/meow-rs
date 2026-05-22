@@ -3,7 +3,7 @@
 ## Reference: commit 9419421578f808c59db37fc7ec056a8971a741b9
 
 Platform: aarch64-apple-darwin (Apple Silicon), macOS 25.4.0, Rust stable 1.88  
-Binary: release build of mihomo-rust (`cargo build --release`), commit `9419421578f808c59db37fc7ec056a8971a741b9`  
+Binary: release build of meow-rs (`cargo build --release`), commit `9419421578f808c59db37fc7ec056a8971a741b9`  
 Config: `config-bench.yaml` (SOCKS5 proxy on port 17890, DIRECT rule, log-level silent)  
 Measurement tool: `ps -o rss= -p <pid>` (returns KB; values multiplied by 1024)
 
@@ -57,7 +57,7 @@ struct overhead component but will not substantially move the headline bytes/con
 
 ### Idle Connections (M-idle — N=1000)
 
-Measurement infrastructure: `bench_idle_conns` (added in M2 baseline sprint, `crates/mihomo-bench/src/bench_idle_conns.rs`).
+Measurement infrastructure: `bench_idle_conns` (added in M2 baseline sprint, `crates/meow-bench/src/bench_idle_conns.rs`).
 **Not run at baseline** — requires the bench harness to be wired into `main.rs` fully and a live benchmark run.
 Expected to produce ~8–16 KB/idle-conn (primarily kernel socket buffer per connection held open).
 
@@ -80,7 +80,7 @@ The primary M2 levers are:
 
 ## Benchmark Infrastructure Added (M2 baseline sprint)
 
-Two new measurement functions were added to `crates/mihomo-bench/`:
+Two new measurement functions were added to `crates/meow-bench/`:
 
 | Function | File | Purpose |
 |----------|------|---------|

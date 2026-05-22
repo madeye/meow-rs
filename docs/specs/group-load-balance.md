@@ -28,7 +28,7 @@ selection with a counter or a hash. Estimate ~200 LOC total.
 
 In scope:
 
-1. `LoadBalanceGroup` struct in `crates/mihomo-proxy/src/group/load_balance.rs`
+1. `LoadBalanceGroup` struct in `crates/meow-proxy/src/group/load_balance.rs`
    implementing `ProxyAdapter`.
 2. Strategy `round-robin` (default): AtomicUsize counter, mod alive-
    proxy count. Per-request, not per-connection (so long-lived
@@ -39,10 +39,10 @@ In scope:
 4. Periodic health-check using the same `url` + `interval` probe
    mechanism as URLTest. Unhealthy proxies are skipped by both
    strategies.
-5. YAML config parser in `mihomo-config` for the
+5. YAML config parser in `meow-config` for the
    `proxies: [{ type: load-balance }]` group variant.
 6. `AdapterType::LoadBalance` variant added to
-   `crates/mihomo-common/src/adapter_type.rs`.
+   `crates/meow-common/src/adapter_type.rs`.
 7. Integration with `ProxyHealth` and the api-delay-endpoints probe
    path.
 
@@ -88,7 +88,7 @@ Field reference:
 | # | Case | Class | Rationale |
 |---|------|:-----:|-----------|
 | 1 | Unknown `strategy` value — upstream falls back to round-robin | A | Unknown strategy means the user may get different distribution behaviour than intended. Hard-error at parse time. |
-| 2 | `strategy: consistent-hashing` with no alive proxies — upstream panics (index out of bounds) | A | We return `MihomoError::NoProxyAvailable` and surface it as a clean dial error. NOT a panic. |
+| 2 | `strategy: consistent-hashing` with no alive proxies — upstream panics (index out of bounds) | A | We return `MeowError::NoProxyAvailable` and surface it as a clean dial error. NOT a panic. |
 | 3 | All proxies dead — upstream returns the round-robin slot (dead proxy) | B | We return `NoProxyAvailable` error immediately instead of dialing a known-dead proxy. Same reachability outcome (connection fails), but our failure is fast and named. |
 | 4 | `strategy: consistent-hashing` uses modulo-hash, not ring-hash | B | Despite the name, upstream Go mihomo's implementation (`adapter/outbound/loadbalance.go`) uses the same `hash % alive.len()` modulo approach, not a ring. Rebalancing a proxy list reshuffles most assignments — users expecting minimal-disruption ring-consistent-hash should be aware. We match upstream; the label "consistent-hashing" means "stable for a given src IP given a fixed proxy list", not ring-consistent. |
 
@@ -97,7 +97,7 @@ Field reference:
 ### Struct
 
 ```rust
-// crates/mihomo-proxy/src/group/load_balance.rs
+// crates/meow-proxy/src/group/load_balance.rs
 
 pub enum LbStrategy {
     RoundRobin,
@@ -195,7 +195,7 @@ needs `Arc<LoadBalanceGroup>` to call `update_health()`.
 impl ProxyAdapter for LoadBalanceGroup {
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
         let proxy = self.select(metadata)
-            .ok_or(MihomoError::NoProxyAvailable)?;
+            .ok_or(MeowError::NoProxyAvailable)?;
         proxy.dial_tcp(metadata).await
     }
 
@@ -298,10 +298,10 @@ that subset.
 
 ## Implementation checklist (for engineer handoff)
 
-- [ ] Add `AdapterType::LoadBalance` to `mihomo-common/src/adapter_type.rs`.
+- [ ] Add `AdapterType::LoadBalance` to `meow-common/src/adapter_type.rs`.
 - [ ] Implement `group/load_balance.rs` with both strategies. Inline
       FNV-1a 32-bit (no crate dep). Comment cites upstream file.
-- [ ] Wire `parse_proxy_group` in `mihomo-config` to recognise
+- [ ] Wire `parse_proxy_group` in `meow-config` to recognise
       `type: load-balance` and produce a `LoadBalanceGroup`.
 - [ ] Spawn health-check sweep task in `main.rs` for each
       load-balance group with `interval > 0`.

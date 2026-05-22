@@ -1,0 +1,79 @@
+[package]
+name = "meow-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["full", "boring-tls"]
+boring-tls = ["meow-config/boring-tls"]
+# Heap profiling via dhat crate — swaps global allocator; never enable in production.
+dhat-heap = ["dhat"]
+
+# Protocol features — forwarded to meow-proxy and meow-config
+ss = ["meow-config/ss", "meow-proxy/ss"]
+trojan = ["meow-config/trojan", "meow-proxy/trojan"]
+vless = ["meow-config/vless", "meow-proxy/vless"]
+vless-vision = ["vless", "meow-config/vless-vision", "meow-proxy/vless-vision"]
+ech-tls-tunnel = [
+    "ss",
+    "meow-config/ech-tls-tunnel",
+    "meow-proxy/ech-tls-tunnel",
+]
+
+# DNS
+dns-server = ["meow-dns/dns-server"]
+dns-encrypted = ["meow-dns/encrypted"]
+
+# Listener features — forwarded to meow-listener
+listener-http = ["meow-listener/listener-http"]
+listener-socks5 = ["meow-listener/listener-socks5"]
+listener-tproxy = ["meow-listener/listener-tproxy"]
+listener-mixed = ["meow-listener/listener-mixed"]
+
+# Convenience bundles
+minimal = ["ss", "trojan", "dns-server", "listener-mixed"]
+full = [
+    "ss", "trojan", "vless", "vless-vision",
+    "dns-server", "dns-encrypted",
+    "listener-http", "listener-socks5", "listener-tproxy", "listener-mixed",
+]
+
+[[bin]]
+name = "meow"
+path = "src/main.rs"
+
+# cargo-machete false-positive: meow-proxy has no direct src imports but is
+# required here to forward protocol features (`ss`, `trojan`, `vless`, etc.)
+# to the proxy crate via the [features] table's `meow-proxy/<feat>` entries.
+[package.metadata.cargo-machete]
+ignored = ["meow-proxy"]
+
+[dependencies]
+meow-config = { workspace = true, default-features = false }
+meow-rules = { workspace = true }
+meow-tunnel = { workspace = true }
+meow-listener = { workspace = true, default-features = false }
+meow-dns = { workspace = true, default-features = false }
+meow-api = { workspace = true }
+meow-proxy = { workspace = true, default-features = false }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde_yaml = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+rustls = { workspace = true }
+libc = "0.2"
+dhat = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+serde_yaml = { workspace = true }
+meow-config = { workspace = true }
+libc = "0.2"
+
+[lints]
+workspace = true

@@ -64,11 +64,11 @@ real backends reserved for the "golden run" (§7).
 Pick something we can run inside a container without external network
 dependencies.
 
-**Primary generator — wrk2 driving a local HTTP echo behind mihomo:**
+**Primary generator — wrk2 driving a local HTTP echo behind meow-rs:**
 
 - Local `caddy` or `nginx` as the origin on 127.0.0.1:18080, returning
   a 1 KiB response and a 1 MiB response on two different paths.
-- `wrk2` running through mihomo's mixed listener as an HTTP proxy,
+- `wrk2` running through meow-rs's mixed listener as an HTTP proxy,
   targeted at a rotating pool of hostnames that map (via /etc/hosts
   or the test's `hosts:` block) back to 127.0.0.1. Rotating hostnames
   force rule re-evaluation and DNS-snooping table updates; a single
@@ -80,7 +80,7 @@ dependencies.
 
 - `socat` UDP echo on 127.0.0.1:18081. A small Python/Rust script sends
   paced UDP datagrams through the SOCKS5 listener to exercise UDP NAT.
-- `dig` loop (every 5s, rotating qnames) against mihomo's DNS server
+- `dig` loop (every 5s, rotating qnames) against meow-rs's DNS server
   to cover the resolver / cache / snooping paths.
 
 **Chaos injection (cheap, high-value):**
@@ -90,7 +90,7 @@ dependencies.
 - Drop the rule-provider HTTP endpoint for 2 min every hour to exercise
   refresh-failure paths.
 
-All generators run inside the same Docker Compose stack as the mihomo
+All generators run inside the same Docker Compose stack as the meow-rs
 binary under test, so the whole soak is one `docker compose up`.
 
 ## 4. What we watch
@@ -104,7 +104,7 @@ Prometheus dependency required for M1):
 | Open fds | `/proc/$pid/fd` count | Bounded; no monotonic growth after warm-up |
 | TCP connections (kernel) | `ss -tan \| wc -l` for pid's netns | Returns to baseline ±10% between load bursts |
 | Goroutines-equivalent | tokio task count via `/debug` endpoint (needs tiny addition; see §6) | Bounded |
-| Mihomo conn table size | REST `/connections` count | Returns to near-zero within 2× idle-timeout after generators stop |
+| meow-rs conn table size | REST `/connections` count | Returns to near-zero within 2× idle-timeout after generators stop |
 | DNS cache size | REST `/dns/...` or added debug endpoint | Bounded by configured cap |
 | Panics | stderr grep `panicked at` | **Zero** |
 | Generator error rate | wrk2 latency/error CSV | ≤ 0.1% over the 24h; no sustained error spike > 1% for > 5 min |
@@ -118,7 +118,7 @@ the binary exiting.
 ```
 tests/soak/
   README.md
-  docker-compose.yml        # mihomo + origins + generators + collector
+  docker-compose.yml        # meow-rs + origins + generators + collector
   config.yaml               # representative subscription
   generators/
     wrk2.sh
@@ -135,7 +135,7 @@ CI wiring: **not** on every PR (24h is too long). Run it:
 - Manually via `workflow_dispatch` before cutting an M1 release.
 - Scheduled weekly on `main` once M1 is feature-complete.
 
-The workflow uploads `soak.csv`, the mihomo log, and `check.py`'s
+The workflow uploads `soak.csv`, the meow-rs log, and `check.py`'s
 verdict as artifacts. Red verdict fails the job.
 
 ## 6. What the binary needs that it doesn't have yet

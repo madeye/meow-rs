@@ -505,7 +505,7 @@ api.merge(ws_routes).merge(ui).layer(CorsLayer::permissive()).with_state(state)
 
 ### New Cargo dependencies
 
-**`mihomo-api/Cargo.toml`:**
+**`meow-api/Cargo.toml`:**
 
 ```toml
 sysinfo = "0.32"    # RSS polling; cross-platform; per-crate (only used here)
@@ -519,7 +519,7 @@ not already declared at workspace level, add it to the workspace
 `[dependencies]` so the feature can be added explicitly. If it IS
 already declared (likely), add `features = ["formatting"]` to the
 workspace entry and reference `time = { workspace = true }` in
-`mihomo-api/Cargo.toml`. Do NOT add a new `chrono` dep.
+`meow-api/Cargo.toml`. Do NOT add a new `chrono` dep.
 
 **`axum` workspace dep:** confirm `features = ["ws"]` is included.
 If not, add it. WebSocket support is gated behind the `ws` feature.
@@ -573,11 +573,11 @@ sufficient and avoids a duplicate dep.
     the upgrade completes.
 13. `GET /logs` (plain REST, not WS) with `?token=<secret>` and no Bearer
     header returns `401` — `?token=` is not accepted on REST routes.
-14. `cargo test -p mihomo-api` passes with no regressions.
+14. `cargo test -p meow-api` passes with no regressions.
 
 ## Test plan (starting point — qa owns final shape)
 
-**Unit/integration (`crates/mihomo-api/tests/api_test.rs`):**
+**Unit/integration (`crates/meow-api/tests/api_test.rs`):**
 
 *Log stream:*
 - `logs_ws_emits_info_events` — connect WS to `/logs?level=info`;
@@ -624,13 +624,13 @@ sufficient and avoids a duplicate dep.
 ## Implementation checklist (for engineer handoff)
 
 - [ ] Confirm `axum` workspace dep has `features = ["ws"]`; add if missing.
-- [ ] Add `sysinfo = "0.32"` to `mihomo-api/Cargo.toml` (per-crate, not workspace).
+- [ ] Add `sysinfo = "0.32"` to `meow-api/Cargo.toml` (per-crate, not workspace).
 - [ ] Enable `features = ["formatting"]` on `time` in workspace deps
       (already in graph via hickory-server); reference as
-      `time = { workspace = true }` in `mihomo-api/Cargo.toml`.
+      `time = { workspace = true }` in `meow-api/Cargo.toml`.
       Do NOT add `chrono`.
 - [ ] Define `LogMessage`, `LogLevel`, `LogBroadcastLayer`, `MessageVisitor`
-      in `crates/mihomo-api/src/log_stream.rs` (new file).
+      in `crates/meow-api/src/log_stream.rs` (new file).
       Confirm: `on_event` uses `broadcast::Sender::send` only — no
       `.await`, no `blocking_send`.
 - [ ] Extend `AppState` with `log_tx: broadcast::Sender<LogMessage>`.
@@ -647,7 +647,7 @@ sufficient and avoids a duplicate dep.
       `read_rss_bytes()` and `read_os_memory_limit()` helpers
       (platform-cfg for Linux rlimit).
 - [ ] Add `close_all_connections()` to `ConnectionStats` in
-      `mihomo-tunnel`. Implement as drain on the active-connections map.
+      `meow-tunnel`. Implement as drain on the active-connections map.
 - [ ] Implement `close_all_connections` handler in `routes.rs`.
 - [ ] Add `GET /dns/query` handler (`dns_query_get`) in `routes.rs`
       reading from `Query<DnsQueryRequest>` instead of `Json<>`.
@@ -669,7 +669,7 @@ sufficient and avoids a duplicate dep.
    lag frames > 1/subscriber/minute, bump to 512.
 
 2. **`sysinfo` per-crate** — correct. Not workspace-level; only
-   `mihomo-api` uses it. If a second crate ever needs it, promote then.
+   `meow-api` uses it. If a second crate ever needs it, promote then.
 
 3. **Use `time`, not `chrono`** — `time 0.3.x` is already in the dep
    graph via `hickory-server`. Enable `features = ["formatting"]` on

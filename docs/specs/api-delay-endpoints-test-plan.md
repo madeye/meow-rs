@@ -34,7 +34,7 @@ to PM so the spec can be updated.
 ## Test adapter contract
 
 All cases below assume a test adapter living in
-`crates/mihomo-api/tests/support/delay_adapter.rs` (new file,
+`crates/meow-api/tests/support/delay_adapter.rs` (new file,
 engineer's call on exact name). It must expose:
 
 ```rust
@@ -68,7 +68,7 @@ cases here keep working.
 
 ## Case list
 
-All cases live in `crates/mihomo-api/tests/api_test.rs` unless marked
+All cases live in `crates/meow-api/tests/api_test.rs` unless marked
 otherwise. Each case asserts **status code AND exact body bytes**
 (not just "contains") so error-body drift is caught.
 
@@ -180,7 +180,7 @@ against a regression back to 400.
 All cases in A–G pass on `ubuntu-latest` and `macos-latest` (which
 means adding none of them to the Linux-only gate list in `test.yml` —
 they're pure-Rust, no ssserver needed, so both jobs pick them up for
-free once the file lives in `crates/mihomo-api/tests/api_test.rs`).
+free once the file lives in `crates/meow-api/tests/api_test.rs`).
 
 Zero new CI wiring required: `api_test` is already invoked on both
 platforms.
@@ -189,7 +189,7 @@ platforms.
 
 None blocking. Two stylistic nits worth a reply before you start:
 
-1. **Test adapter location**: `crates/mihomo-api/tests/support/` as a
+1. **Test adapter location**: `crates/meow-api/tests/support/` as a
    sibling module, or inline in `api_test.rs` next to `test_state_*`?
    I'd lean sibling module for reuse by any future adapter-needing
    test, but either is fine.

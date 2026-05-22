@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. It provides rule-based tunneling with support for multiple proxy protocols (Shadowsocks, Trojan, Direct, Reject), transparent proxy (nftables/pf), DNS with snooping (IP→domain reverse table), and a REST API for runtime control. Licensed under GPL-3.0.
+meow-rs is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. It provides rule-based tunneling with support for multiple proxy protocols (Shadowsocks, Trojan, Direct, Reject), transparent proxy (nftables/pf), DNS with snooping (IP→domain reverse table), and a REST API for runtime control. Licensed under GPL-3.0.
 
 ## Build Commands
 
@@ -13,10 +13,10 @@ Mihomo is a Rust implementation of the [mihomo](https://github.com/MetaCubeX/mih
 cargo build --release
 
 # Run with config
-./target/release/mihomo -f config.yaml
+./target/release/meow -f config.yaml
 
 # Test config validity
-./target/release/mihomo -f config.yaml -t
+./target/release/meow -f config.yaml -t
 
 # Run all unit tests
 cargo test --lib
@@ -31,7 +31,7 @@ bash tests/test_tproxy_qemu.sh             # Docker-based tproxy e2e tests
 cargo install shadowsocks-rust --features "stream-cipher aead-cipher-2022" --locked
 
 # Run tests for a single crate
-cargo test -p mihomo-dns --lib
+cargo test -p meow-dns --lib
 
 # Lint
 cargo clippy --all-targets
@@ -59,41 +59,41 @@ The workspace has 12 crates (see also [ADR-0009](docs/adr/0009-cleanup-scope.md)
 
 | Crate | Purpose |
 |-------|---------|
-| `mihomo-common` | Core traits and types (`ProxyAdapter`, `Rule`, `Metadata`, `ConnContext`) — the "contracts" crate |
-| `mihomo-trie` | Domain trie for efficient pattern matching |
-| `mihomo-transport` | Composable stream-transport layers (TLS, WebSocket, gRPC, HTTP/2, HTTP Upgrade) — protocol-agnostic, no dep on other mihomo crates (see [ADR-0001](docs/adr/0001-mihomo-transport-crate.md)) |
-| `mihomo-proxy` | Proxy protocol implementations (SS, Trojan, VLESS, Direct, Reject) and groups (Selector, URLTest, Fallback) |
-| `mihomo-rules` | Rule matching engine and parser (domain, IP-CIDR, GeoIP, process, logic composition) |
-| `mihomo-dns` | DNS resolver, cache, DNS snooping (IP→domain reverse table), UDP server |
-| `mihomo-tunnel` | Core routing engine: TCP/UDP relay, rule matching dispatch, connection statistics |
-| `mihomo-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
-| `mihomo-config` | YAML configuration parsing into typed structs |
-| `mihomo-api` | REST API server (Axum) for proxies, rules, connections, configs, traffic, DNS query |
-| `mihomo-app` | CLI entry point (`main.rs`) — wires config → tunnel → listeners → DNS → API |
-| `mihomo-bench` | Standalone benchmark binary (throughput, latency, connection-rate, DNS, memory, binary-size) |
+| `meow-common` | Core traits and types (`ProxyAdapter`, `Rule`, `Metadata`, `ConnContext`) — the "contracts" crate |
+| `meow-trie` | Domain trie for efficient pattern matching |
+| `meow-transport` | Composable stream-transport layers (TLS, WebSocket, gRPC, HTTP/2, HTTP Upgrade) — protocol-agnostic, no dep on other meow-rs crates (see [ADR-0001](docs/adr/0001-meow-transport-crate.md)) |
+| `meow-proxy` | Proxy protocol implementations (SS, Trojan, VLESS, Direct, Reject) and groups (Selector, URLTest, Fallback) |
+| `meow-rules` | Rule matching engine and parser (domain, IP-CIDR, GeoIP, process, logic composition) |
+| `meow-dns` | DNS resolver, cache, DNS snooping (IP→domain reverse table), UDP server |
+| `meow-tunnel` | Core routing engine: TCP/UDP relay, rule matching dispatch, connection statistics |
+| `meow-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
+| `meow-config` | YAML configuration parsing into typed structs |
+| `meow-api` | REST API server (Axum) for proxies, rules, connections, configs, traffic, DNS query |
+| `meow-app` | CLI entry point (`main.rs`) — wires config → tunnel → listeners → DNS → API |
+| `meow-bench` | Standalone benchmark binary (throughput, latency, connection-rate, DNS, memory, binary-size) |
 
 ### Startup Flow
 
-`mihomo-app/src/main.rs` → parse CLI args → `mihomo_config::load_config()` → create `Tunnel` → spawn DNS server, API server, listeners (Mixed/SOCKS/HTTP/TProxy) as tokio tasks → await SIGINT/SIGTERM.
+`meow-app/src/main.rs` → parse CLI args → `meow_config::load_config()` → create `Tunnel` → spawn DNS server, API server, listeners (Mixed/SOCKS/HTTP/TProxy) as tokio tasks → await SIGINT/SIGTERM.
 
 ### Key Patterns
 
-- **`ProxyAdapter` trait** (`mihomo-common/src/adapter.rs`) — all proxy protocols implement this async trait for TCP connect and UDP relay
-- **`Rule` trait** (`mihomo-common/src/rule.rs`) — all rule types implement this for matching against `Metadata`
-- **Proxy groups** (`mihomo-proxy/src/group/`) — Selector, URLTest, Fallback wrap multiple adapters with selection strategies
-- **Tunnel** (`mihomo-tunnel/src/tunnel.rs`) — central `Arc`-shared routing engine; holds proxies, rules, DNS resolver, connection stats
+- **`ProxyAdapter` trait** (`meow-common/src/adapter.rs`) — all proxy protocols implement this async trait for TCP connect and UDP relay
+- **`Rule` trait** (`meow-common/src/rule.rs`) — all rule types implement this for matching against `Metadata`
+- **Proxy groups** (`meow-proxy/src/group/`) — Selector, URLTest, Fallback wrap multiple adapters with selection strategies
+- **Tunnel** (`meow-tunnel/src/tunnel.rs`) — central `Arc`-shared routing engine; holds proxies, rules, DNS resolver, connection stats
 
 ### Adding New Proxy Protocols
 
-1. Implement `ProxyAdapter` trait in a new file under `mihomo-proxy/src/`
-2. Add the adapter type variant to `AdapterType` enum in `mihomo-common/src/adapter_type.rs`
-3. Register parsing in `mihomo-config/src/lib.rs` proxy config section
+1. Implement `ProxyAdapter` trait in a new file under `meow-proxy/src/`
+2. Add the adapter type variant to `AdapterType` enum in `meow-common/src/adapter_type.rs`
+3. Register parsing in `meow-config/src/lib.rs` proxy config section
 
 ### Adding New Rule Types
 
-1. Implement `Rule` trait in `mihomo-rules/src/`
-2. Add the rule type variant to `RuleType` enum in `mihomo-common/src/rule.rs`
-3. Register parsing in `mihomo-rules/src/parser.rs`
+1. Implement `Rule` trait in `meow-rules/src/`
+2. Add the rule type variant to `RuleType` enum in `meow-common/src/rule.rs`
+3. Register parsing in `meow-rules/src/parser.rs`
 
 ## Lint Policy
 
@@ -149,12 +149,12 @@ Four ADRs define the quantitative bar for this codebase:
 
 Any PR touching these types **must** include before/after byte counts (from `-Zprint-type-sizes`) in the commit body:
 
-- `Metadata` (`crates/mihomo-common/src/metadata.rs`) — M2 baseline 272 B struct / heap via SmolStr
-- `ConnectionInfo` (`crates/mihomo-tunnel/src/statistics.rs`) — M2 exit 120 B
-- `UdpSession` (`crates/mihomo-tunnel/src/udp.rs`) — M2 exit 40 B
-- DNS `CacheEntry` / `ReverseEntry` (`crates/mihomo-dns/src/cache.rs`) — M2 exit 72 B per LruEntry slot
+- `Metadata` (`crates/meow-common/src/metadata.rs`) — M2 baseline 272 B struct / heap via SmolStr
+- `ConnectionInfo` (`crates/meow-tunnel/src/statistics.rs`) — M2 exit 120 B
+- `UdpSession` (`crates/meow-tunnel/src/udp.rs`) — M2 exit 40 B
+- DNS `CacheEntry` / `ReverseEntry` (`crates/meow-dns/src/cache.rs`) — M2 exit 72 B per LruEntry slot
 
-Any PR touching relay code (`crates/mihomo-tunnel/src/relay.rs`, `tcp.rs`, or call sites in `mihomo-listener`) must preserve the zero-per-relay-setup-allocation invariant: relay buffers are stack-allocated in the caller's async frame, not heap-allocated per call.
+Any PR touching relay code (`crates/meow-tunnel/src/relay.rs`, `tcp.rs`, or call sites in `meow-listener`) must preserve the zero-per-relay-setup-allocation invariant: relay buffers are stack-allocated in the caller's async frame, not heap-allocated per call.
 
 ### Benchmark baselines (docs/benchmarks/)
 

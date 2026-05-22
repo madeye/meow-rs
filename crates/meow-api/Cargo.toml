@@ -1,0 +1,46 @@
+[package]
+name = "meow-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+meow-common = { workspace = true }
+meow-tunnel = { workspace = true }
+meow-dns = { workspace = true, default-features = false }
+meow-config = { workspace = true, default-features = false }
+meow-proxy = { workspace = true, default-features = false }
+meow-rules = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+subtle = "2"
+sysinfo = "0.32"
+uuid = { workspace = true }
+time = { workspace = true }
+base64 = "0.22"
+prometheus-client = "0.22"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+meow-trie = { workspace = true }
+tower = { workspace = true }
+http-body-util = "0.1"
+tempfile = "3"
+async-trait = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
+[lints]
+workspace = true

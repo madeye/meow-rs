@@ -1,9 +1,9 @@
-# Spec: Reusable transport layer (`mihomo-transport` crate)
+# Spec: Reusable transport layer (`meow-transport` crate)
 
 Status: Approved (architect 2026-04-18, amendments applied)
 Owner: pm
 Tracks roadmap item: **M1.A-1 … M1.A-4**
-Architecture source of truth: [ADR-0001](../adr/0001-mihomo-transport-crate.md)
+Architecture source of truth: [ADR-0001](../adr/0001-meow-transport-crate.md)
 
 > **Read ADR-0001 first.** This spec deliberately does not restate the
 > architectural decisions. It fills in the implementation details the ADR
@@ -25,7 +25,7 @@ must reuse `tls` and `ws` instead of the current per-adapter copies in
 In scope for this spec (all four engineer steps from ADR-0001 §Build
 sequence):
 
-1. Create `crates/mihomo-transport` with the `Transport` trait per
+1. Create `crates/meow-transport` with the `Transport` trait per
    ADR-0001 §2.
 2. Ship five layers — `tls`, `ws`, `grpc` (gun), `h2`, `httpupgrade` —
    with the struct shapes, YAML mapping, and tests defined below.
@@ -35,13 +35,13 @@ sequence):
 
 ### Interaction with `simple_obfs.rs`
 
-`crates/mihomo-proxy/src/simple_obfs.rs` is **not** part of M1.A. It
+`crates/meow-proxy/src/simple_obfs.rs` is **not** part of M1.A. It
 stays exactly where it is today, wired to Shadowsocks. Rationale:
 simple-obfs has no meaningful server-side variant in our client-only
 trait, the existing code is small and already tested, and sweeping it
 into the move would bloat the M1.A PRs for no architectural gain.
 Engineer must not touch `simple_obfs.rs` in any M1.A PR. A future ADR
-may introduce `mihomo-transport::obfs` if server-side obfs ever enters
+may introduce `meow-transport::obfs` if server-side obfs ever enters
 scope; until then, leave it alone.
 
 ### Deferred items — quoted verbatim from ADR-0001 §"Open questions deferred"
@@ -67,7 +67,7 @@ Out of scope (deferred per ADR-0001 §Open questions):
 ## User-facing YAML schema
 
 The upstream YAML shape for transports lives under each proxy entry.
-mihomo-rust accepts the same shape. The table below maps each upstream
+meow-rs accepts the same shape. The table below maps each upstream
 key to the layer that consumes it.
 
 ### Shared: `tls`
@@ -85,11 +85,11 @@ proxies:
     alpn: ["h2", "http/1.1"]
     client-fingerprint: chrome    # accepted-but-stub, warns at startup
     # (optional) client cert
-    # cert: /etc/mihomo/client.crt
-    # key:  /etc/mihomo/client.key
+    # cert: /etc/meow/client.crt
+    # key:  /etc/meow/client.key
 ```
 
-Rust struct (lives in `mihomo-transport::tls`):
+Rust struct (lives in `meow-transport::tls`):
 
 ```rust
 #[derive(Debug, Clone)]
@@ -109,13 +109,13 @@ pub struct ClientCert {
 }
 ```
 
-Parsing lives in `mihomo-config` (not in `mihomo-transport`). Config
+Parsing lives in `meow-config` (not in `meow-transport`). Config
 builds the `TlsConfig` and hands it to the layer constructor — the
-crate boundary rule from ADR-0001 §1 says `mihomo-transport` never sees
+crate boundary rule from ADR-0001 §1 says `meow-transport` never sees
 YAML.
 
 **SNI resolution (canonical, amended 2026-04-11 after M1.A-1 review):**
-`mihomo-config` resolves `TlsConfig.sni` before construction:
+`meow-config` resolves `TlsConfig.sni` before construction:
 
 | YAML `servername:` | YAML `server:` | `TlsConfig.sni`      |
 |--------------------|----------------|----------------------|
@@ -142,7 +142,7 @@ for log text would leak identity into the transport crate):
 client-fingerprint="<value>" set on proxy: \
 uTLS fingerprint spoofing is not implemented; \
 TLS handshake will use rustls defaults. \
-See https://github.com/mihomo-rust/mihomo-rust/issues/32 \
+See https://github.com/meow-rs/meow-rs/issues/32 \
 for real uTLS support.
 ```
 
@@ -182,7 +182,7 @@ Notes:
   bug; adapters that need it (e.g. VMess) flip the knob at their own
   spec's layer-config level, not at the `ws` layer default.
 - **`max-early-data` is capped at 2048.** Upstream caps at the same
-  value; mihomo-rust enforces it at YAML parse time in `mihomo-config`
+  value; meow-rs enforces it at YAML parse time in `meow-config`
   with a `warn!` and clamps to 2048 if the user sets higher. Do not
   silently accept 65535.
 - `host_header` takes precedence over `extra_headers` with key `Host`,
@@ -294,7 +294,7 @@ let ws_stream  = ws_layer.connect(tls_stream).await?;
 
 ### Error taxonomy
 
-`mihomo-transport` exposes one error type:
+`meow-transport` exposes one error type:
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -315,18 +315,18 @@ pub enum TransportError {
 ```
 
 Adapters (VMess, VLESS, Trojan) convert `TransportError` into
-`MihomoError::Proxy(...)` at the crate boundary. The conversion lives
-in `mihomo-proxy` (not in `mihomo-common` or `mihomo-transport`),
+`MeowError::Proxy(...)` at the crate boundary. The conversion lives
+in `meow-proxy` (not in `meow-common` or `meow-transport`),
 preserving ADR-0001 §1's leaf-crate rule.
 
 **Form: free function, not `From` impl.** The orphan rule blocks
-`impl From<TransportError> for MihomoError` in `mihomo-proxy` because
+`impl From<TransportError> for MeowError` in `meow-proxy` because
 both types are foreign to that crate. The canonical shape is:
 
 ```rust
-// crates/mihomo-proxy/src/lib.rs
-pub(crate) fn transport_to_proxy_err(e: TransportError) -> MihomoError {
-    MihomoError::Proxy(e.to_string())
+// crates/meow-proxy/src/lib.rs
+pub(crate) fn transport_to_proxy_err(e: TransportError) -> MeowError {
+    MeowError::Proxy(e.to_string())
 }
 ```
 
@@ -334,22 +334,22 @@ Call sites use `.map_err(transport_to_proxy_err)?` instead of `?`. The
 ergonomic cost is trivial and grep-ability is higher than a `From`
 impl would be. (Architect decision 2026-04-11, answering engineer Q1
 and correcting an earlier suggestion that assumed the `From` impl
-could live in `mihomo-proxy` — the orphan rule says otherwise.)
+could live in `meow-proxy` — the orphan rule says otherwise.)
 
 Invariants the review enforces: **no adapter constructs
 `TransportError` variants by hand, and no `anyhow::Error` ever crosses
-the `mihomo-transport` boundary**. The crate-invariants test suite
+the `meow-transport` boundary**. The crate-invariants test suite
 (`tests/crate_invariants_test.rs`) enforces the second one
 mechanically via a grep over `src/`.
 
-The transport crate itself never constructs `MihomoError`.
+The transport crate itself never constructs `MeowError`.
 
 ### Cargo features
 
 Default workspace feature set:
 
 ```toml
-# crates/mihomo-transport/Cargo.toml
+# crates/meow-transport/Cargo.toml
 [features]
 default = ["tls", "ws"]
 tls = ["dep:tokio-rustls", "dep:rustls-pki-types", "dep:webpki-roots"]
@@ -366,7 +366,7 @@ httpupgrade = ["dep:httparse"]
 > for `h2` exactly once. Do not split them by accident in a future PR
 > trying to "save a crate" — you can't.
 
-`mihomo-app` enables `tls,ws,grpc,h2,httpupgrade` by default; router/
+`meow-app` enables `tls,ws,grpc,h2,httpupgrade` by default; router/
 embedded profiles flip off whatever they don't need. The M2
 minimal-build budget is measured against `--no-default-features
 --features "tls,ws"`.
@@ -378,7 +378,7 @@ the layer work:
 
 **Step M1.A-1.migrate** (after `tls` layer lands):
 
-- `crates/mihomo-proxy/src/trojan.rs`: delete its inline rustls setup;
+- `crates/meow-proxy/src/trojan.rs`: delete its inline rustls setup;
   build a `TlsLayer` from the existing Trojan YAML fields and call
   `tls_layer.connect(tcp).await?`.
 - Keep all Trojan protocol logic (password hash prefix, CRLF,
@@ -387,7 +387,7 @@ the layer work:
 
 **Step M1.A-2.migrate** (after `ws` layer lands):
 
-- `crates/mihomo-proxy/src/v2ray_plugin.rs`: becomes a SIP003-opts
+- `crates/meow-proxy/src/v2ray_plugin.rs`: becomes a SIP003-opts
   parser that builds `[TlsLayer, WsLayer]` and returns the resulting
   stream to the SS adapter.
 - Gate: `cargo test --test v2ray_plugin_integration` stays green (this
@@ -403,8 +403,8 @@ considered merged:
 
 1. Struct shape matches the "Rust struct" block in the YAML schema
    section above.
-2. YAML parsing in `mihomo-config` produces the struct from a fixture
-   YAML file under `crates/mihomo-config/tests/fixtures/`.
+2. YAML parsing in `meow-config` produces the struct from a fixture
+   YAML file under `crates/meow-config/tests/fixtures/`.
 3. Unit tests listed under **Test plan** pass.
 4. Cargo feature gate works: `cargo check --no-default-features
    --features "<only this layer>"` builds, and
@@ -415,23 +415,23 @@ considered merged:
 
 Crate-wide:
 
-6. `mihomo-transport` has no dependency on `mihomo-proxy`, `mihomo-dns`,
-   or `mihomo-config`. `cargo tree -p mihomo-transport` shows only
-   `mihomo-common` from our workspace. Enforced by a shell test in CI
+6. `meow-transport` has no dependency on `meow-proxy`, `meow-dns`,
+   or `meow-config`. `cargo tree -p meow-transport` shows only
+   `meow-common` from our workspace. Enforced by a shell test in CI
    (`grep -v` on `cargo tree` output).
 7. `client-fingerprint:` YAML key is accepted, stored on `TlsConfig`,
    and emits exactly one `warn!` per distinct value at startup —
    asserted by a log-capture test.
 8. **No server-side code.** Grep the merged PR for `accept`, `bind`,
    `listen`, `Server`, `Acceptor`, and `TcpListener` inside
-   `mihomo-transport` and fail the review if any of them appear
+   `meow-transport` and fail the review if any of them appear
    outside `tests/` helpers. The last one catches the
    `use tokio::net::TcpListener as _` case the other patterns would
    miss.
 
 ## Test plan (starting point — qa owns final shape)
 
-Tests live under `crates/mihomo-transport/tests/`. Each layer gets its
+Tests live under `crates/meow-transport/tests/`. Each layer gets its
 own binary so they can be filtered individually.
 
 ### `tls`
@@ -494,8 +494,8 @@ own binary so they can be filtered individually.
 
 ### Crate-level
 
-- `no_proxy_dep` — shell test: `cargo tree -p mihomo-transport 2>&1 |
-  grep -qv 'mihomo-proxy'`. Runs in the lint job.
+- `no_proxy_dep` — shell test: `cargo tree -p meow-transport 2>&1 |
+  grep -qv 'meow-proxy'`. Runs in the lint job.
 - `feature_minimal_builds` — CI matrix adds three `cargo check` rows:
   `--no-default-features`, `--no-default-features --features tls`, and
   `--no-default-features --features "tls,ws"`.
@@ -509,7 +509,7 @@ own binary so they can be filtered individually.
 
 ## Implementation checklist (for engineer handoff)
 
-- [ ] **M1.A-1** Create `crates/mihomo-transport`, add to workspace,
+- [ ] **M1.A-1** Create `crates/meow-transport`, add to workspace,
       implement `Transport` trait + `Stream` blanket impl + shared
       `TransportError`.
 - [ ] **M1.A-1** Implement `tls` layer (`TlsConfig`, `TlsLayer`).
@@ -538,7 +538,7 @@ own binary so they can be filtered individually.
   ADR, not a spec revision.
 - Do not add `shadowtls`, `reality`, `restls`, `smux`, or any layer
   not listed in ADR-0001 §3.
-- Do not route YAML parsing through `mihomo-transport`. Config lives
-  in `mihomo-config` and hands pre-built structs across the crate
+- Do not route YAML parsing through `meow-transport`. Config lives
+  in `meow-config` and hands pre-built structs across the crate
   boundary.
 - Do not implement uTLS fingerprint spoofing (accept-and-warn only).

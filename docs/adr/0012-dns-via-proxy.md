@@ -26,7 +26,7 @@ This ADR proposes the syntax, the loop-prevention rules, and the layering for im
 
 ### Syntax
 
-Extend `NameServerUrl` (`crates/mihomo-dns/src/upstream.rs`) so each variant carries an optional `proxy: Option<String>`:
+Extend `NameServerUrl` (`crates/meow-dns/src/upstream.rs`) so each variant carries an optional `proxy: Option<String>`:
 
 ```rust
 NameServerUrl::Udp { addr, port, proxy: Option<String> }
@@ -93,7 +93,7 @@ For DoT/DoH, layer `tokio_rustls` / HTTP/1.1 over the `Box<dyn AsyncRead+AsyncWr
 
 `Resolver` construction (`new_with_bootstrap`) accepts a new `proxy_registry: Arc<HashMap<String, Arc<dyn Proxy>>>` parameter. The resolver resolves `#PROXY-NAME` strings to `Arc<dyn Proxy>` at construction time, failing fast (Class A) if the name is unknown — silent fallback to the global resolver would leak the query.
 
-In `mihomo-config::build_config`, proxies are constructed before the resolver, so the registry handoff is straightforward.
+In `meow-config::build_config`, proxies are constructed before the resolver, so the registry handoff is straightforward.
 
 ### What this ADR does NOT cover
 
@@ -106,7 +106,7 @@ In `mihomo-config::build_config`, proxies are constructed before the resolver, s
 - One new field per `NameServerUrl` variant, one new `Resolver` constructor parameter, one new optional field on `DnsClient`. The default code path (no `#PROXY`) is unchanged.
 - Two new Class A hard-errors at config load (unknown `#PROXY` name, cycle in `dns:` graph). Both are documented in the config reference.
 - Bootstrap DNS (used to resolve proxy server hostnames) is explicitly a `#PROXY`-free resolver, breaking the loop.
-- Tests need a mock `Proxy` that records the DNS message it was asked to relay; this is straightforward (`crates/mihomo-dns/tests/proxy_routed_dns_test.rs`).
+- Tests need a mock `Proxy` that records the DNS message it was asked to relay; this is straightforward (`crates/meow-dns/tests/proxy_routed_dns_test.rs`).
 
 ## Implementation order
 

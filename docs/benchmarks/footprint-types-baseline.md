@@ -12,11 +12,11 @@ All sizes measured via `std::mem::size_of` in #[cfg(test)] within the owning cra
 
 | Type | Crate | Size (bytes) | Notes |
 |------|-------|-------------|-------|
-| `ConnectionInfo` | mihomo-tunnel | **408** | Embeds full `Metadata` (272 B) + 4 × String + Vec<String> |
-| `Metadata` | mihomo-common | **272** | 9 × String/Vec<String> + 2 × Option<IpAddr> + misc |
-| `TunnelInner` | mihomo-tunnel | 232 | Singleton; not per-connection |
-| `UdpSession` | mihomo-tunnel | 48 | Box<dyn ProxyPacketConn> + String + AtomicU64 |
-| `Tunnel` | mihomo-tunnel | 8 | Arc pointer to TunnelInner |
+| `ConnectionInfo` | meow-tunnel | **408** | Embeds full `Metadata` (272 B) + 4 × String + Vec<String> |
+| `Metadata` | meow-common | **272** | 9 × String/Vec<String> + 2 × Option<IpAddr> + misc |
+| `TunnelInner` | meow-tunnel | 232 | Singleton; not per-connection |
+| `UdpSession` | meow-tunnel | 48 | Box<dyn ProxyPacketConn> + String + AtomicU64 |
+| `Tunnel` | meow-tunnel | 8 | Arc pointer to TunnelInner |
 
 ### `Metadata` field breakdown (272 bytes total)
 
@@ -82,9 +82,9 @@ Expected reduction: 48 → 32 B (−33%).
 
 ---
 
-## `MihomoError` pre-probe (lead directive 2026-05-12)
+## `MeowError` pre-probe (lead directive 2026-05-12)
 
-**`MihomoError` total: 32 bytes** — **NEGATIVE RESULT: no escalation.**
+**`MeowError` total: 32 bytes** — **NEGATIVE RESULT: no escalation.**
 
 Threshold is 64 B; 32 B is well under it. No `M2.enum-variant-mihomo-error` subtask needed.
 
@@ -100,7 +100,7 @@ Threshold is 64 B; 32 B is well under it. No `M2.enum-variant-mihomo-error` subt
 | `Socks5ConnectFailed(u8)` | u8 | 1 B |
 | `NoAcceptableMethod` | unit | 0 B |
 | `NoProxyAvailable` | unit | 0 B |
-| `RelayHopFailed` | `{hop: usize, source: Box<MihomoError>}` | 16 B |
+| `RelayHopFailed` | `{hop: usize, source: Box<MeowError>}` | 16 B |
 | `UdpNotSupported` | unit | 0 B |
 | `Other(String)` | String | 24 B |
 
@@ -113,7 +113,7 @@ The `RelayHopFailed` variant carries 16 B (usize + Box), smaller than String (24
 
 ## `AdapterType` negative finding (lead directive 2026-05-12)
 
-`AdapterType` (`mihomo-common/src/adapter_type.rs:5`) has 14 unit variants and measures **1 byte**.
+`AdapterType` (`meow-common/src/adapter_type.rs:5`) has 14 unit variants and measures **1 byte**.
 No per-connection inline sum-type allocation occurs — adapter dispatch is done via
 `Box<dyn ProxyAdapter>` (16-byte fat pointer), which places all variant data on the heap and
 is not part of any per-connection hot struct. This is already optimal; do not attempt further
@@ -125,11 +125,11 @@ reduction. Recorded here to prevent relitigating in M2 code review.
 
 | Type | Crate | Size (bytes) |
 |------|-------|-------------|
-| `ConnectionInfo` | mihomo-tunnel | 408 |
-| `Metadata` | mihomo-common | 272 |
-| `TunnelInner` | mihomo-tunnel | 232 |
+| `ConnectionInfo` | meow-tunnel | 408 |
+| `Metadata` | meow-common | 272 |
+| `TunnelInner` | meow-tunnel | 232 |
 | `tracing::Metadata<'_>` | tracing (dep) | 120 |
-| `UdpSession` | mihomo-tunnel | 48 |
+| `UdpSession` | meow-tunnel | 48 |
 
 Note: `tracing::Metadata` is a static (zero per-connection allocation); excluded from M2 targets.
 `TunnelInner` is a singleton; excluded.

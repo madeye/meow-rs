@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end transparent proxy integration test using Docker.
 #
-# Runs a privileged Linux container with nftables support, builds mihomo
+# Runs a privileged Linux container with nftables support, builds meow
 # inside it, starts the tproxy listener, and verifies firewall setup,
 # traffic interception, SNI extraction, and clean teardown.
 #
@@ -30,7 +30,7 @@ fi
 echo "=== Building test container ==="
 
 # Build a Docker image with Rust toolchain + nftables
-DOCKER_IMAGE="mihomo-tproxy-test"
+DOCKER_IMAGE="meow-tproxy-test"
 
 docker build -t "$DOCKER_IMAGE" -f - "$ROOT_DIR" <<'DOCKERFILE'
 FROM rust:1-alpine AS builder
@@ -40,12 +40,12 @@ COPY . .
 # tproxy tests don't need boring-tls; building with default features pulls in
 # boring-sys which requires libclang via dlopen — unsupported on musl-static
 # clang. Use --no-default-features + `full` to skip boring-tls cleanly.
-RUN cargo build -p mihomo-app --no-default-features --features=full 2>&1
+RUN cargo build -p meow-app --no-default-features --features=full 2>&1
 
 FROM alpine:latest
 RUN apk add --no-cache nftables bash busybox-extras
-COPY --from=builder /src/target/debug/mihomo /usr/local/bin/mihomo
-COPY tests/tproxy-qemu/mihomo-tproxy.yaml /etc/mihomo-tproxy.yaml
+COPY --from=builder /src/target/debug/meow /usr/local/bin/meow
+COPY tests/tproxy-qemu/meow-tproxy.yaml /etc/meow-tproxy.yaml
 COPY tests/tproxy-qemu/guest-init.sh /run-tests.sh
 RUN chmod +x /run-tests.sh
 DOCKERFILE

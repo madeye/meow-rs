@@ -1,4 +1,4 @@
-# mihomo-rust sample configuration
+# meow-rs sample configuration
 
 # Inbound listeners
 mixed-port: 7890

@@ -1,4 +1,4 @@
-# mihomo-rust Roadmap
+# meow-rs Roadmap
 
 Owner: pm
 Last updated: 2026-05-13 (audit — reconcile M2 item 6 [release CI, done via release.yml] and M1.H-2 [Prometheus /metrics, dropped 2026-04-19]; cite primary landing commits where the prior audit only cited follow-ups. Still open: M1.E-6, M1.F-4/5, the Go-vs-Rust shared-hw benchmark publication, and M3.)
@@ -28,11 +28,11 @@ pick these up as "fix-it Fridays" while larger M1 specs are drafted.
 | # | Item | Value | Risk | Notes |
 |---|------|:-----:|:----:|-------|
 | ~~M0-1~~ | ~~Enforce REST API `secret` (Bearer auth)~~ | H | L | ~~`AppState.secret` is `#[allow(dead_code)]`; unauth API is a security gap~~ *(landed in [d89e5fd](../../../commit/d89e5fd); hardened to constant-time compare in [178c30f](../../../commit/178c30f); upstream-parity refinements in [3b84db2](../../../commit/3b84db2))* |
-| ~~M0-2~~ | ~~Replace `eprintln!` debug in `routes.rs:115` with `tracing::debug!`~~ | L | L | ~~Hot-path log spam~~ *(closed: no `eprintln!` left in `mihomo-api`; routes.rs has been rewritten)* |
+| ~~M0-2~~ | ~~Replace `eprintln!` debug in `routes.rs:115` with `tracing::debug!`~~ | L | L | ~~Hot-path log spam~~ *(closed: no `eprintln!` left in `meow-api`; routes.rs has been rewritten)* |
 | ~~M0-3~~ | ~~Wire `PROCESS-NAME` lookup (netlink on Linux, `libproc` on macOS)~~ | M | M | ~~Currently a no-op `Box<dyn Fn()>`; rules silently never match~~ *(merged [d89e5fd](../../../commit/d89e5fd))* |
 | ~~M0-4~~ | ~~GEOIP parser + shared `Arc<MaxMindDB>` plumbing~~ | H | M | ~~Today `parse_rule` rejects `GEOIP`; YAML with GEOIP fails to load~~ *(merged [d89e5fd](../../../commit/d89e5fd))* |
 | ~~M0-5~~ | ~~Populate `Resolver` hosts trie from `dns.hosts` config~~ | M | L | ~~Trie allocated, never filled~~ *(merged [d89e5fd](../../../commit/d89e5fd); superseded by M1.E-5 for remaining gaps)* |
-| ~~M0-6~~ | ~~Wire DNS in-flight dedup (`inflight: DashMap`)~~ | M | L | ~~Allocated but `#[allow(dead_code)]`~~ *(closed: `Resolver::lookup` now uses the inflight map; covered by `inflight_entry_cleared_after_lookup_miss` in `mihomo-dns/src/resolver.rs`)* |
+| ~~M0-6~~ | ~~Wire DNS in-flight dedup (`inflight: DashMap`)~~ | M | L | ~~Allocated but `#[allow(dead_code)]`~~ *(closed: `Resolver::lookup` now uses the inflight map; covered by `inflight_entry_cleared_after_lookup_miss` in `meow-dns/src/resolver.rs`)* |
 | ~~M0-7~~ | ~~Verify `AND/OR/NOT` logic rules reachable from top-level parser~~ | M | L | ~~`logic.rs` exists; confirm dispatch, add tests~~ *(confirmed + tested in [8924d49](../../../commit/8924d49))* |
 | ~~M0-8~~ | ~~Prune dead `AdapterType` variants (or mark `#[doc(hidden)]`)~~ | L | L | ~~`RejectDrop`, `Compatible`, `Pass`, `Dns`, `Relay`, `LoadBalance`, unimplemented protos~~ *(merged [3599bdb](../../../commit/3599bdb))* |
 | ~~M0-9~~ | ~~Drop or implement `rule-providers.interval` periodic refresh~~ | M | L | ~~Field accepted and ignored today~~ *(superseded by M1.D-5)* |
@@ -46,14 +46,14 @@ clear decision (implement / defer / remove).
 ## M1 — Parity for the common user
 
 Goal from `vision.md`: a typical Clash Meta user's subscription loads and
-routes correctly on mihomo-rust. Priority is breadth over polish.
+routes correctly on meow-rs. Priority is breadth over polish.
 
 ### M1.A — Reusable transports (prereq)
 
 Before VMess/VLESS land we need transports as composable layers, not
 bespoke code glued into a single adapter. Today `ws` and `tls` live inside
 `v2ray_plugin.rs` / `trojan.rs`. Architecture is settled in
-[ADR-0001](adr/0001-mihomo-transport-crate.md): new `mihomo-transport`
+[ADR-0001](adr/0001-meow-transport-crate.md): new `meow-transport`
 leaf crate; `Transport` trait with `connect(Box<dyn Stream>) -> Box<dyn
 Stream>`; five initial layers (tls / ws / grpc / h2 / httpupgrade), each
 behind a Cargo feature.
@@ -75,7 +75,7 @@ below must not reorder without architect sign-off):
 
 | # | Item | Value | Risk | Spec | Owner |
 |---|------|:-----:|:----:|------|-------|
-| ~~M1.A-1~~ | ~~`mihomo-transport` crate skeleton + `Transport` trait + `tls` layer + `trojan.rs` migration~~ | H | M | ~~[`docs/specs/transport-layer.md`](specs/transport-layer.md)~~ *(merged [e87d570](../../../commit/e87d570))* | ~~engineer~~ |
+| ~~M1.A-1~~ | ~~`meow-transport` crate skeleton + `Transport` trait + `tls` layer + `trojan.rs` migration~~ | H | M | ~~[`docs/specs/transport-layer.md`](specs/transport-layer.md)~~ *(merged [e87d570](../../../commit/e87d570))* | ~~engineer~~ |
 | ~~M1.A-2~~ | ~~`ws` layer + `v2ray_plugin.rs` migration (same spec)~~ | H | M | ~~same spec, §M1.A-2~~ *(merged [e87d570](../../../commit/e87d570))* | ~~engineer~~ |
 | ~~M1.A-3~~ | ~~`grpc` (hand-rolled gun over `h2`) layer (same spec)~~ | H | M | ~~same spec, §M1.A-3~~ *(merged [df78968](../../../commit/df78968))* | ~~engineer~~ |
 | ~~M1.A-4~~ | ~~`h2` + `httpupgrade` layers (same spec)~~ | M | M | ~~same spec, §M1.A-4~~ *(merged [df78968](../../../commit/df78968))* | ~~engineer~~ |
@@ -162,8 +162,8 @@ has its own `connect_over` override in 334d55c. All B items are on main.
 | ~~M1.G-2~~ | ~~`GET /proxies/:name/delay` and `GET /group/:name/delay`~~ | H | L | ~~[`docs/specs/api-delay-endpoints.md`](specs/api-delay-endpoints.md)~~ *(merged [eab429f](../../../commit/eab429f))* | ~~engineer~~ |
 | ~~M1.G-3~~ | ~~`GET /logs` websocket stream~~ | H | M | ~~[`docs/specs/api-logs-websocket.md`](specs/api-logs-websocket.md)~~ *(merged [413a6f8](../../../commit/413a6f8); WS routed at `routes.rs:137`)* | ~~engineer-a~~ |
 | ~~M1.G-4~~ | ~~`GET /memory` websocket (runtime RSS stream)~~ | M | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8); routed at `routes.rs:138`)* | ~~engineer-a~~ |
-| ~~M1.G-5~~ | ~~`GET/PUT /providers/rules[/:name]`~~ | M | L | ~~bundled into M1.D-5 spec~~ *(merged [7d32518](../../../commit/7d32518); routed via `get_rule_providers` in `crates/mihomo-api/src/routes.rs`)* | ~~engineer-b~~ |
-| ~~M1.G-6~~ | ~~`GET/PUT /providers/proxies[/:name]` + proxy providers impl~~ | H | M | ~~depends on M1.H-1~~ *(merged [a0e4e26](../../../commit/a0e4e26); routed via `get_providers` + `/healthcheck` in `crates/mihomo-api/src/routes.rs`)* | ~~engineer-b~~ |
+| ~~M1.G-5~~ | ~~`GET/PUT /providers/rules[/:name]`~~ | M | L | ~~bundled into M1.D-5 spec~~ *(merged [7d32518](../../../commit/7d32518); routed via `get_rule_providers` in `crates/meow-api/src/routes.rs`)* | ~~engineer-b~~ |
+| ~~M1.G-6~~ | ~~`GET/PUT /providers/proxies[/:name]` + proxy providers impl~~ | H | M | ~~depends on M1.H-1~~ *(merged [a0e4e26](../../../commit/a0e4e26); routed via `get_providers` + `/healthcheck` in `crates/meow-api/src/routes.rs`)* | ~~engineer-b~~ |
 | ~~M1.G-7~~ | ~~`DELETE /connections` (bulk)~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
 | ~~M1.G-8~~ | ~~`GET /dns/query` (align with upstream; current is POST)~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
 | ~~M1.G-9~~ | ~~`POST /cache/dns/flush`~~ | L | L | ~~bundled into M1.G-3 spec~~ *(merged [413a6f8](../../../commit/413a6f8))* | ~~engineer-a~~ |
@@ -228,7 +228,7 @@ Scope per `vision.md` §M3. Specs drafted only after M2 exit:
 
 - Hot config reload without dropping connections where safe.
 - OpenTelemetry trace/metric export (opt-in).
-- `mihomo check` CLI with actionable errors + schema export.
+- `meow check` CLI with actionable errors + schema export.
 - Subscription robustness: retry/backoff, signed subscriptions.
 - API auth hardening: per-endpoint authz, audit log for mutating calls.
 - Documented config-compat policy across releases.

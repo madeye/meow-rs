@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Real-world stress test: hammer gstatic / google probe URLs through a
-# rule-mode mihomo using a live VLESS+WS+TLS+ECH proxy from a subscription.
+# rule-mode meow using a live VLESS+WS+TLS+ECH proxy from a subscription.
 # Samples RSS at 1 Hz throughout and reports peak.
 #
 # Goal: verify peak RSS stays under MAX_RSS_MB (default 50 MB) under
@@ -33,22 +33,22 @@ URLS=(
 )
 
 cleanup() {
-    if [[ -n "${MIHOMO_PID:-}" ]]; then
-        kill "$MIHOMO_PID" 2>/dev/null || true
-        wait "$MIHOMO_PID" 2>/dev/null || true
+    if [[ -n "${MEOW_PID:-}" ]]; then
+        kill "$MEOW_PID" 2>/dev/null || true
+        wait "$MEOW_PID" 2>/dev/null || true
     fi
     [[ -n "${SAMPLE_PID:-}" ]] && kill "$SAMPLE_PID" 2>/dev/null || true
     [[ -n "${WORKER_PIDS:-}" ]] && for p in $WORKER_PIDS; do kill "$p" 2>/dev/null || true; done
-    rm -f "$RSS_LOG" "$MIHOMO_LOG" 2>/dev/null || true
+    rm -f "$RSS_LOG" "$MEOW_LOG" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-MIHOMO_LOG="$(mktemp -t mihomo-stress.XXXXXX)"
-RSS_LOG="$(mktemp -t mihomo-stress-rss.XXXXXX)"
+MEOW_LOG="$(mktemp -t meow-stress.XXXXXX)"
+RSS_LOG="$(mktemp -t meow-stress-rss.XXXXXX)"
 
-echo "==> Starting mihomo with $CONFIG"
-"$ROOT_DIR/target/release/mihomo" -f "$CONFIG" >"$MIHOMO_LOG" 2>&1 &
-MIHOMO_PID=$!
+echo "==> Starting meow with $CONFIG"
+"$ROOT_DIR/target/release/meow" -f "$CONFIG" >"$MEOW_LOG" 2>&1 &
+MEOW_PID=$!
 
 # Wait for the proxy port to come up.
 for _ in $(seq 1 30); do
@@ -56,22 +56,22 @@ for _ in $(seq 1 30); do
         -o /dev/null "http://www.gstatic.com/generate_204" 2>/dev/null; then
         break
     fi
-    if ! kill -0 "$MIHOMO_PID" 2>/dev/null; then
-        echo "ERROR: mihomo died during startup. Log:" >&2
-        cat "$MIHOMO_LOG" >&2
+    if ! kill -0 "$MEOW_PID" 2>/dev/null; then
+        echo "ERROR: meow died during startup. Log:" >&2
+        cat "$MEOW_LOG" >&2
         exit 1
     fi
     sleep 1
 done
 
-echo "==> mihomo PID=$MIHOMO_PID, proxy port=$PROXY_PORT"
+echo "==> meow PID=$MEOW_PID, proxy port=$PROXY_PORT"
 echo "==> Stress: concurrency=$CONCURRENCY duration=${DURATION}s cap=${MAX_RSS_MB}MB"
 
 # RSS sampler in background.
 (
     end=$(( $(date +%s) + DURATION + 10 ))
     while [[ $(date +%s) -lt $end ]]; do
-        rss_kb=$(ps -o rss= -p "$MIHOMO_PID" 2>/dev/null | tr -d ' ')
+        rss_kb=$(ps -o rss= -p "$MEOW_PID" 2>/dev/null | tr -d ' ')
         [[ -n "$rss_kb" ]] && echo "$(date +%s) $rss_kb" >> "$RSS_LOG"
         sleep "$SAMPLE_INTERVAL"
     done

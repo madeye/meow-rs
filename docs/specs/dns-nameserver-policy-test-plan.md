@@ -16,13 +16,13 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 
 **In scope:**
 
-- `NameserverPolicy` struct and `lookup()` method (`crates/mihomo-dns/src/resolver.rs`)
+- `NameserverPolicy` struct and `lookup()` method (`crates/meow-dns/src/resolver.rs`)
   — exact match, `+.` wildcard match, no-match fall-through.
 - `FallbackFilter` struct and `should_use_fallback()` method (same file)
   — GeoIP gate, IP-CIDR gate, domain gate, disabled-gate pass-through.
 - Full resolver lookup flow: policy → global → fallback dispatch
   (`Resolver::do_lookup()` or equivalent).
-- Config parser (`crates/mihomo-config/src/dns_parser.rs`) — YAML round-trip
+- Config parser (`crates/meow-config/src/dns_parser.rs`) — YAML round-trip
   for `nameserver-policy` and `fallback-filter` fields.
 - Divergences: `geosite:`/`rule-set:` prefix warn-and-skip, no-MMDB
   startup warn, zero-valid-nameserver hard error.
@@ -42,13 +42,13 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 ## File layout expected
 
 ```
-crates/mihomo-dns/src/
+crates/meow-dns/src/
   resolver.rs          # MODIFIED: NameserverPolicy, FallbackFilter, lookup flow
-crates/mihomo-dns/tests/
+crates/meow-dns/tests/
   nameserver_policy_integration.rs   # NEW: network-gated #[ignore] end-to-end tests
-crates/mihomo-config/src/
+crates/meow-config/src/
   dns_parser.rs        # MODIFIED: nameserver_policy + fallback_filter fields
-crates/mihomo-config/tests/
+crates/meow-config/tests/
   config_test.rs       # MODIFIED: new dns_parser cases
 ```
 
@@ -62,13 +62,13 @@ Following ADR-0002 classification format:
 | 2 | `fallback-filter.geoip: true` with no MMDB — upstream errors at startup | B | We treat as `geoip: false` with `warn!`. Single-resolver configs need no GeoIP DB. NOT a startup error. |
 | 3 | Policy entry with zero valid nameservers (all URLs skipped) — upstream panics | A | Hard parse error: `"nameserver-policy entry 'KEY' has no valid nameservers"`. Silent routing to global = DNS leakage for internal domains. NOT silent fall-through. |
 | 4 | `fallback-filter` GeoIP/CIDR/domain gates — upstream only falls back on primary failure | A | We trigger fallback on GeoIP anomaly, bogon IP, or domain pattern match even when primary succeeds. Upstream: `dns/resolver.go::ipWithFallback` checks only SERVFAIL/timeout. NOT pass-through on poisoned responses. |
-| 5 | Fallback results not re-filtered — both upstream and mihomo-rust match | — | Consistent: fallback is the trusted alternate; re-filtering creates rejection loops. |
+| 5 | Fallback results not re-filtered — both upstream and meow-rs match | — | Consistent: fallback is the trusted alternate; re-filtering creates rejection loops. |
 
 ---
 
 ## Case list
 
-### A. `NameserverPolicy` unit tests (`crates/mihomo-dns/src/resolver.rs`)
+### A. `NameserverPolicy` unit tests (`crates/meow-dns/src/resolver.rs`)
 
 Pure in-process unit tests, no network. Mock policy nameservers that record
 whether they were called.
@@ -85,7 +85,7 @@ whether they were called.
 | A8 | `nameserver_policy_geosite_prefix_warns_and_falls_through_to_global` | Policy key `"geosite:cn"`. At parse time assert one `warn!` log emitted. At lookup time query matching no plain-pattern policy → global mock called. <br/> Upstream: `dns/resolver.go` resolves `geosite:` patterns via the geosite DB (M1.D-2). <br/> NOT hard error — Class B per ADR-0002: too many real configs use this; defer geosite resolution to M1.D-2 integration. |
 | A9 | `nameserver_policy_zero_valid_nameservers_hard_errors_at_parse` | Config with policy entry whose only URL is `"quic://dns.example"` (unsupported scheme, stripped by M1.E-1). Assert `parse_dns` returns `Err` containing `"nameserver-policy entry"` and the key name. <br/> Upstream: `dns/resolver.go` — upstream would panic at lookup time with an empty client list. <br/> NOT silent fall-through to global — Class A per ADR-0002: silent routing of internal domain to global = DNS leakage. |
 
-### B. `FallbackFilter` unit tests (`crates/mihomo-dns/src/resolver.rs`)
+### B. `FallbackFilter` unit tests (`crates/meow-dns/src/resolver.rs`)
 
 Pure unit tests on `FallbackFilter::should_use_fallback`. Use a stub MMDB
 that returns controlled country codes.
@@ -105,7 +105,7 @@ that returns controlled country codes.
 | B11 | `fallback_filter_fallback_result_not_refiltered` | Fallback returns an IP that would itself trigger the GeoIP gate. Assert the result is returned as-is (filter not re-applied to fallback response). Per spec §Resolved questions item 3. |
 | B12 | `fallback_filter_geoip_multiple_ips_any_triggers` **[guard-rail]** | GeoIP gate active. Primary returns two IPs: `1.1.1.1` (CN, passes) and `8.8.8.8` (US, fails). Assert `should_use_fallback` returns `true`. Any non-matching IP is sufficient to trigger fallback — guards that the loop does not short-circuit on the first match. |
 
-### C. Resolver lookup flow integration tests (`crates/mihomo-dns/src/resolver.rs`)
+### C. Resolver lookup flow integration tests (`crates/meow-dns/src/resolver.rs`)
 
 These require a tokio runtime (`#[tokio::test]`). Use mock nameservers that
 return controlled answers (no network).
@@ -122,7 +122,7 @@ return controlled answers (no network).
 | C8 | `lookup_flow_error_when_both_global_and_fallback_fail` | Global-mock SERVFAIL, fallback-mock SERVFAIL. Assert resolver returns an `Err`. |
 | C9 | `lookup_flow_parallel_global_nameservers_fastest_wins` | Two global-mocks: slow-A (50ms), fast-B (0ms). Assert fast-B's answer returned; elapsed < slow-A's delay. Guards `select_ok` not sequential polling. |
 
-### D. Config parser unit tests (`crates/mihomo-config/tests/config_test.rs`)
+### D. Config parser unit tests (`crates/meow-config/tests/config_test.rs`)
 
 All new cases are `#[tokio::test]` to match the async DNS parser.
 
@@ -141,11 +141,11 @@ All new cases are `#[tokio::test]` to match the async DNS parser.
 | D11 | `parse_fallback_filter_invalid_cidr_errors` **[guard-rail]** | `ipcidr: ["not-a-cidr"]`. Assert `Err` at parse time, not at query time. Guards that CIDR parsing is eager. |
 | D12 | `parse_nameserver_policy_multiple_entries` | Three entries: one exact, two wildcard. Assert all three present in parsed policy. |
 
-### E. Network-dependent integration tests (`crates/mihomo-dns/tests/nameserver_policy_integration.rs`)
+### E. Network-dependent integration tests (`crates/meow-dns/tests/nameserver_policy_integration.rs`)
 
 All cases are `#[ignore]`. Run with:
 ```
-cargo test -p mihomo-dns --test nameserver_policy_integration -- --ignored
+cargo test -p meow-dns --test nameserver_policy_integration -- --ignored
 ```
 Not wired into CI. Document in the PR description which resolvers were used.
 
@@ -185,8 +185,8 @@ Not wired into CI. Document in the PR description which resolvers were used.
 ## CI wiring required
 
 Add `nameserver_policy_tests` (or the relevant test binary name for
-`crates/mihomo-dns/src/resolver.rs` unit tests and
-`crates/mihomo-config/tests/config_test.rs` new cases) to both the
+`crates/meow-dns/src/resolver.rs` unit tests and
+`crates/meow-config/tests/config_test.rs` new cases) to both the
 `ubuntu-latest` and `macos-latest` jobs in `.github/workflows/test.yml`.
 
 The §E integration tests are `#[ignore]` — no CI wiring needed.

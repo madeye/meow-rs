@@ -22,7 +22,7 @@ All commands run on commit 7c91033 with output below. **EXIT 0** means success.
 
 **Regression fix**: Commit 7c91033 (lead) closed two clippy gaps discovered during local gauntlet:
 1. `cargo clippy --all-targets --no-default-features -- -D warnings` — listener integration tests (#27) missing feature gate
-2. `cargo clippy --all-targets --all-features -- -D warnings` — 20 lint errors in mihomo-transport under boring-tls feature
+2. `cargo clippy --all-targets --all-features -- -D warnings` — 20 lint errors in meow-transport under boring-tls feature
 
 Both issues are resolved. All three clippy variants now pass.
 
@@ -65,7 +65,7 @@ cargo clippy: No issues found
 EXIT: 0 ✅
 ```
 
-All features (including optional `boring-tls`) pass lint checks. Commit 7c91033 resolved 20 lint errors in mihomo-transport tests and source under the boring-tls feature.
+All features (including optional `boring-tls`) pass lint checks. Commit 7c91033 resolved 20 lint errors in meow-transport tests and source under the boring-tls feature.
 
 ---
 
@@ -146,7 +146,7 @@ All deltas are documented in `/docs/benchmarks/index.md` (Delta summary table).
 ### 9. dhat Feature Build
 
 ```
-Compiling mihomo-app v0.6.2 with --features dhat-heap
+Compiling meow-app v0.6.2 with --features dhat-heap
 Finished `release` profile [optimized] target(s) in 39.16s
 EXIT: 0 ✅
 ```
@@ -206,7 +206,7 @@ All hard-gated targets (aarch64, x86_64) must pass; soft-gated (mipsel) measured
 - **HP-2** (UDP NAT per-datagram): < 0.5 allocs/iter over 10k iterations
 - **HP-3** (rule-match dispatch): < 0.5 allocs/iter over 10k iterations
 
-Reproducers live in `crates/mihomo-tunnel/tests/alloc_audit/*` and `crates/mihomo-rules/benches/alloc_rulematch.rs`.
+Reproducers live in `crates/meow-tunnel/tests/alloc_audit/*` and `crates/meow-rules/benches/alloc_rulematch.rs`.
 
 ### ADR-0011 §1: Summary Document
 

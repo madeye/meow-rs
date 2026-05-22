@@ -8,7 +8,7 @@ Superseded-by: nothing (yet)
 
 ## Context
 
-mihomo-rust is a Rust port of Go mihomo / Clash Meta. Our stated goal
+meow-rs is a Rust port of Go mihomo / Clash Meta. Our stated goal
 in `docs/vision.md` is configuration compatibility with real-world
 Clash Meta subscriptions: a typical user's YAML should load, parse,
 and route. But "compatibility" is not "bug-for-bug emulation" — some
@@ -68,7 +68,7 @@ traffic somewhere the user did not intend.
 
 **Worked examples:**
 
-| Case | Upstream behaviour | mihomo-rust behaviour | Why Class A |
+| Case | Upstream behaviour | meow-rs behaviour | Why Class A |
 |------|-------------------|-----------------------|-------------|
 | `cipher: zero` under VMess | Length-only "cipher", plaintext body | Hard-error | Config says `vmess`; traffic is plaintext |
 | Sniffer peek IO error | Silent skip | `debug!` log, keep original metadata | Covert failure mode — no operator signal |
@@ -90,7 +90,7 @@ migrate away from.
 
 **Worked examples:**
 
-| Case | Upstream behaviour | mihomo-rust behaviour | Why Class B |
+| Case | Upstream behaviour | meow-rs behaviour | Why Class B |
 |------|-------------------|-----------------------|-------------|
 | `alterId > 0` under VMess | Runs legacy MD5 key derivation | Warn-once, coerce to 0 | Under AEAD headers `alterId` is dead state; upstream runs the legacy derivation for config-compat only |
 | Unknown `cipher` string | Error | Warn-once, fall back to `auto` | User probably typoed; auto is a safe default |
@@ -171,7 +171,7 @@ also copy the worst footguns.
 Rejected. Over-strictness would break the config-compat goal. Real
 subscriptions have `alterId: 64` values in them because users have
 been copy-pasting the same YAML for three years. Hard-erroring on
-`alterId` would make mihomo-rust un-adoptable for the exact users
+`alterId` would make meow-rs un-adoptable for the exact users
 we are trying to win over.
 
 ### Three or more classes
@@ -216,7 +216,7 @@ spec review.
 - `docs/specs/proxy-vmess.md` — the three worked examples that
   forced the ADR.
 - `docs/specs/dns-doh-dot.md` — applies the rule to encrypted DNS.
-- `docs/adr/0001-mihomo-transport-crate.md` — architectural sibling
+- `docs/adr/0001-meow-transport-crate.md` — architectural sibling
   ADR; same ADR format.
 - qa convention established in-session: inline test-bullet citations
   of the form `upstream: file::fn` plus `NOT X` lines on test bullets

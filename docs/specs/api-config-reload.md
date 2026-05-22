@@ -60,7 +60,7 @@ PUT /configs HTTP/1.1
 Authorization: Bearer <secret>
 Content-Type: application/json
 
-{"path": "/etc/mihomo/config.yaml"}
+{"path": "/etc/meow/config.yaml"}
 ```
 
 **Request (load from inline payload):**
@@ -223,7 +223,7 @@ pub struct AppState {
 calls `state.tunnel.load()` to get an `Arc<Tunnel>`) and an atomic store on
 reload. This avoids adding a `RwLock` read-lock acquisition to every handler.
 
-Add to `crates/mihomo-api/Cargo.toml`:
+Add to `crates/meow-api/Cargo.toml`:
 ```toml
 arc-swap = "1"
 ```
@@ -242,7 +242,7 @@ state.tunnel.store(new_tunnel);
 
 ### Base64 crate
 
-Add `base64 = "0.22"` to `mihomo-api/Cargo.toml`. Standard alphabet, no
+Add `base64 = "0.22"` to `meow-api/Cargo.toml`. Standard alphabet, no
 line breaks. This matches what dashboard tools encode (MetaCubeXD, Yacd).
 
 ## Acceptance criteria
@@ -295,7 +295,7 @@ line breaks. This matches what dashboard tools encode (MetaCubeXD, Yacd).
 
 ## Implementation checklist (engineer handoff)
 
-- [ ] Add `arc-swap = "1"` and `base64 = "0.22"` to `crates/mihomo-api/Cargo.toml`.
+- [ ] Add `arc-swap = "1"` and `base64 = "0.22"` to `crates/meow-api/Cargo.toml`.
 - [ ] Wrap `tunnel` in `Arc<ArcSwap<Tunnel>>` in `AppState`; update all handlers
       to use `state.tunnel.load()` (wait-free, no lock).
 - [ ] Add `PutConfigsBody` struct (serde `path`, `payload` fields).
@@ -311,7 +311,7 @@ line breaks. This matches what dashboard tools encode (MetaCubeXD, Yacd).
 
 1. **AppState::reload() ownership**: use `ArcSwap<Tunnel>` (not `Arc<RwLock<Tunnel>>`).
    `ArcSwap` provides wait-free reads on the hot path and atomic store on reload.
-   No supervisor channel needed. Add `arc-swap = "1"` to `mihomo-api/Cargo.toml`.
+   No supervisor channel needed. Add `arc-swap = "1"` to `meow-api/Cargo.toml`.
 
 2. **`?force=true` semantics**: `force=true` skips only **semantic** validation
    (unknown group names, duplicate ports, etc.). YAML parse errors are always

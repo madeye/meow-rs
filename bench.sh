@@ -7,11 +7,11 @@ cd "$SCRIPT_DIR"
 GO_BINARY="${GO_BINARY:-}"
 DURATION="${DURATION:-10}"
 
-echo "=== Building mihomo-rust (release) ==="
-cargo build --release -p mihomo-app -p mihomo-bench
+echo "=== Building meow-rs (release) ==="
+cargo build --release -p meow-app -p meow-bench
 
-RUST_BINARY="./target/release/mihomo"
-BENCH_BINARY="./target/release/mihomo-bench"
+RUST_BINARY="./target/release/meow"
+BENCH_BINARY="./target/release/meow-bench"
 
 # Download Go mihomo if not provided
 if [ -z "$GO_BINARY" ]; then

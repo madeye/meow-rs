@@ -28,7 +28,7 @@ The existing flat per-protocol port config (`mixed-port`, `http-port`,
 
 In scope:
 
-1. Parse `listeners:` YAML array in `mihomo-config`. Each entry has
+1. Parse `listeners:` YAML array in `meow-config`. Each entry has
    `name`, `type`, `port`, and optional `listen` (bind address).
 2. Support listener types: `mixed`, `http`, `socks5`, `tproxy`.
 3. Spawn named listener instances in `main.rs`, each propagating `in_name`
@@ -124,7 +124,7 @@ Each named listener is represented by a `ListenerConfig` and a running
 `tokio::task`:
 
 ```rust
-// mihomo-config/src/lib.rs
+// meow-config/src/lib.rs
 
 pub struct NamedListener {
     pub name: String,
@@ -240,5 +240,5 @@ No mutation endpoints in M1 — listener list is read-only at runtime.
       connection handler.
 - [ ] Implement `IN-TYPE` rule dispatch in `rules/parser.rs` mapping strings
       to ConnType patterns.
-- [ ] Add `GET /listeners` handler and route in `mihomo-api/src/routes.rs`.
+- [ ] Add `GET /listeners` handler and route in `meow-api/src/routes.rs`.
 - [ ] Update `docs/roadmap.md` M1.F-1 row with merged PR link; unblock M1.D-4.

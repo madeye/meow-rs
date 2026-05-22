@@ -1,13 +1,13 @@
 # Benchmarks index
 
-This directory holds baseline measurements and audit findings for the mihomo-rust
+This directory holds baseline measurements and audit findings for the meow-rs
 refactor/cleanup-2026-05 work (M1 + M2).
 
 ## Baseline documents
 
 | File | Contents |
 |------|----------|
-| [footprint-types-baseline.md](footprint-types-baseline.md) | Struct sizes at M2 open (`-Zprint-type-sizes`): Metadata 272 B, ConnectionInfo 408 B, UdpSession 48 B, MihomoError 32 B, AdapterType 1 B |
+| [footprint-types-baseline.md](footprint-types-baseline.md) | Struct sizes at M2 open (`-Zprint-type-sizes`): Metadata 272 B, ConnectionInfo 408 B, UdpSession 48 B, MeowError 32 B, AdapterType 1 B |
 | [footprint-rss-baseline.md](footprint-rss-baseline.md) | RSS at M2 open: idle 9.2 MB, load 11.4 MB, ~35 KB/conn steady-state |
 | [footprint-alloc-baseline.md](footprint-alloc-baseline.md) | dhat peak live 2.93 MB; top allocation sites: Statistics::track_connection (~36 B/conn), Metadata alloc (~24 B/conn), relay CopyBuffer (~8 KiB/conn × 2) |
 | [m1-addendum-lint-probe.md](m1-addendum-lint-probe.md) | All 9 allocation lints = 0 hits at M2 open (after M1 hygiene work) |

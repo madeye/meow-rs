@@ -1,0 +1,42 @@
+[package]
+name = "meow-dns"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["encrypted", "dns-server"]
+encrypted = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots"]
+# `dns-server` historically gated hickory-server; the in-tree server now uses
+# only `hickory-proto`, so the feature is a no-op kept for API stability.
+dns-server = []
+
+[dependencies]
+meow-common = { workspace = true }
+meow-trie = { workspace = true }
+tokio = { workspace = true }
+hickory-proto = { workspace = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+rand = { workspace = true }
+lru = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+ipnet = { workspace = true }
+maxminddb = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smol_str = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+sysinfo = "0.32"
+async-trait = { workspace = true }
+hickory-proto = { workspace = true }
+
+[lints]
+workspace = true

@@ -9,9 +9,9 @@ ADR: [ADR-0007](../adr/0007-m2-footprint-budget.md)
 cargo zigbuild --release --locked \
   --no-default-features --features minimal \
   --target aarch64-unknown-linux-musl \
-  --bin mihomo
+  --bin meow
 # Binary already stripped by profile (strip = true); on CI use llvm-strip for ELF.
-wc -c < target/aarch64-unknown-linux-musl/release/mihomo
+wc -c < target/aarch64-unknown-linux-musl/release/meow
 ```
 
 Release profile: `lto = fat, strip = true, codegen-units = 1, panic = abort, opt-level = "z"`

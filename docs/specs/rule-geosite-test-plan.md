@@ -19,7 +19,7 @@ spec can be updated.
 - `GeoSiteRule::apply()` — match/no-match, absent DB, case-insensitive.
 - `@`-suffix stripping + warn-once (Class B).
 - `.dat`-format file detection → callsite error (Class A).
-- File discovery chain: XDG / `~/.config/mihomo` / `./mihomo`.
+- File discovery chain: XDG / `~/.config/meow` / `./meow`.
 - Absent `geosite.mrs` → startup warn, always-no-match.
 - Multiple `GEOSITE` rules sharing a single `Arc<GeositeDB>`.
 - Unknown category in a rule → always no-match (no error).
@@ -70,9 +70,9 @@ lookup. Section E3 guards this.
 ## Test helpers
 
 All unit tests for `GeoSiteRule` live in `#[cfg(test)] mod tests` inside
-`crates/mihomo-rules/src/geosite_rule.rs`.
+`crates/meow-rules/src/geosite_rule.rs`.
 
-Unit tests for the DB loader live in `crates/mihomo-rules/src/geosite.rs`.
+Unit tests for the DB loader live in `crates/meow-rules/src/geosite.rs`.
 
 ### In-process `GeositeDB` fixture
 
@@ -137,11 +137,11 @@ tests (section B) use binary mrs fixtures.
 
 | # | Case | Asserts |
 |---|------|---------|
-| D1 | `discovery_finds_xdg_config_path` | Place `geosite.mrs` fixture at `$XDG_CONFIG_HOME/mihomo/geosite.mrs`; assert DB loaded from that path. NOT fallback path used. |
-| D2 | `discovery_falls_through_to_home_config` | No XDG path; place `geosite.mrs` at `~/.config/mihomo/geosite.mrs`; assert DB loaded. NOT "not found" warn emitted. |
-| D3 | `discovery_falls_through_to_cwd` | No XDG or home path; place `geosite.mrs` at `./mihomo/geosite.mrs`; assert DB loaded. |
+| D1 | `discovery_finds_xdg_config_path` | Place `geosite.mrs` fixture at `$XDG_CONFIG_HOME/meow/geosite.mrs`; assert DB loaded from that path. NOT fallback path used. |
+| D2 | `discovery_falls_through_to_home_config` | No XDG path; place `geosite.mrs` at `~/.config/meow/geosite.mrs`; assert DB loaded. NOT "not found" warn emitted. |
+| D3 | `discovery_falls_through_to_cwd` | No XDG or home path; place `geosite.mrs` at `./meow/geosite.mrs`; assert DB loaded. |
 | D4 | `discovery_no_path_found_warns_once` | No `geosite.mrs` at any candidate; assert exactly one `warn!` log. NOT error. Spec: operators who don't use GEOSITE don't need the DB. |
-| D5 | `discovery_prefers_first_candidate` | `geosite.mrs` present at both XDG path and `./mihomo/geosite.mrs` (with different content); assert XDG path (highest priority) is used. NOT arbitrary order. |
+| D5 | `discovery_prefers_first_candidate` | `geosite.mrs` present at both XDG path and `./meow/geosite.mrs` (with different content); assert XDG path (highest priority) is used. NOT arbitrary order. |
 
 ---
 

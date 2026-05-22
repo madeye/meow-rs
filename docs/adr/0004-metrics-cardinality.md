@@ -11,16 +11,16 @@
 ## Context
 
 `docs/specs/metrics-prometheus.md` is approved and defines the concrete
-catalog for M1 (`mihomo_traffic_bytes`, `mihomo_connections_active`,
-`mihomo_proxy_alive`, `mihomo_proxy_delay_ms`, `mihomo_rules_matched_total`,
-`mihomo_memory_rss_bytes`, `mihomo_info`). That spec already made several
+catalog for M1 (`meow_traffic_bytes`, `meow_connections_active`,
+`meow_proxy_alive`, `meow_proxy_delay_ms`, `meow_rules_matched_total`,
+`meow_memory_rss_bytes`, `meow_info`). That spec already made several
 cardinality-relevant calls:
 
 - Rule-match counter labelled by `rule_type` + `action` (collapsed to
   `DIRECT`/`REJECT`/`PROXY`) — **not** by rule name or proxy name.
-- `proxy_name` label on `mihomo_proxy_alive` + `mihomo_proxy_delay_ms` —
+- `proxy_name` label on `meow_proxy_alive` + `meow_proxy_delay_ms` —
   O(num_proxies), typically 20–500, noted as "expected cardinality".
-- `mihomo_proxy_delay_ms` **omitted** when `last_delay = None` instead of
+- `meow_proxy_delay_ms` **omitted** when `last_delay = None` instead of
   emitting a sentinel `-1`.
 - Hot-path counters keyed by `&'static str` to avoid per-call allocation.
 - Histograms and per-connection metrics deferred to M2.
@@ -36,7 +36,7 @@ wants to add a metric:
    label value? What about line-breaks, quotes, backslashes?
 3. Is `proxy_name: ""` legal, or does an unnamed proxy get filtered out?
 4. When a proxy is removed from the config (reload, provider refresh),
-   does its `mihomo_proxy_alive` series disappear immediately, persist
+   does its `meow_proxy_alive` series disappear immediately, persist
    as 0, or wait until the next scrape?
 5. What is the auth stance on `/metrics`? Bearer-token same as REST, or
    opened up for scrapers that cannot carry headers?
@@ -53,7 +53,7 @@ changes don't re-derive it.
 
 ### 1. Cardinality classes
 
-Every label on a mihomo-rust Prometheus metric falls into exactly one of
+Every label on a meow-rs Prometheus metric falls into exactly one of
 three classes. The class determines what labels are permitted, how they
 are sanitised, and what changes without a new spec.
 
@@ -65,10 +65,10 @@ not a function of user config or external input.
 
 **Examples:**
 
-- `direction` on `mihomo_traffic_bytes` — values: `upload`, `download`.
-- `rule_type` on `mihomo_rules_matched_total` — values: `DOMAIN`,
+- `direction` on `meow_traffic_bytes` — values: `upload`, `download`.
+- `rule_type` on `meow_rules_matched_total` — values: `DOMAIN`,
   `DOMAIN-SUFFIX`, `IP-CIDR`, `GEOIP`, etc. Bounded by the `Rule` enum.
-- `action` on `mihomo_rules_matched_total` — values: `DIRECT`, `REJECT`,
+- `action` on `meow_rules_matched_total` — values: `DIRECT`, `REJECT`,
   `PROXY`. The explicit `PROXY` collapse in `metrics-prometheus.md` is the
   exact reason action is Class I: we do *not* label by proxy name here.
 
@@ -88,7 +88,7 @@ the user base.
 
 **Examples:**
 
-- `proxy_name` on `mihomo_proxy_alive` / `mihomo_proxy_delay_ms`.
+- `proxy_name` on `meow_proxy_alive` / `meow_proxy_delay_ms`.
 - `adapter_type` on the same (a fixed enum today — Class I by this
   definition — but lives alongside `proxy_name` so they're rendered as a
   Class II pair).
@@ -98,7 +98,7 @@ the user base.
 **Policy:**
 
 - Cap: **1024 distinct values per label per scrape**. Above the cap, the
-  exporter emits **one** `mihomo_metric_truncated_total{metric=...}`
+  exporter emits **one** `meow_metric_truncated_total{metric=...}`
   counter increment per excess series, keeps the first 1024 (iteration
   order from the source map), and logs a single `warn!` per scrape.
 - 1024 is deliberately high — typical subscription has 20–500 proxies,
@@ -116,7 +116,7 @@ the user base.
   `prometheus-client` enforces this — if two proxies share the same name
   our code must deduplicate before encoding or the encoder panics.
   Deduplication rule: **last write wins**, but emit a
-  `mihomo_metric_conflict_total{metric=...}` counter increment per
+  `meow_metric_conflict_total{metric=...}` counter increment per
   collision. Matches `docs/specs/proxy-providers.md` §7 duplicate-proxy
   handling (last-write-wins + warn).
 
@@ -129,7 +129,7 @@ connection UUID).
 **Examples:**
 
 - `remote_host` on a traffic counter — unbounded, attacker-controlled.
-- `rule_name` on `mihomo_rules_matched_total` — bounded by config line
+- `rule_name` on `meow_rules_matched_total` — bounded by config line
   count, but users write freeform names and machine-generated rule-sets
   blow it up into the thousands without the operator realising.
 - `connection_id` on any per-connection metric.
@@ -154,11 +154,11 @@ syntactic ones.
 1. **Reject the empty string.** A proxy with `name: ""` in config is a
    bug — the REST API already refuses empty names; metrics do too.
    Implementation: skip the series and emit
-   `mihomo_metric_skipped_total{metric=..., reason="empty_label"}`.
+   `meow_metric_skipped_total{metric=..., reason="empty_label"}`.
 2. **Reject control characters** (U+0000–U+001F except the escaped `\n`
    case already handled by the encoder; also U+007F). Replace the value
    with `"<sanitised>"` (literal) and emit
-   `mihomo_metric_sanitised_total{metric=...}`. Control characters in a
+   `meow_metric_sanitised_total{metric=...}`. Control characters in a
    proxy name are a config bug and never appear in normal configs; we
    want a signal without breaking the scrape.
 3. **No length cap on label values.** Prometheus itself has no limit; our
@@ -181,7 +181,7 @@ ratifies and amplifies:
   `AppState`, encodes, returns.
 - **Hot-path counters live in `Statistics`, not in the registry.** The
   tunnel code increments `&'static` keyed counters in
-  `mihomo-tunnel::Statistics`. The `/metrics` handler *reads* those
+  `meow-tunnel::Statistics`. The `/metrics` handler *reads* those
   counts and copies them into Counter/Gauge slots on the per-scrape
   registry. This is the critical separation: the scrape path, not the
   packet path, owns the encoder.
@@ -232,7 +232,7 @@ the empty-string filter:
 
 | # | Case | Class | Rationale |
 |---|------|:-----:|-----------|
-| 1 | Silently skip empty label values instead of emitting `""` | B | Emitting an empty-string series is technically valid Prometheus but creates a confusing "anonymous" row in aggregations. Skipping + counting via `mihomo_metric_skipped_total` gives operators a signal; no user traffic is affected. |
+| 1 | Silently skip empty label values instead of emitting `""` | B | Emitting an empty-string series is technically valid Prometheus but creates a confusing "anonymous" row in aggregations. Skipping + counting via `meow_metric_skipped_total` gives operators a signal; no user traffic is affected. |
 
 Not an ADR-0002 entry per se because there's no upstream to compare
 against. Kept here as the one "behaviour decision a reviewer might
@@ -242,12 +242,12 @@ question".
 
 When a future PR adds a metric, reviewers verify:
 
-- [ ] Metric name is snake_case, prefixed `mihomo_`, and (for counters)
+- [ ] Metric name is snake_case, prefixed `meow_`, and (for counters)
       the `-total` suffix is **appended by the encoder**, not written
       in the name. Follow `metrics-prometheus.md` §Metric catalog.
 - [ ] Each label is classified I, II, or III. Class III = block.
 - [ ] If any label is Class II, the implementation enforces the 1024 cap
-      and increments `mihomo_metric_truncated_total` on overflow.
+      and increments `meow_metric_truncated_total` on overflow.
 - [ ] Label-value sanitisation (§2 rules 1 and 2) is applied before
       emit for any Class II label.
 - [ ] Hot-path increments use `&'static str` keys. The counter API in
@@ -269,10 +269,10 @@ the feature catalog:
 
 | Name | Type | Labels | When emitted |
 |---|---|---|---|
-| `mihomo_metric_truncated_total` | counter | `metric` (Class I) | Class II label value count exceeded 1024 — per-scrape increment per overflow series |
-| `mihomo_metric_skipped_total` | counter | `metric` (Class I), `reason` (Class I: `empty_label`) | Series skipped due to sanitisation §2.1 |
-| `mihomo_metric_sanitised_total` | counter | `metric` (Class I) | Series emitted with a sanitised value per §2.2 |
-| `mihomo_metric_conflict_total` | counter | `metric` (Class I) | Duplicate label-set collision — last-write-wins per §1 Class II |
+| `meow_metric_truncated_total` | counter | `metric` (Class I) | Class II label value count exceeded 1024 — per-scrape increment per overflow series |
+| `meow_metric_skipped_total` | counter | `metric` (Class I), `reason` (Class I: `empty_label`) | Series skipped due to sanitisation §2.1 |
+| `meow_metric_sanitised_total` | counter | `metric` (Class I) | Series emitted with a sanitised value per §2.2 |
+| `meow_metric_conflict_total` | counter | `metric` (Class I) | Duplicate label-set collision — last-write-wins per §1 Class II |
 
 These are self-describing (all labels Class I) and land with the M1.H-2
 PR. Their existence is this ADR's business; their catalog home is
@@ -290,7 +290,7 @@ PR. Their existence is this ADR's business; their catalog home is
 - **Hot path protected.** `&'static str`-only API prevents a future
   engineer from accidentally keying a hot counter by `String::from(...)`.
 - **Truncation is visible.** Operators running configs above the 1024-
-  proxy cap see `mihomo_metric_truncated_total` rising and can file an
+  proxy cap see `meow_metric_truncated_total` rising and can file an
   issue; today they would silently miss series with no signal.
 
 ### Negative / risks
@@ -326,11 +326,11 @@ because the metrics path is naive.
 omitting
 
 **Rejected by the approved spec already** — kept here for audit. A
-sentinel corrupts aggregations (`avg(mihomo_proxy_delay_ms)` silently
+sentinel corrupts aggregations (`avg(meow_proxy_delay_ms)` silently
 includes `-1`s). Absence + `absent()` is the Prometheus-native way to
 signal "no data".
 
-### A.3 — Allow rule-name label on `mihomo_rules_matched_total` (Class III)
+### A.3 — Allow rule-name label on `meow_rules_matched_total` (Class III)
 
 Useful for debugging a specific rule's hit rate. **Rejected.** Freeform
 rule names are Class III — a user who types `"my 大 rule 🦀"` gets a

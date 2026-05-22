@@ -57,7 +57,7 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 
 ## Case list
 
-### A. Header encoder unit tests (`crates/mihomo-proxy/src/vless/header.rs`)
+### A. Header encoder unit tests (`crates/meow-proxy/src/vless/header.rs`)
 
 Pure-Rust unit tests. No async, no network. These are byte-level
 correctness tests — any deviation from the expected bytes means the
@@ -81,7 +81,7 @@ path must be exercised.
 | A10 | `header_addr_idn_not_punycoded` **[guard-rail]** | `"例え.jp:80"` → raw UTF-8 bytes in the domain field. NOT `xn--` punycode. Match upstream behavior: let the server handle IDN. |
 | A11 | `header_encode_full_round_trip_via_decode` | Encode a header then decode it; assert all fields match input. |
 
-### B. Response decoder unit tests (`crates/mihomo-proxy/src/vless/header.rs`)
+### B. Response decoder unit tests (`crates/meow-proxy/src/vless/header.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -90,7 +90,7 @@ path must be exercised.
 | B3 | `response_decode_version_mismatch_warns_and_errors` | Input `[0x01, 0x00]`. Assert `Err`, and tracing capture shows exactly one `warn!` with substring `"version"` or `"mismatch"`. <br/> Upstream: `transport/vless/conn.go` closes the connection silently. <br/> NOT silent close without log — we surface the reason so users can debug "wrong UUID" / "missing TLS layer" scenarios. |
 | B4 | `response_decode_truncated_buffer_errors` **[guard-rail]** | Feed a 1-byte buffer (just the version, no addon_length). Assert clean `Err`, no panic. Guards against an unbounded read on addon_length. |
 
-### C. XTLS-Vision unit tests (`crates/mihomo-proxy/src/vless/vision.rs`)
+### C. XTLS-Vision unit tests (`crates/meow-proxy/src/vless/vision.rs`)
 
 These tests require the `vless-vision` Cargo feature. Use a test-mode
 `VisionConn` with an observable `mode` flag and a test-writable inner
@@ -115,9 +115,9 @@ must be bounced back to engineer.
 | C10 | `vision_udp_path_uses_plain_conn` **[guard-rail]** | Confirm that `VlessAdapter::dial_udp` when `flow = Some(XtlsRprxVision)` returns a plain `VlessConn` (not `VisionConn`). Assert no padding header is ever written on the UDP path. Guards against accidentally wrapping UDP in Vision. |
 | C11 | `vision_no_inner_tls_no_log_noise` **[guard-rail]** | Feed non-TLS data in pass-through mode. Assert no `warn!` or `error!` is emitted — only a `trace!` at most. Vision's pass-through is the expected path for HTTP-over-VLESS; it must not spam logs. |
 
-### D. Config parser unit tests (`crates/mihomo-config/src/proxy_parser.rs`)
+### D. Config parser unit tests (`crates/meow-config/src/proxy_parser.rs`)
 
-All these live in `crates/mihomo-config/tests/config_test.rs` (or
+All these live in `crates/meow-config/tests/config_test.rs` (or
 inline tests in the parser module). Each case is `#[tokio::test]` if
 `load_config_from_str` is async (per the dns-doh-dot spec amendment),
 otherwise `#[test]`.
@@ -160,11 +160,11 @@ the resulting `TransportChain` shape; no network required.
 | E5 | `vless_vision_wrapped_around_vless_conn` | `flow: "xtls-rprx-vision"`, `tls: true`, `network: tcp`. `dial_tcp` returns a `VisionConn` wrapper, not a bare `VlessConn`. The Vision wrapping is inside the ProxyConn, orthogonal to the `TransportChain`. |
 | E6 | `vless_udp_ignores_vision_flow` **[guard-rail]** | `flow: "xtls-rprx-vision"`, `udp: true`, `tls: true`. `dial_udp` returns a plain `VlessConn` (no `VisionConn` wrapper). Acceptance criterion §Scope: "Vision is TCP-only". |
 
-### F. Connection wire tests (`crates/mihomo-proxy/src/vless/conn.rs`)
+### F. Connection wire tests (`crates/meow-proxy/src/vless/conn.rs`)
 
 Use an in-process mock server that echoes the VLESS response header
 (`[0x00, 0x00]`) and then echoes payload bytes. The mock lives in
-`crates/mihomo-proxy/tests/support/vless_mock.rs`.
+`crates/meow-proxy/tests/support/vless_mock.rs`.
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -182,14 +182,14 @@ Add as steps in the existing `test` job or a new `vless-feature-matrix` job.
 
 | # | Command | Asserts |
 |---|---------|---------|
-| G1 | `cargo check -p mihomo-proxy --no-default-features --features vless` | Compiles without transport layers, without Vision. Acceptance criterion #1. |
-| G2 | `cargo check -p mihomo-proxy --no-default-features --features "vless,tls"` | Compiles. |
-| G3 | `cargo check -p mihomo-proxy --no-default-features --features "vless,tls,ws"` | Compiles. Real-world minimum. Acceptance criterion #2. |
-| G4 | `cargo check -p mihomo-proxy --no-default-features --features "vless,tls,ws,vless-vision"` | Compiles with Vision. |
-| G5 | `cargo check -p mihomo-proxy --no-default-features --features "vless,tls,ws,grpc,h2,httpupgrade,vless-vision"` | Full feature set compiles. |
-| G6 | `cargo check -p mihomo-proxy --no-default-features --features vless` (no `vless-vision`) | The `vision.rs` module is excluded; the `VlessFlow::XtlsRprxVision` match arm is cfg-gated away. Compile check only — behavior tested by D21. |
+| G1 | `cargo check -p meow-proxy --no-default-features --features vless` | Compiles without transport layers, without Vision. Acceptance criterion #1. |
+| G2 | `cargo check -p meow-proxy --no-default-features --features "vless,tls"` | Compiles. |
+| G3 | `cargo check -p meow-proxy --no-default-features --features "vless,tls,ws"` | Compiles. Real-world minimum. Acceptance criterion #2. |
+| G4 | `cargo check -p meow-proxy --no-default-features --features "vless,tls,ws,vless-vision"` | Compiles with Vision. |
+| G5 | `cargo check -p meow-proxy --no-default-features --features "vless,tls,ws,grpc,h2,httpupgrade,vless-vision"` | Full feature set compiles. |
+| G6 | `cargo check -p meow-proxy --no-default-features --features vless` (no `vless-vision`) | The `vision.rs` module is excluded; the `VlessFlow::XtlsRprxVision` match arm is cfg-gated away. Compile check only — behavior tested by D21. |
 
-### H. Integration tests (`crates/mihomo-proxy/tests/vless_integration.rs`)
+### H. Integration tests (`crates/meow-proxy/tests/vless_integration.rs`)
 
 Follow the `vmess_integration.rs` pattern exactly. Skip-if-absent,
 same `xray` binary name and install hint:
@@ -212,12 +212,12 @@ absent; when `=0` or unset, skip gracefully.
 
 | # | Case | Asserts |
 |---|------|---------|
-| I1 | `vless_adapter_type_is_vless` | `VlessAdapter.adapter_type()` returns `AdapterType::Vless`. Guards the enum variant wiring in `mihomo-common`. |
+| I1 | `vless_adapter_type_is_vless` | `VlessAdapter.adapter_type()` returns `AdapterType::Vless`. Guards the enum variant wiring in `meow-common`. |
 | I2 | `vless_support_udp_false_by_default` | Built with `udp: false` → `support_udp() == false`. |
 | I3 | `vless_support_udp_true_when_configured` | `udp: true` → `support_udp() == true`. |
-| I4 | `no_transport_code_in_vless_src` **[guard-rail]** | Walk `crates/mihomo-proxy/src/vless/**/*.rs`, assert no line matches `\btokio_tungstenite\b`, `\bTlsConnector\b`, or `\bClientBuilder\b`. All transport plumbing must go through `mihomo-transport`. Mirrors the VMess plan §J4 grep pattern. |
-| I5 | `no_prost_dep_in_vless` **[guard-rail]** | Parse `crates/mihomo-proxy/Cargo.toml`, assert `prost` is **not** listed as a dependency. Spec §Addon encoding says "do not depend on prost — it is two hardcoded bytes." A direct dep on prost for 18 bytes would violate the footprint goal. |
-| I6 | `vision_module_only_present_with_feature` **[guard-rail]** | Compile `crates/mihomo-proxy` without `vless-vision`; assert `crates/mihomo-proxy/src/vless/vision.rs` symbols are not reachable (no public export of `VisionConn` in the default build). Checked via the G6 compile step. |
+| I4 | `no_transport_code_in_vless_src` **[guard-rail]** | Walk `crates/meow-proxy/src/vless/**/*.rs`, assert no line matches `\btokio_tungstenite\b`, `\bTlsConnector\b`, or `\bClientBuilder\b`. All transport plumbing must go through `meow-transport`. Mirrors the VMess plan §J4 grep pattern. |
+| I5 | `no_prost_dep_in_vless` **[guard-rail]** | Parse `crates/meow-proxy/Cargo.toml`, assert `prost` is **not** listed as a dependency. Spec §Addon encoding says "do not depend on prost — it is two hardcoded bytes." A direct dep on prost for 18 bytes would violate the footprint goal. |
+| I6 | `vision_module_only_present_with_feature` **[guard-rail]** | Compile `crates/meow-proxy` without `vless-vision`; assert `crates/meow-proxy/src/vless/vision.rs` symbols are not reachable (no public export of `VisionConn` in the default build). Checked via the G6 compile step. |
 
 ---
 

@@ -16,7 +16,7 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 
 **In scope:**
 
-- Config parser (`crates/mihomo-config/src/`) — `listeners:` array parsing,
+- Config parser (`crates/meow-config/src/`) — `listeners:` array parsing,
   shorthand field auto-naming, duplicate port/name detection.
 - Listener construction — `name: String` stored at construction time in all
   four listener types (mixed, http, socks5, tproxy).
@@ -41,21 +41,21 @@ divergence. ADR-0002 Class cite (A or B) per `feedback_adr_0002_class_cite.md`.
 ## File layout expected
 
 ```
-crates/mihomo-config/src/
+crates/meow-config/src/
   raw.rs               # MODIFIED: RawListener struct, listeners field on RawConfig
   config_parser.rs     # MODIFIED: parse listeners:, merge shorthand, dedup checks
-crates/mihomo-listener/src/
+crates/meow-listener/src/
   mixed.rs             # MODIFIED: name field, Metadata.in_name/in_port population
   http_proxy.rs        # MODIFIED: same
   socks5.rs            # MODIFIED: same
   tproxy/mod.rs        # MODIFIED: same
-crates/mihomo-rules/src/
+crates/meow-rules/src/
   parser.rs            # MODIFIED: IN-TYPE dispatch added
-crates/mihomo-api/src/
+crates/meow-api/src/
   routes.rs            # MODIFIED: GET /listeners handler + route
-crates/mihomo-config/tests/
+crates/meow-config/tests/
   config_test.rs       # MODIFIED: new listeners-related cases
-crates/mihomo-listener/tests/
+crates/meow-listener/tests/
   listener_metadata_test.rs  # NEW: in_name/in_port population tests
 ```
 
@@ -75,7 +75,7 @@ Following ADR-0002 classification format:
 
 ## Case list
 
-### A. Config parser unit tests (`crates/mihomo-config/tests/config_test.rs`)
+### A. Config parser unit tests (`crates/meow-config/tests/config_test.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -98,7 +98,7 @@ Following ADR-0002 classification format:
 | A17 | `parse_listeners_absent_is_valid` | No `listeners:` key. Assert `Ok`. Shorthand ports work as before. |
 | A18 | `parse_tproxy_sni_field_forwarded` **[guard-rail]** | `type: tproxy, tproxy-sni: true`. Assert `tproxy_sni: true` in parsed struct. Non-tproxy entry with `tproxy-sni` → warn-once and ignore (not a parse error). |
 
-### B. Listener Metadata population tests (`crates/mihomo-listener/tests/listener_metadata_test.rs`)
+### B. Listener Metadata population tests (`crates/meow-listener/tests/listener_metadata_test.rs`)
 
 All require a tokio runtime (`#[tokio::test]`). Use loopback connections, no
 external network. Assert fields on the `Metadata` passed to the tunnel
@@ -116,7 +116,7 @@ callback.
 | B8 | `two_listeners_different_names_stamp_correctly` **[guard-rail]** | Two listeners spawned simultaneously: `"corp"` on port 7891, `"personal"` on port 7892. Connect to each. Assert each connection's Metadata carries its own listener's name and port, not the other's. Guards against shared/static name state. |
 | B9 | `shorthand_listener_in_name_is_auto_name` | Listener spawned from `mixed-port: 7890` shorthand (auto-name `"mixed"`). Assert `metadata.in_name == "mixed"`. |
 
-### C. IN-NAME / IN-PORT / IN-TYPE rule matching unit tests (`crates/mihomo-rules/`)
+### C. IN-NAME / IN-PORT / IN-TYPE rule matching unit tests (`crates/meow-rules/`)
 
 Pure unit tests on the rule matching logic. No network, no listener required.
 
@@ -137,7 +137,7 @@ Pure unit tests on the rule matching logic. No network, no listener required.
 | C13 | `in_type_unknown_value_hard_errors_at_parse` | Rule string `"IN-TYPE,QUIC,Target"`. Assert parse returns `Err`. <br/> Upstream: `rules/parser.go` — unknown IN-TYPE silently returns false at match time. <br/> NOT silent no-match — Class A per ADR-0002: a typo would silently never route all traffic of that type. |
 | C14 | `in_name_rule_case_sensitive` **[guard-rail]** | `in_name: "Corp-Socks"`. Rule `IN-NAME,corp-socks,Target`. Assert no match. Rule matching is case-sensitive — listener names are exact strings, not normalized. |
 
-### D. GET /listeners API endpoint tests (`crates/mihomo-api/`)
+### D. GET /listeners API endpoint tests (`crates/meow-api/`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -178,15 +178,15 @@ the rule fires correctly.
 - `Metadata.in_name` is never `""` for any connection accepted by a named
   listener — assert via §B8 that the zero-value cannot appear from a running
   listener.
-- `cargo test --lib -p mihomo-rules` includes the new IN-TYPE parser cases.
+- `cargo test --lib -p meow-rules` includes the new IN-TYPE parser cases.
 
 ## CI wiring required
 
 Add to `.github/workflows/test.yml`:
 
-1. `cargo test -p mihomo-config --test config_test` — picks up §A cases (already
+1. `cargo test -p meow-config --test config_test` — picks up §A cases (already
    in CI if config_test.rs is wired; new cases are additive).
-2. `cargo test -p mihomo-listener --test listener_metadata_test` — new test
+2. `cargo test -p meow-listener --test listener_metadata_test` — new test
    binary for §B cases.
 3. §E integration tests: add to the existing `rules_test` or a new
    `listener_integration` binary in the `ubuntu-latest` job.

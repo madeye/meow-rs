@@ -16,7 +16,7 @@ cd "$ROOT_DIR"
 echo "=== Running Trojan integration tests ==="
 
 echo "Building..."
-cargo build -p mihomo-proxy 2>&1
+cargo build -p meow-proxy 2>&1
 
 echo "Running integration test..."
 if cargo test --test trojan_integration -- --nocapture 2>&1; then

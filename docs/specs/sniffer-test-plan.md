@@ -19,13 +19,13 @@ reason) per `feedback_spec_divergence_comments.md`.
 **In scope for M1.F-2:**
 
 - Pure parser correctness (`sniff_tls`, `sniff_http`) against byte
-  fixtures in `mihomo-common`.
+  fixtures in `meow-common`.
 - Runtime gating (`parse-pure-ip`, `force-domain`, `skip-domain`,
   `override-destination`, per-port dispatch, timeout, IO-error swallow)
-  in `mihomo-listener`.
+  in `meow-listener`.
 - Config parsing of the full `sniffer:` YAML block, the deprecated
   `enable-sni` alias synthesis path, and the `tls-fingerprint` /
-  `force-dns-mapping` divergence behaviour in `mihomo-config`.
+  `force-dns-mapping` divergence behaviour in `meow-config`.
 - End-to-end integration against real sockets for all four listener
   call-sites (Mixed covered transitively via HTTP/SOCKS, so 3 direct
   cases + Trojan-outbound SNI case = 4 integration cases).
@@ -62,7 +62,7 @@ cases below, but both also want a spec/code fix:
 
 2. **Trojan mock does not record received SNI.** Integration case
    **E4** (`trojan_outbound_uses_sniffed_sni_when_override_destination_true`)
-   needs the trojan mock server in `crates/mihomo-proxy/tests/` to
+   needs the trojan mock server in `crates/meow-proxy/tests/` to
    expose the SNI it saw on its listening side. A grep of
    `trojan_integration.rs` finds only the *client-side* SNI value
    (`"localhost"`) configured on the outbound — there is no
@@ -92,7 +92,7 @@ pattern to copy). Each test owns its capture buffer.
 ### Runtime socket helpers
 
 Cases in §C that need a real peekable socket use a new helper module
-`crates/mihomo-listener/tests/support/sniffer_io.rs`:
+`crates/meow-listener/tests/support/sniffer_io.rs`:
 
 ```rust
 pub async fn paired_stream() -> (TcpStream, TcpStream)
@@ -120,9 +120,9 @@ edits.
 
 ## Case list
 
-### A. Pure TLS parser (`crates/mihomo-common/src/sniffer/tls.rs`)
+### A. Pure TLS parser (`crates/meow-common/src/sniffer/tls.rs`)
 
-Migrate the seven existing tests from `mihomo-listener/src/tproxy/sni.rs`
+Migrate the seven existing tests from `meow-listener/src/tproxy/sni.rs`
 verbatim (engineer: preserve names so `git log --follow` keeps their
 history) and add:
 
@@ -134,7 +134,7 @@ history) and add:
 | A4 | `sniff_tls_sni_extension_absent_none` **[guard-rail]** | Valid ClientHello with no `server_name` extension. `None`. Real-world: TLS 1.3 with ECH can hide SNI. |
 | A5 | `sniff_tls_ip_literal_sni_returned_verbatim` **[guard-rail]** | ClientHello with `server_name = "93.184.216.34"`. Parser returns `Some("93.184.216.34")` — IP-literal filtering is a *runtime* concern (parse-pure-ip), not a parser concern. Guard against leaky filtering. |
 
-### B. Pure HTTP parser (`crates/mihomo-common/src/sniffer/http.rs`)
+### B. Pure HTTP parser (`crates/meow-common/src/sniffer/http.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -149,7 +149,7 @@ history) and add:
 | B9 | `sniff_http_oversized_header_block_none` **[guard-rail]** | Header block exceeds `httparse::EMPTY_HEADER; 32` capacity. Parser returns `None` (not a panic from `TooManyHeaders`). |
 | B10 | `sniff_http_http2_preface_none` **[guard-rail]** | `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n` → `None`. Guards against the HTTP/2 connection preface being mis-parsed as HTTP/1.1. |
 
-### C. Runtime gating (`crates/mihomo-listener/src/sniffer.rs`)
+### C. Runtime gating (`crates/meow-listener/src/sniffer.rs`)
 
 These live as `#[cfg(test)] mod tests` inside the runtime file. Most
 use in-memory fake `TcpStream` only where possible; C5–C8 need real
@@ -172,7 +172,7 @@ paired sockets via the support module.
 | C13 | `sniffer_empty_skip_force_tries_do_not_match_anything` **[guard-rail]** | With empty `skip-domain` / `force-domain` lists, a sniffed `example.com` is **never** erroneously treated as matching. Guards against a DomainTrie default that matches `""` or `*`. |
 | C14 | `sniffer_glob_precision_suffix_vs_keyword` **[guard-rail]** | `skip-domain: [+.apple.com]` matches `push.apple.com` and `apple.com`, but does **not** match `notapple.com` or `apple.com.evil.tld`. Locks in DomainTrie semantics. |
 
-### D. Config parser (`crates/mihomo-config/tests/config_test.rs`)
+### D. Config parser (`crates/meow-config/tests/config_test.rs`)
 
 | # | Case | Asserts |
 |---|------|---------|
@@ -185,10 +185,10 @@ paired sockets via the support module.
 | D7 | `parse_sniffer_force_dns_mapping_true_warns_once` | `force-dns-mapping: true`. Tracing capture: one warn line; parse succeeds; `enable` field still honoured. <br/> Upstream: `dispatcher/sniffer` reuses fake-ip reverse mappings. <br/> NOT implemented — fake-ip is a `vision.md` non-goal; accept-and-warn is the documented divergence. |
 | D8 | `parse_sniffer_tls_fingerprint_hard_errors` | `sniffer.tls-fingerprint: …` → hard parse error, not a warn. <br/> Upstream: undocumented uTLS feature gate. <br/> NOT warn-and-ignore — per divergence rule, a user who set this key assumes fingerprint spoofing is active; silent ignore would be a **security gap**. Hard-error is correct. |
 | D9 | `parse_sniffer_quic_key_warns_and_ignored` **[guard-rail]** | `sniff.QUIC.ports: [443]` present. Parse succeeds with a warn; the QUIC entry is dropped from the built `HashMap<u16, Proto>`. Divergence #2 from the spec. |
-| D10 | `parse_sniffer_unknown_sniff_protocol_warns_and_ignored` **[guard-rail]** | `sniff.GARBAGE.ports: [443]` present. Parse succeeds with a warn. Guards against a strict deserialiser that fails on unknown keys — users must be able to roll back from future mihomo-rust versions. |
+| D10 | `parse_sniffer_unknown_sniff_protocol_warns_and_ignored` **[guard-rail]** | `sniff.GARBAGE.ports: [443]` present. Parse succeeds with a warn. Guards against a strict deserialiser that fails on unknown keys — users must be able to roll back from future meow-rs versions. |
 | D11 | `parse_sniffer_alias_synthesis_rewarned_on_reload` **[guard-rail]** | Calling `Config::load` twice on the same YAML (simulating PUT /configs reload) emits the deprecated-alias warn **each time**. Not a one-process-lifetime warn. Answers PM open question 1. |
 
-### E. Integration (`crates/mihomo-listener/tests/sniffer_integration.rs`, new file)
+### E. Integration (`crates/meow-listener/tests/sniffer_integration.rs`, new file)
 
 End-to-end with real sockets and real tunnel dispatch. Spin up
 listener + a minimal `Tunnel` with an in-process `REJECT` rule
@@ -206,16 +206,16 @@ triggered by domain match.
 
 ### F. Crate-level invariants
 
-These are structural asserts that `mihomo-common::sniffer` stays pure.
+These are structural asserts that `meow-common::sniffer` stays pure.
 Cheap to run; catch accidental cross-crate leaks early.
 
 | # | Case | Asserts |
 |---|------|---------|
-| F1 | `common_sniffer_module_has_no_tokio_import` **[guard-rail]** | Walk `crates/mihomo-common/src/sniffer/**/*.rs`, assert no line matches `^use tokio` or `^use ::tokio`. Lock in the pure-parser split. Runs as a Rust test using `walkdir` + `regex`. |
+| F1 | `common_sniffer_module_has_no_tokio_import` **[guard-rail]** | Walk `crates/meow-common/src/sniffer/**/*.rs`, assert no line matches `^use tokio` or `^use ::tokio`. Lock in the pure-parser split. Runs as a Rust test using `walkdir` + `regex`. |
 | F2 | `common_sniffer_module_has_no_tcpstream_reference` **[guard-rail]** | Same walker, assert no `TcpStream` symbol in any file. Guards against a drive-by edit that introduces async-runtime glue in common. |
 | F3 | `common_sniffer_module_has_no_domaintrie_reference` **[guard-rail]** | Same walker, assert no `DomainTrie` symbol. The trie is a runtime concern (skip/force lists), not a parser concern. |
-| F4 | `tproxy_sni_rs_is_deleted` **[guard-rail]** | Assert `crates/mihomo-listener/src/tproxy/sni.rs` does not exist. Locks criterion #1's deletion step against accidental revert. |
-| F5 | `httparse_is_direct_dep_of_common` **[guard-rail]** | Parse `crates/mihomo-common/Cargo.toml`, assert `httparse` is listed under `[dependencies]`. Guards against the "rely on transitive axum" anti-pattern the spec explicitly forbids. |
+| F4 | `tproxy_sni_rs_is_deleted` **[guard-rail]** | Assert `crates/meow-listener/src/tproxy/sni.rs` does not exist. Locks criterion #1's deletion step against accidental revert. |
+| F5 | `httparse_is_direct_dep_of_common` **[guard-rail]** | Parse `crates/meow-common/Cargo.toml`, assert `httparse` is listed under `[dependencies]`. Guards against the "rely on transitive axum" anti-pattern the spec explicitly forbids. |
 
 ## Deferred / not tested here
 
@@ -246,7 +246,7 @@ picked up by `cargo test --test sniffer_integration` on both jobs.
 Before engineer can implement all cases, these blockers must land:
 
 1. **Trojan mock SNI capture extension** (for E4). ~20 lines in
-   `crates/mihomo-proxy/tests/trojan_integration.rs` or the shared
+   `crates/meow-proxy/tests/trojan_integration.rs` or the shared
    mock-server helper. Must expose `recorded_sni() -> Option<String>`.
    Engineer's call whether to do it in the sniffer PR or file it as
    a separate small task first. **If separated**, I'll file it as

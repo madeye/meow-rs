@@ -50,12 +50,12 @@ features:
     - name: feature powerset
       run: |
         cargo hack --feature-powerset check \
-          -p mihomo-proxy \
-          -p mihomo-transport \
-          -p mihomo-listener
+          -p meow-proxy \
+          -p meow-transport \
+          -p meow-listener
 ```
 
-Scope: only `mihomo-proxy`, `mihomo-transport`, and `mihomo-listener` — the crates
+Scope: only `meow-proxy`, `meow-transport`, and `meow-listener` — the crates
 that gain feature flags from cargo-feature-flags.md. Full-workspace powerset is
 too slow and targets crates with no features.
 
@@ -114,7 +114,7 @@ NOT fail the release job. Use `|| true` or a conditional exit code check:
 
 ```bash
 # mipsel size check — soft gate (warning only, per ADR-0007 §1)
-SIZE=$(stat -c%s target/mipsel-unknown-linux-musl/release/mihomo)
+SIZE=$(stat -c%s target/mipsel-unknown-linux-musl/release/meow)
 BUDGET_BYTES=$((7 * 1024 * 1024))   # 7 MiB
 if [ "$SIZE" -gt "$BUDGET_BYTES" ]; then
   echo "::warning::mipsel minimal binary ${SIZE} bytes exceeds soft budget ${BUDGET_BYTES}"
@@ -130,10 +130,10 @@ No functional validation (no QEMU runner) for mipsel regardless of budget pass/f
 1. `lint` job fails if any `cargo doc --workspace --no-deps` warning is raised
    (confirmed by breaking a doc link and seeing a red lint job).
 2. `features` job runs and passes on a PR that adds a new feature flag in
-   `mihomo-proxy`.
+   `meow-proxy`.
 3. `coverage.yml` runs on schedule, produces `lcov.info`, and uploads to
    Codecov successfully (or exits cleanly with `fail_ci_if_error: false`).
-4. `release.yml` produces a `mihomo-*-mipsel-unknown-linux-musl.tar.gz` artifact
+4. `release.yml` produces a `meow-*-mipsel-unknown-linux-musl.tar.gz` artifact
    on `v*` tag push; mipsel size overrun emits `::warning::` but does NOT fail
    the release job (soft gate, ADR-0007 §1).
 5. `cargo test --lib` is not changed or broken.

@@ -1,0 +1,31 @@
+[package]
+name = "meow-rules"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+meow-common = { workspace = true }
+meow-trie = { workspace = true }
+maxminddb = { workspace = true }
+ipnet = { workspace = true }
+iprange = { workspace = true }
+regex = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+zstd = { workspace = true }
+
+[[bench]]
+name = "rules_bench"
+harness = false
+
+[[bench]]
+name = "iprange_parser_bench"
+harness = false
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[lints]
+workspace = true
