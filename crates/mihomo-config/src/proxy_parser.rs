@@ -931,7 +931,7 @@ pub fn parse_proxy_group(
     parse_proxy_group_inner(config, existing_proxies, true, providers, None)
 }
 
-/// Variant of [`parse_proxy_group`] that wires a persistent [`SelectorStore`]
+/// Variant of [`parse_proxy_group`] that wires a persistent [`mihomo_proxy::SelectorStore`]
 /// into any `type: select` group it builds, so user picks survive restart.
 pub fn parse_proxy_group_with_store(
     config: &crate::raw::RawProxyGroup,

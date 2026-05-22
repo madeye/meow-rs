@@ -29,7 +29,7 @@ const MAX_BODY_BYTES: usize = 256 * 1024 * 1024; // 256 MiB hard ceiling
 
 /// Fetch `url` via `proxy` and return the response body.
 ///
-/// Follows up to [`MAX_REDIRECTS`] redirects (302/301/307/308). Returns an
+/// Follows up to 5 redirects (302/301/307/308). Returns an
 /// error for non-2xx terminal responses, oversize bodies, or transport errors.
 pub async fn fetch_via_proxy(url: &str, proxy: &Arc<dyn Proxy>) -> Result<Vec<u8>> {
     let mut current = Url::parse(url).map_err(|e| anyhow!("invalid URL '{url}': {e}"))?;
