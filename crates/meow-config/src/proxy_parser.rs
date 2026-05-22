@@ -178,11 +178,6 @@ pub fn parse_proxy(
             let adapter = parse_anytls(name, config)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
-        #[cfg(feature = "hysteria2")]
-        "hysteria2" => {
-            let adapter = parse_hysteria2(name, config)?;
-            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
-        }
         _ => Err(format!("unsupported proxy type: {proxy_type}")),
     }
 }
@@ -432,48 +427,6 @@ fn parse_anytls(
         .unwrap_or(false);
 
     meow_proxy::AnytlsAdapter::new(name, server, port, password, sni, skip_cert_verify)
-}
-
-/// Parse a `type: hysteria2` proxy block (issue #72, tracer-bullet PR).
-///
-/// Required fields: `server`, `port`, `password`. Optional: `sni`,
-/// `skip-cert-verify`. Bigger surface (obfs, fast-open, congestion
-/// control overrides) lands once the data plane is implemented.
-///
-/// # Hard errors (Class A per ADR-0002)
-///
-/// - missing `server`, `port`, or `password`.
-/// - `port == 0`.
-/// - empty `password` — caught downstream by `Hy2Adapter::new`.
-///
-/// upstream: `adapter/outbound/hysteria2.go`
-#[cfg(feature = "hysteria2")]
-fn parse_hysteria2(
-    name: &str,
-    config: &HashMap<String, serde_yaml::Value>,
-) -> std::result::Result<meow_proxy::Hy2Adapter, String> {
-    let server = config
-        .get("server")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("hysteria2[{name}]: missing server"))?;
-    let port = config
-        .get("port")
-        .and_then(serde_yaml::Value::as_u64)
-        .ok_or_else(|| format!("hysteria2[{name}]: missing port"))? as u16;
-    if port == 0 {
-        return Err(format!("hysteria2[{name}]: port must be non-zero"));
-    }
-    let password = config
-        .get("password")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("hysteria2[{name}]: missing password"))?;
-    let sni = config.get("sni").and_then(|v| v.as_str());
-    let skip_cert_verify = config
-        .get("skip-cert-verify")
-        .and_then(serde_yaml::Value::as_bool)
-        .unwrap_or(false);
-
-    meow_proxy::Hy2Adapter::new(name, server, port, password, sni, skip_cert_verify)
 }
 
 /// Parse the `strategy` field for a `load-balance` group.
@@ -1278,55 +1231,6 @@ tls: true
             panic!("zero port must hard-error (Class A)");
         };
         assert!(err.contains("port must be non-zero"), "msg: {err}");
-    }
-
-    // ─── hysteria2 parser (issue #72, tracer bullet) ─────────────────────────
-
-    #[cfg(feature = "hysteria2")]
-    fn hy2_config(yaml: &str) -> HashMap<String, serde_yaml::Value> {
-        serde_yaml::from_str(yaml).unwrap()
-    }
-
-    #[cfg(feature = "hysteria2")]
-    #[test]
-    fn parse_hysteria2_minimum_fields_ok() {
-        let cfg = hy2_config(
-            "name: jp-hy2\ntype: hysteria2\nserver: 1.2.3.4\nport: 443\npassword: secret\n",
-        );
-        assert!(parse_proxy(&cfg).is_ok());
-    }
-
-    #[cfg(feature = "hysteria2")]
-    #[test]
-    fn parse_hysteria2_rejects_missing_password() {
-        let cfg = hy2_config("name: jp-hy2\ntype: hysteria2\nserver: 1.2.3.4\nport: 443\n");
-        let Err(err) = parse_proxy(&cfg) else {
-            panic!("must hard-error");
-        };
-        assert!(err.contains("missing password"), "msg: {err}");
-    }
-
-    #[cfg(feature = "hysteria2")]
-    #[test]
-    fn parse_hysteria2_rejects_zero_port() {
-        let cfg = hy2_config(
-            "name: jp-hy2\ntype: hysteria2\nserver: 1.2.3.4\nport: 0\npassword: secret\n",
-        );
-        let Err(err) = parse_proxy(&cfg) else {
-            panic!("must hard-error");
-        };
-        assert!(err.contains("port must be non-zero"), "msg: {err}");
-    }
-
-    #[cfg(feature = "hysteria2")]
-    #[test]
-    fn parse_hysteria2_rejects_empty_password() {
-        let cfg =
-            hy2_config("name: jp-hy2\ntype: hysteria2\nserver: 1.2.3.4\nport: 443\npassword: ''\n");
-        let Err(err) = parse_proxy(&cfg) else {
-            panic!("must hard-error");
-        };
-        assert!(err.contains("password must not be empty"), "msg: {err}");
     }
 
     // ─── Load-balance strategy parser (F1-F7) ────────────────────────────────
