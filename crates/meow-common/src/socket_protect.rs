@@ -18,7 +18,12 @@ use std::io;
 
 use tokio::net::{TcpStream, ToSocketAddrs, UdpSocket};
 
-#[cfg(target_os = "android")]
+// In production we only compile the protector hook on Android — that's the
+// platform whose VPN model demands `VpnService.protect(fd)` and we don't want
+// non-Android binaries paying any footprint for it. For tests we additionally
+// enable the module on any unix host so CI (which does not target Android)
+// can actually exercise the protector path against real loopback sockets.
+#[cfg(any(target_os = "android", all(test, unix)))]
 mod android {
     use super::*;
     use std::net::SocketAddr;
@@ -114,7 +119,7 @@ mod android {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", all(test, unix)))]
 pub use android::{
     clear_socket_protector, set_socket_protector, socket_protector, SocketProtector,
 };
@@ -129,7 +134,7 @@ pub use android::{
 /// taken, addresses are resolved first via `tokio::net::lookup_host` and each
 /// resolved `SocketAddr` is tried in turn.
 pub async fn connect_tcp<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", all(test, unix)))]
     {
         if let Some(p) = android::socket_protector() {
             let mut last_err: Option<io::Error> = None;
@@ -160,7 +165,7 @@ pub async fn connect_tcp<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
 /// `SocketProtector` (if any) to the socket fd before `bind()`. On every
 /// other target this is equivalent to [`UdpSocket::bind`].
 pub async fn bind_udp<A: ToSocketAddrs>(local: A) -> io::Result<UdpSocket> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", all(test, unix)))]
     {
         if let Some(p) = android::socket_protector() {
             let resolved = tokio::net::lookup_host(local)
@@ -175,7 +180,7 @@ pub async fn bind_udp<A: ToSocketAddrs>(local: A) -> io::Result<UdpSocket> {
     UdpSocket::bind(local).await
 }
 
-#[cfg(all(test, target_os = "android"))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::net::SocketAddr;
@@ -183,14 +188,31 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    struct Counting(AtomicUsize);
+    /// Records every fd handed to it; never fails.
+    struct Counting {
+        count: AtomicUsize,
+        seen_fds: parking_lot::Mutex<Vec<RawFd>>,
+    }
+    impl Counting {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                count: AtomicUsize::new(0),
+                seen_fds: parking_lot::Mutex::new(Vec::new()),
+            })
+        }
+        fn count(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
+        }
+    }
     impl SocketProtector for Counting {
-        fn protect(&self, _fd: RawFd) -> io::Result<()> {
-            self.0.fetch_add(1, Ordering::SeqCst);
+        fn protect(&self, fd: RawFd) -> io::Result<()> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            self.seen_fds.lock().push(fd);
             Ok(())
         }
     }
 
+    /// Always errors — used to verify failure propagation.
     struct Failing;
     impl SocketProtector for Failing {
         fn protect(&self, _fd: RawFd) -> io::Result<()> {
@@ -198,41 +220,192 @@ mod tests {
         }
     }
 
-    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    /// Tracks the order of calls — used to verify protect runs BEFORE
+    /// connect/bind. The fd argument must already be a valid (created) socket
+    /// when protect is called, but the kernel `connect()` syscall must not
+    /// have fired yet. We approximate this by observing that the fd is open
+    /// (`fcntl(F_GETFD)` succeeds) but `getpeername` returns ENOTCONN.
+    struct OrderingProbe {
+        was_pre_connect: parking_lot::Mutex<Option<bool>>,
+    }
+    impl OrderingProbe {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                was_pre_connect: parking_lot::Mutex::new(None),
+            })
+        }
+        fn was_pre_connect(&self) -> Option<bool> {
+            *self.was_pre_connect.lock()
+        }
+    }
+    impl SocketProtector for OrderingProbe {
+        fn protect(&self, fd: RawFd) -> io::Result<()> {
+            // SAFETY: fd is owned by the caller (still in socket2 wrapper);
+            // F_GETFD doesn't mutate state, getpeername reads kernel state.
+            let fd_open = unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1;
+            let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            let mut len = std::mem::size_of_val(&sa) as libc::socklen_t;
+            let getpeer = unsafe {
+                libc::getpeername(fd, &mut sa as *mut _ as *mut libc::sockaddr, &mut len)
+            };
+            let not_yet_connected = getpeer == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOTCONN);
+            *self.was_pre_connect.lock() = Some(fd_open && not_yet_connected);
+            Ok(())
+        }
+    }
+
+    /// Serialise tests that touch the process-global protector — they would
+    /// otherwise race each other and corrupt count assertions. `tokio::sync`
+    /// (not `parking_lot`) so the guard can be held across `.await`.
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    // ─── connect_tcp ─────────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn connect_tcp_invokes_protector() {
-        let _g = LOCK.lock();
-        let counter = Arc::new(Counting(AtomicUsize::new(0)));
-        set_socket_protector(counter.clone());
+    async fn no_protector_falls_back_to_plain_tokio() {
+        let _g = LOCK.lock().await;
+        clear_socket_protector();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
-        let _stream = connect_tcp(addr).await.expect("connect");
+        let stream = connect_tcp(addr).await.expect("connect");
         let _ = accept.await.unwrap();
-        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        // Round-trips like a normal stream.
+        drop(stream);
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_invokes_protector_against_real_listener() {
+        let _g = LOCK.lock().await;
+        let counter = Counting::new();
+        set_socket_protector(Arc::clone(&counter) as Arc<dyn SocketProtector>);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let stream = connect_tcp(addr).await.expect("connect");
+        let _ = accept.await.unwrap();
+        drop(stream);
+        assert_eq!(counter.count(), 1, "protector must be called exactly once");
         clear_socket_protector();
     }
 
     #[tokio::test]
     async fn connect_tcp_propagates_protector_failure() {
-        let _g = LOCK.lock();
-        set_socket_protector(Arc::new(Failing));
-        let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let _g = LOCK.lock().await;
+        set_socket_protector(Arc::new(Failing) as Arc<dyn SocketProtector>);
+        // Real listener so the error can only come from the protector, not
+        // a network error masquerading as one.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
         let err = connect_tcp(addr).await.expect_err("protect should fail");
         assert!(err.to_string().contains("protect denied"), "{err}");
         clear_socket_protector();
     }
 
     #[tokio::test]
+    async fn protect_runs_before_connect_syscall() {
+        let _g = LOCK.lock().await;
+        let probe = OrderingProbe::new();
+        set_socket_protector(Arc::clone(&probe) as Arc<dyn SocketProtector>);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let _stream = connect_tcp(addr).await.expect("connect");
+        let _ = accept.await.unwrap();
+        assert_eq!(
+            probe.was_pre_connect(),
+            Some(true),
+            "fd must be open but not-yet-connected at the moment protect() runs — \
+             this is the invariant Android's VpnService.protect relies on"
+        );
+        clear_socket_protector();
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_with_string_addr_resolves_then_protects() {
+        let _g = LOCK.lock().await;
+        let counter = Counting::new();
+        set_socket_protector(Arc::clone(&counter) as Arc<dyn SocketProtector>);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        // Pass as "host:port" string — exercises the lookup_host branch.
+        let host_port = format!("127.0.0.1:{}", addr.port());
+        let _stream = connect_tcp(host_port.as_str()).await.expect("connect");
+        let _ = accept.await.unwrap();
+        assert_eq!(counter.count(), 1);
+        clear_socket_protector();
+    }
+
+    // ─── bind_udp ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
     async fn bind_udp_invokes_protector() {
-        let _g = LOCK.lock();
-        let counter = Arc::new(Counting(AtomicUsize::new(0)));
-        set_socket_protector(counter.clone());
+        let _g = LOCK.lock().await;
+        let counter = Counting::new();
+        set_socket_protector(Arc::clone(&counter) as Arc<dyn SocketProtector>);
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let sock = bind_udp(addr).await.expect("bind");
         assert!(sock.local_addr().unwrap().port() != 0);
-        assert_eq!(counter.0.load(Ordering::SeqCst), 1);
+        assert_eq!(counter.count(), 1);
+        clear_socket_protector();
+    }
+
+    #[tokio::test]
+    async fn bind_udp_propagates_protector_failure() {
+        let _g = LOCK.lock().await;
+        set_socket_protector(Arc::new(Failing) as Arc<dyn SocketProtector>);
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let err = bind_udp(addr).await.expect_err("protect should fail");
+        assert!(err.to_string().contains("protect denied"), "{err}");
+        clear_socket_protector();
+    }
+
+    #[tokio::test]
+    async fn bind_udp_no_protector_falls_back_to_plain_tokio() {
+        let _g = LOCK.lock().await;
+        clear_socket_protector();
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let sock = bind_udp(addr).await.expect("bind");
+        assert!(sock.local_addr().unwrap().port() != 0);
+    }
+
+    // ─── registry semantics ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn protector_set_get_clear_round_trip() {
+        let _g = LOCK.lock().await;
+        clear_socket_protector();
+        assert!(socket_protector().is_none());
+
+        let c = Counting::new();
+        set_socket_protector(Arc::clone(&c) as Arc<dyn SocketProtector>);
+        assert!(socket_protector().is_some(), "registered protector visible");
+
+        clear_socket_protector();
+        assert!(
+            socket_protector().is_none(),
+            "clear must remove the registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn protector_replacement_takes_effect_for_subsequent_lookups() {
+        let _g = LOCK.lock().await;
+        clear_socket_protector();
+        let first = Counting::new();
+        set_socket_protector(Arc::clone(&first) as Arc<dyn SocketProtector>);
+
+        let second = Counting::new();
+        set_socket_protector(Arc::clone(&second) as Arc<dyn SocketProtector>);
+
+        // The currently-installed pointer is the second one.
+        let snap = socket_protector().expect("protector installed");
+        let _ = snap.protect(0); // arbitrary fd; Counting accepts any
+        assert_eq!(first.count(), 0, "old protector must be detached");
+        assert_eq!(second.count(), 1, "new protector receives calls");
+
         clear_socket_protector();
     }
 }
