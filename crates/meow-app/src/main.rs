@@ -435,6 +435,21 @@ async fn run(
     // Keep a resolver clone for the auto-update task before it moves into the tunnel.
     let resolver = Arc::clone(&config.dns.resolver);
 
+    // Android: install the resolver as the global host-resolver hook used
+    // by `meow_common::connect_tcp_host` / `resolve_host`. Without this,
+    // proxy adapters dialling by hostname would fall back to libc's
+    // `getaddrinfo`, whose DNS sockets bypass `VpnService.protect(fd)` —
+    // so on a VPN-active device DNS would route through our own tunnel
+    // and loop. See `meow-common/src/socket_protect.rs` for the full
+    // failure mode. The `SocketProtector` itself is installed separately
+    // by the JNI bridge.
+    #[cfg(target_os = "android")]
+    {
+        meow_common::set_host_resolver(Arc::new(meow_dns::ResolverHostHook::new(Arc::clone(
+            &config.dns.resolver,
+        ))));
+    }
+
     // Create the tunnel (core routing engine)
     let tunnel = Tunnel::new(Arc::clone(&config.dns.resolver));
     tunnel.set_mode(config.general.mode);

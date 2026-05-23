@@ -80,7 +80,7 @@ impl HttpAdapter {
 
     /// Dial TCP to the proxy server, optionally wrapping in TLS.
     async fn dial_stream(&self) -> Result<Box<dyn meow_transport::Stream>> {
-        let tcp = meow_common::connect_tcp(format!("{}:{}", self.server, self.port))
+        let tcp = meow_common::connect_tcp_host(&self.server, self.port)
             .await
             .map_err(MeowError::Io)?;
 

@@ -325,7 +325,7 @@ impl ProxyAdapter for ShadowsocksAdapter {
             PluginKind::Obfs(obfs) => {
                 // Open a raw TCP connection to the SS server, wrap it in the
                 // simple-obfs codec, then layer the SS crypto stream on top.
-                let tcp = meow_common::connect_tcp((self.server.as_str(), self.port))
+                let tcp = meow_common::connect_tcp_host(&self.server, self.port)
                     .await
                     .map_err(|e| MeowError::Proxy(format!("ss obfs tcp connect: {e}")))?;
                 let _ = tcp.set_nodelay(true);
@@ -384,11 +384,17 @@ impl ProxyAdapter for ShadowsocksAdapter {
                 // For `PluginKind::External`, `tcp_external_addr` returns the
                 // SIP003 plugin's local listener (typically 127.0.0.1:<port>),
                 // so the connect is loopback and `protect()` is harmless;
-                // for `PluginKind::None` it's the remote SS server.
-                let server_addr = self.server_config.tcp_external_addr().to_string();
-                let tcp = meow_common::connect_tcp(&server_addr)
-                    .await
-                    .map_err(|e| MeowError::Proxy(format!("ss tcp connect: {e}")))?;
+                // for `PluginKind::None` it's the remote SS server. Dispatch
+                // on the variant so domain-name servers also go through the
+                // installed `HostResolver` (system DNS would loop the
+                // lookup through the VPN on Android).
+                let tcp = match self.server_config.tcp_external_addr() {
+                    ServerAddr::SocketAddr(sa) => meow_common::connect_tcp(*sa).await,
+                    ServerAddr::DomainName(host, port) => {
+                        meow_common::connect_tcp_host(host, *port).await
+                    }
+                }
+                .map_err(|e| MeowError::Proxy(format!("ss tcp connect: {e}")))?;
                 let stream = ProxyClientStream::from_stream(
                     Arc::clone(&self.context),
                     tcp,
@@ -424,11 +430,9 @@ impl ProxyAdapter for ShadowsocksAdapter {
         // (where the connect is loopback — protect is harmless).
         let remote = match self.server_config.udp_external_addr() {
             ServerAddr::SocketAddr(sa) => *sa,
-            ServerAddr::DomainName(host, port) => tokio::net::lookup_host((host.as_str(), *port))
+            ServerAddr::DomainName(host, port) => meow_common::resolve_host(host, *port)
                 .await
-                .map_err(|e| MeowError::Proxy(format!("ss udp lookup: {e}")))?
-                .next()
-                .ok_or_else(|| MeowError::Proxy(format!("ss udp: no address for {host}:{port}")))?,
+                .map_err(|e| MeowError::Proxy(format!("ss udp lookup {host}:{port}: {e}")))?,
         };
         let bind_addr: SocketAddr = if remote.is_ipv4() {
             "0.0.0.0:0".parse().expect("static")

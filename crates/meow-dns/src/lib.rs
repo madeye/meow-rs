@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod client;
 pub mod fakeip;
+pub mod host_resolver_hook;
 pub mod resolver;
 pub mod server;
 pub mod upstream;
@@ -8,6 +9,8 @@ pub mod upstream;
 pub use cache::DnsCache;
 pub use client::{set_socket_factory, ClientError, DnsClient, SocketFactory};
 pub use fakeip::{FileStore, MemoryStore, Pool, PoolError, Skipper, SkipperMode, Store};
+#[cfg(target_os = "android")]
+pub use host_resolver_hook::ResolverHostHook;
 pub use resolver::{BootstrapError, FallbackFilter, NameserverPolicy, PolicyEntry, Resolver};
 pub use server::DnsServer;
 pub use upstream::{HostOrIp, NameServerEntry, NameServerParseError, NameServerUrl};

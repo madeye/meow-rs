@@ -5,16 +5,30 @@
 //! loop back into the tunnel and deadlock. Android exposes a per-fd hook
 //! for this: `android.net.VpnService.protect(int fd)`. This module is the
 //! single place the JNI bridge installs that hook; the proxy adapters that
-//! open outbound sockets dial through [`connect_tcp`] / [`bind_udp`], which
-//! call the installed protector before `connect()` / `bind()` so the very
-//! first SYN / UDP packet already bypasses the tunnel.
+//! open outbound sockets dial through [`connect_tcp`] / [`connect_tcp_host`]
+//! / [`bind_udp`], which call the installed protector before `connect()` /
+//! `bind()` so the very first SYN / UDP packet already bypasses the tunnel.
 //!
-//! The protector trait and global setter are compiled only on Android. On
-//! every other target [`connect_tcp`] / [`bind_udp`] degrade to the same
-//! plain tokio code path the adapters used historically — so call sites
-//! need no `cfg` guards.
+//! ## Why the second hook (`HostResolver`)
+//!
+//! `VpnService.protect(fd)` only protects sockets meow-rs creates itself.
+//! Libc's `getaddrinfo` (called by `tokio::net::lookup_host` and
+//! `TcpStream::connect("host:port")`) opens its own DNS sockets that
+//! meow-rs never sees, so on a VPN-active device those DNS queries route
+//! *through* the VPN — i.e. through meow-rs's own tunnel — which then needs
+//! to dial a proxy upstream, which needs DNS, which loops. To break that
+//! loop, [`connect_tcp_host`] consults an optionally-installed
+//! `HostResolver` (typically backed by meow-rs's own `meow_dns::Resolver`
+//! whose upstream sockets *are* protected) before falling back to the
+//! system resolver.
+//!
+//! The hooks are compiled only on Android in production — that's the
+//! platform whose VPN model demands this. For tests we additionally enable
+//! the module on any unix host so CI (which does not target Android) can
+//! actually exercise the hooks against real loopback sockets.
 
 use std::io;
+use std::net::SocketAddr;
 
 use tokio::net::{TcpStream, ToSocketAddrs, UdpSocket};
 
@@ -26,10 +40,11 @@ use tokio::net::{TcpStream, ToSocketAddrs, UdpSocket};
 #[cfg(any(target_os = "android", all(test, unix)))]
 mod android {
     use super::*;
-    use std::net::SocketAddr;
+    use std::net::IpAddr;
     use std::os::fd::{AsRawFd, RawFd};
     use std::sync::Arc;
 
+    use async_trait::async_trait;
     use parking_lot::RwLock;
 
     /// Hook invoked on every outbound socket fd just before `connect()` /
@@ -44,7 +59,20 @@ mod android {
         fn protect(&self, fd: RawFd) -> io::Result<()>;
     }
 
+    /// Hostname → IP resolution hook used by [`connect_tcp_host`] when a
+    /// [`SocketProtector`] is installed. Mirrors the protector registry:
+    /// the JNI bridge / app startup installs an implementation that routes
+    /// queries through meow-rs's own DNS pipeline (whose upstream sockets
+    /// are themselves protected), so the resolution itself bypasses the
+    /// VPN. Without this, `getaddrinfo` would loop DNS through the tunnel.
+    #[async_trait]
+    pub trait HostResolver: Send + Sync {
+        /// Resolve `host` to one `IpAddr`. Returning `Err` aborts the dial.
+        async fn resolve(&self, host: &str) -> io::Result<IpAddr>;
+    }
+
     static PROTECTOR: RwLock<Option<Arc<dyn SocketProtector>>> = RwLock::new(None);
+    static RESOLVER: RwLock<Option<Arc<dyn HostResolver>>> = RwLock::new(None);
 
     /// Install the global socket protector. Call once during VPN startup,
     /// before any proxy adapter dials.
@@ -65,6 +93,27 @@ mod android {
     /// can still apply protect on the fd they own.
     pub fn socket_protector() -> Option<Arc<dyn SocketProtector>> {
         PROTECTOR.read().clone()
+    }
+
+    /// Install the global host resolver used by [`connect_tcp_host`]. Call
+    /// once at startup, right after the meow-rs `Resolver` is built. Safe
+    /// to re-install (e.g. config reload) — the new resolver takes effect
+    /// on the next hostname dial.
+    pub fn set_host_resolver(resolver: Arc<dyn HostResolver>) {
+        *RESOLVER.write() = Some(resolver);
+    }
+
+    /// Remove the currently installed host resolver, if any. With the
+    /// protector still installed, subsequent [`connect_tcp_host`] calls
+    /// will fall back to the system resolver and log a warning — that
+    /// path is known-unsafe when the VPN is active.
+    pub fn clear_host_resolver() {
+        *RESOLVER.write() = None;
+    }
+
+    /// Snapshot of the currently-installed host resolver.
+    pub fn host_resolver() -> Option<Arc<dyn HostResolver>> {
+        RESOLVER.read().clone()
     }
 
     pub(super) async fn connect_tcp_protected(
@@ -121,25 +170,68 @@ mod android {
 
 #[cfg(any(target_os = "android", all(test, unix)))]
 pub use android::{
-    clear_socket_protector, set_socket_protector, socket_protector, SocketProtector,
+    clear_host_resolver, clear_socket_protector, host_resolver, set_host_resolver,
+    set_socket_protector, socket_protector, HostResolver, SocketProtector,
 };
 
-/// Dial an outbound TCP stream. On Android, applies the installed
-/// `SocketProtector` (if any) to the socket fd before `connect()` so the
-/// connection bypasses the VPN. On every other target this is equivalent to
-/// [`TcpStream::connect`].
+/// Dial an outbound TCP stream to an already-resolved [`SocketAddr`]. On
+/// Android, applies the installed `SocketProtector` (if any) to the
+/// socket fd before `connect()` so the connection bypasses the VPN. On
+/// every other target this is equivalent to [`TcpStream::connect`].
 ///
-/// Accepts the same address forms as [`TcpStream::connect`] (a `SocketAddr`,
-/// `(host, port)`, `"host:port"`, etc.). When the Android protector path is
-/// taken, addresses are resolved first via `tokio::net::lookup_host` and each
-/// resolved `SocketAddr` is tried in turn.
-pub async fn connect_tcp<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
+/// Callers that only have a hostname must use [`connect_tcp_host`] —
+/// passing a hostname here is a compile error by construction (the type
+/// is `SocketAddr`, not `ToSocketAddrs`). That split exists to prevent
+/// silent regressions back into the system resolver; see the module docs
+/// for the loop-routing failure mode.
+pub async fn connect_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
     #[cfg(any(target_os = "android", all(test, unix)))]
     {
         if let Some(p) = android::socket_protector() {
+            return android::connect_tcp_protected(addr, p.as_ref()).await;
+        }
+    }
+    TcpStream::connect(addr).await
+}
+
+/// Dial an outbound TCP stream to `host:port`, resolving the hostname
+/// through the installed `HostResolver` when a `SocketProtector` is
+/// also installed. This routes the lookup through meow-rs's own DNS
+/// resolver (whose upstream sockets are themselves protected) instead of
+/// libc's `getaddrinfo`, which on a VPN-active device would loop DNS
+/// queries back through the tunnel.
+///
+/// IP literals short-circuit straight to [`connect_tcp`] — no resolver
+/// hook is needed.
+///
+/// Fallback behaviour (when no `HostResolver` is installed):
+/// * If a `SocketProtector` is installed, falls back to
+///   `tokio::net::lookup_host` and logs a warning — this path is the
+///   exact failure mode the resolver hook exists to prevent, but is kept
+///   so a protector-only configuration still functions (degraded).
+/// * If no `SocketProtector` is installed (i.e. not running inside a
+///   VPN), behaves as a plain `TcpStream::connect((host, port))`.
+pub async fn connect_tcp_host(host: &str, port: u16) -> io::Result<TcpStream> {
+    // IP literal — no DNS needed, regardless of platform.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return connect_tcp(SocketAddr::new(ip, port)).await;
+    }
+
+    #[cfg(any(target_os = "android", all(test, unix)))]
+    {
+        if let Some(p) = android::socket_protector() {
+            if let Some(r) = android::host_resolver() {
+                let ip = r.resolve(host).await?;
+                return android::connect_tcp_protected(SocketAddr::new(ip, port), p.as_ref()).await;
+            }
+            tracing::warn!(
+                host,
+                "connect_tcp_host: protector installed but no HostResolver — \
+                 falling back to system resolver, which may loop DNS through the VPN"
+            );
             let mut last_err: Option<io::Error> = None;
             let mut any = false;
-            for resolved in tokio::net::lookup_host(addr).await? {
+            for resolved in tokio::net::lookup_host((host, port)).await? {
                 any = true;
                 match android::connect_tcp_protected(resolved, p.as_ref()).await {
                     Ok(s) => return Ok(s),
@@ -150,15 +242,52 @@ pub async fn connect_tcp<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     if any {
-                        "connect_tcp: all candidates failed"
+                        "connect_tcp_host: all candidates failed"
                     } else {
-                        "connect_tcp: no addresses resolved"
+                        "connect_tcp_host: no addresses resolved"
                     },
                 )
             }));
         }
     }
-    TcpStream::connect(addr).await
+    TcpStream::connect((host, port)).await
+}
+
+/// Resolve `host` to a single [`SocketAddr`] using the same hook chain
+/// as [`connect_tcp_host`]: IP literals short-circuit, the installed
+/// `HostResolver` is preferred when a `SocketProtector` is present,
+/// and the system resolver is the (warning-logged) fallback. Use this
+/// from call sites that need a `SocketAddr` for a subsequent operation
+/// other than `connect()` — e.g. `UdpSocket::connect(addr)`.
+pub async fn resolve_host(host: &str, port: u16) -> io::Result<SocketAddr> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
+
+    #[cfg(any(target_os = "android", all(test, unix)))]
+    {
+        if android::socket_protector().is_some() {
+            if let Some(r) = android::host_resolver() {
+                let ip = r.resolve(host).await?;
+                return Ok(SocketAddr::new(ip, port));
+            }
+            tracing::warn!(
+                host,
+                "resolve_host: protector installed but no HostResolver — \
+                 falling back to system resolver, which may loop DNS through the VPN"
+            );
+        }
+    }
+
+    tokio::net::lookup_host((host, port))
+        .await?
+        .next()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("resolve_host: no address for {host}:{port}"),
+            )
+        })
 }
 
 /// Bind an outbound UDP socket. On Android, applies the installed
@@ -183,10 +312,12 @@ pub async fn bind_udp<A: ToSocketAddrs>(local: A) -> io::Result<UdpSocket> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::net::SocketAddr;
+    use std::net::{IpAddr, SocketAddr};
     use std::os::fd::RawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    use async_trait::async_trait;
 
     /// Records every fd handed to it; never fails.
     struct Counting {
@@ -217,6 +348,45 @@ mod tests {
     impl SocketProtector for Failing {
         fn protect(&self, _fd: RawFd) -> io::Result<()> {
             Err(io::Error::other("protect denied"))
+        }
+    }
+
+    /// Counts every `resolve` and always returns a fixed `IpAddr`.
+    struct FixedResolver {
+        ip: IpAddr,
+        count: AtomicUsize,
+        last_host: parking_lot::Mutex<Option<String>>,
+    }
+    impl FixedResolver {
+        fn new(ip: IpAddr) -> Arc<Self> {
+            Arc::new(Self {
+                ip,
+                count: AtomicUsize::new(0),
+                last_host: parking_lot::Mutex::new(None),
+            })
+        }
+        fn count(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
+        }
+        fn last_host(&self) -> Option<String> {
+            self.last_host.lock().clone()
+        }
+    }
+    #[async_trait]
+    impl HostResolver for FixedResolver {
+        async fn resolve(&self, host: &str) -> io::Result<IpAddr> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            *self.last_host.lock() = Some(host.to_string());
+            Ok(self.ip)
+        }
+    }
+
+    /// Errors on every `resolve`.
+    struct FailingResolver;
+    #[async_trait]
+    impl HostResolver for FailingResolver {
+        async fn resolve(&self, _host: &str) -> io::Result<IpAddr> {
+            Err(io::Error::other("resolve denied"))
         }
     }
 
@@ -322,20 +492,82 @@ mod tests {
         clear_socket_protector();
     }
 
+    // ─── connect_tcp_host ────────────────────────────────────────────────────
+
     #[tokio::test]
-    async fn connect_tcp_with_string_addr_resolves_then_protects() {
+    async fn connect_tcp_host_with_ip_literal_skips_resolver() {
+        let _g = LOCK.lock().await;
+        clear_socket_protector();
+        clear_host_resolver();
+        // Install a resolver that would fail if it were called — proving
+        // the IP-literal short-circuit really did skip it.
+        set_host_resolver(Arc::new(FailingResolver) as Arc<dyn HostResolver>);
+        let counter = Counting::new();
+        set_socket_protector(Arc::clone(&counter) as Arc<dyn SocketProtector>);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let _stream = connect_tcp_host("127.0.0.1", port).await.expect("connect");
+        let _ = accept.await.unwrap();
+        assert_eq!(counter.count(), 1, "protector still applies to literal");
+
+        clear_socket_protector();
+        clear_host_resolver();
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_host_uses_installed_resolver_when_protected() {
         let _g = LOCK.lock().await;
         let counter = Counting::new();
         set_socket_protector(Arc::clone(&counter) as Arc<dyn SocketProtector>);
+
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let resolver = FixedResolver::new(IpAddr::from([127, 0, 0, 1]));
+        set_host_resolver(Arc::clone(&resolver) as Arc<dyn HostResolver>);
+
         let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
-        // Pass as "host:port" string — exercises the lookup_host branch.
-        let host_port = format!("127.0.0.1:{}", addr.port());
-        let _stream = connect_tcp(host_port.as_str()).await.expect("connect");
+        let _stream = connect_tcp_host("example.invalid", port)
+            .await
+            .expect("connect");
         let _ = accept.await.unwrap();
-        assert_eq!(counter.count(), 1);
+
+        assert_eq!(resolver.count(), 1, "resolver must be consulted once");
+        assert_eq!(resolver.last_host().as_deref(), Some("example.invalid"));
+        assert_eq!(counter.count(), 1, "protector still applies");
+
+        clear_host_resolver();
         clear_socket_protector();
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_host_propagates_resolver_failure() {
+        let _g = LOCK.lock().await;
+        let counter = Counting::new();
+        set_socket_protector(Arc::clone(&counter) as Arc<dyn SocketProtector>);
+        set_host_resolver(Arc::new(FailingResolver) as Arc<dyn HostResolver>);
+
+        let err = connect_tcp_host("example.invalid", 80)
+            .await
+            .expect_err("resolver should fail");
+        assert!(err.to_string().contains("resolve denied"), "{err}");
+
+        clear_host_resolver();
+        clear_socket_protector();
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_host_without_protector_uses_plain_tokio() {
+        let _g = LOCK.lock().await;
+        clear_socket_protector();
+        clear_host_resolver();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let _stream = connect_tcp_host("127.0.0.1", port).await.expect("connect");
+        let _ = accept.await.unwrap();
     }
 
     // ─── bind_udp ────────────────────────────────────────────────────────────
@@ -407,5 +639,19 @@ mod tests {
         assert_eq!(second.count(), 1, "new protector receives calls");
 
         clear_socket_protector();
+    }
+
+    #[tokio::test]
+    async fn host_resolver_set_get_clear_round_trip() {
+        let _g = LOCK.lock().await;
+        clear_host_resolver();
+        assert!(host_resolver().is_none());
+
+        let r = FixedResolver::new(IpAddr::from([127, 0, 0, 1]));
+        set_host_resolver(Arc::clone(&r) as Arc<dyn HostResolver>);
+        assert!(host_resolver().is_some());
+
+        clear_host_resolver();
+        assert!(host_resolver().is_none());
     }
 }

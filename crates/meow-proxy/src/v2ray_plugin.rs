@@ -136,7 +136,7 @@ pub async fn dial(
     );
 
     // 1) Raw TCP.
-    let tcp = meow_common::connect_tcp((server_host, server_port))
+    let tcp = meow_common::connect_tcp_host(server_host, server_port)
         .await
         .map_err(MeowError::Io)?;
 

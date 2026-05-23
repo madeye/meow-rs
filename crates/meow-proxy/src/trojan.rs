@@ -37,6 +37,8 @@ const ATYP_IPV6: u8 = 0x04;
 
 pub struct TrojanAdapter {
     name: String,
+    server: String,
+    port: u16,
     addr_str: String,
     hex_password: String,
     support_udp: bool,
@@ -76,6 +78,8 @@ impl TrojanAdapter {
 
         Self {
             name: name.to_string(),
+            server: server.to_string(),
+            port,
             addr_str: format!("{server}:{port}"),
             hex_password,
             support_udp: udp,
@@ -105,7 +109,7 @@ impl TrojanAdapter {
         metadata: &Metadata,
         cmd: u8,
     ) -> Result<Box<dyn TransportStream>> {
-        let tcp = meow_common::connect_tcp(self.addr_str.as_str())
+        let tcp = meow_common::connect_tcp_host(&self.server, self.port)
             .await
             .map_err(MeowError::Io)?;
 

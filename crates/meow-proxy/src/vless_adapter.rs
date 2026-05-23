@@ -44,6 +44,8 @@ pub enum VlessFlow {
 /// VLESS outbound proxy adapter.
 pub struct VlessAdapter {
     name: String,
+    server: String,
+    port: u16,
     addr_str: String,
     uuid_bytes: [u8; 16],
     flow: Option<VlessFlow>,
@@ -69,6 +71,8 @@ impl VlessAdapter {
     ) -> Self {
         Self {
             name: name.to_string(),
+            server: server.to_string(),
+            port,
             addr_str: format!("{server}:{port}"),
             uuid_bytes,
             flow,
@@ -80,7 +84,7 @@ impl VlessAdapter {
 
     /// Dial a raw TCP + transport-chain stream to the VLESS server.
     async fn dial_stream(&self) -> Result<Box<dyn meow_transport::Stream>> {
-        let tcp = meow_common::connect_tcp(self.addr_str.as_str())
+        let tcp = meow_common::connect_tcp_host(&self.server, self.port)
             .await
             .map_err(MeowError::Io)?;
         self.transport.connect(Box::new(tcp)).await
