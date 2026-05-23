@@ -174,7 +174,7 @@ pub type RebuildResult = (HashMap<String, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>);
 /// Does not resolve rule-provider cache paths; use
 /// [`rebuild_from_raw_with_cache_dir`] when a working directory is available.
 pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, None, None, &HashMap::new(), None)
+    rebuild_from_raw_impl(raw, None, None, &HashMap::new(), None, None)
 }
 
 /// Rebuild proxies/rules and inject `resolver` into the built-in DIRECT
@@ -183,7 +183,7 @@ pub fn rebuild_from_raw_with_resolver(
     raw: &raw::RawConfig,
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, None, resolver, &HashMap::new(), None)
+    rebuild_from_raw_impl(raw, None, resolver, &HashMap::new(), None, None)
 }
 
 /// Same as [`rebuild_from_raw`] but accepts a `cache_dir` used to resolve
@@ -194,7 +194,7 @@ pub fn rebuild_from_raw_with_cache_dir(
     cache_dir: Option<&Path>,
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None)
+    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None, None)
 }
 
 fn rebuild_from_raw_impl(
@@ -203,6 +203,7 @@ fn rebuild_from_raw_impl(
     resolver: Option<Arc<Resolver>>,
     providers: &HashMap<String, Arc<ProxyProvider>>,
     selector_store: Option<&Arc<meow_proxy::SelectorStore>>,
+    shared_ctx: Option<&meow_rules::ParserContext>,
 ) -> Result<RebuildResult, anyhow::Error> {
     let mut proxies: HashMap<String, Arc<dyn Proxy>> = HashMap::new();
     // Built-in proxies
@@ -296,19 +297,19 @@ fn rebuild_from_raw_impl(
         remaining = still_remaining;
     }
 
-    // Build the parser context: lazy-load the GeoIP MMDB iff any rule
-    // (top-level) references GEOIP. Respects any `geodata:` path overrides
-    // already embedded in the raw config.
-    let ctx = build_parser_context_from_raw(raw)?;
+    let owned_ctx;
+    let ctx = match shared_ctx {
+        Some(c) => c,
+        None => {
+            owned_ctx = build_parser_context_from_raw(raw)?;
+            &owned_ctx
+        }
+    };
 
-    // Load rule-providers before rule parsing so RULE-SET entries can
-    // resolve their named sets. Route HTTP fetches through the first
-    // upstream proxy from `proxies:` (if any) so providers hosted on
-    // GFW-blocked domains stay reachable.
     let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
     let providers = match raw.rule_providers.as_ref() {
         Some(map) if !map.is_empty() => {
-            rule_provider::load_providers(map, cache_dir, &ctx, download_proxy.as_ref())
+            rule_provider::load_providers(map, cache_dir, ctx, download_proxy.as_ref())
         }
         _ => HashMap::new(),
     };
@@ -853,12 +854,16 @@ async fn build_config(
     let selector_store =
         cache_dir.map(|d| meow_proxy::SelectorStore::open(d.join("selector-cache.json")));
 
+    // Build the parser context once and share across all passes.
+    let ctx = build_parser_context_with_geo(&raw, &geodata)?;
+
     let (proxies, _) = rebuild_from_raw_impl(
         &raw,
         cache_dir,
         None,
         &proxy_providers,
         selector_store.as_ref(),
+        Some(&ctx),
     )?;
 
     // DNS — pass the explicit mmdb path so fallback-filter GeoIP uses the
@@ -873,12 +878,9 @@ async fn build_config(
         Some(Arc::clone(&dns_config.resolver)),
         &proxy_providers,
         selector_store.as_ref(),
+        Some(&ctx),
     )?;
 
-    // Rule providers share the same ParserContext as the top-level rules
-    // (same geodata paths, same lazy-loaded readers). HTTP fetches route
-    // through the first upstream proxy from `proxies:` (if any).
-    let ctx = build_parser_context_with_geo(&raw, &geodata)?;
     let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
     let rule_providers = match raw.rule_providers.as_ref() {
         Some(map) if !map.is_empty() => {
