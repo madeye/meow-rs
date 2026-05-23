@@ -40,6 +40,9 @@ pub struct EchTlsTunnelConfig {
     pub path: String,
     /// Wire-format `ECHConfigList`, base64-decoded. Required.
     pub ech_config: Vec<u8>,
+    /// Optional uTLS client-fingerprint (e.g. `chrome`). When set, the TLS
+    /// backend routing prefers BoringSSL.
+    pub fingerprint: Option<String>,
 }
 
 fn parse_bool(s: &str) -> bool {
@@ -53,6 +56,10 @@ fn parse_bool(s: &str) -> bool {
 /// * `sni`    — REQUIRED, inner SNI / cert name / Host header.
 /// * `path`   — REQUIRED, must start with `/`.
 /// * `ech_config` — REQUIRED, base64-encoded `ECHConfigList`.
+/// * `fingerprint` — OPTIONAL, uTLS client-fingerprint (e.g. `chrome`).
+///   Routes the TLS handshake through the BoringSSL backend. Defaults to
+///   `chrome` when the opt is absent (so ECH traffic mimics a real browser
+///   by default). Pass `fingerprint=none` to opt out.
 /// * `fast_open` — accepted, ignored (we don't TFO outbound today).
 ///
 /// Unknown keys are warned and ignored to stay forward-compatible.
@@ -61,6 +68,7 @@ pub fn parse_opts(s: &str) -> Result<EchTlsTunnelConfig> {
     let mut sni: Option<String> = None;
     let mut path: Option<String> = None;
     let mut ech_b64: Option<String> = None;
+    let mut fingerprint: Option<String> = Some("chrome".to_string());
 
     for token in s.split(';').map(str::trim).filter(|t| !t.is_empty()) {
         let (key, value) = match token.split_once('=') {
@@ -72,6 +80,12 @@ pub fn parse_opts(s: &str) -> Result<EchTlsTunnelConfig> {
             "sni" => sni = Some(value),
             "path" => path = Some(value),
             "ech_config" | "ech-config" => ech_b64 = Some(value),
+            "fingerprint" | "client-fingerprint" | "client_fingerprint" => {
+                fingerprint = match value.as_str() {
+                    "" | "none" | "off" | "disable" | "disabled" => None,
+                    _ => Some(value),
+                };
+            }
             "fast_open" | "fast-open" => {
                 let _ = parse_bool(&value);
             }
@@ -117,6 +131,7 @@ pub fn parse_opts(s: &str) -> Result<EchTlsTunnelConfig> {
         sni,
         path,
         ech_config,
+        fingerprint,
     })
 }
 
@@ -148,6 +163,7 @@ pub async fn dial(
     let mut tls_config = TlsConfig::new(cfg.sni.clone());
     tls_config.alpn = vec!["http/1.1".to_string()];
     tls_config.ech = Some(EchOpts::Config(cfg.ech_config.clone()));
+    tls_config.fingerprint = cfg.fingerprint.clone();
     let tls_layer = TlsLayer::new(&tls_config).map_err(transport_to_proxy_err)?;
     let tls_stream = tls_layer
         .connect(Box::new(tcp))
@@ -240,6 +256,33 @@ mod tests {
         ))
         .expect("ok");
         assert_eq!(cfg.sni, "t.example");
+    }
+
+    #[test]
+    fn parse_fingerprint_chrome() {
+        let cfg = parse_opts(&format!(
+            "mode=client;sni=t.example;path=/ws;ech_config={FAKE_ECH_B64};fingerprint=chrome"
+        ))
+        .expect("ok");
+        assert_eq!(cfg.fingerprint.as_deref(), Some("chrome"));
+    }
+
+    #[test]
+    fn parse_fingerprint_defaults_to_chrome() {
+        let cfg = parse_opts(&format!(
+            "mode=client;sni=t.example;path=/ws;ech_config={FAKE_ECH_B64}"
+        ))
+        .expect("ok");
+        assert_eq!(cfg.fingerprint.as_deref(), Some("chrome"));
+    }
+
+    #[test]
+    fn parse_fingerprint_none_opts_out() {
+        let cfg = parse_opts(&format!(
+            "mode=client;sni=t.example;path=/ws;ech_config={FAKE_ECH_B64};fingerprint=none"
+        ))
+        .expect("ok");
+        assert!(cfg.fingerprint.is_none());
     }
 
     #[test]
