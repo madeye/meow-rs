@@ -10,8 +10,6 @@ use dashmap::DashMap;
 use meow_api::ApiServer;
 use meow_config::load_config;
 use meow_config::proxy_provider::ProxyProvider;
-use meow_config::raw::RawConfig;
-use meow_dns::resolver::Resolver;
 use meow_dns::DnsServer;
 #[cfg(feature = "listener-mixed")]
 use meow_listener::MixedListener;
@@ -22,7 +20,7 @@ use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[cfg(target_os = "linux")]
 const SERVICE_NAME: &str = "meow";
@@ -507,7 +505,7 @@ async fn run(
         let tunnel = tunnel.clone();
         let config_path = config_path.clone();
         tokio::spawn(async move {
-            subscription_refresh_loop(raw_config, tunnel, config_path).await;
+            meow_app::subscription_refresh::run_loop(raw_config, tunnel, config_path).await;
         });
     }
 
@@ -520,7 +518,7 @@ async fn run(
         let raw_config = Arc::clone(&raw_config);
         let resolver = Arc::clone(&resolver);
         tokio::spawn(async move {
-            geodata_fetch_missing_on_startup(geodata, tunnel, raw_config, resolver).await;
+            meow_app::geodata_fetch::run_on_startup(geodata, tunnel, raw_config, resolver).await;
         });
     }
 
@@ -531,7 +529,7 @@ async fn run(
         let raw_config = Arc::clone(&raw_config);
         let resolver = Arc::clone(&resolver);
         tokio::spawn(async move {
-            geodata_auto_update_loop(geodata, tunnel, raw_config, resolver).await;
+            meow_app::geodata_fetch::auto_update_loop(geodata, tunnel, raw_config, resolver).await;
         });
     }
 
@@ -608,207 +606,4 @@ async fn run(
     info!("Shutting down...");
 
     Ok(())
-}
-
-async fn subscription_refresh_loop(
-    raw_config: Arc<RwLock<RawConfig>>,
-    tunnel: Tunnel,
-    config_path: String,
-) {
-    loop {
-        let subs_to_refresh: Vec<(String, String)> = {
-            let raw = raw_config.read();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            raw.subscriptions
-                .as_deref()
-                .unwrap_or(&[])
-                .iter()
-                .filter(|s| match (s.interval, s.last_updated) {
-                    (_, None) => true, // Never fetched — fetch now
-                    (Some(interval), Some(last)) => now - last >= interval as i64,
-                    (None, Some(_)) => false, // No interval set, already fetched once
-                })
-                .map(|s| (s.name.clone(), s.url.clone()))
-                .collect()
-        };
-
-        for (name, url) in subs_to_refresh {
-            info!("Auto-refreshing subscription '{}'", name);
-            match meow_config::subscription::fetch_subscription(&url).await {
-                Ok(mut fetched) => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64;
-
-                    // Pre-resolve any DNS-sourced ECH configs before taking the
-                    // sync write lock — preresolve_ech is async, must not be
-                    // held across `parking_lot::RwLock`.
-                    meow_config::ech_dns::preresolve_ech(&mut fetched.proxies).await;
-
-                    let mut raw = raw_config.write();
-
-                    if let Some(ref mut subs) = raw.subscriptions {
-                        if let Some(sub) = subs.iter_mut().find(|s| s.name == name) {
-                            sub.last_updated = Some(now);
-                        }
-                    }
-
-                    // Replace with remote data as-is
-                    raw.proxies = Some(fetched.proxies);
-                    raw.proxy_groups = Some(fetched.proxy_groups);
-                    raw.rules = Some(fetched.rules);
-
-                    match meow_config::rebuild_from_raw_with_resolver(
-                        &raw,
-                        Some(Arc::clone(tunnel.resolver())),
-                    ) {
-                        Ok((new_proxies, new_rules)) => {
-                            tunnel.update_proxies(new_proxies);
-                            tunnel.update_rules(new_rules);
-                            info!("Subscription '{}' refreshed successfully", name);
-                            // Persist updated config (with last_updated timestamp)
-                            let _ = meow_config::save_raw_config(&config_path, &raw);
-                        }
-                        Err(e) => error!("Failed to rebuild after refreshing '{}': {}", name, e),
-                    }
-                }
-                Err(e) => error!("Failed to refresh subscription '{}': {}", name, e),
-            }
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-    }
-}
-
-/// Background task that periodically re-downloads geodata DBs (GeoIP, ASN,
-/// geosite) when `geodata.auto-update: true`. After each successful download
-/// the DB file is atomically replaced on disk, then rules are rebuilt in
-/// memory without restart.
-/// On startup, download any geodata DB whose target file does not yet exist.
-/// Independent of `geodata.auto-update` — the goal is "if the file is missing
-/// when meow boots, fetch it so rules work on first run." After at least one
-/// successful fetch, rules are rebuilt so the new DB is picked up.
-async fn geodata_fetch_missing_on_startup(
-    geo: meow_config::GeoDataConfig,
-    tunnel: Tunnel,
-    raw_config: Arc<RwLock<RawConfig>>,
-    resolver: Arc<Resolver>,
-) {
-    let targets = meow_app::geodata_fetch::compute_targets(&geo);
-
-    let proxies = tunnel.proxies();
-    let download_proxy = meow_config::internal_http::first_named_proxy(
-        raw_config.read().proxies.as_deref(),
-        &proxies,
-    );
-
-    let downloaded =
-        meow_app::geodata_fetch::fetch_missing(&targets, download_proxy.as_ref()).await;
-    if downloaded.is_empty() {
-        return;
-    }
-
-    // Rebuild rules so the freshly-downloaded DBs take effect without a restart.
-    let raw = raw_config.read().clone();
-    match meow_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(&resolver))) {
-        Ok((_proxies, new_rules)) => {
-            tunnel.update_rules(new_rules);
-            info!("geodata startup-fetch: rules reloaded with downloaded DBs");
-        }
-        Err(e) => warn!(
-            "geodata startup-fetch: rule rebuild failed after download: {:#}",
-            e
-        ),
-    }
-}
-
-async fn geodata_auto_update_loop(
-    geo: meow_config::GeoDataConfig,
-    tunnel: Tunnel,
-    raw_config: Arc<RwLock<RawConfig>>,
-    resolver: Arc<Resolver>,
-) {
-    use meow_config::geodata::download_and_replace;
-
-    let interval = std::time::Duration::from_secs(geo.auto_update_interval as u64 * 3600);
-    let mut ticker = tokio::time::interval(interval);
-    ticker.tick().await; // skip the immediate first tick
-
-    // Resolve the target file paths once (explicit override or default discovery
-    // path so the next config load finds the updated file).
-    let mmdb_target = geo
-        .mmdb_path
-        .clone()
-        .unwrap_or_else(meow_config::default_geoip_path);
-    let asn_target = geo
-        .asn_path
-        .clone()
-        .unwrap_or_else(meow_config::default_asn_path);
-    let geosite_target = geo
-        .geosite_path
-        .clone()
-        .unwrap_or_else(meow_config::default_geosite_path);
-
-    loop {
-        ticker.tick().await;
-
-        let mut any_updated = false;
-
-        // Look up the first upstream proxy on each tick — captures any
-        // selector/group changes since startup.
-        let proxies = tunnel.proxies();
-        let download_proxy = meow_config::internal_http::first_named_proxy(
-            raw_config.read().proxies.as_deref(),
-            &proxies,
-        );
-
-        if let Err(e) =
-            download_and_replace(&geo.mmdb_url, &mmdb_target, download_proxy.as_ref()).await
-        {
-            warn!("geodata auto-update: GeoIP MMDB download failed: {:#}", e);
-        } else {
-            any_updated = true;
-        }
-
-        if let Err(e) =
-            download_and_replace(&geo.asn_url, &asn_target, download_proxy.as_ref()).await
-        {
-            warn!("geodata auto-update: ASN MMDB download failed: {:#}", e);
-        } else {
-            any_updated = true;
-        }
-
-        if let Err(e) =
-            download_and_replace(&geo.geosite_url, &geosite_target, download_proxy.as_ref()).await
-        {
-            warn!("geodata auto-update: geosite download failed: {:#}", e);
-        } else {
-            any_updated = true;
-        }
-
-        if !any_updated {
-            warn!("geodata auto-update: all downloads failed; rules not reloaded");
-            continue;
-        }
-
-        // Rebuild rules with the newly downloaded DBs. Only rules are affected
-        // by geodata changes; proxies are unchanged.
-        let raw = raw_config.read().clone();
-        match meow_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(&resolver))) {
-            Ok((_proxies, new_rules)) => {
-                tunnel.update_rules(new_rules);
-                info!("geodata auto-update: rules reloaded with updated DBs");
-            }
-            Err(e) => {
-                warn!(
-                    "geodata auto-update: rule rebuild failed after DB download: {:#}",
-                    e
-                );
-            }
-        }
-    }
 }

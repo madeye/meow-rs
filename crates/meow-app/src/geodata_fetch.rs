@@ -1,11 +1,18 @@
-//! On-startup geodata DB download (independent of `geodata.auto-update`).
+//! Geodata DB download orchestration — startup-fetch (run unconditionally
+//! when a target file is missing) and auto-update loop (periodic refresh
+//! when `geodata.auto-update: true`).
 //!
-//! Extracted from `main.rs` so the path-resolution and download orchestration
-//! can be unit/integration tested without standing up a real `Tunnel`.
+//! Both entry points are `pub` so downstream FFI callers that build a
+//! `Tunnel` directly — bypassing `main.rs` — can wire the same behavior in
+//! without reimplementing it.
 
 use meow_common::adapter::Proxy;
 use meow_config::geodata::download_and_replace;
+use meow_config::raw::RawConfig;
 use meow_config::GeoDataConfig;
+use meow_dns::resolver::Resolver;
+use meow_tunnel::Tunnel;
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -79,6 +86,126 @@ pub async fn fetch_missing(
         }
     }
     downloaded
+}
+
+/// Startup-fetch entry point: download any geodata DB whose target file does
+/// not yet exist, then rebuild rules so the freshly-downloaded DBs take
+/// effect without a restart. Independent of `geodata.auto-update` — the goal
+/// is "if the file is missing when meow boots, fetch it so rules work on
+/// first run." Safe to spawn as a background task.
+pub async fn run_on_startup(
+    geo: GeoDataConfig,
+    tunnel: Tunnel,
+    raw_config: Arc<RwLock<RawConfig>>,
+    resolver: Arc<Resolver>,
+) {
+    let targets = compute_targets(&geo);
+
+    let proxies = tunnel.proxies();
+    let download_proxy = meow_config::internal_http::first_named_proxy(
+        raw_config.read().proxies.as_deref(),
+        &proxies,
+    );
+
+    let downloaded = fetch_missing(&targets, download_proxy.as_ref()).await;
+    if downloaded.is_empty() {
+        return;
+    }
+
+    let raw = raw_config.read().clone();
+    match meow_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(&resolver))) {
+        Ok((_proxies, new_rules)) => {
+            tunnel.update_rules(new_rules);
+            info!("geodata startup-fetch: rules reloaded with downloaded DBs");
+        }
+        Err(e) => warn!(
+            "geodata startup-fetch: rule rebuild failed after download: {:#}",
+            e
+        ),
+    }
+}
+
+/// Background task that periodically re-downloads geodata DBs (GeoIP, ASN,
+/// geosite) when `geodata.auto-update: true`. After each successful download
+/// the DB file is atomically replaced on disk, then rules are rebuilt in
+/// memory without restart. Runs forever; spawn as a background task.
+pub async fn auto_update_loop(
+    geo: GeoDataConfig,
+    tunnel: Tunnel,
+    raw_config: Arc<RwLock<RawConfig>>,
+    resolver: Arc<Resolver>,
+) {
+    let interval = std::time::Duration::from_secs(geo.auto_update_interval as u64 * 3600);
+    let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await; // skip the immediate first tick
+
+    let mmdb_target = geo
+        .mmdb_path
+        .clone()
+        .unwrap_or_else(meow_config::default_geoip_path);
+    let asn_target = geo
+        .asn_path
+        .clone()
+        .unwrap_or_else(meow_config::default_asn_path);
+    let geosite_target = geo
+        .geosite_path
+        .clone()
+        .unwrap_or_else(meow_config::default_geosite_path);
+
+    loop {
+        ticker.tick().await;
+
+        let mut any_updated = false;
+
+        let proxies = tunnel.proxies();
+        let download_proxy = meow_config::internal_http::first_named_proxy(
+            raw_config.read().proxies.as_deref(),
+            &proxies,
+        );
+
+        if let Err(e) =
+            download_and_replace(&geo.mmdb_url, &mmdb_target, download_proxy.as_ref()).await
+        {
+            warn!("geodata auto-update: GeoIP MMDB download failed: {:#}", e);
+        } else {
+            any_updated = true;
+        }
+
+        if let Err(e) =
+            download_and_replace(&geo.asn_url, &asn_target, download_proxy.as_ref()).await
+        {
+            warn!("geodata auto-update: ASN MMDB download failed: {:#}", e);
+        } else {
+            any_updated = true;
+        }
+
+        if let Err(e) =
+            download_and_replace(&geo.geosite_url, &geosite_target, download_proxy.as_ref()).await
+        {
+            warn!("geodata auto-update: geosite download failed: {:#}", e);
+        } else {
+            any_updated = true;
+        }
+
+        if !any_updated {
+            warn!("geodata auto-update: all downloads failed; rules not reloaded");
+            continue;
+        }
+
+        let raw = raw_config.read().clone();
+        match meow_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(&resolver))) {
+            Ok((_proxies, new_rules)) => {
+                tunnel.update_rules(new_rules);
+                info!("geodata auto-update: rules reloaded with updated DBs");
+            }
+            Err(e) => {
+                warn!(
+                    "geodata auto-update: rule rebuild failed after DB download: {:#}",
+                    e
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
