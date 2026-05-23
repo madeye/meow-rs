@@ -795,8 +795,26 @@ impl BoringInner {
             b.set_verify(boring::ssl::SslVerifyMode::NONE);
         } else {
             b.set_verify(boring::ssl::SslVerifyMode::PEER);
-            if !config.additional_roots.is_empty() {
+            // Seed Mozilla's CA bundle so peer verification has a trust
+            // root to chase, even in sandboxed runtimes (iOS NE
+            // extensions, sealed app extensions) where boring-sys's
+            // vendored BoringSSL can't reach any system trust store.
+            // This matches what rustls does by default and gives the
+            // boring backend the same baseline. User-supplied
+            // `additional_roots` are added afterwards so they take
+            // precedence on conflicts.
+            {
                 let cert_store = b.cert_store_mut();
+                for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+                    let x509 = boring::x509::X509::from_der(cert.as_ref()).map_err(|e| {
+                        TransportError::Config(format!(
+                            "webpki_root_certs: invalid CA cert (boring): {e}"
+                        ))
+                    })?;
+                    cert_store.add_cert(x509).map_err(|e| {
+                        TransportError::Config(format!("webpki_root_certs: add_cert (boring): {e}"))
+                    })?;
+                }
                 for der in &config.additional_roots {
                     let x509 = boring::x509::X509::from_der(der).map_err(|e| {
                         TransportError::Config(format!(
