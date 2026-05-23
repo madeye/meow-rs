@@ -27,6 +27,7 @@ boring-tls = [
     "dep:tokio-boring",
     "dep:boring-sys",
     "dep:rand",
+    "dep:webpki-root-certs",
 ]
 ws = [
     "dep:tokio-tungstenite",
@@ -81,9 +82,20 @@ rand = { workspace = true, optional = true }
 httparse = { version = "1", optional = true }
 
 # boring-tls feature
-boring       = { workspace = true, optional = true }
-tokio-boring = { workspace = true, optional = true }
-boring-sys   = { version = "5.0.2", optional = true }
+boring             = { workspace = true, optional = true }
+tokio-boring       = { workspace = true, optional = true }
+boring-sys         = { version = "5.0.2", optional = true }
+# Mozilla CA bundle for boring's X509Store. The BoringSSL connector
+# starts with an *empty* trust store; sandboxed runtimes (iOS
+# NetworkExtension, sealed app extensions) don't pick up system roots
+# the way `boring-sys`'s vendored BoringSSL falls back to on a plain
+# macOS process, so peer-cert verification fails with
+# `unable to get local issuer certificate` for every proxy that uses
+# TLS (ech-tls-tunnel, trojan, vless+tls, ss-plugin v2ray, …).
+# Seeding the same Mozilla root list rustls uses gives the boring path
+# parity with rustls and makes verification work uniformly across
+# platforms. Adds ~150 KB of DER blobs to the .rlib.
+webpki-root-certs  = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio        = { workspace = true }
