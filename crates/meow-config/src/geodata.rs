@@ -12,7 +12,7 @@ const DEFAULT_MMDB_URL: &str =
 const DEFAULT_ASN_URL: &str =
     "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb";
 const DEFAULT_GEOSITE_URL: &str =
-    "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.mrs";
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.dat";
 
 /// Validated `geodata:` config, produced by [`parse_geodata`].
 #[derive(Debug, Clone)]
@@ -174,7 +174,7 @@ mod tests {
         assert!(cfg.geosite_path.is_none());
         assert!(cfg.mmdb_url.contains("country.mmdb"));
         assert!(cfg.asn_url.contains("GeoLite2-ASN"));
-        assert!(cfg.geosite_url.contains("geosite.mrs"));
+        assert!(cfg.geosite_url.contains("geosite.dat"));
     }
 
     #[test]

@@ -618,9 +618,11 @@ pub fn default_asn_path() -> PathBuf {
     meow_config_dir().join("GeoLite2-ASN.mmdb")
 }
 
-/// Default path for geosite.mrs (first candidate in the discovery chain).
+/// Default on-disk path for the geosite DB used by the geodata downloader.
+/// Uses `geosite.dat` since upstream MetaCubeX stopped publishing the `.mrs`
+/// release artifact; the loader transparently accepts either format.
 pub fn default_geosite_path() -> PathBuf {
-    meow_config_dir().join("geosite.mrs")
+    meow_config_dir().join("geosite.dat")
 }
 
 pub fn meow_config_dir() -> PathBuf {
