@@ -125,10 +125,15 @@ pub async fn run_on_startup(
     }
 }
 
-/// Background task that periodically re-downloads geodata DBs (GeoIP, ASN,
-/// geosite) when `geodata.auto-update: true`. After each successful download
-/// the DB file is atomically replaced on disk, then rules are rebuilt in
-/// memory without restart. Runs forever; spawn as a background task.
+/// Background task that periodically re-downloads the ASN DB when
+/// `geodata.auto-update: true`. After a successful download the DB file is
+/// atomically replaced on disk, then rules are rebuilt in memory without
+/// restart. Runs forever; spawn as a background task.
+///
+/// GeoIP MMDB and geosite are intentionally NOT refreshed here — their data
+/// changes infrequently, and skipping the rebuild lets the parser-built
+/// `CountryIndex` / geosite DB stay live without churn. Operators who need
+/// to update them should replace the files on disk and restart.
 pub async fn auto_update_loop(
     geo: GeoDataConfig,
     tunnel: Tunnel,
@@ -139,23 +144,13 @@ pub async fn auto_update_loop(
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await; // skip the immediate first tick
 
-    let mmdb_target = geo
-        .mmdb_path
-        .clone()
-        .unwrap_or_else(meow_config::default_geoip_path);
     let asn_target = geo
         .asn_path
         .clone()
         .unwrap_or_else(meow_config::default_asn_path);
-    let geosite_target = geo
-        .geosite_path
-        .clone()
-        .unwrap_or_else(meow_config::default_geosite_path);
 
     loop {
         ticker.tick().await;
-
-        let mut any_updated = false;
 
         let proxies = tunnel.proxies();
         let download_proxy = meow_config::internal_http::first_named_proxy(
@@ -164,31 +159,9 @@ pub async fn auto_update_loop(
         );
 
         if let Err(e) =
-            download_and_replace(&geo.mmdb_url, &mmdb_target, download_proxy.as_ref()).await
-        {
-            warn!("geodata auto-update: GeoIP MMDB download failed: {:#}", e);
-        } else {
-            any_updated = true;
-        }
-
-        if let Err(e) =
             download_and_replace(&geo.asn_url, &asn_target, download_proxy.as_ref()).await
         {
             warn!("geodata auto-update: ASN MMDB download failed: {:#}", e);
-        } else {
-            any_updated = true;
-        }
-
-        if let Err(e) =
-            download_and_replace(&geo.geosite_url, &geosite_target, download_proxy.as_ref()).await
-        {
-            warn!("geodata auto-update: geosite download failed: {:#}", e);
-        } else {
-            any_updated = true;
-        }
-
-        if !any_updated {
-            warn!("geodata auto-update: all downloads failed; rules not reloaded");
             continue;
         }
 
