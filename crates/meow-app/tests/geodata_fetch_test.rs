@@ -148,6 +148,75 @@ async fn empty_target_list_returns_empty() {
     assert!(downloaded.is_empty());
 }
 
+/// Live smoke test: hits the real default upstream URLs from
+/// `meow_config::geodata` and confirms each DB downloads to disk with a
+/// plausible (non-empty, magic-byte-checked) payload. Marked `#[ignore]`
+/// so the regular `cargo test` run stays hermetic — opt in with:
+///
+/// ```text
+/// cargo test -p meow-app --test geodata_fetch_test -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "network: downloads real geodata DBs from GitHub releases"]
+async fn live_download_from_default_urls() {
+    let geo = meow_config::geodata::GeoDataConfig::default();
+    let dir = tempfile::tempdir().unwrap();
+    let targets = [
+        GeoTarget {
+            label: "GeoIP MMDB",
+            path: dir.path().join("country.mmdb"),
+            url: geo.mmdb_url.clone(),
+        },
+        GeoTarget {
+            label: "ASN MMDB",
+            path: dir.path().join("asn.mmdb"),
+            url: geo.asn_url.clone(),
+        },
+        GeoTarget {
+            label: "geosite",
+            path: dir.path().join("geosite.mrs"),
+            url: geo.geosite_url.clone(),
+        },
+    ];
+
+    let downloaded = fetch_missing(&targets, None).await;
+    assert_eq!(
+        downloaded.len(),
+        3,
+        "all three live targets must download; got {downloaded:?}"
+    );
+
+    // MMDB files end with the MaxMind metadata marker
+    // "\xab\xcd\xefMaxMind.com". Cheap, format-correct sanity check.
+    const MMDB_MARKER: &[u8] = b"\xab\xcd\xefMaxMind.com";
+    for t in &targets[..2] {
+        let bytes = std::fs::read(&t.path).unwrap();
+        assert!(
+            bytes.len() > 100 * 1024,
+            "{} suspiciously small: {} bytes",
+            t.label,
+            bytes.len()
+        );
+        assert!(
+            bytes.windows(MMDB_MARKER.len()).any(|w| w == MMDB_MARKER),
+            "{} missing MaxMind metadata marker",
+            t.label
+        );
+    }
+    let geosite_bytes = std::fs::read(&targets[2].path).unwrap();
+    assert!(
+        geosite_bytes.len() > 100 * 1024,
+        "geosite suspiciously small: {} bytes",
+        geosite_bytes.len()
+    );
+    // MRS files begin with the literal "MRS\0" magic.
+    assert_eq!(
+        &geosite_bytes[..4],
+        b"MRS\0",
+        "geosite missing MRS\\0 magic header"
+    );
+}
+
 #[test]
 fn geo_target_is_constructible_for_callers() {
     // The public type is what main.rs hands to fetch_missing — guard the

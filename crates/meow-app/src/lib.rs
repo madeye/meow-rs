@@ -1,4 +1,5 @@
 pub mod geodata_fetch;
+pub mod subscription_refresh;
 
 /// Generate a systemd unit file for the meow service.
 ///

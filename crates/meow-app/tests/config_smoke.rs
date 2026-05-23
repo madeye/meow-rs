@@ -6,6 +6,7 @@
 
 const MINIMAL_YAML: &str = include_str!("fixtures/minimal.yaml");
 const REALWORLD_YAML: &str = include_str!("fixtures/realworld_clash_meta.yaml");
+const REALWORLD_VERBATIM_YAML: &str = include_str!("fixtures/realworld_clash_meta_verbatim.yaml");
 
 #[tokio::test]
 async fn load_minimal_config_parses_without_error() {
@@ -100,5 +101,33 @@ async fn load_realworld_config_parses_without_error() {
         18,
         "expected 18 parsed rules, got {}",
         config.rules.len()
+    );
+}
+
+/// Verbatim community config with three known unsupported forms preserved:
+///
+///   1. `sniffer.sniff.HTTP.ports: [80, 8080-8880]` — port-range literal.
+///   2. `exclude-type: direct` — scalar (vs. `[direct]`).
+///   3. `default-nameserver: tls://...` — TLS bootstrap, rejected per ADR-0002.
+///
+/// Today the parser must reject this config. When any of the three gaps is
+/// closed, flip this to a success assertion and document which gap shipped.
+#[tokio::test]
+async fn load_realworld_verbatim_config_currently_fails() {
+    let result = meow_config::load_config_from_str(REALWORLD_VERBATIM_YAML).await;
+    let Err(err) = result else {
+        panic!(
+            "verbatim community config now parses — update the patches table \
+             in fixtures/realworld_clash_meta.yaml and convert this test to \
+             a success assertion"
+        );
+    };
+    let msg = format!("{err:#}").to_lowercase();
+    assert!(
+        msg.contains("8080-8880")
+            || msg.contains("exclude-type")
+            || msg.contains("tls://")
+            || msg.contains("default-nameserver"),
+        "parse failure should point at one of the three known gaps; got: {err:#}"
     );
 }
