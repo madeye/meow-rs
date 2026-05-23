@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["ss", "trojan", "vless", "vless-vision"]
+default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel"]
 ss = ["dep:shadowsocks"]
 trojan = []
 vless = []
