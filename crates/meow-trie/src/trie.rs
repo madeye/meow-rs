@@ -1,35 +1,73 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 
-use smallvec::SmallVec;
+use regex::RegexSet;
 
-const WILDCARD: &str = "*";
-const DOT_WILDCARD: &str = ".";
-
-/// Most domains have 2–4 labels; size the inline buffer at 8 so realistic
-/// queries never heap-allocate while still tolerating absurdly deep names.
-type Labels<'a> = SmallVec<[&'a str; 8]>;
-
-pub struct DomainTrie<T> {
-    root: Node<T>,
+pub struct DomainTrie<T: Clone + 'static> {
+    entries: Mutex<Vec<Entry<T>>>,
+    len: usize,
+    compiled: OnceLock<Compiled<T>>,
 }
 
-struct Node<T> {
-    children: HashMap<String, Node<T>>,
-    data: Option<T>,
+struct Entry<T> {
+    base_domain: String,
+    value: T,
+    kind: MatchKind,
 }
 
-impl<T> Node<T> {
-    fn new() -> Self {
-        Node {
-            children: HashMap::new(),
-            data: None,
+#[derive(Clone, Copy)]
+enum MatchKind {
+    Exact,
+    Star,
+    Dot,
+}
+
+impl MatchKind {
+    fn priority(self) -> u8 {
+        match self {
+            Self::Exact => 0,
+            Self::Star => 1,
+            Self::Dot => 2,
+        }
+    }
+
+    fn to_regex(self, domain: &str) -> String {
+        let escaped = regex::escape(domain);
+        match self {
+            Self::Exact => format!("^{escaped}$"),
+            Self::Star => format!("^[^.]+\\.{escaped}$"),
+            Self::Dot => format!("^.+\\.{escaped}$"),
         }
     }
 }
 
-impl<T: Clone> DomainTrie<T> {
+enum Compiled<T> {
+    Empty,
+    /// For large `DomainTrie<()>` sets (geosite): Bloom-filter matching.
+    /// FPR ~0.1% — a false positive causes one domain to hit the wrong
+    /// proxy group, which is harmless (the connection fails or retries).
+    BloomCheck {
+        exact: BloomFilter,
+        star: BloomFilter,
+        dot: BloomFilter,
+        value: T,
+    },
+    /// For value-mapped tries (small counts): per-entry regex patterns.
+    Individual {
+        set: RegexSet,
+        values: Vec<T>,
+        priorities: Vec<u8>,
+    },
+}
+
+impl<T: Clone + 'static> DomainTrie<T> {
     pub fn new() -> Self {
-        DomainTrie { root: Node::new() }
+        DomainTrie {
+            entries: Mutex::new(Vec::new()),
+            len: 0,
+            compiled: OnceLock::new(),
+        }
     }
 
     pub fn insert(&mut self, domain: &str, data: T) -> bool {
@@ -38,119 +76,274 @@ impl<T: Clone> DomainTrie<T> {
             return false;
         }
 
-        // Handle +.domain (insert both * and . wildcards)
         if let Some(rest) = domain.strip_prefix("+.") {
-            let star = format!("*.{rest}");
-            let dot = format!(".{rest}");
-            if let Some(parts) = Self::split_domain(&star) {
-                self.insert_parts(&parts, data.clone());
+            if rest.is_empty() {
+                return false;
             }
-            if let Some(parts) = Self::split_domain(&dot) {
-                self.insert_parts(&parts, data);
-            }
+            let entries = self.entries.get_mut().unwrap();
+            entries.push(Entry {
+                base_domain: rest.to_string(),
+                value: data.clone(),
+                kind: MatchKind::Star,
+            });
+            entries.push(Entry {
+                base_domain: rest.to_string(),
+                value: data,
+                kind: MatchKind::Dot,
+            });
+            self.len += 2;
             return true;
         }
 
-        let Some(parts) = Self::split_domain(&domain) else {
-            return false;
-        };
-        self.insert_parts(&parts, data);
+        if let Some(rest) = domain.strip_prefix("*.") {
+            if rest.is_empty() {
+                return false;
+            }
+            let entries = self.entries.get_mut().unwrap();
+            entries.push(Entry {
+                base_domain: rest.to_string(),
+                value: data,
+                kind: MatchKind::Star,
+            });
+            self.len += 1;
+            return true;
+        }
+
+        if let Some(rest) = domain.strip_prefix('.') {
+            if rest.is_empty() {
+                return false;
+            }
+            let entries = self.entries.get_mut().unwrap();
+            entries.push(Entry {
+                base_domain: rest.to_string(),
+                value: data,
+                kind: MatchKind::Dot,
+            });
+            self.len += 1;
+            return true;
+        }
+
+        let entries = self.entries.get_mut().unwrap();
+        entries.push(Entry {
+            base_domain: domain,
+            value: data,
+            kind: MatchKind::Exact,
+        });
+        self.len += 1;
         true
     }
 
-    fn insert_parts(&mut self, parts: &[&str], data: T) {
-        let mut node = &mut self.root;
-        for part in parts {
-            node = node
-                .children
-                .entry((*part).to_string())
-                .or_insert_with(Node::new);
-        }
-        node.data = Some(data);
-    }
-
     pub fn search(&self, domain: &str) -> Option<&T> {
+        if self.len == 0 {
+            return None;
+        }
+
+        let compiled = self.compiled.get_or_init(|| self.compile());
+
         let trimmed = domain.trim();
-        // Fast path: ASCII-lowercase input avoids the String allocation.
         if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
             let lower = trimmed.to_ascii_lowercase();
-            self.search_normalised(&lower)
+            Self::search_compiled(compiled, lower.trim_end_matches('.'))
         } else {
-            self.search_normalised(trimmed)
+            Self::search_compiled(compiled, trimmed.trim_end_matches('.'))
         }
     }
 
-    fn search_normalised(&self, domain: &str) -> Option<&T> {
-        let domain = domain.trim_end_matches('.');
-        if domain.is_empty() {
-            return None;
-        }
-        let parts = Self::split_domain(domain)?;
-        self.search_node(&self.root, &parts)
-    }
-
-    fn search_node<'a>(&'a self, node: &'a Node<T>, parts: &[&str]) -> Option<&'a T> {
-        if parts.is_empty() {
-            return node.data.as_ref();
-        }
-
-        let part = parts[0];
-        let rest = &parts[1..];
-
-        // Priority 1: exact match
-        if let Some(child) = node.children.get(part) {
-            if let Some(data) = self.search_node(child, rest) {
-                return Some(data);
-            }
-        }
-
-        // Priority 2: wildcard (*)
-        if let Some(child) = node.children.get(WILDCARD) {
-            if let Some(data) = self.search_node(child, rest) {
-                return Some(data);
-            }
-        }
-
-        // Priority 3: dot wildcard (.) — matches this segment and all remaining
-        if let Some(child) = node.children.get(DOT_WILDCARD) {
-            if child.data.is_some() {
-                return child.data.as_ref();
-            }
-        }
-
-        None
-    }
-
-    /// Split domain into reversed parts borrowing from the input:
-    /// "www.example.com" -> \["com", "example", "www"\]. Leading dot means
-    /// dot-wildcard: ".example.com" -> \["com", "example", "."\].
-    fn split_domain(domain: &str) -> Option<Labels<'_>> {
-        let domain = domain.trim_end_matches('.');
-        if domain.is_empty() {
+    fn search_compiled<'a>(compiled: &'a Compiled<T>, query: &str) -> Option<&'a T> {
+        if query.is_empty() {
             return None;
         }
 
-        let (prefix, domain) = if let Some(stripped) = domain.strip_prefix('.') {
-            (Some(DOT_WILDCARD), stripped)
-        } else {
-            (None, domain)
-        };
-
-        let mut parts: Labels<'_> = domain.split('.').rev().collect();
-        if let Some(p) = prefix {
-            parts.push(p);
+        match compiled {
+            Compiled::Empty => None,
+            Compiled::BloomCheck {
+                exact,
+                star,
+                dot,
+                value,
+            } => {
+                if exact.maybe_contains(query) {
+                    return Some(value);
+                }
+                for (i, _) in query.match_indices('.') {
+                    let suffix = &query[i..];
+                    let prefix = &query[..i];
+                    if star.maybe_contains(suffix) && !prefix.contains('.') {
+                        return Some(value);
+                    }
+                    if dot.maybe_contains(suffix) {
+                        return Some(value);
+                    }
+                }
+                None
+            }
+            Compiled::Individual {
+                set,
+                values,
+                priorities,
+            } => {
+                let matches = set.matches(query);
+                let mut best: Option<(u8, usize)> = None;
+                for idx in &matches {
+                    let pri = priorities[idx];
+                    match best {
+                        None => best = Some((pri, idx)),
+                        Some((best_pri, _)) if pri < best_pri => best = Some((pri, idx)),
+                        _ => {}
+                    }
+                }
+                best.map(|(_, idx)| &values[idx])
+            }
         }
-        Some(parts)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.root.children.is_empty()
+        self.len == 0
+    }
+
+    fn compile(&self) -> Compiled<T> {
+        let entries: Vec<Entry<T>> = {
+            let mut guard = self.entries.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+
+        if entries.is_empty() {
+            return Compiled::Empty;
+        }
+
+        if std::mem::size_of::<T>() == 0 && entries.len() > 100 {
+            Self::compile_bloom(entries)
+        } else {
+            Self::compile_individual(entries)
+        }
+    }
+
+    fn compile_individual(entries: Vec<Entry<T>>) -> Compiled<T> {
+        let mut patterns = Vec::with_capacity(entries.len());
+        let mut values = Vec::with_capacity(entries.len());
+        let mut priorities = Vec::with_capacity(entries.len());
+
+        for e in entries {
+            patterns.push(e.kind.to_regex(&e.base_domain));
+            values.push(e.value);
+            priorities.push(e.kind.priority());
+        }
+
+        let set = RegexSet::new(&patterns).expect("compile DomainTrie regex set");
+        Compiled::Individual {
+            set,
+            values,
+            priorities,
+        }
+    }
+
+    fn compile_bloom(entries: Vec<Entry<T>>) -> Compiled<T> {
+        let mut exact_items: Vec<String> = Vec::new();
+        let mut star_items: Vec<String> = Vec::new();
+        let mut dot_items: Vec<String> = Vec::new();
+
+        for e in &entries {
+            match e.kind {
+                MatchKind::Exact => exact_items.push(e.base_domain.clone()),
+                MatchKind::Star => star_items.push(format!(".{}", e.base_domain)),
+                MatchKind::Dot => dot_items.push(format!(".{}", e.base_domain)),
+            }
+        }
+
+        // Safety: T is a ZST (size_of::<T>() == 0), all bit patterns are valid
+        let value = unsafe {
+            #[allow(clippy::uninit_assumed_init)]
+            std::mem::MaybeUninit::<T>::uninit().assume_init()
+        };
+
+        Compiled::BloomCheck {
+            exact: BloomFilter::from_items(&exact_items),
+            star: BloomFilter::from_items(&star_items),
+            dot: BloomFilter::from_items(&dot_items),
+            value,
+        }
     }
 }
 
-impl<T: Clone> Default for DomainTrie<T> {
+impl<T: Clone + 'static> Default for DomainTrie<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bloom filter — ~14.4 bits/item for 0.1% FPR, 10 hash functions.
+// Uses double-hashing: h_i(x) = h1(x) + i * h2(x).
+// ---------------------------------------------------------------------------
+
+const BLOOM_FPR_BITS_PER_ITEM: f64 = 14.4; // -ln(0.001) / ln(2)^2
+const BLOOM_NUM_HASHES: u32 = 10; // -ln(0.001) / ln(2)
+
+struct BloomFilter {
+    bits: Vec<u64>,
+    num_bits: u64,
+    num_hashes: u32,
+}
+
+impl BloomFilter {
+    fn from_items(items: &[String]) -> Self {
+        if items.is_empty() {
+            return Self {
+                bits: Vec::new(),
+                num_bits: 0,
+                num_hashes: 0,
+            };
+        }
+
+        let num_bits = ((items.len() as f64 * BLOOM_FPR_BITS_PER_ITEM).ceil() as u64).max(64);
+        let num_words = ((num_bits + 63) / 64) as usize;
+        let num_bits = num_words as u64 * 64;
+        let mut bits = vec![0u64; num_words];
+
+        for item in items {
+            let (h1, h2) = Self::double_hash(item);
+            for i in 0..BLOOM_NUM_HASHES {
+                let idx = (h1.wrapping_add((i as u64).wrapping_mul(h2))) % num_bits;
+                bits[(idx / 64) as usize] |= 1u64 << (idx % 64);
+            }
+        }
+
+        Self {
+            bits,
+            num_bits,
+            num_hashes: BLOOM_NUM_HASHES,
+        }
+    }
+
+    fn maybe_contains(&self, item: &str) -> bool {
+        if self.num_bits == 0 {
+            return false;
+        }
+        let (h1, h2) = Self::double_hash(item);
+        for i in 0..self.num_hashes {
+            let idx = (h1.wrapping_add((i as u64).wrapping_mul(h2))) % self.num_bits;
+            if self.bits[(idx / 64) as usize] & (1u64 << (idx % 64)) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn double_hash(item: &str) -> (u64, u64) {
+        let mut hasher1 = std::hash::DefaultHasher::new();
+        item.hash(&mut hasher1);
+        let h1 = hasher1.finish();
+
+        let mut hasher2 = std::hash::DefaultHasher::new();
+        h1.hash(&mut hasher2);
+        let h2 = hasher2.finish() | 1; // ensure odd for better distribution
+
+        (h1, h2)
+    }
+
+    #[cfg(test)]
+    fn size_bytes(&self) -> usize {
+        self.bits.len() * 8
     }
 }
 
@@ -159,12 +352,6 @@ mod proptests {
     use super::*;
     use proptest::prelude::*;
 
-    /// Naive reference matcher — linear scan, no trie.
-    ///
-    /// Understands three pattern forms:
-    ///   `*.foo`   — matches exactly one label prepended to `.foo` (e.g. `bar.foo`)
-    ///   `.foo`    — matches any number of labels prepended to `.foo` but NOT `foo` itself
-    ///   `foo.bar` — exact match (case-insensitive)
     struct NaiveMatcher {
         patterns: Vec<String>,
     }
@@ -180,22 +367,17 @@ mod proptests {
             let q = query.to_lowercase();
             for pat in &self.patterns {
                 if let Some(rest) = pat.strip_prefix("*.") {
-                    // *.rest → query must be exactly one label + "." + rest
                     if let Some(prefix) = q.strip_suffix(&format!(".{rest}")) {
                         if !prefix.is_empty() && !prefix.contains('.') {
                             return true;
                         }
                     }
                 } else if let Some(rest) = pat.strip_prefix('.') {
-                    // .rest → query ends with ".rest" (one or more labels prepended)
                     if q.ends_with(&format!(".{rest}")) {
                         return true;
                     }
-                } else {
-                    // exact match
-                    if q == pat.as_str() {
-                        return true;
-                    }
+                } else if q == pat.as_str() {
+                    return true;
                 }
             }
             false
@@ -210,11 +392,6 @@ mod proptests {
         trie
     }
 
-    // Patterns: either `*.label` (single-star wildcard) or `label[.label]*` (exact).
-    // We exclude `.`-prefixed patterns from the proptest strategy because the trie's
-    // dot-wildcard semantics differ subtly from a naive suffix check when combined
-    // with `*` patterns on the same suffix (priority interactions).  The dot-wildcard
-    // path is covered by the deterministic unit tests above.
     proptest! {
         #[test]
         fn matches_naive_reference(
@@ -264,7 +441,7 @@ mod tests {
         assert_eq!(trie.search("www.example.com"), Some(&1));
         assert_eq!(trie.search("foo.example.com"), Some(&1));
         assert_eq!(trie.search("example.com"), None);
-        assert_eq!(trie.search("a.b.example.com"), None); // * matches only one level
+        assert_eq!(trie.search("a.b.example.com"), None);
     }
 
     #[test]
@@ -280,7 +457,6 @@ mod tests {
     fn test_plus_wildcard() {
         let mut trie = DomainTrie::new();
         trie.insert("+.example.com", 1);
-        // +. inserts both * and . wildcards
         assert_eq!(trie.search("www.example.com"), Some(&1));
         assert_eq!(trie.search("a.b.example.com"), Some(&1));
     }
@@ -291,11 +467,8 @@ mod tests {
         trie.insert("www.example.com", 1);
         trie.insert("*.example.com", 2);
         trie.insert(".example.com", 3);
-        // Exact match has highest priority
         assert_eq!(trie.search("www.example.com"), Some(&1));
-        // Wildcard next
         assert_eq!(trie.search("foo.example.com"), Some(&2));
-        // Dot wildcard for deeper matches
         assert_eq!(trie.search("a.b.example.com"), Some(&3));
     }
 
@@ -305,5 +478,82 @@ mod tests {
         trie.insert("Example.COM", 1);
         assert_eq!(trie.search("example.com"), Some(&1));
         assert_eq!(trie.search("EXAMPLE.COM"), Some(&1));
+    }
+
+    #[test]
+    fn test_bloom_mode() {
+        let mut trie: DomainTrie<()> = DomainTrie::new();
+        for i in 0..200 {
+            trie.insert(&format!("domain{i}.com"), ());
+        }
+        assert!(trie.search("domain0.com").is_some());
+        assert!(trie.search("domain199.com").is_some());
+        assert!(trie.search("domain200.com").is_none());
+    }
+
+    #[test]
+    fn test_bloom_with_star_wildcards() {
+        let mut trie: DomainTrie<()> = DomainTrie::new();
+        for i in 0..110 {
+            trie.insert(&format!("*.suffix{i}.com"), ());
+        }
+        assert!(trie.search("www.suffix0.com").is_some());
+        assert!(trie.search("foo.suffix50.com").is_some());
+        assert!(trie.search("suffix0.com").is_none());
+        assert!(trie.search("a.b.suffix0.com").is_none());
+    }
+
+    #[test]
+    fn test_bloom_apex_and_wildcard() {
+        let mut trie: DomainTrie<()> = DomainTrie::new();
+        for i in 0..60 {
+            trie.insert(&format!("exact{i}.com"), ());
+        }
+        for i in 0..60 {
+            trie.insert(&format!("+.wild{i}.com"), ());
+        }
+        assert!(trie.search("exact0.com").is_some());
+        assert!(trie.search("sub.wild0.com").is_some());
+        assert!(trie.search("a.b.wild0.com").is_some());
+    }
+
+    #[test]
+    fn test_bloom_filter_size() {
+        let items: Vec<String> = (0..10000).map(|i| format!("domain{i}.com")).collect();
+        let bf = BloomFilter::from_items(&items);
+        let size_kb = bf.size_bytes() as f64 / 1024.0;
+        // 10k items × 14.4 bits ≈ 18 KB
+        assert!(size_kb < 25.0, "bloom filter too large: {size_kb:.1} KB");
+        assert!(size_kb > 10.0, "bloom filter too small: {size_kb:.1} KB");
+
+        for item in &items {
+            assert!(bf.maybe_contains(item), "false negative for {item}");
+        }
+    }
+
+    #[test]
+    fn test_bloom_false_positive_rate() {
+        let items: Vec<String> = (0..10000)
+            .map(|i| format!("domain{i}.example.com"))
+            .collect();
+        let bf = BloomFilter::from_items(&items);
+
+        let mut fp = 0u64;
+        let trials = 100_000;
+        for i in 0..trials {
+            let probe = format!("probe{i}.notindomain.org");
+            if bf.maybe_contains(&probe) {
+                fp += 1;
+            }
+        }
+        let fpr = fp as f64 / trials as f64;
+        assert!(fpr < 0.005, "FPR too high: {fpr:.4} ({fp}/{trials})");
+    }
+
+    #[test]
+    fn test_empty_trie() {
+        let trie: DomainTrie<i32> = DomainTrie::new();
+        assert!(trie.is_empty());
+        assert_eq!(trie.search("anything.com"), None);
     }
 }

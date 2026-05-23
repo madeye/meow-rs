@@ -131,7 +131,15 @@ pub struct GeositePayload {
 
 /// Parse the inner (decompressed) geosite payload per the format described
 /// at the top of this module.
-pub fn parse_geosite_payload(decompressed: &[u8]) -> Result<GeositePayload, MrsError> {
+///
+/// When `allowed` is `Some`, only categories whose lowercased name is in the
+/// set are fully parsed; all others are skipped at the byte level (the cursor
+/// advances past their domains without allocating strings). Pass `None` to
+/// load every category.
+pub fn parse_geosite_payload(
+    decompressed: &[u8],
+    allowed: Option<&std::collections::HashSet<String>>,
+) -> Result<GeositePayload, MrsError> {
     let mut r = ByteReader::new(decompressed);
     let cat_count = r.read_u32_be("category_count")?;
     let mut categories = Vec::with_capacity(cat_count as usize);
@@ -142,6 +150,20 @@ pub fn parse_geosite_payload(decompressed: &[u8]) -> Result<GeositePayload, MrsE
             .map_err(|e| MrsError::Utf8("category_name", e))?
             .to_ascii_lowercase();
         let dom_count = r.read_u32_be("domain_count")?;
+
+        // If an allow-set is active and this category is not in it, skip its
+        // domains at the byte level — read lengths and advance the cursor
+        // without allocating any domain strings.
+        if let Some(set) = allowed {
+            if !set.contains(&name) {
+                for _ in 0..dom_count {
+                    let dom_len = r.read_u16_be("domain_len")? as usize;
+                    let _ = r.read_slice("domain", dom_len)?;
+                }
+                continue;
+            }
+        }
+
         let mut domains = Vec::with_capacity(dom_count as usize);
         for _ in 0..dom_count {
             let dom_len = r.read_u16_be("domain_len")? as usize;
@@ -322,7 +344,7 @@ mod tests {
         let bytes = write_geosite_mrs(&p).unwrap();
         let (_, compressed) = parse_header(&bytes).unwrap();
         let decompressed = decompress_payload(compressed).unwrap();
-        let parsed = parse_geosite_payload(&decompressed).unwrap();
+        let parsed = parse_geosite_payload(&decompressed, None).unwrap();
         assert_eq!(parsed.categories.len(), 2);
         assert_eq!(parsed.categories[0].0, "cn");
         assert_eq!(parsed.categories[0].1, vec!["example.cn", "baidu.com"]);
@@ -336,7 +358,7 @@ mod tests {
         let bytes = write_geosite_mrs(&empty).unwrap();
         let (_, compressed) = parse_header(&bytes).unwrap();
         let decompressed = decompress_payload(compressed).unwrap();
-        let parsed = parse_geosite_payload(&decompressed).unwrap();
+        let parsed = parse_geosite_payload(&decompressed, None).unwrap();
         assert!(parsed.categories.is_empty());
     }
 }

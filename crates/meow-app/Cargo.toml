@@ -74,6 +74,8 @@ dhat = { workspace = true, optional = true }
 tempfile = "3"
 serde_yaml = { workspace = true }
 meow-config = { workspace = true }
+meow-rules = { workspace = true }
+maxminddb = { workspace = true }
 libc = "0.2"
 
 [lints]

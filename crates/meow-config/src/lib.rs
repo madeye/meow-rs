@@ -504,7 +504,12 @@ fn build_parser_context_at(
 
     let geosite_trigger = lines.iter().any(|l| line_is_geosite_rule(l));
     let geosite = if geosite_trigger {
-        meow_rules::geosite::discover_and_load_at(geosite_explicit, geosite_candidates)
+        let allowed = collect_geosite_categories(lines);
+        meow_rules::geosite::discover_and_load_at(
+            geosite_explicit,
+            geosite_candidates,
+            Some(&allowed),
+        )
     } else {
         None
     };
@@ -567,6 +572,32 @@ fn collect_geoip_countries(lines: &[String]) -> std::collections::HashSet<String
         }
         for cap in re.captures_iter(line) {
             out.insert(cap[1].to_ascii_uppercase());
+        }
+    }
+    out
+}
+
+/// Scan raw rule lines and return the set of category names referenced by
+/// `GEOSITE,<category>` payloads — including occurrences inside logic rules
+/// (`AND`/`OR`/`NOT`). The returned names are lowercased.
+///
+/// Used to drive targeted geosite loading so we only parse categories that
+/// are actually referenced by rules, skipping the rest at the byte level.
+fn collect_geosite_categories(lines: &[String]) -> std::collections::HashSet<String> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)\bGEOSITE\s*,\s*([A-Za-z0-9_-]+)").expect("compile GEOSITE scan regex")
+    });
+    let mut out = std::collections::HashSet::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        for cap in re.captures_iter(line) {
+            out.insert(cap[1].to_ascii_lowercase());
         }
     }
     out

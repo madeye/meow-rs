@@ -6,7 +6,7 @@
 //! - `rules/geosite.go` (rule application)
 //! - `component/geodata/metaresource/metaresource.go::Read` (mrs geosite format)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -107,16 +107,23 @@ impl GeositeDB {
     /// - `MRS!` magic → parsed as the upstream MetaCubeX `.mrs` binary.
     /// - anything else → parsed as a V2Ray `geosite.dat` protobuf.
     ///
+    /// When `allowed` is `Some`, only the named categories are loaded;
+    /// all others are skipped at the byte level. Pass `None` to load
+    /// everything.
+    ///
     /// Returns `WrongFormat` only when neither path produces a usable DB.
     /// **Does not log.** Callsites log with the file path.
-    pub fn from_bytes(data: &[u8]) -> Result<Self, GeositeError> {
+    pub fn from_bytes(
+        data: &[u8],
+        allowed: Option<&HashSet<String>>,
+    ) -> Result<Self, GeositeError> {
         match parse_header(data) {
             Ok((header, rest)) => {
                 if header.type_tag != TYPE_DOMAIN {
                     return Err(GeositeError::UnexpectedType(header.type_tag));
                 }
                 let decompressed = decompress_payload(rest)?;
-                let payload = parse_geosite_payload(&decompressed)?;
+                let payload = parse_geosite_payload(&decompressed, allowed)?;
 
                 let mut categories: HashMap<String, DomainTrie<()>> =
                     HashMap::with_capacity(payload.categories.len());
@@ -139,16 +146,20 @@ impl GeositeDB {
                 // Try the V2Ray .dat protobuf format. On any dat-parse
                 // error, surface `WrongFormat` so the callsite can log a
                 // single actionable message without internal noise.
-                crate::geosite_dat::from_dat_bytes(data).map_err(|_| GeositeError::WrongFormat)
+                crate::geosite_dat::from_dat_bytes(data, allowed)
+                    .map_err(|_| GeositeError::WrongFormat)
             }
             Err(e) => Err(GeositeError::Mrs(e)),
         }
     }
 
     /// Load a geosite DB from a filesystem path.
-    pub fn load_from_path(path: &Path) -> Result<Self, GeositeError> {
+    pub fn load_from_path(
+        path: &Path,
+        allowed: Option<&HashSet<String>>,
+    ) -> Result<Self, GeositeError> {
         let bytes = std::fs::read(path)?;
-        Self::from_bytes(&bytes)
+        Self::from_bytes(&bytes, allowed)
     }
 }
 
@@ -183,8 +194,8 @@ pub fn default_geosite_candidates() -> Vec<PathBuf> {
 /// wrong-format, logs an `error!` with the path and conversion hint and
 /// returns `None` (Class A per ADR-0002 — wrong format is actionable;
 /// absent is not).
-pub fn discover_and_load() -> Option<Arc<GeositeDB>> {
-    discover_and_load_from(&default_geosite_candidates())
+pub fn discover_and_load(allowed: Option<&HashSet<String>>) -> Option<Arc<GeositeDB>> {
+    discover_and_load_from(&default_geosite_candidates(), allowed)
 }
 
 /// Load geosite DB from `explicit` path if given (skips discovery chain),
@@ -195,18 +206,22 @@ pub fn discover_and_load() -> Option<Arc<GeositeDB>> {
 pub fn discover_and_load_at(
     explicit: Option<&std::path::Path>,
     candidates: &[PathBuf],
+    allowed: Option<&HashSet<String>>,
 ) -> Option<Arc<GeositeDB>> {
     if let Some(p) = explicit {
         // Explicit path given: use only that path (no fallback to discovery).
-        return discover_and_load_from(&[p.to_path_buf()]);
+        return discover_and_load_from(&[p.to_path_buf()], allowed);
     }
-    discover_and_load_from(candidates)
+    discover_and_load_from(candidates, allowed)
 }
 
 /// Same as [`discover_and_load`] but lets callers override the candidate
 /// list. Used by tests and by an explicit config override in future
 /// M2+ `geodata.path` support.
-pub fn discover_and_load_from(candidates: &[PathBuf]) -> Option<Arc<GeositeDB>> {
+pub fn discover_and_load_from(
+    candidates: &[PathBuf],
+    allowed: Option<&HashSet<String>>,
+) -> Option<Arc<GeositeDB>> {
     let Some(path) = candidates.iter().find(|p| p.exists()) else {
         warn!(
             "geosite DB not found in any of the discovery paths; GEOSITE rules will not match. \
@@ -219,7 +234,7 @@ pub fn discover_and_load_from(candidates: &[PathBuf]) -> Option<Arc<GeositeDB>> 
         );
         return None;
     };
-    match GeositeDB::load_from_path(path) {
+    match GeositeDB::load_from_path(path, allowed) {
         Ok(db) => Some(Arc::new(db)),
         Err(GeositeError::WrongFormat) => {
             tracing::error!(
@@ -261,7 +276,7 @@ mod tests {
     #[test]
     fn load_parses_categories() {
         let bytes = build_fixture();
-        let db = GeositeDB::from_bytes(&bytes).unwrap();
+        let db = GeositeDB::from_bytes(&bytes, None).unwrap();
         assert_eq!(db.category_count(), 2);
         assert_eq!(db.domain_count("cn"), Some(3));
         assert_eq!(db.domain_count("ads"), Some(1));
@@ -271,7 +286,7 @@ mod tests {
     #[test]
     fn load_lookup_roundtrips() {
         let bytes = build_fixture();
-        let db = GeositeDB::from_bytes(&bytes).unwrap();
+        let db = GeositeDB::from_bytes(&bytes, None).unwrap();
         assert!(db.lookup("cn", "baidu.com"));
         assert!(db.lookup("CN", "BAIDU.COM")); // case-insensitive
         assert!(!db.lookup("cn", "google.com"));
@@ -280,7 +295,7 @@ mod tests {
     #[test]
     fn load_unknown_category_no_match() {
         let bytes = build_fixture();
-        let db = GeositeDB::from_bytes(&bytes).unwrap();
+        let db = GeositeDB::from_bytes(&bytes, None).unwrap();
         assert!(!db.lookup("zz", "baidu.com"));
     }
 
@@ -288,7 +303,7 @@ mod tests {
     fn wrong_format_returns_error() {
         // protobuf-style header: `0x0A` is the proto wire tag for field 1 (length-delimited)
         let bytes = b"\x0a\x05hello";
-        match GeositeDB::from_bytes(bytes) {
+        match GeositeDB::from_bytes(bytes, None) {
             Err(GeositeError::WrongFormat) => {}
             other => panic!("expected WrongFormat, got {:?}", other.err()),
         }
@@ -298,7 +313,7 @@ mod tests {
     fn empty_db_valid() {
         let empty = GeositePayload { categories: vec![] };
         let bytes = write_geosite_mrs(&empty).unwrap();
-        let db = GeositeDB::from_bytes(&bytes).unwrap();
+        let db = GeositeDB::from_bytes(&bytes, None).unwrap();
         assert_eq!(db.category_count(), 0);
     }
 
@@ -313,7 +328,7 @@ mod tests {
     #[test]
     fn discover_none_returns_none() {
         let candidates = vec![PathBuf::from("/definitely/not/a/real/path/geosite.mrs")];
-        let result = discover_and_load_from(&candidates);
+        let result = discover_and_load_from(&candidates, None);
         assert!(result.is_none());
     }
 
@@ -327,7 +342,7 @@ mod tests {
             path,
             PathBuf::from("/definitely/not/a/real/path/geosite.mrs"),
         ];
-        let db = discover_and_load_from(&candidates).expect("DB should load");
+        let db = discover_and_load_from(&candidates, None).expect("DB should load");
         assert!(db.lookup("cn", "baidu.com"));
     }
 
@@ -341,7 +356,7 @@ mod tests {
             PathBuf::from("/definitely/not/a/real/path/geosite.mrs"),
             path,
         ];
-        let db = discover_and_load_from(&candidates).expect("DB should load");
+        let db = discover_and_load_from(&candidates, None).expect("DB should load");
         assert!(db.lookup("ads", "ad.example.com"));
     }
 
@@ -365,7 +380,7 @@ mod tests {
         std::fs::write(&path1, first).unwrap();
         std::fs::write(&path2, second).unwrap();
 
-        let db = discover_and_load_from(&[path1, path2]).unwrap();
+        let db = discover_and_load_from(&[path1, path2], None).unwrap();
         assert!(db.lookup("first", "only-in-first.com"));
         assert!(!db.lookup("second", "only-in-second.com"));
     }
@@ -377,7 +392,7 @@ mod tests {
         std::fs::write(&path, b"\x0a\x05hello").unwrap();
 
         let candidates = vec![path];
-        let result = discover_and_load_from(&candidates);
+        let result = discover_and_load_from(&candidates, None);
         assert!(result.is_none());
     }
 }

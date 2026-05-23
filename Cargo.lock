@@ -2000,6 +2000,7 @@ dependencies = [
  "dashmap",
  "dhat",
  "libc",
+ "maxminddb",
  "meow-api",
  "meow-common",
  "meow-config",
@@ -2209,6 +2210,7 @@ version = "0.8.0"
 dependencies = [
  "criterion",
  "proptest",
+ "regex",
  "smallvec",
 ]
 

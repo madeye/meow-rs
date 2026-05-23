@@ -25,7 +25,7 @@
 //!   has no representation for them. A warning summarising the skipped
 //!   count is emitted once per `from_dat_bytes` call.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use meow_trie::DomainTrie;
 use tracing::warn;
@@ -165,7 +165,13 @@ struct SkipStats {
 /// `Plain` and `Regex` entries are skipped (see module docs). All `Domain`
 /// and `Full` entries are inserted into the per-category trie. Category
 /// names are lowercased to match `.mrs` semantics.
-pub fn from_dat_bytes(data: &[u8]) -> Result<GeositeDB, DatError> {
+///
+/// When `allowed` is `Some`, only categories whose lowercased name is in
+/// the set are loaded; all others are skipped. Pass `None` to load all.
+pub fn from_dat_bytes(
+    data: &[u8],
+    allowed: Option<&HashSet<String>>,
+) -> Result<GeositeDB, DatError> {
     let mut r = PbReader::new(data);
     let mut categories: HashMap<String, DomainTrie<()>> = HashMap::new();
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -179,7 +185,13 @@ pub fn from_dat_bytes(data: &[u8]) -> Result<GeositeDB, DatError> {
             continue;
         }
         let entry_bytes = r.read_length_delimited()?;
-        parse_geosite_entry(entry_bytes, &mut categories, &mut counts, &mut skipped)?;
+        parse_geosite_entry(
+            entry_bytes,
+            &mut categories,
+            &mut counts,
+            &mut skipped,
+            allowed,
+        )?;
     }
 
     if skipped.plain + skipped.regex + skipped.empty > 0 {
@@ -193,15 +205,19 @@ pub fn from_dat_bytes(data: &[u8]) -> Result<GeositeDB, DatError> {
     Ok(GeositeDB::from_parts(categories, counts))
 }
 
-fn parse_geosite_entry(
-    data: &[u8],
+fn parse_geosite_entry<'a>(
+    data: &'a [u8],
     categories: &mut HashMap<String, DomainTrie<()>>,
     counts: &mut HashMap<String, usize>,
     skipped: &mut SkipStats,
+    allowed: Option<&HashSet<String>>,
 ) -> Result<(), DatError> {
     let mut r = PbReader::new(data);
     let mut country: Option<String> = None;
-    let mut deferred_domains: Vec<Vec<u8>> = Vec::new();
+    let mut deferred_domains: Vec<&'a [u8]> = Vec::new();
+    // Track whether we should collect domain bytes. Set to false once
+    // we know the category is filtered out.
+    let mut dominated = true;
 
     while !r.is_at_end() {
         let (field, wire) = r.read_tag()?;
@@ -211,13 +227,22 @@ fn parse_geosite_entry(
                 let s = std::str::from_utf8(bytes)
                     .map_err(|_| DatError::InvalidUtf8(r.pos))?
                     .to_ascii_lowercase();
+                // Check if this category is in the allow-set
+                if let Some(set) = allowed {
+                    if !set.contains(&s) {
+                        dominated = false;
+                    }
+                }
                 country = Some(s);
             }
             (FIELD_GEOSITE_DOMAIN, WIRE_LEN_DELIM) => {
                 // country_code may appear after some domain entries in
-                // pathological encoders; buffer the bytes and apply after
-                // the message is fully scanned.
-                deferred_domains.push(r.read_length_delimited()?.to_vec());
+                // pathological encoders; buffer the bytes (borrow from
+                // input) and apply after the message is fully scanned.
+                let domain_bytes = r.read_length_delimited()?;
+                if dominated {
+                    deferred_domains.push(domain_bytes);
+                }
             }
             (_, w) => r.skip_field(w)?,
         }
@@ -227,10 +252,17 @@ fn parse_geosite_entry(
         return Ok(()); // unnamed category — drop silently
     };
 
+    // If the category is not in the allow-set, skip it entirely.
+    if let Some(set) = allowed {
+        if !set.contains(&country) {
+            return Ok(());
+        }
+    }
+
     let trie = categories.entry(country.clone()).or_default();
     let mut count = counts.get(&country).copied().unwrap_or(0);
     for domain_bytes in deferred_domains {
-        if let Some(()) = apply_domain_entry(&domain_bytes, trie, skipped)? {
+        if let Some(()) = apply_domain_entry(domain_bytes, trie, skipped)? {
             count += 1;
         }
     }
@@ -378,7 +410,7 @@ mod tests {
     #[test]
     fn parse_single_domain_entry() {
         let bytes = build_geosite_list(&[("cn", &[(DOMAIN_TYPE_DOMAIN, "baidu.com")])]);
-        let db = from_dat_bytes(&bytes).expect("ok");
+        let db = from_dat_bytes(&bytes, None).expect("ok");
         assert!(db.lookup("cn", "baidu.com"));
         assert!(db.lookup("cn", "www.baidu.com")); // suffix
         assert!(!db.lookup("cn", "google.com"));
@@ -387,7 +419,7 @@ mod tests {
     #[test]
     fn parse_full_entry_is_exact_match() {
         let bytes = build_geosite_list(&[("test", &[(DOMAIN_TYPE_FULL, "example.com")])]);
-        let db = from_dat_bytes(&bytes).expect("ok");
+        let db = from_dat_bytes(&bytes, None).expect("ok");
         assert!(db.lookup("test", "example.com"));
         assert!(!db.lookup("test", "sub.example.com")); // no suffix match for Full
     }
@@ -403,7 +435,7 @@ mod tests {
                 (DOMAIN_TYPE_FULL, "exact.com"),
             ],
         )]);
-        let db = from_dat_bytes(&bytes).expect("ok");
+        let db = from_dat_bytes(&bytes, None).expect("ok");
         assert_eq!(db.domain_count("mixed"), Some(2));
         assert!(db.lookup("mixed", "keep.com"));
         assert!(db.lookup("mixed", "exact.com"));
@@ -416,7 +448,7 @@ mod tests {
             ("cn", &[(DOMAIN_TYPE_DOMAIN, "baidu.com")]),
             ("youtube", &[(DOMAIN_TYPE_DOMAIN, "youtube.com")]),
         ]);
-        let db = from_dat_bytes(&bytes).expect("ok");
+        let db = from_dat_bytes(&bytes, None).expect("ok");
         assert_eq!(db.category_count(), 2);
         assert!(db.lookup("cn", "www.baidu.com"));
         assert!(db.lookup("youtube", "m.youtube.com"));
@@ -426,7 +458,7 @@ mod tests {
     #[test]
     fn category_names_are_lowercased() {
         let bytes = build_geosite_list(&[("CN", &[(DOMAIN_TYPE_DOMAIN, "Baidu.COM")])]);
-        let db = from_dat_bytes(&bytes).expect("ok");
+        let db = from_dat_bytes(&bytes, None).expect("ok");
         assert!(db.lookup("cn", "baidu.com"));
         assert!(db.lookup("CN", "BAIDU.COM"));
     }
@@ -440,7 +472,7 @@ mod tests {
         let entry = build_geosite("cn", &[(DOMAIN_TYPE_DOMAIN, "baidu.com")]);
         write_tag(&mut bytes, FIELD_GEOSITELIST_ENTRY, WIRE_LEN_DELIM);
         write_len_delim(&mut bytes, &entry);
-        let db = from_dat_bytes(&bytes).expect("ok");
+        let db = from_dat_bytes(&bytes, None).expect("ok");
         assert!(db.lookup("cn", "baidu.com"));
     }
 
@@ -449,14 +481,14 @@ mod tests {
         let mut bytes = build_geosite_list(&[("cn", &[(DOMAIN_TYPE_DOMAIN, "baidu.com")])]);
         bytes.truncate(bytes.len() - 3);
         assert!(matches!(
-            from_dat_bytes(&bytes),
+            from_dat_bytes(&bytes, None),
             Err(DatError::Truncated(_))
         ));
     }
 
     #[test]
     fn empty_input_is_empty_db() {
-        let db = from_dat_bytes(&[]).expect("ok");
+        let db = from_dat_bytes(&[], None).expect("ok");
         assert_eq!(db.category_count(), 0);
     }
 }
