@@ -196,25 +196,24 @@ impl NameServerUrl {
         Ok(NameServerUrl::Udp { addr, port })
     }
 
+    #[cfg(feature = "encrypted")]
     fn parse_tls(rest: &str, fragment: Option<&str>) -> Result<Self, NameServerParseError> {
-        #[cfg(not(feature = "encrypted"))]
-        return Err(NameServerParseError::EncryptedFeatureDisabled);
-
-        #[cfg(feature = "encrypted")]
-        {
-            let (addr, port) = parse_host_port(rest, 853)?;
-            let sni = match fragment {
-                Some(f) if !f.is_empty() => f.to_string(),
-                // Default SNI = the host string (IP or hostname)
-                _ => addr.to_string(),
-            };
-            Ok(NameServerUrl::Tls { addr, port, sni })
-        }
+        let (addr, port) = parse_host_port(rest, 853)?;
+        let sni = match fragment {
+            Some(f) if !f.is_empty() => f.to_string(),
+            // Default SNI = the host string (IP or hostname)
+            _ => addr.to_string(),
+        };
+        Ok(NameServerUrl::Tls { addr, port, sni })
     }
 
+    #[cfg(not(feature = "encrypted"))]
+    fn parse_tls(_rest: &str, _fragment: Option<&str>) -> Result<Self, NameServerParseError> {
+        Err(NameServerParseError::EncryptedFeatureDisabled)
+    }
+
+    #[cfg(feature = "encrypted")]
     fn parse_https(rest: &str, fragment: Option<&str>) -> Result<Self, NameServerParseError> {
-        #[cfg(not(feature = "encrypted"))]
-        return Err(NameServerParseError::EncryptedFeatureDisabled);
         // Split path off the host[:port] portion. Path starts at first '/' after host.
         let (hostport, path) = match rest.find('/') {
             Some(idx) => (&rest[..idx], rest[idx..].to_string()),
@@ -238,6 +237,11 @@ impl NameServerUrl {
             path,
             sni,
         })
+    }
+
+    #[cfg(not(feature = "encrypted"))]
+    fn parse_https(_rest: &str, _fragment: Option<&str>) -> Result<Self, NameServerParseError> {
+        Err(NameServerParseError::EncryptedFeatureDisabled)
     }
 }
 

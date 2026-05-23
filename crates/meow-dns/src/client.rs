@@ -438,6 +438,7 @@ async fn doh_exchange(
     Ok(body.to_vec())
 }
 
+#[cfg(feature = "encrypted")]
 fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
         return None;
@@ -480,6 +481,7 @@ fn tls_client_config(alpn: &str) -> Arc<rustls::ClientConfig> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "encrypted")]
     #[test]
     fn find_subseq_basic() {
         assert_eq!(find_subseq(b"abc\r\n\r\nbody", b"\r\n\r\n"), Some(3));
