@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
@@ -212,7 +211,7 @@ impl<T: Clone + 'static> DomainTrie<T> {
         }
 
         if std::mem::size_of::<T>() == 0 && entries.len() > 100 {
-            Self::compile_bloom(entries)
+            Self::compile_bloom(&entries)
         } else {
             Self::compile_individual(entries)
         }
@@ -237,12 +236,12 @@ impl<T: Clone + 'static> DomainTrie<T> {
         }
     }
 
-    fn compile_bloom(entries: Vec<Entry<T>>) -> Compiled<T> {
+    fn compile_bloom(entries: &[Entry<T>]) -> Compiled<T> {
         let mut exact_items: Vec<String> = Vec::new();
         let mut star_items: Vec<String> = Vec::new();
         let mut dot_items: Vec<String> = Vec::new();
 
-        for e in &entries {
+        for e in entries {
             match e.kind {
                 MatchKind::Exact => exact_items.push(e.base_domain.clone()),
                 MatchKind::Star => star_items.push(format!(".{}", e.base_domain)),
@@ -296,7 +295,7 @@ impl BloomFilter {
         }
 
         let num_bits = ((items.len() as f64 * BLOOM_FPR_BITS_PER_ITEM).ceil() as u64).max(64);
-        let num_words = ((num_bits + 63) / 64) as usize;
+        let num_words = num_bits.div_ceil(64) as usize;
         let num_bits = num_words as u64 * 64;
         let mut bits = vec![0u64; num_words];
 
