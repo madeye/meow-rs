@@ -19,12 +19,14 @@ use crate::mrs_parser::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum GeositeError {
-    #[error("geosite: .dat / V2Ray protobuf format is not supported; convert with metacubex convert-geo")]
+    #[error("geosite: unrecognised format (neither .mrs magic nor a parseable V2Ray .dat)")]
     WrongFormat,
     #[error("geosite: file I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("geosite: mrs parse error: {0}")]
     Mrs(#[from] MrsError),
+    #[error("geosite: dat parse error: {0}")]
+    Dat(#[from] crate::geosite_dat::DatError),
     #[error("geosite: mrs header type {0} is not 'domain' (expected 0)")]
     UnexpectedType(u8),
 }
@@ -91,40 +93,56 @@ impl GeositeDB {
         self.counts.get(&category.to_ascii_lowercase()).copied()
     }
 
-    /// Load a geosite DB from bytes. Detects non-mrs files by magic bytes
-    /// and returns `WrongFormat` — the callsite is responsible for logging
-    /// an actionable message with the file path (per spec §Divergences #1).
-    ///
-    /// **Does not log.** A file that isn't present on disk is not wrong; a
-    /// file whose magic doesn't match is wrong and the callsite logs with
-    /// the path. Internal logging from here would duplicate the message.
-    pub fn from_bytes(data: &[u8]) -> Result<Self, GeositeError> {
-        let (header, rest) = match parse_header(data) {
-            Ok(v) => v,
-            Err(MrsError::WrongFormat) => return Err(GeositeError::WrongFormat),
-            Err(e) => return Err(GeositeError::Mrs(e)),
-        };
-        if header.type_tag != TYPE_DOMAIN {
-            return Err(GeositeError::UnexpectedType(header.type_tag));
-        }
-        let decompressed = decompress_payload(rest)?;
-        let payload = parse_geosite_payload(&decompressed)?;
+    /// Construct a `GeositeDB` from already-built per-category tries +
+    /// counts. Used by the `.dat` (V2Ray protobuf) parser to hand back a
+    /// fully populated DB without going through the `.mrs` path.
+    pub fn from_parts(
+        categories: HashMap<String, DomainTrie<()>>,
+        counts: HashMap<String, usize>,
+    ) -> Self {
+        Self { categories, counts }
+    }
 
-        let mut categories: HashMap<String, DomainTrie<()>> =
-            HashMap::with_capacity(payload.categories.len());
-        let mut counts: HashMap<String, usize> = HashMap::with_capacity(payload.categories.len());
-        for (name, domains) in payload.categories {
-            let mut trie = DomainTrie::new();
-            let mut inserted = 0usize;
-            for d in domains {
-                if trie.insert(&d, ()) {
-                    inserted += 1;
+    /// Load a geosite DB from bytes. Auto-detects format:
+    /// - `MRS!` magic → parsed as the upstream MetaCubeX `.mrs` binary.
+    /// - anything else → parsed as a V2Ray `geosite.dat` protobuf.
+    ///
+    /// Returns `WrongFormat` only when neither path produces a usable DB.
+    /// **Does not log.** Callsites log with the file path.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, GeositeError> {
+        match parse_header(data) {
+            Ok((header, rest)) => {
+                if header.type_tag != TYPE_DOMAIN {
+                    return Err(GeositeError::UnexpectedType(header.type_tag));
                 }
+                let decompressed = decompress_payload(rest)?;
+                let payload = parse_geosite_payload(&decompressed)?;
+
+                let mut categories: HashMap<String, DomainTrie<()>> =
+                    HashMap::with_capacity(payload.categories.len());
+                let mut counts: HashMap<String, usize> =
+                    HashMap::with_capacity(payload.categories.len());
+                for (name, domains) in payload.categories {
+                    let mut trie = DomainTrie::new();
+                    let mut inserted = 0usize;
+                    for d in domains {
+                        if trie.insert(&d, ()) {
+                            inserted += 1;
+                        }
+                    }
+                    counts.insert(name.clone(), inserted);
+                    categories.insert(name, trie);
+                }
+                Ok(Self { categories, counts })
             }
-            counts.insert(name.clone(), inserted);
-            categories.insert(name, trie);
+            Err(MrsError::WrongFormat) => {
+                // Try the V2Ray .dat protobuf format. On any dat-parse
+                // error, surface `WrongFormat` so the callsite can log a
+                // single actionable message without internal noise.
+                crate::geosite_dat::from_dat_bytes(data).map_err(|_| GeositeError::WrongFormat)
+            }
+            Err(e) => Err(GeositeError::Mrs(e)),
         }
-        Ok(Self { categories, counts })
     }
 
     /// Load a geosite DB from a filesystem path.
@@ -143,12 +161,20 @@ fn meow_config_dir() -> PathBuf {
     base.join("meow")
 }
 
-/// Candidate paths for `geosite.mrs`, in priority order. Returned regardless
-/// of whether the files exist; caller decides.
+/// Candidate paths for the geosite DB, in priority order. Returned
+/// regardless of whether the files exist; caller decides.
+///
+/// Both `.mrs` (MetaCubeX binary) and `.dat` (V2Ray protobuf) are accepted —
+/// the loader auto-detects via magic bytes. `.mrs` is preferred when both
+/// are present, since it parses ~10× faster and has no per-entry type
+/// fidelity loss.
 pub fn default_geosite_candidates() -> Vec<PathBuf> {
+    let cfg = meow_config_dir();
     vec![
-        meow_config_dir().join("geosite.mrs"),
+        cfg.join("geosite.mrs"),
+        cfg.join("geosite.dat"),
         PathBuf::from("./meow/geosite.mrs"),
+        PathBuf::from("./meow/geosite.dat"),
     ]
 }
 
@@ -183,8 +209,8 @@ pub fn discover_and_load_at(
 pub fn discover_and_load_from(candidates: &[PathBuf]) -> Option<Arc<GeositeDB>> {
     let Some(path) = candidates.iter().find(|p| p.exists()) else {
         warn!(
-            "geosite.mrs not found in any of the discovery paths; GEOSITE rules will not match. \
-             Place the file at one of: {}",
+            "geosite DB not found in any of the discovery paths; GEOSITE rules will not match. \
+             Place a geosite.mrs or geosite.dat file at one of: {}",
             candidates
                 .iter()
                 .map(|p| p.display().to_string())
@@ -198,14 +224,13 @@ pub fn discover_and_load_from(candidates: &[PathBuf]) -> Option<Arc<GeositeDB>> 
         Err(GeositeError::WrongFormat) => {
             tracing::error!(
                 path = %path.display(),
-                "geosite.dat detected at {}; meow-rs requires geosite.mrs format. \
-                 Convert with: metacubex convert-geo",
+                "geosite file at {} is neither a valid .mrs nor a parseable V2Ray .dat",
                 path.display()
             );
             None
         }
         Err(e) => {
-            tracing::error!(path = %path.display(), "failed to load geosite.mrs: {}", e);
+            tracing::error!(path = %path.display(), "failed to load geosite DB: {}", e);
             None
         }
     }

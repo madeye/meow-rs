@@ -8,6 +8,7 @@ pub mod dscp;
 pub mod final_rule;
 pub mod geoip;
 pub mod geosite;
+pub mod geosite_dat;
 pub mod geosite_rule;
 pub mod in_name;
 pub mod in_port;
