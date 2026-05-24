@@ -5,12 +5,16 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess"]
+default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess", "snell"]
 ss = ["dep:shadowsocks"]
 trojan = []
 vless = []
 vmess = ["dep:md-5", "dep:hmac", "dep:aes", "dep:aes-gcm", "dep:chacha20poly1305", "dep:crc32fast"]
 vless-vision = ["vless"]
+# Snell v4/v5 outbound — argon2id KDF + AES-128-GCM AEAD frames,
+# optional http/tls obfs (reused from the SS simple-obfs module),
+# UDP-over-TCP, and an opt-in reuse pool (CommandConnectV2).
+snell = ["dep:argon2", "dep:aes-gcm"]
 # Opt-in anytls outbound (uses the `anytls-rs` crate). Adds ~one extra TLS
 # provider to the binary because the upstream crate pins default rustls
 # features — accept the bloat in exchange for not re-implementing the
@@ -33,6 +37,7 @@ tokio = { workspace = true }
 anytls-rs = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 shadowsocks = { workspace = true, optional = true }
+argon2 = { workspace = true, optional = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }

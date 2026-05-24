@@ -189,8 +189,136 @@ pub fn parse_proxy(
             let adapter = parse_vmess(name, config)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
+        #[cfg(feature = "snell")]
+        "snell" => {
+            let adapter = parse_snell(name, config)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
         _ => Err(format!("unsupported proxy type: {proxy_type}")),
     }
+}
+
+/// Parse a `type: snell` proxy block.
+///
+/// Aligned with opensnell's client-side surface — v4 / v5 wire only (older
+/// v1/v2/v3 are hard-rejected, mirroring opensnell's own scope decision).
+///
+/// YAML schema (mihomo-compatible):
+///
+/// ```yaml
+/// - name: my-snell
+///   type: snell
+///   server: 1.2.3.4
+///   port: 443
+///   psk: shared-secret
+///   version: 4         # optional; default 4. Accepts 4, 5, "v4", "v5".
+///   udp: true          # optional; UDP-over-TCP relay.
+///   reuse: true        # optional; CommandConnectV2 + connection pool.
+///   obfs-opts:         # optional
+///     mode: http       # off (default) | http | tls
+///     host: bing.com   # falls back to server when missing
+/// ```
+///
+/// # Hard errors (Class A per ADR-0002)
+///
+/// - missing `server`, `port`, or `psk` — required by the protocol.
+/// - `port == 0` — never a valid endpoint.
+/// - empty `psk` — caught by [`meow_proxy::SnellAdapter::new`].
+/// - `version` ∈ {1, 2, 3} — opensnell does not implement those wires.
+/// - `obfs-opts.mode` is not one of off / http / tls.
+#[cfg(feature = "snell")]
+fn parse_snell(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<meow_proxy::SnellAdapter, String> {
+    use meow_proxy::{SnellAdapter, SnellObfs, SnellVersion};
+
+    let server = config
+        .get("server")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("snell[{name}]: missing server"))?;
+    let port = config
+        .get("port")
+        .and_then(serde_yaml::Value::as_u64)
+        .ok_or_else(|| format!("snell[{name}]: missing port"))? as u16;
+    if port == 0 {
+        return Err(format!("snell[{name}]: port must be non-zero"));
+    }
+    let psk = config
+        .get("psk")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("snell[{name}]: missing psk"))?;
+
+    let udp = config
+        .get("udp")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+    let reuse = config
+        .get("reuse")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+
+    // ── Version parsing ──────────────────────────────────────────────────
+    let version = match config.get("version") {
+        None => SnellVersion::V4,
+        Some(v) => {
+            // Accept ints (1..=5) or strings ("v4", "5", ...).
+            let label = if let Some(n) = v.as_u64() {
+                n.to_string()
+            } else if let Some(s) = v.as_str() {
+                s.to_string()
+            } else {
+                return Err(format!(
+                    "snell[{name}]: version must be an integer or string (4 or 5)"
+                ));
+            };
+            match label.trim().to_ascii_lowercase().as_str() {
+                "" | "4" | "v4" => SnellVersion::V4,
+                "5" | "v5" => SnellVersion::V5,
+                "1" | "2" | "3" | "v1" | "v2" | "v3" => {
+                    return Err(format!(
+                        "snell[{name}]: version '{label}' is not supported; \
+                         this adapter implements the v4 / v5 wire only \
+                         (mihomo's older v1/v2/v3 are deprecated)"
+                    ));
+                }
+                other => {
+                    return Err(format!(
+                        "snell[{name}]: unknown version '{other}'; valid: 4, 5"
+                    ));
+                }
+            }
+        }
+    };
+
+    // ── Obfs opts ────────────────────────────────────────────────────────
+    let obfs = if let Some(opts) = config.get("obfs-opts") {
+        let mode = opts
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("off")
+            .to_ascii_lowercase();
+        let host = opts
+            .get("host")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map_or_else(|| server.to_string(), std::string::ToString::to_string);
+        match mode.as_str() {
+            "off" | "none" | "" => SnellObfs::None,
+            "http" => SnellObfs::Http { host },
+            "tls" => SnellObfs::Tls { server: host },
+            other => {
+                return Err(format!(
+                    "snell[{name}]: obfs-opts.mode '{other}' invalid; expected one of off, http, tls"
+                ));
+            }
+        }
+    } else {
+        SnellObfs::None
+    };
+
+    SnellAdapter::new(name, server, port, psk, obfs, version, udp, reuse)
+        .map_err(|e| format!("snell[{name}]: {e}"))
 }
 
 /// Parse a `type: http` proxy config block into an `HttpAdapter`.
