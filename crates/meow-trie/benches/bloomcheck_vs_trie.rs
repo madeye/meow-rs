@@ -91,11 +91,21 @@ fn generate_synthetic_domains(n: usize) -> Vec<String> {
     let mut domains = Vec::with_capacity(n);
     for i in 0..n {
         match i % 5 {
-            0 => domains.push(format!("host{}.example{}.{}", i, i / 100, tlds[i % tlds.len()])),
+            0 => domains.push(format!(
+                "host{}.example{}.{}",
+                i,
+                i / 100,
+                tlds[i % tlds.len()]
+            )),
             1 => domains.push(format!("+.suffix{}.{}", i / 50, tlds[i % tlds.len()])),
             2 => domains.push(format!("*.wild{}.{}", i / 50, tlds[i % tlds.len()])),
             3 => domains.push(format!(".deep{}.{}", i / 50, tlds[i % tlds.len()])),
-            _ => domains.push(format!("exact{}.cdn{}.{}", i, i / 200, tlds[i % tlds.len()])),
+            _ => domains.push(format!(
+                "exact{}.cdn{}.{}",
+                i,
+                i / 200,
+                tlds[i % tlds.len()]
+            )),
         }
     }
     domains
@@ -373,5 +383,10 @@ fn bench_compile_time(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_realistic_search, bench_scaled_search, bench_compile_time);
+criterion_group!(
+    benches,
+    bench_realistic_search,
+    bench_scaled_search,
+    bench_compile_time
+);
 criterion_main!(benches);
