@@ -117,6 +117,11 @@ iprange = "0.6"
 sha2 = "0.10"
 hex = "0.4"
 subtle = "2"
+# Snell uses Argon2id (t=3, m=8 KiB, p=1) as its KDF and AES-128-GCM as
+# its AEAD. Both are pure-Rust RustCrypto crates; `aes-gcm` shares the
+# AES backend with the existing crypto stack.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 
 # Logging
 tracing = "0.1"
