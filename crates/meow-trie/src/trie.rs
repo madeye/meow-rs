@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 pub struct DomainTrie<T: Clone + 'static> {
@@ -34,6 +33,29 @@ struct TrieNode {
     dot: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Prefix trie node for the value-bearing path.
+// Same reverse-label structure, but stores actual values at each match slot.
+// ---------------------------------------------------------------------------
+
+struct TrieMapNode<T> {
+    children: HashMap<Box<str>, TrieMapNode<T>>,
+    exact_value: Option<T>,
+    star_value: Option<T>,
+    dot_value: Option<T>,
+}
+
+impl<T> Default for TrieMapNode<T> {
+    fn default() -> Self {
+        Self {
+            children: HashMap::new(),
+            exact_value: None,
+            star_value: None,
+            dot_value: None,
+        }
+    }
+}
+
 enum Compiled<T> {
     Empty,
     /// ZST path: real prefix trie — 0% false-positive rate.
@@ -41,18 +63,11 @@ enum Compiled<T> {
         root: TrieNode,
         value: T,
     },
-    /// Value-bearing path: Bloom filters for fast rejection, HashMaps for
-    /// exact value retrieval on hits (effective FPR = 0%).
-    BloomMap(Box<BloomMapData<T>>),
-}
-
-struct BloomMapData<T> {
-    exact_bloom: BloomFilter,
-    star_bloom: BloomFilter,
-    dot_bloom: BloomFilter,
-    exact: HashMap<String, T>,
-    star: HashMap<String, T>,
-    dot: HashMap<String, T>,
+    /// Value-bearing path: prefix trie with values stored at nodes.
+    /// Priority: exact > star (most-specific) > dot (most-specific).
+    TrieMap {
+        root: TrieMapNode<T>,
+    },
 }
 
 impl<T: Clone + 'static> DomainTrie<T> {
@@ -175,27 +190,35 @@ impl<T: Clone + 'static> DomainTrie<T> {
                 }
                 None
             }
-            Compiled::BloomMap(data) => {
-                if data.exact_bloom.maybe_contains(query) {
-                    if let Some(v) = data.exact.get(query) {
-                        return Some(v);
-                    }
-                }
-                for (i, _) in query.match_indices('.') {
-                    let suffix = &query[i..];
-                    let prefix = &query[..i];
-                    if !prefix.contains('.') && data.star_bloom.maybe_contains(suffix) {
-                        if let Some(v) = data.star.get(suffix) {
-                            return Some(v);
+            Compiled::TrieMap { root } => {
+                let labels: smallvec::SmallVec<[&str; 8]> = query.rsplit('.').collect();
+                let n = labels.len();
+                let mut node = root;
+                let mut best: Option<&T> = None;
+
+                for (d, label) in labels.iter().enumerate() {
+                    match node.children.get(*label) {
+                        None => break,
+                        Some(child) => {
+                            node = child;
+                            let remaining = n - d - 1;
+                            if remaining == 0 {
+                                if let Some(ref v) = node.exact_value {
+                                    return Some(v);
+                                }
+                            } else if remaining == 1 {
+                                if let Some(ref v) = node.star_value {
+                                    best = Some(v);
+                                } else if let Some(ref v) = node.dot_value {
+                                    best = Some(v);
+                                }
+                            } else if let Some(ref v) = node.dot_value {
+                                best = Some(v);
+                            }
                         }
                     }
-                    if data.dot_bloom.maybe_contains(suffix) {
-                        if let Some(v) = data.dot.get(suffix) {
-                            return Some(v);
-                        }
-                    }
                 }
-                None
+                best
             }
         }
     }
@@ -215,50 +238,37 @@ impl<T: Clone + 'static> DomainTrie<T> {
         }
 
         if std::mem::size_of::<T>() == 0 {
-            Self::compile_trie(&entries)
+            Self::compile_trie_check(&entries)
         } else {
-            Self::compile_bloom_map(entries)
+            Self::compile_trie_map(entries)
         }
     }
 
-    fn compile_bloom_map(entries: Vec<Entry<T>>) -> Compiled<T> {
-        let mut exact_items: Vec<String> = Vec::new();
-        let mut star_items: Vec<String> = Vec::new();
-        let mut dot_items: Vec<String> = Vec::new();
-        let mut exact_map: HashMap<String, T> = HashMap::new();
-        let mut star_map: HashMap<String, T> = HashMap::new();
-        let mut dot_map: HashMap<String, T> = HashMap::new();
+    fn compile_trie_map(entries: Vec<Entry<T>>) -> Compiled<T> {
+        let mut root = TrieMapNode::default();
 
         for e in entries {
+            let mut node = &mut root;
+            for label in e.base_domain.rsplit('.') {
+                node = node.children.entry(label.into()).or_default();
+            }
             match e.kind {
                 MatchKind::Exact => {
-                    exact_items.push(e.base_domain.clone());
-                    exact_map.entry(e.base_domain).or_insert(e.value);
+                    node.exact_value.get_or_insert(e.value);
                 }
                 MatchKind::Star => {
-                    let key = format!(".{}", e.base_domain);
-                    star_items.push(key.clone());
-                    star_map.entry(key).or_insert(e.value);
+                    node.star_value.get_or_insert(e.value);
                 }
                 MatchKind::Dot => {
-                    let key = format!(".{}", e.base_domain);
-                    dot_items.push(key.clone());
-                    dot_map.entry(key).or_insert(e.value);
+                    node.dot_value.get_or_insert(e.value);
                 }
             }
         }
 
-        Compiled::BloomMap(Box::new(BloomMapData {
-            exact_bloom: BloomFilter::from_items(&exact_items),
-            star_bloom: BloomFilter::from_items(&star_items),
-            dot_bloom: BloomFilter::from_items(&dot_items),
-            exact: exact_map,
-            star: star_map,
-            dot: dot_map,
-        }))
+        Compiled::TrieMap { root }
     }
 
-    fn compile_trie(entries: &[Entry<T>]) -> Compiled<T> {
+    fn compile_trie_check(entries: &[Entry<T>]) -> Compiled<T> {
         let mut root = TrieNode::default();
 
         for e in entries {
@@ -286,82 +296,6 @@ impl<T: Clone + 'static> DomainTrie<T> {
 impl<T: Clone + 'static> Default for DomainTrie<T> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Bloom filter — ~14.4 bits/item for 0.1% FPR, 10 hash functions.
-// Uses double-hashing: h_i(x) = h1(x) + i * h2(x).
-// ---------------------------------------------------------------------------
-
-const BLOOM_FPR_BITS_PER_ITEM: f64 = 14.4; // -ln(0.001) / ln(2)^2
-const BLOOM_NUM_HASHES: u32 = 10; // -ln(0.001) / ln(2)
-
-struct BloomFilter {
-    bits: Vec<u64>,
-    num_bits: u64,
-    num_hashes: u32,
-}
-
-impl BloomFilter {
-    fn from_items(items: &[String]) -> Self {
-        if items.is_empty() {
-            return Self {
-                bits: Vec::new(),
-                num_bits: 0,
-                num_hashes: 0,
-            };
-        }
-
-        let num_bits = ((items.len() as f64 * BLOOM_FPR_BITS_PER_ITEM).ceil() as u64).max(64);
-        let num_words = num_bits.div_ceil(64) as usize;
-        let num_bits = num_words as u64 * 64;
-        let mut bits = vec![0u64; num_words];
-
-        for item in items {
-            let (h1, h2) = Self::double_hash(item);
-            for i in 0..BLOOM_NUM_HASHES {
-                let idx = (h1.wrapping_add((i as u64).wrapping_mul(h2))) % num_bits;
-                bits[(idx / 64) as usize] |= 1u64 << (idx % 64);
-            }
-        }
-
-        Self {
-            bits,
-            num_bits,
-            num_hashes: BLOOM_NUM_HASHES,
-        }
-    }
-
-    fn maybe_contains(&self, item: &str) -> bool {
-        if self.num_bits == 0 {
-            return false;
-        }
-        let (h1, h2) = Self::double_hash(item);
-        for i in 0..self.num_hashes {
-            let idx = (h1.wrapping_add((i as u64).wrapping_mul(h2))) % self.num_bits;
-            if self.bits[(idx / 64) as usize] & (1u64 << (idx % 64)) == 0 {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn double_hash(item: &str) -> (u64, u64) {
-        let mut hasher1 = std::hash::DefaultHasher::new();
-        item.hash(&mut hasher1);
-        let h1 = hasher1.finish();
-
-        let mut hasher2 = std::hash::DefaultHasher::new();
-        h1.hash(&mut hasher2);
-        let h2 = hasher2.finish() | 1; // ensure odd for better distribution
-
-        (h1, h2)
-    }
-
-    #[cfg(test)]
-    fn size_bytes(&self) -> usize {
-        self.bits.len() * 8
     }
 }
 
@@ -528,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bloom_mode() {
+    fn test_many_exact_domains() {
         let mut trie: DomainTrie<()> = DomainTrie::new();
         for i in 0..200 {
             trie.insert(&format!("domain{i}.com"), ());
@@ -539,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bloom_with_star_wildcards() {
+    fn test_many_star_wildcards() {
         let mut trie: DomainTrie<()> = DomainTrie::new();
         for i in 0..110 {
             trie.insert(&format!("*.suffix{i}.com"), ());
@@ -551,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bloom_apex_and_wildcard() {
+    fn test_apex_and_wildcard() {
         let mut trie: DomainTrie<()> = DomainTrie::new();
         for i in 0..60 {
             trie.insert(&format!("exact{i}.com"), ());
@@ -565,36 +499,44 @@ mod tests {
     }
 
     #[test]
-    fn test_bloom_filter_size() {
-        let items: Vec<String> = (0..10000).map(|i| format!("domain{i}.com")).collect();
-        let bf = BloomFilter::from_items(&items);
-        let size_kb = bf.size_bytes() as f64 / 1024.0;
-        // 10k items × 14.4 bits ≈ 18 KB
-        assert!(size_kb < 25.0, "bloom filter too large: {size_kb:.1} KB");
-        assert!(size_kb > 10.0, "bloom filter too small: {size_kb:.1} KB");
-
-        for item in &items {
-            assert!(bf.maybe_contains(item), "false negative for {item}");
-        }
+    fn test_trie_map_value_retrieval() {
+        let mut trie = DomainTrie::new();
+        trie.insert("exact.com", 10);
+        trie.insert("*.wild.com", 20);
+        trie.insert(".deep.com", 30);
+        assert_eq!(trie.search("exact.com"), Some(&10));
+        assert_eq!(trie.search("foo.wild.com"), Some(&20));
+        assert_eq!(trie.search("a.b.deep.com"), Some(&30));
+        assert_eq!(trie.search("other.com"), None);
     }
 
     #[test]
-    fn test_bloom_false_positive_rate() {
-        let items: Vec<String> = (0..10000)
-            .map(|i| format!("domain{i}.example.com"))
-            .collect();
-        let bf = BloomFilter::from_items(&items);
+    fn test_trie_map_first_insert_wins() {
+        let mut trie = DomainTrie::new();
+        trie.insert("*.example.com", 1);
+        trie.insert("*.example.com", 2);
+        assert_eq!(trie.search("foo.example.com"), Some(&1));
+    }
 
-        let mut fp = 0u64;
-        let trials = 100_000;
-        for i in 0..trials {
-            let probe = format!("probe{i}.notindomain.org");
-            if bf.maybe_contains(&probe) {
-                fp += 1;
-            }
-        }
-        let fpr = fp as f64 / trials as f64;
-        assert!(fpr < 0.005, "FPR too high: {fpr:.4} ({fp}/{trials})");
+    #[test]
+    fn test_trie_map_deep_dot_overrides_shallow() {
+        let mut trie = DomainTrie::new();
+        trie.insert(".com", 1);
+        trie.insert(".google.com", 2);
+        // Most specific dot wins
+        assert_eq!(trie.search("www.google.com"), Some(&2));
+        assert_eq!(trie.search("foo.other.com"), Some(&1));
+    }
+
+    #[test]
+    fn test_trie_map_star_beats_dot_same_level() {
+        let mut trie = DomainTrie::new();
+        trie.insert("*.example.com", 1);
+        trie.insert(".example.com", 2);
+        // Star has priority over dot at the same level
+        assert_eq!(trie.search("foo.example.com"), Some(&1));
+        // But dot still matches multi-level
+        assert_eq!(trie.search("a.b.example.com"), Some(&2));
     }
 
     #[test]
