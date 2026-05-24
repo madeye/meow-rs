@@ -11,6 +11,10 @@ smallvec = { workspace = true }
 name = "trie_bench"
 harness = false
 
+[[bench]]
+name = "bloomcheck_vs_trie"
+harness = false
+
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
