@@ -21,26 +21,38 @@ enum MatchKind {
     Dot,
 }
 
+// ---------------------------------------------------------------------------
+// Prefix trie node for the ZST path (0% false-positive rate).
+// Labels are stored in reverse order (TLD first): com → google → www.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct TrieNode {
+    children: HashMap<Box<str>, TrieNode>,
+    exact: bool,
+    star: bool,
+    dot: bool,
+}
+
 enum Compiled<T> {
     Empty,
-    /// ZST path: pure Bloom filters (~0.1% FPR). Filter size is dynamic,
-    /// computed as `n * 14.4` bits for `n` items to guarantee <0.1% FPR.
-    BloomCheck {
-        exact: BloomFilter,
-        star: BloomFilter,
-        dot: BloomFilter,
+    /// ZST path: real prefix trie — 0% false-positive rate.
+    TrieCheck {
+        root: TrieNode,
         value: T,
     },
     /// Value-bearing path: Bloom filters for fast rejection, HashMaps for
     /// exact value retrieval on hits (effective FPR = 0%).
-    BloomMap {
-        exact_bloom: BloomFilter,
-        star_bloom: BloomFilter,
-        dot_bloom: BloomFilter,
-        exact: HashMap<String, T>,
-        star: HashMap<String, T>,
-        dot: HashMap<String, T>,
-    },
+    BloomMap(Box<BloomMapData<T>>),
+}
+
+struct BloomMapData<T> {
+    exact_bloom: BloomFilter,
+    star_bloom: BloomFilter,
+    dot_bloom: BloomFilter,
+    exact: HashMap<String, T>,
+    star: HashMap<String, T>,
+    dot: HashMap<String, T>,
 }
 
 impl<T: Clone + 'static> DomainTrie<T> {
@@ -138,50 +150,47 @@ impl<T: Clone + 'static> DomainTrie<T> {
 
         match compiled {
             Compiled::Empty => None,
-            Compiled::BloomCheck {
-                exact,
-                star,
-                dot,
-                value,
-            } => {
-                if exact.maybe_contains(query) {
-                    return Some(value);
-                }
-                for (i, _) in query.match_indices('.') {
-                    let suffix = &query[i..];
-                    let prefix = &query[..i];
-                    if star.maybe_contains(suffix) && !prefix.contains('.') {
-                        return Some(value);
-                    }
-                    if dot.maybe_contains(suffix) {
-                        return Some(value);
+            Compiled::TrieCheck { root, value } => {
+                let labels: smallvec::SmallVec<[&str; 8]> = query.rsplit('.').collect();
+                let n = labels.len();
+                let mut node = root;
+
+                for (d, label) in labels.iter().enumerate() {
+                    match node.children.get(*label) {
+                        None => return None,
+                        Some(child) => {
+                            node = child;
+                            let remaining = n - d - 1;
+                            if remaining == 0 && node.exact {
+                                return Some(value);
+                            }
+                            if remaining == 1 && node.star {
+                                return Some(value);
+                            }
+                            if remaining > 0 && node.dot {
+                                return Some(value);
+                            }
+                        }
                     }
                 }
                 None
             }
-            Compiled::BloomMap {
-                exact_bloom,
-                star_bloom,
-                dot_bloom,
-                exact,
-                star,
-                dot,
-            } => {
-                if exact_bloom.maybe_contains(query) {
-                    if let Some(v) = exact.get(query) {
+            Compiled::BloomMap(data) => {
+                if data.exact_bloom.maybe_contains(query) {
+                    if let Some(v) = data.exact.get(query) {
                         return Some(v);
                     }
                 }
                 for (i, _) in query.match_indices('.') {
                     let suffix = &query[i..];
                     let prefix = &query[..i];
-                    if !prefix.contains('.') && star_bloom.maybe_contains(suffix) {
-                        if let Some(v) = star.get(suffix) {
+                    if !prefix.contains('.') && data.star_bloom.maybe_contains(suffix) {
+                        if let Some(v) = data.star.get(suffix) {
                             return Some(v);
                         }
                     }
-                    if dot_bloom.maybe_contains(suffix) {
-                        if let Some(v) = dot.get(suffix) {
+                    if data.dot_bloom.maybe_contains(suffix) {
+                        if let Some(v) = data.dot.get(suffix) {
                             return Some(v);
                         }
                     }
@@ -206,7 +215,7 @@ impl<T: Clone + 'static> DomainTrie<T> {
         }
 
         if std::mem::size_of::<T>() == 0 {
-            Self::compile_bloom(&entries)
+            Self::compile_trie(&entries)
         } else {
             Self::compile_bloom_map(entries)
         }
@@ -239,26 +248,28 @@ impl<T: Clone + 'static> DomainTrie<T> {
             }
         }
 
-        Compiled::BloomMap {
+        Compiled::BloomMap(Box::new(BloomMapData {
             exact_bloom: BloomFilter::from_items(&exact_items),
             star_bloom: BloomFilter::from_items(&star_items),
             dot_bloom: BloomFilter::from_items(&dot_items),
             exact: exact_map,
             star: star_map,
             dot: dot_map,
-        }
+        }))
     }
 
-    fn compile_bloom(entries: &[Entry<T>]) -> Compiled<T> {
-        let mut exact_items: Vec<String> = Vec::new();
-        let mut star_items: Vec<String> = Vec::new();
-        let mut dot_items: Vec<String> = Vec::new();
+    fn compile_trie(entries: &[Entry<T>]) -> Compiled<T> {
+        let mut root = TrieNode::default();
 
         for e in entries {
+            let mut node = &mut root;
+            for label in e.base_domain.rsplit('.') {
+                node = node.children.entry(label.into()).or_default();
+            }
             match e.kind {
-                MatchKind::Exact => exact_items.push(e.base_domain.clone()),
-                MatchKind::Star => star_items.push(format!(".{}", e.base_domain)),
-                MatchKind::Dot => dot_items.push(format!(".{}", e.base_domain)),
+                MatchKind::Exact => node.exact = true,
+                MatchKind::Star => node.star = true,
+                MatchKind::Dot => node.dot = true,
             }
         }
 
@@ -268,12 +279,7 @@ impl<T: Clone + 'static> DomainTrie<T> {
             std::mem::MaybeUninit::<T>::uninit().assume_init()
         };
 
-        Compiled::BloomCheck {
-            exact: BloomFilter::from_items(&exact_items),
-            star: BloomFilter::from_items(&star_items),
-            dot: BloomFilter::from_items(&dot_items),
-            value,
-        }
+        Compiled::TrieCheck { root, value }
     }
 }
 
@@ -425,6 +431,35 @@ mod proptests {
                     trie_hit,
                     naive_hit,
                     "divergence on query {:?} with patterns {:?}",
+                    q,
+                    patterns
+                );
+            }
+        }
+
+        #[test]
+        fn matches_naive_reference_zst(
+            patterns in proptest::collection::vec(
+                "[a-z]{1,5}(\\.[a-z]{1,5}){0,3}|\\*\\.[a-z]{1,5}(\\.[a-z]{1,5}){0,2}",
+                1..=20,
+            ),
+            queries in proptest::collection::vec(
+                "[a-z]{1,5}(\\.[a-z]{1,5}){0,4}",
+                1..=10,
+            ),
+        ) {
+            let mut trie: DomainTrie<()> = DomainTrie::new();
+            for p in &patterns {
+                trie.insert(p, ());
+            }
+            let naive = NaiveMatcher::new(&patterns);
+            for q in &queries {
+                let trie_hit = trie.search(q).is_some();
+                let naive_hit = naive.matches(q);
+                prop_assert_eq!(
+                    trie_hit,
+                    naive_hit,
+                    "ZST divergence on query {:?} with patterns {:?}",
                     q,
                     patterns
                 );
