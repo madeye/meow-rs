@@ -95,8 +95,8 @@ impl CountryIndex {
     /// about. Codes are matched case-insensitively (the allowlist is
     /// internally uppercased). Networks without an `iso_code` are skipped
     /// silently — they cannot drive any rule.
-    pub fn build(
-        reader: &maxminddb::Reader<Vec<u8>>,
+    pub fn build<S: AsRef<[u8]>>(
+        reader: &maxminddb::Reader<S>,
         allowed: &HashSet<String>,
     ) -> Result<Self, String> {
         if allowed.is_empty() {

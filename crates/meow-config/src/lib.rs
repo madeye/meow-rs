@@ -484,13 +484,11 @@ fn build_parser_context_at(
     let geoip_trigger = lines.iter().find(|l| line_is_geoip_rule(l));
     let geoip = match geoip_trigger {
         Some(trigger) => {
-            let reader = load_mmdb(geoip_path, "GeoIP", trigger)?;
+            let reader = load_mmdb_mmap(geoip_path, "GeoIP", trigger)?;
             let allowed = collect_geoip_countries(lines);
             let index = meow_rules::country_index::CountryIndex::build(&reader, &allowed)
                 .map_err(|e| anyhow::anyhow!("failed to build GeoIP country index: {e}"))?;
-            // Drop the MMDB reader — the index now holds the per-country
-            // ranges we need and per-rule matches go through
-            // `IpRange::contains`, not MMDB.
+            // reader is mmap-backed — pages are returned to the OS on drop.
             drop(reader);
             Some(Arc::new(index))
         }
@@ -547,6 +545,28 @@ fn load_mmdb(
         )
     })?;
     info!("Loaded {} database from {}", kind, path.display());
+    Ok(reader)
+}
+
+/// Memory-map an MMDB file. The OS reclaims pages immediately on drop,
+/// unlike `Vec<u8>` where the allocator retains the freed block.
+fn load_mmdb_mmap(
+    path: &Path,
+    kind: &str,
+    trigger: &str,
+) -> Result<maxminddb::Reader<maxminddb::Mmap>, anyhow::Error> {
+    // Safety: the file is read-only and not modified during the reader's
+    // lifetime (dropped before the function returns to the caller).
+    let reader = unsafe { maxminddb::Reader::open_mmap(path) }.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load {} database at {}\n  required by rule: {}\n  underlying error: {}",
+            kind,
+            path.display(),
+            trigger.trim(),
+            e
+        )
+    })?;
+    info!("Loaded {} database from {} (mmap)", kind, path.display());
     Ok(reader)
 }
 
