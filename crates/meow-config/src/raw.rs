@@ -21,6 +21,10 @@ where
             Ok(None)
         }
 
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
         fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
             Ok(Some(vec![v.to_owned()]))
         }
@@ -222,7 +226,11 @@ pub struct RawProxyGroup {
     pub use_providers: Option<Vec<String>>,
     pub filter: Option<String>,
     pub exclude_filter: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string_or_seq",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub exclude_type: Option<Vec<String>>,
     pub include_all: Option<bool>,
     pub include_all_proxies: Option<bool>,
@@ -238,7 +246,11 @@ pub struct RawProxyProvider {
     pub interval: Option<u64>,
     pub filter: Option<String>,
     pub exclude_filter: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string_or_seq",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub exclude_type: Option<Vec<String>>,
     pub health_check: Option<RawHealthCheck>,
 }
@@ -316,6 +328,10 @@ where
         }
 
         fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
             Ok(None)
         }
 
