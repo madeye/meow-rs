@@ -33,11 +33,10 @@ pub enum GeositeError {
 
 /// Parsed geosite database. Cheap to share via `Arc`.
 pub struct GeositeDB {
-    // Keys are lower-cased category names.
     categories: HashMap<String, DomainTrie<()>>,
-    // Per-category domain counts, carried separately because `DomainTrie`
-    // doesn't expose a `len()` method. Populated at insert / load time.
     counts: HashMap<String, usize>,
+    regex_sets: HashMap<String, regex::RegexSet>,
+    keywords: HashMap<String, Vec<String>>,
 }
 
 impl std::fmt::Debug for GeositeDB {
@@ -54,6 +53,8 @@ impl GeositeDB {
         Self {
             categories: HashMap::new(),
             counts: HashMap::new(),
+            regex_sets: HashMap::new(),
+            keywords: HashMap::new(),
         }
     }
 
@@ -69,17 +70,35 @@ impl GeositeDB {
     /// True iff `domain` is in the named category. Category match is
     /// case-insensitive. Unknown categories return `false` (no error).
     pub fn lookup(&self, category: &str, domain: &str) -> bool {
-        // Hot-path callers (GeoSiteRule) pre-lowercase the category; avoid
-        // the heap allocation when nothing needs folding.
-        let trie = if category.bytes().any(|b| b.is_ascii_uppercase()) {
-            self.categories.get(&category.to_ascii_lowercase())
+        let cat_key;
+        let cat = if category.bytes().any(|b| b.is_ascii_uppercase()) {
+            cat_key = category.to_ascii_lowercase();
+            &cat_key
         } else {
-            self.categories.get(category)
+            category
         };
-        let Some(trie) = trie else {
-            return false;
-        };
-        trie.search(&domain.to_ascii_lowercase()).is_some()
+
+        if let Some(trie) = self.categories.get(cat) {
+            if trie.search(&domain.to_ascii_lowercase()).is_some() {
+                return true;
+            }
+        }
+
+        let domain_lower = domain.to_ascii_lowercase();
+
+        if let Some(kws) = self.keywords.get(cat) {
+            if kws.iter().any(|kw| domain_lower.contains(kw.as_str())) {
+                return true;
+            }
+        }
+
+        if let Some(rs) = self.regex_sets.get(cat) {
+            if rs.is_match(&domain_lower) {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Number of categories in the DB.
@@ -93,14 +112,18 @@ impl GeositeDB {
         self.counts.get(&category.to_ascii_lowercase()).copied()
     }
 
-    /// Construct a `GeositeDB` from already-built per-category tries +
-    /// counts. Used by the `.dat` (V2Ray protobuf) parser to hand back a
-    /// fully populated DB without going through the `.mrs` path.
     pub fn from_parts(
         categories: HashMap<String, DomainTrie<()>>,
         counts: HashMap<String, usize>,
+        regex_sets: HashMap<String, regex::RegexSet>,
+        keywords: HashMap<String, Vec<String>>,
     ) -> Self {
-        Self { categories, counts }
+        Self {
+            categories,
+            counts,
+            regex_sets,
+            keywords,
+        }
     }
 
     /// Load a geosite DB from bytes. Auto-detects format:
@@ -140,7 +163,12 @@ impl GeositeDB {
                     counts.insert(name.clone(), inserted);
                     categories.insert(name, trie);
                 }
-                Ok(Self { categories, counts })
+                Ok(Self {
+                    categories,
+                    counts,
+                    regex_sets: HashMap::new(),
+                    keywords: HashMap::new(),
+                })
             }
             Err(MrsError::WrongFormat) => {
                 // Try the V2Ray .dat protobuf format. On any dat-parse
