@@ -35,7 +35,9 @@ pub enum GeositeError {
 pub struct GeositeDB {
     categories: HashMap<String, DomainTrie<()>>,
     counts: HashMap<String, usize>,
-    regex_sets: HashMap<String, regex::RegexSet>,
+    /// Raw regex patterns per category; compiled lazily on first lookup.
+    regex_patterns: HashMap<String, Vec<String>>,
+    regex_compiled: HashMap<String, std::sync::OnceLock<Option<regex::RegexSet>>>,
     keywords: HashMap<String, Vec<String>>,
 }
 
@@ -53,7 +55,8 @@ impl GeositeDB {
         Self {
             categories: HashMap::new(),
             counts: HashMap::new(),
-            regex_sets: HashMap::new(),
+            regex_patterns: HashMap::new(),
+            regex_compiled: HashMap::new(),
             keywords: HashMap::new(),
         }
     }
@@ -92,9 +95,16 @@ impl GeositeDB {
             }
         }
 
-        if let Some(rs) = self.regex_sets.get(cat) {
-            if rs.is_match(&domain_lower) {
-                return true;
+        if let Some(lock) = self.regex_compiled.get(cat) {
+            let set = lock.get_or_init(|| {
+                self.regex_patterns
+                    .get(cat)
+                    .and_then(|pats| regex::RegexSet::new(pats).ok())
+            });
+            if let Some(rs) = set {
+                if rs.is_match(&domain_lower) {
+                    return true;
+                }
             }
         }
 
@@ -115,13 +125,19 @@ impl GeositeDB {
     pub fn from_parts(
         categories: HashMap<String, DomainTrie<()>>,
         counts: HashMap<String, usize>,
-        regex_sets: HashMap<String, regex::RegexSet>,
+        regex_patterns: HashMap<String, Vec<String>>,
         keywords: HashMap<String, Vec<String>>,
     ) -> Self {
+        let regex_compiled: HashMap<String, std::sync::OnceLock<Option<regex::RegexSet>>> =
+            regex_patterns
+                .keys()
+                .map(|k| (k.clone(), std::sync::OnceLock::new()))
+                .collect();
         Self {
             categories,
             counts,
-            regex_sets,
+            regex_patterns,
+            regex_compiled,
             keywords,
         }
     }
@@ -166,7 +182,8 @@ impl GeositeDB {
                 Ok(Self {
                     categories,
                     counts,
-                    regex_sets: HashMap::new(),
+                    regex_patterns: HashMap::new(),
+                    regex_compiled: HashMap::new(),
                     keywords: HashMap::new(),
                 })
             }

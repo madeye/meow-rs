@@ -1,51 +1,27 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 pub struct DomainTrie<T: Clone + 'static> {
-    entries: Mutex<Vec<Entry<T>>>,
+    state: TrieState<T>,
     len: usize,
-    compiled: OnceLock<Compiled<T>>,
 }
 
-struct Entry<T> {
-    base_domain: String,
-    value: T,
-    kind: MatchKind,
-}
-
-#[derive(Clone, Copy)]
-enum MatchKind {
-    Exact,
-    Star,
-    Dot,
+enum TrieState<T> {
+    Building(BuildNode<T>),
+    Sealed(SealedNode<T>),
 }
 
 // ---------------------------------------------------------------------------
-// Prefix trie node for the ZST path (0% false-positive rate).
-// Labels are stored in reverse order (TLD first): com → google → www.
+// Build phase: HashMap children for O(1) insert.
 // ---------------------------------------------------------------------------
 
-#[derive(Default)]
-struct TrieNode {
-    children: HashMap<Box<str>, TrieNode>,
-    exact: bool,
-    star: bool,
-    dot: bool,
-}
-
-// ---------------------------------------------------------------------------
-// Prefix trie node for the value-bearing path.
-// Same reverse-label structure, but stores actual values at each match slot.
-// ---------------------------------------------------------------------------
-
-struct TrieMapNode<T> {
-    children: HashMap<Box<str>, TrieMapNode<T>>,
+struct BuildNode<T> {
+    children: HashMap<Box<str>, BuildNode<T>>,
     exact_value: Option<T>,
     star_value: Option<T>,
     dot_value: Option<T>,
 }
 
-impl<T> Default for TrieMapNode<T> {
+impl<T> Default for BuildNode<T> {
     fn default() -> Self {
         Self {
             children: HashMap::new(),
@@ -56,26 +32,46 @@ impl<T> Default for TrieMapNode<T> {
     }
 }
 
-enum Compiled<T> {
-    Empty,
-    /// ZST path: real prefix trie — 0% false-positive rate.
-    TrieCheck {
-        root: TrieNode,
-        value: T,
-    },
-    /// Value-bearing path: prefix trie with values stored at nodes.
-    /// Priority: exact > star (most-specific) > dot (most-specific).
-    TrieMap {
-        root: TrieMapNode<T>,
-    },
+// ---------------------------------------------------------------------------
+// Sealed phase: sorted Vec children for compact memory + binary search.
+// ---------------------------------------------------------------------------
+
+struct SealedNode<T> {
+    children: Box<[(Box<str>, SealedNode<T>)]>,
+    exact_value: Option<T>,
+    star_value: Option<T>,
+    dot_value: Option<T>,
+}
+
+impl<T> BuildNode<T> {
+    fn into_sealed(self) -> SealedNode<T> {
+        let mut children: Vec<(Box<str>, SealedNode<T>)> = self
+            .children
+            .into_iter()
+            .map(|(k, v)| (k, v.into_sealed()))
+            .collect();
+        children.sort_by(|(a, _), (b, _)| a.as_bytes().cmp(b.as_bytes()));
+        SealedNode {
+            children: children.into_boxed_slice(),
+            exact_value: self.exact_value,
+            star_value: self.star_value,
+            dot_value: self.dot_value,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MatchKind {
+    Exact,
+    Star,
+    Dot,
 }
 
 impl<T: Clone + 'static> DomainTrie<T> {
     pub fn new() -> Self {
         DomainTrie {
-            entries: Mutex::new(Vec::new()),
+            state: TrieState::Building(BuildNode::default()),
             len: 0,
-            compiled: OnceLock::new(),
         }
     }
 
@@ -89,17 +85,8 @@ impl<T: Clone + 'static> DomainTrie<T> {
             if rest.is_empty() {
                 return false;
             }
-            let entries = self.entries.get_mut().unwrap();
-            entries.push(Entry {
-                base_domain: rest.to_string(),
-                value: data.clone(),
-                kind: MatchKind::Star,
-            });
-            entries.push(Entry {
-                base_domain: rest.to_string(),
-                value: data,
-                kind: MatchKind::Dot,
-            });
+            self.insert_into_tree(rest, data.clone(), MatchKind::Star);
+            self.insert_into_tree(rest, data, MatchKind::Dot);
             self.len += 2;
             return true;
         }
@@ -108,12 +95,7 @@ impl<T: Clone + 'static> DomainTrie<T> {
             if rest.is_empty() {
                 return false;
             }
-            let entries = self.entries.get_mut().unwrap();
-            entries.push(Entry {
-                base_domain: rest.to_string(),
-                value: data,
-                kind: MatchKind::Star,
-            });
+            self.insert_into_tree(rest, data, MatchKind::Star);
             self.len += 1;
             return true;
         }
@@ -122,24 +104,47 @@ impl<T: Clone + 'static> DomainTrie<T> {
             if rest.is_empty() {
                 return false;
             }
-            let entries = self.entries.get_mut().unwrap();
-            entries.push(Entry {
-                base_domain: rest.to_string(),
-                value: data,
-                kind: MatchKind::Dot,
-            });
+            self.insert_into_tree(rest, data, MatchKind::Dot);
             self.len += 1;
             return true;
         }
 
-        let entries = self.entries.get_mut().unwrap();
-        entries.push(Entry {
-            base_domain: domain,
-            value: data,
-            kind: MatchKind::Exact,
-        });
+        self.insert_into_tree(&domain, data, MatchKind::Exact);
         self.len += 1;
         true
+    }
+
+    fn insert_into_tree(&mut self, base_domain: &str, value: T, kind: MatchKind) {
+        let root = match &mut self.state {
+            TrieState::Building(root) => root,
+            TrieState::Sealed(_) => return,
+        };
+        let mut node = root;
+        for label in base_domain.rsplit('.') {
+            node = node.children.entry(label.into()).or_default();
+        }
+        match kind {
+            MatchKind::Exact => {
+                node.exact_value.get_or_insert(value);
+            }
+            MatchKind::Star => {
+                node.star_value.get_or_insert(value);
+            }
+            MatchKind::Dot => {
+                node.dot_value.get_or_insert(value);
+            }
+        }
+    }
+
+    /// Freeze the trie: convert HashMap children to sorted slices.
+    /// Frees the HashMap overhead. Idempotent.
+    pub fn seal(&mut self) {
+        if let TrieState::Building(_) = &self.state {
+            let old = std::mem::replace(&mut self.state, TrieState::Building(BuildNode::default()));
+            if let TrieState::Building(root) = old {
+                self.state = TrieState::Sealed(root.into_sealed());
+            }
+        }
     }
 
     pub fn search(&self, domain: &str) -> Option<&T> {
@@ -147,149 +152,92 @@ impl<T: Clone + 'static> DomainTrie<T> {
             return None;
         }
 
-        let compiled = self.compiled.get_or_init(|| self.compile());
-
         let trimmed = domain.trim();
         if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
             let lower = trimmed.to_ascii_lowercase();
-            Self::search_compiled(compiled, lower.trim_end_matches('.'))
+            self.search_inner(lower.trim_end_matches('.'))
         } else {
-            Self::search_compiled(compiled, trimmed.trim_end_matches('.'))
+            self.search_inner(trimmed.trim_end_matches('.'))
         }
     }
 
-    fn search_compiled<'a>(compiled: &'a Compiled<T>, query: &str) -> Option<&'a T> {
+    fn search_inner(&self, query: &str) -> Option<&T> {
         if query.is_empty() {
             return None;
         }
+        match &self.state {
+            TrieState::Building(root) => Self::search_build(root, query),
+            TrieState::Sealed(root) => Self::search_sealed(root, query),
+        }
+    }
 
-        match compiled {
-            Compiled::Empty => None,
-            Compiled::TrieCheck { root, value } => {
-                let labels: smallvec::SmallVec<[&str; 8]> = query.rsplit('.').collect();
-                let n = labels.len();
-                let mut node = root;
+    fn search_build<'a>(root: &'a BuildNode<T>, query: &str) -> Option<&'a T> {
+        let labels: smallvec::SmallVec<[&str; 8]> = query.rsplit('.').collect();
+        let n = labels.len();
+        let mut node = root;
+        let mut best: Option<&T> = None;
 
-                for (d, label) in labels.iter().enumerate() {
-                    match node.children.get(*label) {
-                        None => return None,
-                        Some(child) => {
-                            node = child;
-                            let remaining = n - d - 1;
-                            if remaining == 0 && node.exact {
-                                return Some(value);
-                            }
-                            if remaining == 1 && node.star {
-                                return Some(value);
-                            }
-                            if remaining > 0 && node.dot {
-                                return Some(value);
-                            }
+        for (d, label) in labels.iter().enumerate() {
+            match node.children.get(*label) {
+                None => break,
+                Some(child) => {
+                    node = child;
+                    let remaining = n - d - 1;
+                    if remaining == 0 {
+                        if let Some(ref v) = node.exact_value {
+                            return Some(v);
                         }
+                    } else if remaining == 1 {
+                        if let Some(ref v) = node.star_value {
+                            best = Some(v);
+                        } else if let Some(ref v) = node.dot_value {
+                            best = Some(v);
+                        }
+                    } else if let Some(ref v) = node.dot_value {
+                        best = Some(v);
                     }
                 }
-                None
-            }
-            Compiled::TrieMap { root } => {
-                let labels: smallvec::SmallVec<[&str; 8]> = query.rsplit('.').collect();
-                let n = labels.len();
-                let mut node = root;
-                let mut best: Option<&T> = None;
-
-                for (d, label) in labels.iter().enumerate() {
-                    match node.children.get(*label) {
-                        None => break,
-                        Some(child) => {
-                            node = child;
-                            let remaining = n - d - 1;
-                            if remaining == 0 {
-                                if let Some(ref v) = node.exact_value {
-                                    return Some(v);
-                                }
-                            } else if remaining == 1 {
-                                if let Some(ref v) = node.star_value {
-                                    best = Some(v);
-                                } else if let Some(ref v) = node.dot_value {
-                                    best = Some(v);
-                                }
-                            } else if let Some(ref v) = node.dot_value {
-                                best = Some(v);
-                            }
-                        }
-                    }
-                }
-                best
             }
         }
+        best
+    }
+
+    fn search_sealed<'a>(root: &'a SealedNode<T>, query: &str) -> Option<&'a T> {
+        let labels: smallvec::SmallVec<[&str; 8]> = query.rsplit('.').collect();
+        let n = labels.len();
+        let mut node = root;
+        let mut best: Option<&T> = None;
+
+        for (d, label) in labels.iter().enumerate() {
+            let found = node
+                .children
+                .binary_search_by(|(k, _)| k.as_bytes().cmp(label.as_bytes()));
+            match found {
+                Err(_) => break,
+                Ok(idx) => {
+                    node = &node.children[idx].1;
+                    let remaining = n - d - 1;
+                    if remaining == 0 {
+                        if let Some(ref v) = node.exact_value {
+                            return Some(v);
+                        }
+                    } else if remaining == 1 {
+                        if let Some(ref v) = node.star_value {
+                            best = Some(v);
+                        } else if let Some(ref v) = node.dot_value {
+                            best = Some(v);
+                        }
+                    } else if let Some(ref v) = node.dot_value {
+                        best = Some(v);
+                    }
+                }
+            }
+        }
+        best
     }
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
-    }
-
-    fn compile(&self) -> Compiled<T> {
-        let entries: Vec<Entry<T>> = {
-            let mut guard = self.entries.lock().unwrap();
-            std::mem::take(&mut *guard)
-        };
-
-        if entries.is_empty() {
-            return Compiled::Empty;
-        }
-
-        if std::mem::size_of::<T>() == 0 {
-            Self::compile_trie_check(&entries)
-        } else {
-            Self::compile_trie_map(entries)
-        }
-    }
-
-    fn compile_trie_map(entries: Vec<Entry<T>>) -> Compiled<T> {
-        let mut root = TrieMapNode::default();
-
-        for e in entries {
-            let mut node = &mut root;
-            for label in e.base_domain.rsplit('.') {
-                node = node.children.entry(label.into()).or_default();
-            }
-            match e.kind {
-                MatchKind::Exact => {
-                    node.exact_value.get_or_insert(e.value);
-                }
-                MatchKind::Star => {
-                    node.star_value.get_or_insert(e.value);
-                }
-                MatchKind::Dot => {
-                    node.dot_value.get_or_insert(e.value);
-                }
-            }
-        }
-
-        Compiled::TrieMap { root }
-    }
-
-    fn compile_trie_check(entries: &[Entry<T>]) -> Compiled<T> {
-        let mut root = TrieNode::default();
-
-        for e in entries {
-            let mut node = &mut root;
-            for label in e.base_domain.rsplit('.') {
-                node = node.children.entry(label.into()).or_default();
-            }
-            match e.kind {
-                MatchKind::Exact => node.exact = true,
-                MatchKind::Star => node.star = true,
-                MatchKind::Dot => node.dot = true,
-            }
-        }
-
-        // Safety: T is a ZST (size_of::<T>() == 0), all bit patterns are valid
-        let value = unsafe {
-            #[allow(clippy::uninit_assumed_init)]
-            std::mem::MaybeUninit::<T>::uninit().assume_init()
-        };
-
-        Compiled::TrieCheck { root, value }
     }
 }
 
@@ -396,6 +344,31 @@ mod proptests {
                     "ZST divergence on query {:?} with patterns {:?}",
                     q,
                     patterns
+                );
+            }
+        }
+
+        #[test]
+        fn sealed_matches_unsealed(
+            patterns in proptest::collection::vec(
+                "[a-z]{1,5}(\\.[a-z]{1,5}){0,3}|\\*\\.[a-z]{1,5}(\\.[a-z]{1,5}){0,2}",
+                1..=20,
+            ),
+            queries in proptest::collection::vec(
+                "[a-z]{1,5}(\\.[a-z]{1,5}){0,4}",
+                1..=10,
+            ),
+        ) {
+            let mut trie = build_trie(&patterns);
+            let unsealed_results: Vec<_> = queries.iter().map(|q| trie.search(q).copied()).collect();
+            trie.seal();
+            for (q, expected) in queries.iter().zip(unsealed_results.iter()) {
+                let sealed_result = trie.search(q).copied();
+                prop_assert_eq!(
+                    sealed_result,
+                    *expected,
+                    "sealed/unsealed divergence on query {:?}",
+                    q,
                 );
             }
         }
@@ -523,7 +496,6 @@ mod tests {
         let mut trie = DomainTrie::new();
         trie.insert(".com", 1);
         trie.insert(".google.com", 2);
-        // Most specific dot wins
         assert_eq!(trie.search("www.google.com"), Some(&2));
         assert_eq!(trie.search("foo.other.com"), Some(&1));
     }
@@ -533,9 +505,7 @@ mod tests {
         let mut trie = DomainTrie::new();
         trie.insert("*.example.com", 1);
         trie.insert(".example.com", 2);
-        // Star has priority over dot at the same level
         assert_eq!(trie.search("foo.example.com"), Some(&1));
-        // But dot still matches multi-level
         assert_eq!(trie.search("a.b.example.com"), Some(&2));
     }
 
@@ -544,5 +514,18 @@ mod tests {
         let trie: DomainTrie<i32> = DomainTrie::new();
         assert!(trie.is_empty());
         assert_eq!(trie.search("anything.com"), None);
+    }
+
+    #[test]
+    fn test_sealed_search() {
+        let mut trie = DomainTrie::new();
+        trie.insert("example.com", 1);
+        trie.insert("*.example.com", 2);
+        trie.insert(".example.com", 3);
+        trie.seal();
+        assert_eq!(trie.search("example.com"), Some(&1));
+        assert_eq!(trie.search("foo.example.com"), Some(&2));
+        assert_eq!(trie.search("a.b.example.com"), Some(&3));
+        assert_eq!(trie.search("other.com"), None);
     }
 }

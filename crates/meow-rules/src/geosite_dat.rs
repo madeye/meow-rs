@@ -201,22 +201,10 @@ pub fn from_dat_bytes(
         );
     }
 
-    let mut regex_sets: HashMap<String, regex::RegexSet> = HashMap::new();
-    for (cat, patterns) in regex_patterns {
-        match regex::RegexSet::new(&patterns) {
-            Ok(set) => {
-                regex_sets.insert(cat, set);
-            }
-            Err(e) => {
-                warn!("geosite.dat: failed to compile RegexSet for category '{cat}': {e}");
-            }
-        }
-    }
-
     Ok(GeositeDB::from_parts(
         categories,
         counts,
-        regex_sets,
+        regex_patterns,
         keyword_patterns,
     ))
 }
