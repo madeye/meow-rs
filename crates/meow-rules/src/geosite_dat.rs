@@ -15,15 +15,11 @@
 //! message GeoSiteList { repeated GeoSite entry = 1; }
 //! ```
 //!
-//! Domain.Type mapping into `DomainTrie`:
-//! - `Domain` (suffix, matches `value` AND `*.value`) → inserted as `+.value`
-//!   so the trie matches both the apex and any subdomain (consistent with
-//!   `GeositeDB::insert`-and-suffix semantics).
-//! - `Full` (exact match only) → inserted as `value` so the trie matches
-//!   only the apex label.
-//! - `Plain` (substring) and `Regex` are silently dropped — `DomainTrie`
-//!   has no representation for them. A warning summarising the skipped
-//!   count is emitted once per `from_dat_bytes` call.
+//! Domain.Type mapping:
+//! - `Domain` (suffix) → inserted as `+.value` into `DomainTrie`
+//! - `Full` (exact) → inserted as `value` into `DomainTrie`
+//! - `Plain` (substring/keyword) → stored in per-category keyword list
+//! - `Regex` → compiled into per-category `RegexSet`
 
 use std::collections::{HashMap, HashSet};
 
@@ -155,19 +151,17 @@ impl<'a> PbReader<'a> {
 /// Tally of skipped Domain entries — emitted as a single warn after parsing.
 #[derive(Default)]
 struct SkipStats {
-    plain: usize,
-    regex: usize,
     empty: usize,
+    bad_regex: usize,
 }
 
 /// Parse a V2Ray `geosite.dat` byte buffer into a fully-built [`GeositeDB`].
 ///
-/// `Plain` and `Regex` entries are skipped (see module docs). All `Domain`
-/// and `Full` entries are inserted into the per-category trie. Category
-/// names are lowercased to match `.mrs` semantics.
-///
-/// When `allowed` is `Some`, only categories whose lowercased name is in
-/// the set are loaded; all others are skipped. Pass `None` to load all.
+/// All four domain types are supported:
+/// - `Domain` (suffix) → inserted as `+.value` into the trie
+/// - `Full` (exact) → inserted as `value` into the trie
+/// - `Plain` (substring/keyword) → stored in per-category keyword list
+/// - `Regex` → compiled into per-category `RegexSet`
 pub fn from_dat_bytes(
     data: &[u8],
     allowed: Option<&HashSet<String>>,
@@ -175,9 +169,10 @@ pub fn from_dat_bytes(
     let mut r = PbReader::new(data);
     let mut categories: HashMap<String, DomainTrie<()>> = HashMap::new();
     let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut regex_patterns: HashMap<String, Vec<String>> = HashMap::new();
+    let mut keyword_patterns: HashMap<String, Vec<String>> = HashMap::new();
     let mut skipped = SkipStats::default();
 
-    // Top-level message is GeoSiteList: repeated GeoSite entry = 1.
     while !r.is_at_end() {
         let (field, wire) = r.read_tag()?;
         if field != FIELD_GEOSITELIST_ENTRY || wire != WIRE_LEN_DELIM {
@@ -189,26 +184,49 @@ pub fn from_dat_bytes(
             entry_bytes,
             &mut categories,
             &mut counts,
+            &mut regex_patterns,
+            &mut keyword_patterns,
             &mut skipped,
             allowed,
         )?;
     }
 
-    if skipped.plain + skipped.regex + skipped.empty > 0 {
+    if skipped.empty > 0 {
+        warn!("geosite.dat: skipped {} empty-value entries", skipped.empty);
+    }
+    if skipped.bad_regex > 0 {
         warn!(
-            "geosite.dat: skipped {} Plain (keyword), {} Regex, and {} empty-value entries — \
-             DomainTrie has no representation for substring/regex matching",
-            skipped.plain, skipped.regex, skipped.empty
+            "geosite.dat: skipped {} invalid regex patterns",
+            skipped.bad_regex
         );
     }
 
-    Ok(GeositeDB::from_parts(categories, counts))
+    let mut regex_sets: HashMap<String, regex::RegexSet> = HashMap::new();
+    for (cat, patterns) in regex_patterns {
+        match regex::RegexSet::new(&patterns) {
+            Ok(set) => {
+                regex_sets.insert(cat, set);
+            }
+            Err(e) => {
+                warn!("geosite.dat: failed to compile RegexSet for category '{cat}': {e}");
+            }
+        }
+    }
+
+    Ok(GeositeDB::from_parts(
+        categories,
+        counts,
+        regex_sets,
+        keyword_patterns,
+    ))
 }
 
 fn parse_geosite_entry<'a>(
     data: &'a [u8],
     categories: &mut HashMap<String, DomainTrie<()>>,
     counts: &mut HashMap<String, usize>,
+    regex_patterns: &mut HashMap<String, Vec<String>>,
+    keyword_patterns: &mut HashMap<String, Vec<String>>,
     skipped: &mut SkipStats,
     allowed: Option<&HashSet<String>>,
 ) -> Result<(), DatError> {
@@ -260,9 +278,11 @@ fn parse_geosite_entry<'a>(
     }
 
     let trie = categories.entry(country.clone()).or_default();
+    let regexes = regex_patterns.entry(country.clone()).or_default();
+    let keywords = keyword_patterns.entry(country.clone()).or_default();
     let mut count = counts.get(&country).copied().unwrap_or(0);
     for domain_bytes in deferred_domains {
-        if let Some(()) = apply_domain_entry(domain_bytes, trie, skipped)? {
+        if let Some(()) = apply_domain_entry(domain_bytes, trie, regexes, keywords, skipped)? {
             count += 1;
         }
     }
@@ -270,15 +290,15 @@ fn parse_geosite_entry<'a>(
     Ok(())
 }
 
-/// Parse a single `Domain` submessage and insert it into `trie`. Returns
-/// `Some(())` when an insert happened, `None` when the entry was skipped.
 fn apply_domain_entry(
     data: &[u8],
     trie: &mut DomainTrie<()>,
+    regexes: &mut Vec<String>,
+    keywords: &mut Vec<String>,
     skipped: &mut SkipStats,
 ) -> Result<Option<()>, DatError> {
     let mut r = PbReader::new(data);
-    let mut dom_type: u64 = DOMAIN_TYPE_DOMAIN; // proto3 default = 0 = Plain; explicit default kept clear
+    let mut dom_type: u64 = DOMAIN_TYPE_DOMAIN;
     let mut value: Option<String> = None;
     let mut saw_type = false;
 
@@ -300,7 +320,6 @@ fn apply_domain_entry(
         }
     }
 
-    // proto3 omits the field for zero values; an unset `type` means Plain.
     if !saw_type {
         dom_type = DOMAIN_TYPE_PLAIN;
     }
@@ -316,18 +335,19 @@ fn apply_domain_entry(
 
     match dom_type {
         DOMAIN_TYPE_PLAIN => {
-            skipped.plain += 1;
-            Ok(None)
+            keywords.push(value);
+            Ok(Some(()))
         }
         DOMAIN_TYPE_REGEX => {
-            skipped.regex += 1;
-            Ok(None)
+            if regex::Regex::new(&value).is_ok() {
+                regexes.push(value);
+                Ok(Some(()))
+            } else {
+                skipped.bad_regex += 1;
+                Ok(None)
+            }
         }
         DOMAIN_TYPE_DOMAIN => {
-            // V2Ray's `Domain` type matches the apex AND any subdomain.
-            // `DomainTrie`'s `+.value` form only covers subdomains, so we
-            // insert the apex (`value`) separately. The pair count as one
-            // logical entry — `inserted` only tracks the suffix insert.
             let pat = format!("+.{value}");
             let _ = trie.insert(&value, ());
             if trie.insert(&pat, ()) {
@@ -343,7 +363,7 @@ fn apply_domain_entry(
                 Ok(None)
             }
         }
-        _ => Ok(None), // unknown type — silently skip
+        _ => Ok(None),
     }
 }
 
@@ -425,21 +445,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_plain_and_regex_are_skipped() {
+    fn parse_plain_and_regex_are_matched() {
         let bytes = build_geosite_list(&[(
             "mixed",
             &[
                 (DOMAIN_TYPE_DOMAIN, "keep.com"),
-                (DOMAIN_TYPE_PLAIN, "drop-keyword"),
-                (DOMAIN_TYPE_REGEX, "^drop.*regex$"),
+                (DOMAIN_TYPE_PLAIN, "keyword"),
+                (DOMAIN_TYPE_REGEX, r"^drop.*regex$"),
                 (DOMAIN_TYPE_FULL, "exact.com"),
             ],
         )]);
         let db = from_dat_bytes(&bytes, None).expect("ok");
-        assert_eq!(db.domain_count("mixed"), Some(2));
+        assert_eq!(db.domain_count("mixed"), Some(4));
         assert!(db.lookup("mixed", "keep.com"));
         assert!(db.lookup("mixed", "exact.com"));
-        assert!(!db.lookup("mixed", "drop-keyword"));
+        assert!(db.lookup("mixed", "has-keyword-in-it.com"));
+        assert!(db.lookup("mixed", "drop-something-regex"));
+        assert!(!db.lookup("mixed", "nomatch.org"));
     }
 
     #[test]
