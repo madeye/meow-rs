@@ -1,6 +1,42 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn deserialize_string_or_seq<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct StringOrSeq;
+
+    impl<'de> Visitor<'de> for StringOrSeq {
+        type Value = Option<Vec<String>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a string or list of strings")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(vec![v.to_owned()]))
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element::<String>()? {
+                v.push(s);
+            }
+            Ok(Some(v))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrSeq)
+}
+
 /// `geodata:` YAML subsection — path overrides, download URLs, auto-update.
 ///
 /// Fields `geodata-mode`, `geodata-loader`, and `geoip-matcher` exist in
@@ -186,6 +222,7 @@ pub struct RawProxyGroup {
     pub use_providers: Option<Vec<String>>,
     pub filter: Option<String>,
     pub exclude_filter: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
     pub exclude_type: Option<Vec<String>>,
     pub include_all: Option<bool>,
     pub include_all_proxies: Option<bool>,
@@ -201,6 +238,7 @@ pub struct RawProxyProvider {
     pub interval: Option<u64>,
     pub filter: Option<String>,
     pub exclude_filter: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
     pub exclude_type: Option<Vec<String>>,
     pub health_check: Option<RawHealthCheck>,
 }
@@ -257,7 +295,75 @@ pub struct RawSniffer {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawSniffProtocol {
+    #[serde(default, deserialize_with = "deserialize_port_list")]
     pub ports: Option<Vec<u16>>,
+}
+
+fn deserialize_port_list<'de, D>(deserializer: D) -> Result<Option<Vec<u16>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, SeqAccess, Visitor};
+    use std::fmt;
+
+    struct PortListVisitor;
+
+    impl<'de> Visitor<'de> for PortListVisitor {
+        type Value = Option<Vec<u16>>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("a list of ports or port ranges (e.g. [80, \"8080-8880\"])")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut ports = Vec::new();
+            while let Some(item) = seq.next_element::<serde_yaml::Value>()? {
+                match item {
+                    serde_yaml::Value::Number(n) => {
+                        let p = n
+                            .as_u64()
+                            .and_then(|v| u16::try_from(v).ok())
+                            .ok_or_else(|| de::Error::custom(format!("invalid port: {n}")))?;
+                        ports.push(p);
+                    }
+                    serde_yaml::Value::String(s) => {
+                        if let Some((start_s, end_s)) = s.split_once('-') {
+                            let start: u16 = start_s.trim().parse().map_err(|_| {
+                                de::Error::custom(format!("invalid port range start: {start_s}"))
+                            })?;
+                            let end: u16 = end_s.trim().parse().map_err(|_| {
+                                de::Error::custom(format!("invalid port range end: {end_s}"))
+                            })?;
+                            if start > end {
+                                return Err(de::Error::custom(format!(
+                                    "invalid port range: {start}-{end}"
+                                )));
+                            }
+                            ports.extend(start..=end);
+                        } else {
+                            let p: u16 = s
+                                .trim()
+                                .parse()
+                                .map_err(|_| de::Error::custom(format!("invalid port: {s}")))?;
+                            ports.push(p);
+                        }
+                    }
+                    other => {
+                        return Err(de::Error::custom(format!(
+                            "expected port number or range string, got: {other:?}"
+                        )));
+                    }
+                }
+            }
+            Ok(Some(ports))
+        }
+    }
+
+    deserializer.deserialize_any(PortListVisitor)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

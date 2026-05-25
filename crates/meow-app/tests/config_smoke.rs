@@ -104,30 +104,45 @@ async fn load_realworld_config_parses_without_error() {
     );
 }
 
-/// Verbatim community config with three known unsupported forms preserved:
+/// Verbatim community config — all three previously unsupported forms now parse:
 ///
 ///   1. `sniffer.sniff.HTTP.ports: [80, 8080-8880]` — port-range literal.
 ///   2. `exclude-type: direct` — scalar (vs. `[direct]`).
-///   3. `default-nameserver: tls://...` — TLS bootstrap, rejected per ADR-0002.
+///   3. `default-nameserver: tls://...` — TLS IP-literal (no bootstrap loop).
 ///
-/// Today the parser must reject this config. When any of the three gaps is
-/// closed, flip this to a success assertion and document which gap shipped.
-#[tokio::test]
-async fn load_realworld_verbatim_config_currently_fails() {
-    let result = meow_config::load_config_from_str(REALWORLD_VERBATIM_YAML).await;
-    let Err(err) = result else {
-        panic!(
-            "verbatim community config now parses — update the patches table \
-             in fixtures/realworld_clash_meta.yaml and convert this test to \
-             a success assertion"
-        );
-    };
-    let msg = format!("{err:#}").to_lowercase();
+/// This test only verifies YAML deserialization (no DNS bootstrap / network).
+#[test]
+fn load_realworld_verbatim_config_deserializes() {
+    let mut value: serde_yaml::Value =
+        serde_yaml::from_str(REALWORLD_VERBATIM_YAML).expect("valid YAML");
+    value.apply_merge().expect("merge keys");
+    let raw: meow_config::raw::RawConfig =
+        serde_yaml::from_value(value).expect("verbatim config should deserialize");
+
+    assert!(raw.proxy_groups.is_some());
+    let groups = raw.proxy_groups.as_ref().unwrap();
+    let hk = groups.iter().find(|g| g.name == "香港").unwrap();
+    assert_eq!(
+        hk.exclude_type,
+        Some(vec!["direct".to_string()]),
+        "scalar exclude-type should deserialize as single-element vec"
+    );
+
+    let sniff = raw.sniffer.as_ref().unwrap().sniff.as_ref().unwrap();
+    let http_ports = &sniff.get("HTTP").unwrap().ports;
     assert!(
-        msg.contains("8080-8880")
-            || msg.contains("exclude-type")
-            || msg.contains("tls://")
-            || msg.contains("default-nameserver"),
-        "parse failure should point at one of the three known gaps; got: {err:#}"
+        http_ports.as_ref().unwrap().contains(&8080),
+        "port range should expand to include 8080"
+    );
+    assert!(
+        http_ports.as_ref().unwrap().contains(&8880),
+        "port range should expand to include 8880"
+    );
+
+    let dns = raw.dns.as_ref().unwrap();
+    let default_ns = dns.default_nameserver.as_ref().unwrap();
+    assert!(
+        default_ns.iter().any(|s| s.starts_with("tls://")),
+        "tls:// entries should survive deserialization"
     );
 }
