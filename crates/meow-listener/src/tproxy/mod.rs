@@ -5,6 +5,7 @@ use crate::sniffer::SnifferRuntime;
 use firewall::FirewallGuard;
 use meow_common::{ConnType, Metadata, Network};
 use meow_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
+use smallvec::smallvec;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -209,7 +210,7 @@ async fn handle_tproxy_conn(
         metadata.pure(),
         rule_name,
         rule_payload,
-        vec![Arc::from(proxy.name())],
+        smallvec![Arc::from(proxy.name())],
     );
 
     // Relay buffers on the future's stack — zero per-relay heap allocation (ADR-0011 T6).

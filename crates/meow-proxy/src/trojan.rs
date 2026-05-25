@@ -88,19 +88,19 @@ impl TrojanAdapter {
         }
     }
 
-    fn build_header(&self, metadata: &Metadata, cmd: u8) -> Vec<u8> {
-        // Worst case: 56 (hex password) + 2 (CRLF) + 1 (cmd) + 1+255 (FQDN) + 2 (port) + 2 (CRLF) = 319 B.
-        let mut buf = Vec::with_capacity(320);
-        // hex password + CRLF
-        buf.extend_from_slice(self.hex_password.as_bytes());
-        buf.extend_from_slice(b"\r\n");
-        // command byte
-        buf.push(cmd);
-        // SOCKS5 address format
-        encode_socks5_addr_from_metadata(&mut buf, metadata);
-        // CRLF
-        buf.extend_from_slice(b"\r\n");
-        buf
+    fn build_header<'a>(&self, metadata: &Metadata, cmd: u8, out: &'a mut [u8; 320]) -> &'a [u8] {
+        let pw = self.hex_password.as_bytes();
+        let mut pos = 0;
+        out[..pw.len()].copy_from_slice(pw);
+        pos += pw.len();
+        out[pos..pos + 2].copy_from_slice(b"\r\n");
+        pos += 2;
+        out[pos] = cmd;
+        pos += 1;
+        pos = encode_socks5_addr_from_metadata_buf(out, pos, metadata);
+        out[pos..pos + 2].copy_from_slice(b"\r\n");
+        pos += 2;
+        &out[..pos]
     }
 
     /// Open a TLS stream and write the Trojan request header.
@@ -119,16 +119,53 @@ impl TrojanAdapter {
             .await
             .map_err(transport_to_proxy_err)?;
 
-        let header = self.build_header(metadata, cmd);
-        stream.write_all(&header).await.map_err(MeowError::Io)?;
+        let mut hdr_buf = [0u8; 320];
+        let header = self.build_header(metadata, cmd, &mut hdr_buf);
+        stream.write_all(header).await.map_err(MeowError::Io)?;
         Ok(stream)
     }
 }
 
-/// Append a SOCKS5 address (ATYP + ADDR + PORT) drawn from `metadata` onto `buf`.
-///
-/// Used for both the request header and per-packet UDP frames.  Domain takes
-/// precedence over IP — same priority as `Metadata::remote_address`.
+fn encode_socks5_addr_from_metadata_buf(
+    buf: &mut [u8; 320],
+    mut pos: usize,
+    metadata: &Metadata,
+) -> usize {
+    if !metadata.host.is_empty() {
+        let host_bytes = metadata.host.as_bytes();
+        buf[pos] = ATYP_DOMAIN;
+        pos += 1;
+        buf[pos] = host_bytes.len() as u8;
+        pos += 1;
+        buf[pos..pos + host_bytes.len()].copy_from_slice(host_bytes);
+        pos += host_bytes.len();
+    } else if let Some(ip) = metadata.dst_ip {
+        match ip {
+            IpAddr::V4(v4) => {
+                buf[pos] = ATYP_IPV4;
+                pos += 1;
+                buf[pos..pos + 4].copy_from_slice(&v4.octets());
+                pos += 4;
+            }
+            IpAddr::V6(v6) => {
+                buf[pos] = ATYP_IPV6;
+                pos += 1;
+                buf[pos..pos + 16].copy_from_slice(&v6.octets());
+                pos += 16;
+            }
+        }
+    } else {
+        buf[pos] = ATYP_IPV4;
+        pos += 1;
+        buf[pos..pos + 4].copy_from_slice(&[0, 0, 0, 0]);
+        pos += 4;
+    }
+    let port_bytes = metadata.dst_port.to_be_bytes();
+    buf[pos..pos + 2].copy_from_slice(&port_bytes);
+    pos + 2
+}
+
+#[cfg(test)]
 fn encode_socks5_addr_from_metadata(buf: &mut Vec<u8>, metadata: &Metadata) {
     if !metadata.host.is_empty() {
         buf.push(ATYP_DOMAIN);

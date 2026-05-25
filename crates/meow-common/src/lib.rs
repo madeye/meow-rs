@@ -18,7 +18,7 @@ pub use auth::{AuthConfig, Credentials};
 pub use conn::{ProxyConn, ProxyPacketConn, UdpPacket};
 pub use dns_mode::DnsMode;
 pub use error::{MeowError, Result};
-pub use metadata::Metadata;
+pub use metadata::{AddrDisplay, Metadata};
 pub use network::Network;
 pub use process_lookup::{find_process, ProcessInfo};
 pub use rule::{Rule, RuleMatchHelper, RuleType};

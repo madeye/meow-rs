@@ -2,6 +2,7 @@ use crate::relay::{copy_bidirectional_buf, RELAY_BUF_SIZE};
 use crate::statistics::Statistics;
 use crate::tunnel::TunnelInner;
 use meow_common::{Metadata, ProxyConn};
+use smallvec::{smallvec, SmallVec};
 use smol_str::SmolStr;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -31,7 +32,7 @@ impl<'a> ConnectionGuard<'a> {
         metadata: Metadata,
         rule: SmolStr,
         rule_payload: SmolStr,
-        chains: Vec<Arc<str>>,
+        chains: SmallVec<[Arc<str>; 1]>,
     ) -> Self {
         let id = stats.track_connection(metadata, rule, rule_payload, chains);
         Self { stats, id }
@@ -84,7 +85,7 @@ pub async fn handle_tcp(
         metadata.pure(),
         rule_name,
         rule_payload,
-        vec![Arc::from(proxy.name())],
+        smallvec![Arc::from(proxy.name())],
     );
 
     // Declare relay buffers on the future's stack frame — zero per-relay heap
@@ -141,7 +142,7 @@ mod tests {
                 metadata(),
                 SmolStr::new_static("DOMAIN"),
                 SmolStr::new_static("example.com"),
-                vec![],
+                smallvec![],
             );
             assert_eq!(stats.active_connection_count(), 1, "entry tracked");
         }
@@ -161,7 +162,7 @@ mod tests {
                 metadata(),
                 SmolStr::new_static("DOMAIN"),
                 SmolStr::new_static("example.com"),
-                vec![],
+                smallvec![],
             );
             assert_eq!(stats.active_connection_count(), 1);
             panic!("simulating mid-relay abort");
@@ -182,14 +183,14 @@ mod tests {
             metadata(),
             SmolStr::new_static("DOMAIN"),
             SmolStr::new_static("a"),
-            vec![],
+            smallvec![],
         );
         let g2 = ConnectionGuard::track(
             &stats,
             metadata(),
             SmolStr::new_static("DOMAIN"),
             SmolStr::new_static("b"),
-            vec![],
+            smallvec![],
         );
         assert_eq!(stats.active_connection_count(), 2);
         drop(g1);

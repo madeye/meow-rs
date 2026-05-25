@@ -19,6 +19,8 @@ arc-swap = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 smol_str = { workspace = true }
+smallvec = { workspace = true }
+itoa = "1"
 
 [[bench]]
 name = "udp_bench"

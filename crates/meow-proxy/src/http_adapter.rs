@@ -25,6 +25,7 @@ use base64::Engine as _;
 use meow_common::{
     AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
 };
+use std::fmt;
 use std::fmt::Write as _;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::debug;
@@ -106,11 +107,14 @@ impl HttpAdapter {
     ///
     /// On success the stream is ready for tunnelled application data.
     /// On failure returns the appropriate `MeowError` variant.
-    async fn run_connect<S>(&self, stream: &mut S, target: &str) -> Result<()>
+    async fn run_connect<S>(
+        &self,
+        stream: &mut S,
+        target: &(dyn fmt::Display + Send + Sync),
+    ) -> Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        // ── Build request ─────────────────────────────────────────────────────
         let mut req = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
 
         if let Some((user, pass)) = &self.auth {
@@ -233,19 +237,12 @@ impl ProxyAdapter for HttpAdapter {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Build the `host:port` target string from metadata.
+/// Zero-alloc display wrapper for `host:port` from metadata.
 ///
 /// Prefers `metadata.host` (domain name) over raw IP; this preserves the
 /// domain name for SNI and logging on the upstream proxy.
-fn connect_target(metadata: &Metadata) -> String {
-    if !metadata.host.is_empty() {
-        format!("{}:{}", metadata.host, metadata.dst_port)
-    } else if let Some(ip) = metadata.dst_ip {
-        format!("{}:{}", ip, metadata.dst_port)
-    } else {
-        // Unreachable in practice — tunnel has always validated metadata.
-        format!(":{}", metadata.dst_port)
-    }
+fn connect_target(metadata: &Metadata) -> meow_common::AddrDisplay<'_> {
+    metadata.remote_address()
 }
 
 /// Parse `"HTTP/1.x NNN ..."` → status code as `u16`.

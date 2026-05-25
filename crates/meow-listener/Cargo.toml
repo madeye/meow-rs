@@ -19,6 +19,7 @@ base64 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 libc = "0.2"
+smallvec = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

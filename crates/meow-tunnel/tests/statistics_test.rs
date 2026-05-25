@@ -1,5 +1,6 @@
 use meow_common::Metadata;
 use meow_tunnel::Statistics;
+use smallvec::smallvec;
 use std::sync::Arc;
 
 #[test]
@@ -56,7 +57,7 @@ fn test_track_connection() {
         metadata,
         smol_str::SmolStr::new_static("DOMAIN-SUFFIX"),
         smol_str::SmolStr::new_static("google.com"),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
 
     assert!(!id.is_nil());
@@ -77,7 +78,7 @@ fn test_close_connection() {
         metadata,
         smol_str::SmolStr::new_static("MATCH"),
         smol_str::SmolStr::new_static(""),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
     assert_eq!(stats.active_connections().len(), 1);
 
@@ -101,19 +102,19 @@ fn test_multiple_connections() {
         Metadata::default(),
         smol_str::SmolStr::new_static("DOMAIN"),
         smol_str::SmolStr::new_static("a.com"),
-        vec![Arc::from("proxy1")],
+        smallvec![Arc::from("proxy1")],
     );
     let id2 = stats.track_connection(
         Metadata::default(),
         smol_str::SmolStr::new_static("DOMAIN"),
         smol_str::SmolStr::new_static("b.com"),
-        vec![Arc::from("proxy2")],
+        smallvec![Arc::from("proxy2")],
     );
     let id3 = stats.track_connection(
         Metadata::default(),
         smol_str::SmolStr::new_static("MATCH"),
         smol_str::SmolStr::new_static(""),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
 
     assert_eq!(stats.active_connections().len(), 3);
@@ -136,13 +137,13 @@ fn test_connection_unique_ids() {
         Metadata::default(),
         smol_str::SmolStr::new_static("MATCH"),
         smol_str::SmolStr::new_static(""),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
     let id2 = stats.track_connection(
         Metadata::default(),
         smol_str::SmolStr::new_static("MATCH"),
         smol_str::SmolStr::new_static(""),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
     assert_ne!(id1, id2, "Connection IDs must be unique");
 }
@@ -154,7 +155,7 @@ fn test_connection_has_start_time() {
         Metadata::default(),
         smol_str::SmolStr::new_static("MATCH"),
         smol_str::SmolStr::new_static(""),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
 
     let conns = stats.active_connections();
@@ -174,7 +175,7 @@ fn test_connection_chains() {
         Metadata::default(),
         smol_str::SmolStr::new_static("DOMAIN"),
         smol_str::SmolStr::new_static("example.com"),
-        vec![Arc::from("proxy-group"), Arc::from("ss-server")],
+        smallvec![Arc::from("proxy-group"), Arc::from("ss-server")],
     );
 
     let conns = stats.active_connections();

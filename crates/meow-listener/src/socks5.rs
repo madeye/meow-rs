@@ -1,6 +1,7 @@
 use crate::sniffer::SnifferRuntime;
 use meow_common::{AuthConfig, ConnType, Metadata, Network};
 use meow_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
+use smallvec::smallvec;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -184,7 +185,7 @@ async fn handle_socks5_inner(
         metadata.pure(),
         rule_name,
         rule_payload,
-        vec![Arc::from(proxy.name())],
+        smallvec![Arc::from(proxy.name())],
     );
 
     // Relay buffers on the future's stack — zero per-relay heap allocation (ADR-0011 T6).

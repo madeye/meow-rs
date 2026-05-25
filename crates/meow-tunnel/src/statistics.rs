@@ -18,6 +18,7 @@
 use dashmap::DashMap;
 use meow_common::Metadata;
 use serde::Serialize;
+use smallvec::SmallVec;
 use smol_str::SmolStr;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -61,9 +62,9 @@ pub struct ConnectionInfo {
     pub metadata: Arc<Metadata>,
     pub upload: i64,
     pub download: i64,
-    pub start: String,
+    pub start: SmolStr,
     /// Proxy chain; ref-counted so proxy-name strings are shared across entries.
-    pub chains: Vec<Arc<str>>,
+    pub chains: SmallVec<[Arc<str>; 1]>,
     /// Rule type that matched this connection (e.g. `"DOMAIN-SUFFIX"`).
     /// `SmolStr` so common short names inline (no heap on the connection
     /// hot path).
@@ -105,7 +106,7 @@ impl Statistics {
         metadata: Metadata,
         rule: SmolStr,
         rule_payload: SmolStr,
-        chains: Vec<Arc<str>>,
+        chains: SmallVec<[Arc<str>; 1]>,
     ) -> Uuid {
         let uuid = Uuid::new_v4();
         let info = ConnectionInfo {
@@ -152,10 +153,11 @@ impl Default for Statistics {
     }
 }
 
-fn chrono_now() -> String {
-    // Simple ISO timestamp without chrono dependency
-    let now = std::time::SystemTime::now()
+fn chrono_now() -> SmolStr {
+    let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}", now.as_secs())
+        .unwrap_or_default()
+        .as_secs();
+    let mut buf = itoa::Buffer::new();
+    SmolStr::new(buf.format(secs))
 }

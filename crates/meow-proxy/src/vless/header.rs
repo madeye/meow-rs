@@ -42,7 +42,8 @@ pub(crate) enum VlessAddr {
     Ipv4([u8; 4]),
     Ipv6([u8; 16]),
     /// UTF-8 domain name; max 255 bytes enforced at construction.
-    Domain(String),
+    /// Uses `SmolStr` — domains ≤23 bytes inline without heap allocation.
+    Domain(smol_str::SmolStr),
 }
 
 impl VlessAddr {
@@ -59,7 +60,7 @@ impl VlessAddr {
                 s.len()
             ));
         }
-        Ok(VlessAddr::Domain(s.to_string()))
+        Ok(VlessAddr::Domain(smol_str::SmolStr::new(s)))
     }
 }
 
@@ -68,15 +69,14 @@ impl VlessAddr {
 /// Prefers `host` (domain), falls back to `dst_ip`.
 pub(crate) fn addr_from_metadata(m: &Metadata) -> VlessAddr {
     if !m.host.is_empty() {
-        // Metadata hosts are already validated (or we fail at encode time at worst).
-        VlessAddr::Domain(m.host.to_string())
+        VlessAddr::Domain(m.host.clone())
     } else if let Some(ip) = m.dst_ip {
         match ip {
             std::net::IpAddr::V4(v4) => VlessAddr::Ipv4(v4.octets()),
             std::net::IpAddr::V6(v6) => VlessAddr::Ipv6(v6.octets()),
         }
     } else {
-        VlessAddr::Domain(String::new())
+        VlessAddr::Domain(smol_str::SmolStr::default())
     }
 }
 

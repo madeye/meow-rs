@@ -8,6 +8,7 @@ use meow_dns::Resolver;
 use meow_trie::DomainTrie;
 use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
+use smallvec::smallvec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -2238,7 +2239,7 @@ async fn delete_connection_by_id_returns_204_and_removes_entry() {
         meta,
         smol_str::SmolStr::new_static("DOMAIN"),
         smol_str::SmolStr::new_static("example.com"),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
 
     // Verify the connection shows up in GET /connections.
@@ -2303,13 +2304,13 @@ async fn delete_all_connections_clears_all() {
         meta(),
         smol_str::SmolStr::new_static("MATCH"),
         smol_str::SmolStr::default(),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
     stats.track_connection(
         meta(),
         smol_str::SmolStr::new_static("MATCH"),
         smol_str::SmolStr::default(),
-        vec![Arc::from("DIRECT")],
+        smallvec![Arc::from("DIRECT")],
     );
 
     let app = create_router(Arc::clone(&state));

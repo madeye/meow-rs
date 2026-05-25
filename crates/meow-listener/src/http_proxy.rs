@@ -2,6 +2,7 @@ use crate::sniffer::SnifferRuntime;
 use base64::Engine;
 use meow_common::{AuthConfig, ConnType, Metadata, Network};
 use meow_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
+use smallvec::smallvec;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -176,7 +177,7 @@ async fn handle_http_inner(
             metadata.pure(),
             rule_name,
             rule_payload,
-            vec![Arc::from(proxy.name())],
+            smallvec![Arc::from(proxy.name())],
         );
 
         match proxy.dial_tcp(&metadata).await {
@@ -256,7 +257,7 @@ async fn handle_http_inner(
             metadata.pure(),
             rule_name,
             rule_payload,
-            vec![Arc::from(proxy.name())],
+            smallvec![Arc::from(proxy.name())],
         );
 
         match proxy.dial_tcp(&metadata).await {

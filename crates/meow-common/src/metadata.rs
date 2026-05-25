@@ -85,22 +85,81 @@ impl Default for Metadata {
     }
 }
 
-impl Metadata {
-    pub fn remote_address(&self) -> String {
-        if !self.host.is_empty() {
-            format!("{}:{}", self.host, self.dst_port)
-        } else if let Some(ip) = self.dst_ip {
-            SocketAddr::new(ip, self.dst_port).to_string()
-        } else {
-            format!(":{}", self.dst_port)
+pub struct AddrDisplay<'a> {
+    host: &'a str,
+    ip: Option<IpAddr>,
+    port: u16,
+}
+
+impl fmt::Debug for AddrDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+impl PartialEq<&str> for AddrDisplay<'_> {
+    fn eq(&self, other: &&str) -> bool {
+        use std::fmt::Write;
+        let mut buf = CompactAddrBuf::new();
+        let _ = write!(buf, "{self}");
+        buf.as_str() == *other
+    }
+}
+
+struct CompactAddrBuf {
+    buf: [u8; 64],
+    len: usize,
+}
+
+impl CompactAddrBuf {
+    fn new() -> Self {
+        Self {
+            buf: [0u8; 64],
+            len: 0,
         }
     }
 
-    pub fn source_address(&self) -> String {
-        if let Some(ip) = self.src_ip {
-            SocketAddr::new(ip, self.src_port).to_string()
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+}
+
+impl std::fmt::Write for CompactAddrBuf {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let remaining = self.buf.len() - self.len;
+        let to_copy = s.len().min(remaining);
+        self.buf[self.len..self.len + to_copy].copy_from_slice(&s.as_bytes()[..to_copy]);
+        self.len += to_copy;
+        Ok(())
+    }
+}
+
+impl fmt::Display for AddrDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.host.is_empty() {
+            write!(f, "{}:{}", self.host, self.port)
+        } else if let Some(ip) = self.ip {
+            fmt::Display::fmt(&SocketAddr::new(ip, self.port), f)
         } else {
-            format!(":{}", self.src_port)
+            write!(f, ":{}", self.port)
+        }
+    }
+}
+
+impl Metadata {
+    pub fn remote_address(&self) -> AddrDisplay<'_> {
+        AddrDisplay {
+            host: &self.host,
+            ip: self.dst_ip,
+            port: self.dst_port,
+        }
+    }
+
+    pub fn source_address(&self) -> AddrDisplay<'_> {
+        AddrDisplay {
+            host: "",
+            ip: self.src_ip,
+            port: self.src_port,
         }
     }
 

@@ -161,11 +161,15 @@ impl Socks5Adapter {
             &[METHOD_NO_AUTH]
         };
 
-        let mut greeting = Vec::with_capacity(2 + methods.len());
-        greeting.push(VERSION);
-        greeting.push(methods.len() as u8);
-        greeting.extend_from_slice(methods);
-        stream.write_all(&greeting).await.map_err(MeowError::Io)?;
+        let greeting_len = 2 + methods.len();
+        let mut greeting = [0u8; 4];
+        greeting[0] = VERSION;
+        greeting[1] = methods.len() as u8;
+        greeting[2..greeting_len].copy_from_slice(methods);
+        stream
+            .write_all(&greeting[..greeting_len])
+            .await
+            .map_err(MeowError::Io)?;
 
         let mut server_choice = [0u8; 2];
         stream
@@ -196,13 +200,17 @@ impl Socks5Adapter {
                 .as_ref()
                 .expect("auth set when METHOD_USER_PASS offered");
 
-            let mut auth_req = Vec::with_capacity(3 + user.len() + pass.len());
-            auth_req.push(AUTH_VERSION);
-            auth_req.push(user.len() as u8);
-            auth_req.extend_from_slice(user.as_bytes());
-            auth_req.push(pass.len() as u8);
-            auth_req.extend_from_slice(pass.as_bytes());
-            stream.write_all(&auth_req).await.map_err(MeowError::Io)?;
+            let auth_len = 3 + user.len() + pass.len();
+            let mut auth_buf = [0u8; 515];
+            auth_buf[0] = AUTH_VERSION;
+            auth_buf[1] = user.len() as u8;
+            auth_buf[2..2 + user.len()].copy_from_slice(user.as_bytes());
+            auth_buf[2 + user.len()] = pass.len() as u8;
+            auth_buf[3 + user.len()..auth_len].copy_from_slice(pass.as_bytes());
+            stream
+                .write_all(&auth_buf[..auth_len])
+                .await
+                .map_err(MeowError::Io)?;
 
             let mut auth_resp = [0u8; 2];
             stream
@@ -220,17 +228,25 @@ impl Socks5Adapter {
         // Prefer domain name (atyp 0x03) when metadata.host is set;
         // fall back to IPv4/IPv6 literal otherwise.
         // upstream: socks5.go — uses hostname when available, NOT IP-only dial.
-        let mut req = vec![VERSION, CMD_CONNECT, RESERVED];
+        let mut req_buf = [0u8; 262];
+        req_buf[0] = VERSION;
+        req_buf[1] = CMD_CONNECT;
+        req_buf[2] = RESERVED;
+        let mut pos = 3;
 
         if target_host.is_empty() {
             match target_ip {
                 Some(IpAddr::V4(v4)) => {
-                    req.push(ATYP_IPV4);
-                    req.extend_from_slice(&v4.octets());
+                    req_buf[pos] = ATYP_IPV4;
+                    pos += 1;
+                    req_buf[pos..pos + 4].copy_from_slice(&v4.octets());
+                    pos += 4;
                 }
                 Some(IpAddr::V6(v6)) => {
-                    req.push(ATYP_IPV6);
-                    req.extend_from_slice(&v6.octets());
+                    req_buf[pos] = ATYP_IPV6;
+                    pos += 1;
+                    req_buf[pos..pos + 16].copy_from_slice(&v6.octets());
+                    pos += 16;
                 }
                 None => {
                     return Err(MeowError::Proxy(
@@ -239,16 +255,22 @@ impl Socks5Adapter {
                 }
             }
         } else {
-            // atyp 0x03: domain name
             let host_bytes = target_host.as_bytes();
-            req.push(ATYP_DOMAIN);
-            req.push(host_bytes.len() as u8);
-            req.extend_from_slice(host_bytes);
+            req_buf[pos] = ATYP_DOMAIN;
+            pos += 1;
+            req_buf[pos] = host_bytes.len() as u8;
+            pos += 1;
+            req_buf[pos..pos + host_bytes.len()].copy_from_slice(host_bytes);
+            pos += host_bytes.len();
         }
 
-        req.push((target_port >> 8) as u8);
-        req.push((target_port & 0xFF) as u8);
-        stream.write_all(&req).await.map_err(MeowError::Io)?;
+        req_buf[pos] = (target_port >> 8) as u8;
+        req_buf[pos + 1] = (target_port & 0xFF) as u8;
+        pos += 2;
+        stream
+            .write_all(&req_buf[..pos])
+            .await
+            .map_err(MeowError::Io)?;
 
         // ── Step 4: CONNECT response ──────────────────────────────────────────
         // [0x05, rep, 0x00, atyp, bnd_addr..., bnd_port_hi, bnd_port_lo]

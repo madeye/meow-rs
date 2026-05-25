@@ -47,6 +47,7 @@ parking_lot = { workspace = true }
 serde_json = { workspace = true }
 socket2 = { workspace = true }
 libc = "0.2"
+smol_str = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -57,7 +58,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
-smol_str = { workspace = true }
 
 [lints]
 workspace = true
