@@ -202,11 +202,21 @@ fn url_to_plain_socketaddr(url: &NameServerUrl) -> SocketAddr {
         NameServerUrl::Udp { addr, port } | NameServerUrl::Tcp { addr, port } => {
             let ip = match addr {
                 HostOrIp::Ip(ip) => *ip,
-                HostOrIp::Host(_) => unreachable!("default_ns must be plain IPs"),
+                HostOrIp::Host(_) => {
+                    unreachable!("default_ns hostname entries should have been rejected")
+                }
             };
             SocketAddr::new(ip, *port)
         }
-        _ => unreachable!("default_ns must be plain"),
+        NameServerUrl::Tls { addr, .. } | NameServerUrl::Https { addr, .. } => {
+            let ip = match addr {
+                HostOrIp::Ip(ip) => *ip,
+                HostOrIp::Host(_) => {
+                    unreachable!("default_ns hostname entries should have been rejected")
+                }
+            };
+            SocketAddr::new(ip, 53)
+        }
     }
 }
 
@@ -447,9 +457,10 @@ impl Resolver {
         let main_urls: Vec<NameServerUrl> = main_urls.into_iter().map(|e| e.url).collect();
         let fallback_urls: Vec<NameServerUrl> = fallback_urls.into_iter().map(|e| e.url).collect();
         let default_ns: Vec<NameServerUrl> = default_ns.into_iter().map(|e| e.url).collect();
-        // Step 1: Validate default_ns — only plain entries allowed.
+        // Step 1: Validate default_ns — encrypted entries are only allowed
+        // when they use IP literals (no bootstrap loop).
         for ns in &default_ns {
-            if !ns.is_plain() {
+            if !ns.is_plain() && ns.needs_bootstrap().is_some() {
                 return Err(BootstrapError::DefaultNameserverNotPlain {
                     entry: ns.to_string(),
                 });
@@ -486,10 +497,9 @@ impl Resolver {
                 .iter()
                 .map(|ns| {
                     let addr = url_to_plain_socketaddr(ns);
-                    let c = if matches!(ns, NameServerUrl::Tcp { .. }) {
-                        DnsClient::tcp(addr)
-                    } else {
-                        DnsClient::udp(addr)
+                    let c = match ns {
+                        NameServerUrl::Tcp { .. } => DnsClient::tcp(addr),
+                        _ => DnsClient::udp(addr),
                     };
                     Arc::new(c.with_timeout(Duration::from_secs(3)))
                 })
@@ -999,11 +1009,10 @@ mod tests {
         );
     }
 
-    // B5: Tls in default_ns → DefaultNameserverNotPlain.
-    // Upstream: allows encrypted in default-nameserver (creates bootstrap loop). NOT accepted — Class A per ADR-0002.
+    // B5: Tls hostname in default_ns → DefaultNameserverNotPlain (bootstrap loop).
     #[tokio::test]
-    async fn bootstrap_rejects_encrypted_default_ns() {
-        let default_ns = vec![NameServerUrl::parse("tls://8.8.8.8:853#dns.google").unwrap()];
+    async fn bootstrap_rejects_encrypted_hostname_default_ns() {
+        let default_ns = vec![NameServerUrl::parse("tls://dns.google:853").unwrap()];
         let hosts = DomainTrie::new();
         let err = Resolver::new_with_bootstrap(
             vec![],
@@ -1024,11 +1033,33 @@ mod tests {
         );
     }
 
-    // B6: Https in default_ns → same error.
+    // B5b: Tls IP-literal in default_ns → accepted (no bootstrap loop).
     #[tokio::test]
-    async fn bootstrap_rejects_https_in_default_ns() {
+    async fn bootstrap_accepts_encrypted_ip_literal_default_ns() {
+        let default_ns = vec![NameServerUrl::parse("tls://8.8.8.8:853#dns.google").unwrap()];
+        let hosts = DomainTrie::new();
+        let result = Resolver::new_with_bootstrap(
+            vec![],
+            vec![],
+            default_ns,
+            DnsMode::Normal,
+            hosts,
+            true,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "tls:// IP-literal in default_ns must be accepted"
+        );
+    }
+
+    // B6: Https hostname in default_ns → same error.
+    #[tokio::test]
+    async fn bootstrap_rejects_https_hostname_in_default_ns() {
         let default_ns =
-            vec![NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap()];
+            vec![NameServerUrl::parse("https://cloudflare-dns.com/dns-query").unwrap()];
         let hosts = DomainTrie::new();
         let err = Resolver::new_with_bootstrap(
             vec![],
@@ -1047,6 +1078,29 @@ mod tests {
             err,
             BootstrapError::DefaultNameserverNotPlain { .. }
         ));
+    }
+
+    // B6b: Https IP-literal in default_ns → accepted.
+    #[tokio::test]
+    async fn bootstrap_accepts_https_ip_literal_default_ns() {
+        let default_ns =
+            vec![NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap()];
+        let hosts = DomainTrie::new();
+        let result = Resolver::new_with_bootstrap(
+            vec![],
+            vec![],
+            default_ns,
+            DnsMode::Normal,
+            hosts,
+            true,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "https:// IP-literal in default_ns must be accepted"
+        );
     }
 
     // B7: tcp:// in default_ns is accepted (useful behind middleboxes blocking UDP/53).
