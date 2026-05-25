@@ -81,13 +81,13 @@ impl GeositeDB {
             category
         };
 
+        let domain_lower = domain.to_ascii_lowercase();
+
         if let Some(trie) = self.categories.get(cat) {
-            if trie.search(&domain.to_ascii_lowercase()).is_some() {
+            if trie.search_normalized(&domain_lower).is_some() {
                 return true;
             }
         }
-
-        let domain_lower = domain.to_ascii_lowercase();
 
         if let Some(kws) = self.keywords.get(cat) {
             if kws.iter().any(|kw| domain_lower.contains(kw.as_str())) {

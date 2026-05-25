@@ -161,6 +161,14 @@ impl<T: Clone + 'static> DomainTrie<T> {
         }
     }
 
+    /// Search with a pre-lowercased domain. Skips the case-folding allocation.
+    pub fn search_normalized(&self, domain_lower: &str) -> Option<&T> {
+        if self.len == 0 {
+            return None;
+        }
+        self.search_inner(domain_lower.trim_end_matches('.'))
+    }
+
     fn search_inner(&self, query: &str) -> Option<&T> {
         if query.is_empty() {
             return None;
