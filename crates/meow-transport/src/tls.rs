@@ -768,6 +768,19 @@ impl BoringInner {
             }
         }
 
+        // ── Session cache ───────────────────────────────────────────────────
+        // Disable BoringSSL's internal TLS session cache. Without this, the
+        // SSL_CTX accumulates up to 20480 SSL_SESSION objects (BoringSSL
+        // default) as TLS 1.3 servers send NewSessionTicket messages on each
+        // connection. For a proxy adapter that holds its SslConnector for the
+        // process lifetime, this manifests as unbounded memory growth (~2-4 KB
+        // per session × thousands of connections = tens of MB).
+        //
+        // Disabling also keeps the spoofed fingerprint consistent: resumed
+        // ClientHellos include pre_shared_key and omit key_share, which
+        // diverges from the profile we're emulating.
+        b.set_session_cache_mode(boring::ssl::SslSessionCacheMode::OFF);
+
         // ── ALPN ────────────────────────────────────────────────────────────
         if !config.alpn.is_empty() {
             // ALPN wire format: each entry is a length-prefixed byte sequence.

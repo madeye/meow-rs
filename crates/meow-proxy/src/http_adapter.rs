@@ -25,6 +25,8 @@ use base64::Engine as _;
 use meow_common::{
     AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
 };
+use meow_transport::tls::{TlsConfig, TlsLayer};
+use meow_transport::Transport;
 use smol_str::SmolStr;
 use std::fmt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -45,8 +47,7 @@ pub struct HttpAdapter {
     addr_str: SmolStr,
     /// `Some((username, password))` — both present or neither (ADR-0002 Class A).
     auth: Option<(String, String)>,
-    tls: bool,
-    skip_cert_verify: bool,
+    tls_layer: Option<TlsLayer>,
     /// Extra headers injected into the CONNECT request only.
     extra_headers: Vec<(String, String)>,
     health: ProxyHealth,
@@ -66,14 +67,25 @@ impl HttpAdapter {
         skip_cert_verify: bool,
         extra_headers: Vec<(String, String)>,
     ) -> Self {
+        let tls_layer = if tls {
+            let tls_cfg = TlsConfig {
+                skip_cert_verify,
+                ..TlsConfig::new(server)
+            };
+            Some(
+                TlsLayer::new(&tls_cfg)
+                    .expect("HttpAdapter: failed to build TlsLayer — check SNI/cert config"),
+            )
+        } else {
+            None
+        };
         Self {
             name: SmolStr::from(name),
             addr_str: SmolStr::from(format!("{server}:{port}")),
             server: SmolStr::from(server),
             port,
             auth,
-            tls,
-            skip_cert_verify,
+            tls_layer,
             extra_headers,
             health: ProxyHealth::new(),
         }
@@ -85,17 +97,8 @@ impl HttpAdapter {
             .await
             .map_err(MeowError::Io)?;
 
-        if self.tls {
-            use meow_transport::tls::{TlsConfig, TlsLayer};
-            use meow_transport::Transport;
-
-            let tls_cfg = TlsConfig {
-                skip_cert_verify: self.skip_cert_verify,
-                ..TlsConfig::new(self.server.as_str())
-            };
-            let tls_layer = TlsLayer::new(&tls_cfg).map_err(|e| MeowError::Proxy(e.to_string()))?;
-            tls_layer
-                .connect(Box::new(tcp))
+        if let Some(tls) = &self.tls_layer {
+            tls.connect(Box::new(tcp))
                 .await
                 .map_err(|e| MeowError::Proxy(e.to_string()))
         } else {
