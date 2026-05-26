@@ -131,7 +131,7 @@ fn test_reverse_lookup_basic() {
     let ip = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
     cache.put("example.com", &[ip], Duration::from_secs(300));
 
-    assert_eq!(cache.reverse_lookup(ip), Some("example.com".to_string()));
+    assert_eq!(cache.reverse_lookup(ip), Some("example.com".into()));
 }
 
 #[test]
@@ -148,14 +148,8 @@ fn test_reverse_lookup_multiple_ips() {
     let ip2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
     cache.put("cloudflare.com", &[ip1, ip2], Duration::from_secs(300));
 
-    assert_eq!(
-        cache.reverse_lookup(ip1),
-        Some("cloudflare.com".to_string())
-    );
-    assert_eq!(
-        cache.reverse_lookup(ip2),
-        Some("cloudflare.com".to_string())
-    );
+    assert_eq!(cache.reverse_lookup(ip1), Some("cloudflare.com".into()));
+    assert_eq!(cache.reverse_lookup(ip2), Some("cloudflare.com".into()));
 }
 
 #[test]
@@ -164,10 +158,7 @@ fn test_reverse_lookup_ipv6() {
     let ip = IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111));
     cache.put("one.one.one.one", &[ip], Duration::from_secs(300));
 
-    assert_eq!(
-        cache.reverse_lookup(ip),
-        Some("one.one.one.one".to_string())
-    );
+    assert_eq!(cache.reverse_lookup(ip), Some("one.one.one.one".into()));
 }
 
 #[test]
@@ -179,10 +170,7 @@ fn test_reverse_lookup_overwrite_same_ip() {
     cache.put("old.example.com", &[ip], Duration::from_secs(300));
     cache.put("new.example.com", &[ip], Duration::from_secs(300));
 
-    assert_eq!(
-        cache.reverse_lookup(ip),
-        Some("new.example.com".to_string())
-    );
+    assert_eq!(cache.reverse_lookup(ip), Some("new.example.com".into()));
 }
 
 #[test]

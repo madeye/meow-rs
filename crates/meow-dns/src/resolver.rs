@@ -8,6 +8,7 @@ use hickory_proto::rr::RecordType;
 use ipnet::IpNet;
 use meow_common::DnsMode;
 use meow_trie::DomainTrie;
+use smol_str::SmolStr;
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -828,18 +829,18 @@ impl Resolver {
         None
     }
 
-    pub fn reverse_lookup(&self, ip: IpAddr) -> Option<String> {
+    pub fn reverse_lookup(&self, ip: IpAddr) -> Option<SmolStr> {
         // Fake-IP pools own the authoritative reverse mapping for their
         // synthesised IPs. Consult them first; fall back to the snooping
         // cache for `Mapping` mode or real-IP hits.
         if let Some(pool) = &self.fakeip_v4 {
             if let Some(host) = pool.look_back(ip) {
-                return Some(host);
+                return Some(SmolStr::from(host));
             }
         }
         if let Some(pool) = &self.fakeip_v6 {
             if let Some(host) = pool.look_back(ip) {
-                return Some(host);
+                return Some(SmolStr::from(host));
             }
         }
         self.cache.reverse_lookup(ip)

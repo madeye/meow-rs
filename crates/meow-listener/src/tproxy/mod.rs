@@ -173,7 +173,7 @@ async fn handle_tproxy_conn(
     let mut hostname = metadata.sniff_host.clone();
     if hostname.is_empty() {
         if let Some(domain) = tunnel.resolver().reverse_lookup(orig_dst.ip()) {
-            hostname = domain.into();
+            hostname = domain;
         }
     }
 

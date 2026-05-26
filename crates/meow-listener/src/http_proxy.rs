@@ -111,16 +111,15 @@ async fn handle_http_inner(
         None
     };
 
-    // Parse the request line from the buffer
+    // Parse the request line from the buffer — no heap allocation.
     let request_str = String::from_utf8_lossy(&request_buf);
-    let request_line = request_str
-        .lines()
-        .next()
-        .ok_or("empty request")?
-        .to_string();
+    let request_line = request_str.lines().next().ok_or("empty request")?;
 
-    let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 3 {
+    let mut parts = [""; 3];
+    for (i, part) in request_line.split_whitespace().take(3).enumerate() {
+        parts[i] = part;
+    }
+    if parts[2].is_empty() {
         return Err("invalid HTTP request line".into());
     }
 

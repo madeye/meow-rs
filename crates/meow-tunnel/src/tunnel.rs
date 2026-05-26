@@ -79,14 +79,14 @@ impl TunnelInner {
             // `DNSMapping` mode contract used by the tproxy listener.
             if metadata.host.is_empty() {
                 if let Some(host) = self.resolver.reverse_lookup(ip) {
-                    metadata.host = host.into();
+                    metadata.host = host;
                 }
             }
             return;
         }
         if let Some(host) = self.resolver.reverse_lookup(ip) {
             debug!("pre_handle_metadata: fake-ip {} → {}", ip, host);
-            metadata.host = host.into();
+            metadata.host = host;
             metadata.dst_ip = None;
         } else {
             // Fake IP without a reverse mapping — pool wrap evicted the

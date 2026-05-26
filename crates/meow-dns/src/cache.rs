@@ -20,6 +20,7 @@
 // reverse-entry domain allocation drops from N+1 to 1 per cache write.
 use lru::LruCache;
 use parking_lot::Mutex;
+use smol_str::SmolStr;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -137,13 +138,13 @@ impl DnsCache {
     }
 
     /// Reverse lookup: given an IP, return the domain that resolved to it.
-    pub fn reverse_lookup(&self, ip: IpAddr) -> Option<String> {
+    pub fn reverse_lookup(&self, ip: IpAddr) -> Option<SmolStr> {
         let shard = &self.reverse[shard_ip(ip)];
         let mut reverse = shard.lock();
         let now = Instant::now();
         if let Some(entry) = reverse.get(&ip) {
             if entry.expire_at > now {
-                return Some(entry.domain.to_string());
+                return Some(SmolStr::from(entry.domain.as_ref()));
             }
         } else {
             return None;
