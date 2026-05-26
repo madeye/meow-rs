@@ -184,6 +184,11 @@ pub fn parse_proxy(
             let adapter = parse_hysteria2(name, config)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
+        #[cfg(feature = "vmess")]
+        "vmess" => {
+            let adapter = parse_vmess(name, config)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
         _ => Err(format!("unsupported proxy type: {proxy_type}")),
     }
 }
@@ -922,6 +927,178 @@ fn serialize_plugin_opts(opts: &serde_yaml::Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+#[cfg(feature = "vmess")]
+fn parse_vmess(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<meow_proxy::VmessAdapter, String> {
+    use meow_proxy::vmess::header::Security;
+
+    let server = config
+        .get("server")
+        .and_then(|v| v.as_str())
+        .ok_or("vmess: missing server")?;
+    let port = config
+        .get("port")
+        .and_then(serde_yaml::Value::as_u64)
+        .ok_or("vmess: missing port")? as u16;
+    let uuid_str = config
+        .get("uuid")
+        .and_then(|v| v.as_str())
+        .ok_or("vmess: missing uuid")?;
+    let uuid_bytes = parse_uuid(uuid_str).map_err(|e| format!("vmess: {e}"))?;
+
+    if server.len() > 255 {
+        return Err(format!(
+            "vmess: server domain is {} bytes; max 255",
+            server.len()
+        ));
+    }
+
+    // alterId: warn-and-coerce to 0
+    let alter_id = config
+        .get("alterId")
+        .and_then(serde_yaml::Value::as_u64)
+        .unwrap_or(0);
+    if alter_id > 0 {
+        tracing::warn!(
+            proxy = %name,
+            "vmess: alterId={alter_id} is deprecated and coerced to 0; \
+             AEAD header mode is always used"
+        );
+    }
+
+    let cipher_str = config
+        .get("cipher")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
+    let security = match cipher_str {
+        "auto" => meow_proxy::vmess::header::auto_security(),
+        "aes-128-gcm" => Security::Aes128Gcm,
+        "chacha20-poly1305" => Security::ChaCha20Poly1305,
+        "none" => Security::None,
+        "zero" => {
+            return Err(
+                "vmess: cipher 'zero' is rejected — it disables body encryption \
+                 with no visual cue in the config (security gap per ADR-0002)"
+                    .into(),
+            );
+        }
+        other => return Err(format!("vmess: unsupported cipher '{other}'")),
+    };
+
+    let udp = config
+        .get("udp")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+    let tls = config
+        .get("tls")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+    let skip_cert_verify = config
+        .get("skip-cert-verify")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+    let servername = config
+        .get("servername")
+        .and_then(|v| v.as_str())
+        .unwrap_or(server);
+    let alpn: Vec<String> = config
+        .get("alpn")
+        .and_then(|v| v.as_sequence())
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
+        .collect();
+    let network = config
+        .get("network")
+        .and_then(|v| v.as_str())
+        .unwrap_or("tcp");
+    let client_fingerprint = config.get("client-fingerprint").and_then(|v| v.as_str());
+
+    // Warn: mux enabled
+    if let Some(mux) = config.get("mux") {
+        if mux
+            .get("enabled")
+            .and_then(serde_yaml::Value::as_bool)
+            .unwrap_or(false)
+        {
+            tracing::warn!(
+                proxy = %name,
+                "vmess: mux is not implemented; the option is ignored"
+            );
+        }
+    }
+
+    // Build transport chain (same pattern as VLESS)
+    let mut chain = TransportChain::empty();
+
+    if tls {
+        use meow_transport::tls::{TlsConfig, TlsLayer};
+        let sni = if servername.is_empty() {
+            server.to_string()
+        } else {
+            servername.to_string()
+        };
+        let mut tls_cfg = TlsConfig::new(sni);
+        tls_cfg.skip_cert_verify = skip_cert_verify;
+        tls_cfg.alpn = if alpn.is_empty() && network == "ws" {
+            vec!["http/1.1".to_string()]
+        } else {
+            alpn
+        };
+        tls_cfg.fingerprint = client_fingerprint.map(std::string::ToString::to_string);
+        let tls_layer =
+            TlsLayer::new(&tls_cfg).map_err(|e| format!("vmess: TLS layer error: {e}"))?;
+        chain.push(Box::new(tls_layer));
+    }
+
+    match network {
+        "tcp" => {}
+        "ws" => {
+            use meow_transport::ws::{WsConfig, WsLayer};
+            let ws_opts = config.get("ws-opts");
+            let path = ws_opts
+                .and_then(|o| o.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("/")
+                .to_string();
+            let host_header = ws_opts
+                .and_then(|o| o.get("headers"))
+                .and_then(|h| h.get("Host"))
+                .and_then(|v| v.as_str())
+                .map_or_else(|| server.to_string(), std::string::ToString::to_string);
+            let max_early_data = ws_opts
+                .and_then(|o| o.get("max-early-data"))
+                .and_then(serde_yaml::Value::as_u64)
+                .unwrap_or(0) as usize;
+            let early_data_header_name = ws_opts
+                .and_then(|o| o.get("early-data-header-name"))
+                .and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string);
+            let ws_cfg = WsConfig {
+                path,
+                host_header: Some(host_header),
+                extra_headers: vec![],
+                max_early_data,
+                early_data_header_name,
+            };
+            let ws_layer =
+                WsLayer::new(ws_cfg).map_err(|e| format!("vmess: ws layer error: {e}"))?;
+            chain.push(Box::new(ws_layer));
+        }
+        other => {
+            return Err(format!(
+                "vmess: unsupported network '{other}'; valid values: tcp, ws"
+            ));
+        }
+    }
+
+    Ok(meow_proxy::VmessAdapter::new(
+        name, server, port, uuid_bytes, security, udp, chain,
+    ))
 }
 
 pub fn parse_proxy_group(

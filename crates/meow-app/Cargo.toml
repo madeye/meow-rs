@@ -15,6 +15,7 @@ ss = ["meow-config/ss", "meow-proxy/ss"]
 trojan = ["meow-config/trojan", "meow-proxy/trojan"]
 vless = ["meow-config/vless", "meow-proxy/vless"]
 vless-vision = ["vless", "meow-config/vless-vision", "meow-proxy/vless-vision"]
+vmess = ["meow-config/vmess", "meow-proxy/vmess"]
 ech-tls-tunnel = [
     "ss",
     "meow-config/ech-tls-tunnel",
@@ -34,7 +35,7 @@ listener-mixed = ["meow-listener/listener-mixed"]
 # Convenience bundles
 minimal = ["ss", "trojan", "dns-server", "listener-mixed"]
 full = [
-    "ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel",
+    "ss", "trojan", "vless", "vless-vision", "vmess", "ech-tls-tunnel",
     "dns-server", "dns-encrypted",
     "listener-http", "listener-socks5", "listener-tproxy", "listener-mixed",
 ]

@@ -732,6 +732,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "criterion"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2142,13 +2151,19 @@ dependencies = [
 name = "meow-proxy"
 version = "0.11.0"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "anytls-rs",
  "async-trait",
  "base64",
  "bytes",
+ "chacha20poly1305",
+ "crc32fast",
  "futures",
  "hex",
+ "hmac",
  "libc",
+ "md-5",
  "meow-common",
  "meow-dns",
  "meow-transport",

@@ -34,6 +34,9 @@ pub(crate) mod vless;
 #[cfg(feature = "vless")]
 pub mod vless_adapter;
 
+#[cfg(feature = "vmess")]
+pub mod vmess;
+
 pub use direct::DirectAdapter;
 pub use group::fallback::FallbackGroup;
 pub use group::load_balance::{LbStrategy, LoadBalanceGroup};
@@ -53,6 +56,8 @@ pub use trojan::TrojanAdapter;
 
 #[cfg(feature = "vless")]
 pub use vless_adapter::{VlessAdapter, VlessFlow};
+#[cfg(feature = "vmess")]
+pub use vmess::VmessAdapter;
 
 // ─── Error bridge ────────────────────────────────────────────────────────────
 

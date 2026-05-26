@@ -5,10 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel"]
+default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess"]
 ss = ["dep:shadowsocks"]
 trojan = []
 vless = []
+vmess = ["dep:md-5", "dep:hmac", "dep:aes", "dep:aes-gcm", "dep:chacha20poly1305", "dep:crc32fast"]
 vless-vision = ["vless"]
 # Opt-in anytls outbound (uses the `anytls-rs` crate). Adds ~one extra TLS
 # provider to the binary because the upstream crate pins default rustls
@@ -48,6 +49,12 @@ serde_json = { workspace = true }
 socket2 = { workspace = true }
 libc = "0.2"
 smol_str = { workspace = true }
+md-5 = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+aes = { workspace = true, optional = true }
+aes-gcm = { workspace = true, optional = true }
+chacha20poly1305 = { workspace = true, optional = true }
+crc32fast = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

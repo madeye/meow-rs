@@ -115,6 +115,12 @@ iprange = "0.6"
 
 # Crypto
 sha2 = "0.10"
+md-5 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+crc32fast = "1"
 hex = "0.4"
 subtle = "2"
 

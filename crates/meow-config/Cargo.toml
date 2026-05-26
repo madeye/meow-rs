@@ -5,11 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel"]
+default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess"]
 ss = ["meow-proxy/ss"]
 trojan = ["meow-proxy/trojan"]
 vless = ["meow-proxy/vless"]
 vless-vision = ["vless", "meow-proxy/vless-vision"]
+vmess = ["meow-proxy/vmess"]
 anytls = ["meow-proxy/anytls"]
 hysteria2 = ["meow-proxy/hysteria2"]
 boring-tls = ["meow-transport/boring-tls"]
