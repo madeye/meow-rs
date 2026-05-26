@@ -37,7 +37,7 @@ pub struct GeositeDB {
     counts: HashMap<String, usize>,
     /// Raw regex patterns per category; compiled lazily on first lookup.
     regex_patterns: HashMap<String, Vec<String>>,
-    regex_compiled: HashMap<String, std::sync::OnceLock<Option<regex::RegexSet>>>,
+    regex_compiled: HashMap<String, std::sync::OnceLock<Vec<regex::Regex>>>,
     keywords: HashMap<String, Vec<String>>,
 }
 
@@ -96,15 +96,18 @@ impl GeositeDB {
         }
 
         if let Some(lock) = self.regex_compiled.get(cat) {
-            let set = lock.get_or_init(|| {
+            let compiled = lock.get_or_init(|| {
                 self.regex_patterns
                     .get(cat)
-                    .and_then(|pats| regex::RegexSet::new(pats).ok())
+                    .map(|pats| {
+                        pats.iter()
+                            .filter_map(|p| regex::Regex::new(p).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default()
             });
-            if let Some(rs) = set {
-                if rs.is_match(&domain_lower) {
-                    return true;
-                }
+            if compiled.iter().any(|re| re.is_match(&domain_lower)) {
+                return true;
             }
         }
 
@@ -128,7 +131,7 @@ impl GeositeDB {
         regex_patterns: HashMap<String, Vec<String>>,
         keywords: HashMap<String, Vec<String>>,
     ) -> Self {
-        let regex_compiled: HashMap<String, std::sync::OnceLock<Option<regex::RegexSet>>> =
+        let regex_compiled: HashMap<String, std::sync::OnceLock<Vec<regex::Regex>>> =
             regex_patterns
                 .keys()
                 .map(|k| (k.clone(), std::sync::OnceLock::new()))

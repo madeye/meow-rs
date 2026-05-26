@@ -19,7 +19,7 @@
 //! - `Domain` (suffix) → inserted as `+.value` into `DomainTrie`
 //! - `Full` (exact) → inserted as `value` into `DomainTrie`
 //! - `Plain` (substring/keyword) → stored in per-category keyword list
-//! - `Regex` → compiled into per-category `RegexSet`
+//! - `Regex` → compiled into per-category `Vec<Regex>`
 
 use std::collections::{HashMap, HashSet};
 
@@ -161,7 +161,7 @@ struct SkipStats {
 /// - `Domain` (suffix) → inserted as `+.value` into the trie
 /// - `Full` (exact) → inserted as `value` into the trie
 /// - `Plain` (substring/keyword) → stored in per-category keyword list
-/// - `Regex` → compiled into per-category `RegexSet`
+/// - `Regex` → compiled into per-category `Vec<Regex>`
 pub fn from_dat_bytes(
     data: &[u8],
     allowed: Option<&HashSet<String>>,
