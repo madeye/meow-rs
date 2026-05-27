@@ -14,6 +14,7 @@ vmess = ["meow-proxy/vmess"]
 anytls = ["meow-proxy/anytls"]
 hysteria2 = ["meow-proxy/hysteria2"]
 boring-tls = ["meow-transport/boring-tls"]
+ech = ["meow-transport/ech"]
 ech-tls-tunnel = ["ss", "meow-proxy/ech-tls-tunnel"]
 
 [dependencies]

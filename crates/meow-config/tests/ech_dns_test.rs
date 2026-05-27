@@ -24,7 +24,9 @@
 
 use std::collections::HashMap;
 
+// Used by E9 (boring-tls + !ech) and E9b (!boring-tls).
 #[cfg(feature = "vless")]
+#[allow(unused_imports)]
 use base64::Engine;
 use meow_config::ech_dns::preresolve_ech;
 #[cfg(feature = "vless")]
@@ -240,12 +242,12 @@ proxies:
 
 // ─── E9: well-formed inline base64 loads cleanly through parse_vless ──────
 //
-// Requires `boring-tls`: without the feature, `TlsLayer::new` rejects any
-// `TlsConfig.ech = Some(_)` at construction time (the rustls path can't
-// honour ECH), and parse_vless propagates the error so the proxy is
-// dropped. With `boring-tls` on, the layer accepts the config (the actual
-// wire-format validation happens on connect, covered in boring_tls_test).
-#[cfg(all(feature = "vless", feature = "boring-tls"))]
+// Requires `boring-tls` *without* `ech`: the boring backend defers ECH
+// wire-format validation to connect-time, so junk bytes are accepted at
+// parse time. When the `ech` feature is also on, rustls eagerly validates
+// the ECH config list and rejects the dummy bytes, causing the proxy to be
+// dropped — that path is correct but makes this test fail.
+#[cfg(all(feature = "vless", feature = "boring-tls", not(feature = "ech")))]
 #[tokio::test]
 async fn parse_vless_ech_inline_valid_base64_loads() {
     let blob = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01\x02\x03");
