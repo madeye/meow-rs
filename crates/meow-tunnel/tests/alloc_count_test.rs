@@ -40,6 +40,18 @@ fn snapshot() -> (usize, usize) {
     )
 }
 
+/// `cargo llvm-cov` instruments every binary it builds and sets
+/// `LLVM_PROFILE_FILE` on the test process so it can write `.profraw` data.
+/// That instrumentation injects its own heap allocations, which invalidates the
+/// ADR-0008 hot-path allocation-count thresholds asserted below. When running
+/// under coverage we still exercise the product code paths (so coverage data is
+/// collected) but skip the count assertions, which would otherwise be flaky
+/// around their boundaries. The uninstrumented `Test` workflow remains the
+/// source of truth for these invariants.
+fn under_coverage_instrumentation() -> bool {
+    std::env::var_os("LLVM_PROFILE_FILE").is_some()
+}
+
 struct SimpleDomainRule {
     domain: String,
     adapter: String,
@@ -127,6 +139,10 @@ fn rule_match_zero_alloc_on_hot_path() {
 
     let per_match = allocs as f64 / n as f64;
     println!("rule_match: {allocs} allocs for {n} iterations = {per_match:.3} per match");
+    if under_coverage_instrumentation() {
+        println!("skipping alloc assertion under coverage instrumentation");
+        return;
+    }
     // Rule matching with short adapter names (≤23B) and no process lookup.
     // The trie's internal SmallVec and HashMap traversal may cause minor
     // allocator activity in debug builds. Target: ≤ 2 per match.
@@ -170,6 +186,10 @@ fn track_connection_alloc_count() {
 
     let per_conn = allocs as f64 / 100.0;
     println!("track_connection: {allocs} allocs for 100 conns = {per_conn:.2} per connection");
+    if under_coverage_instrumentation() {
+        println!("skipping alloc assertion under coverage instrumentation");
+        return;
+    }
     // SmallVec<[Arc<str>; 1]> avoids Vec heap alloc.
     // SmolStr fields inline. itoa for timestamp avoids format!.
     // Arc<Metadata> is 1 alloc. Arc::from("Proxy") is 1 alloc.
@@ -206,6 +226,10 @@ fn metadata_remote_address_zero_alloc() {
     }
     let (allocs_bare, _) = snapshot();
     println!("remote_address (bare): {allocs_bare} allocs for 1000 calls");
+    if under_coverage_instrumentation() {
+        println!("skipping alloc assertion under coverage instrumentation");
+        return;
+    }
     assert!(
         allocs_bare <= 5,
         "remote_address() should produce near-zero heap allocations, got {allocs_bare}"
