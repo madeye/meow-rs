@@ -120,6 +120,10 @@ name = "grpc_test"
 required-features = ["grpc"]
 
 [[test]]
+name = "grpc_unbounded_test"
+required-features = ["grpc"]
+
+[[test]]
 name = "h2_test"
 required-features = ["h2"]
 

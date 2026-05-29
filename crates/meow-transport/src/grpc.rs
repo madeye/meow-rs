@@ -233,6 +233,18 @@ fn decode_varint(src: &[u8]) -> std::result::Result<(u64, usize), String> {
 
 // ─── GunStream ────────────────────────────────────────────────────────────────
 
+/// Maximum accepted gun-frame inner length (16 MiB).
+///
+/// `inner_len` arrives on the wire as an attacker-controlled BE32 (up to
+/// ~4 GiB) and [`GunStream::poll_read`] buffers a frame in `pending_frame`
+/// until it is complete. Without this cap a malicious/compromised upstream can
+/// declare a giant frame and trickle bytes to drive unbounded heap growth — a
+/// memory-exhaustion DoS (h2 flow-control does not bound it because every chunk
+/// eagerly releases receive-window capacity). 16 MiB sits far above any
+/// realistic relay frame while bounding worst-case in-flight buffering per
+/// connection. Mirrors the WebSocket `max_frame_size` cap in `ws.rs`.
+const MAX_GUN_FRAME_LEN: usize = 16 * 1024 * 1024;
+
 /// A bidirectional gRPC-framed stream over a single h2 request/response pair.
 struct GunStream {
     send: h2::SendStream<Bytes>,
@@ -286,6 +298,17 @@ impl AsyncRead for GunStream {
                     this.pending_frame[3],
                     this.pending_frame[4],
                 ]) as usize;
+                // Reject oversize frames up front (DoS guard). Checked on
+                // `inner_len` itself — not `5 + inner_len` — to avoid usize
+                // overflow on 32-bit targets where `5 + u32::MAX` would wrap.
+                if inner_len > MAX_GUN_FRAME_LEN {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "grpc: frame inner_len {inner_len} exceeds cap {MAX_GUN_FRAME_LEN}"
+                        ),
+                    )));
+                }
                 let frame_len = 5 + inner_len;
 
                 if this.pending_frame.len() >= frame_len {

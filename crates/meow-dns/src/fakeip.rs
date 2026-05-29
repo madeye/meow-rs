@@ -148,6 +148,10 @@ pub struct FileStore {
     reverse: Mutex<HashMap<IpAddr, SmolStr>>,
     dirty: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
+    /// Handle to the background debounce-flush task, aborted on drop so the
+    /// task (which parks forever on `notify.notified()` and holds `Arc` clones
+    /// of `state`/`dirty`/`notify`) does not outlive the store.
+    flush_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl FileStore {
@@ -189,24 +193,29 @@ impl FileStore {
         let dirty = Arc::new(AtomicBool::new(false));
         let notify = Arc::new(tokio::sync::Notify::new());
 
-        let store = Self {
+        let flush_task = Self::spawn_flush_task(
+            path.clone(),
+            Arc::clone(&state),
+            Arc::clone(&dirty),
+            Arc::clone(&notify),
+        );
+
+        Ok(Self {
             path,
             state,
             reverse: Mutex::new(reverse),
             dirty,
             notify,
-        };
-
-        store.spawn_flush_task();
-        Ok(store)
+            flush_task: Some(flush_task),
+        })
     }
 
-    fn spawn_flush_task(&self) {
-        let path = self.path.clone();
-        let state = Arc::clone(&self.state);
-        let dirty = Arc::clone(&self.dirty);
-        let notify = Arc::clone(&self.notify);
-
+    fn spawn_flush_task(
+        path: PathBuf,
+        state: Arc<Mutex<PersistedSnapshot>>,
+        dirty: Arc<AtomicBool>,
+        notify: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 notify.notified().await;
@@ -221,7 +230,7 @@ impl FileStore {
                     persist_to_file(&path, &snap);
                 }
             }
-        });
+        })
     }
 
     fn mark_dirty(&self) {
@@ -240,6 +249,17 @@ impl Drop for FileStore {
         if self.dirty.swap(false, Ordering::SeqCst) {
             let snap = serialise(&self.state.lock());
             persist_to_file(&self.path, &snap);
+        }
+        // Abort the background flush task. It parks forever on
+        // `notify.notified()` (nothing signals it after the store drops) and
+        // holds `Arc` clones of `state`/`dirty`/`notify`, so without this it
+        // would leak a task plus the snapshot on every `FileStore` drop —
+        // e.g. once per fake-ip config reload. The final flush above already
+        // persisted any pending state. `abort()` cancels at the task's next
+        // await point, so an in-progress synchronous `persist_to_file` is not
+        // torn.
+        if let Some(handle) = self.flush_task.take() {
+            handle.abort();
         }
     }
 }

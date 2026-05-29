@@ -81,16 +81,26 @@ impl GeositeDB {
             category
         };
 
-        let domain_lower = domain.to_ascii_lowercase();
+        // `domain` is already ASCII-lowercased at every ingestion point
+        // (rule_host(), commit 0068548), so only pay for a lowercase copy on
+        // the rare mixed-case input — mirroring the `cat` guard above instead
+        // of allocating a String on every lookup.
+        let domain_lower;
+        let domain = if domain.bytes().any(|b| b.is_ascii_uppercase()) {
+            domain_lower = domain.to_ascii_lowercase();
+            domain_lower.as_str()
+        } else {
+            domain
+        };
 
         if let Some(trie) = self.categories.get(cat) {
-            if trie.search_normalized(&domain_lower).is_some() {
+            if trie.search_normalized(domain).is_some() {
                 return true;
             }
         }
 
         if let Some(kws) = self.keywords.get(cat) {
-            if kws.iter().any(|kw| domain_lower.contains(kw.as_str())) {
+            if kws.iter().any(|kw| domain.contains(kw.as_str())) {
                 return true;
             }
         }
@@ -106,7 +116,7 @@ impl GeositeDB {
                     })
                     .unwrap_or_default()
             });
-            if compiled.iter().any(|re| re.is_match(&domain_lower)) {
+            if compiled.iter().any(|re| re.is_match(domain)) {
                 return true;
             }
         }
