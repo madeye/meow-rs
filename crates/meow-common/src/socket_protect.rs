@@ -256,12 +256,28 @@ pub async fn connect_tcp_host(host: &str, port: u16) -> io::Result<TcpStream> {
 /// Resolve `host` to a single [`SocketAddr`] using the same hook chain
 /// as [`connect_tcp_host`]: IP literals short-circuit, the installed
 /// `HostResolver` is preferred when a `SocketProtector` is present,
-/// and the system resolver is the (warning-logged) fallback. Use this
-/// from call sites that need a `SocketAddr` for a subsequent operation
-/// other than `connect()` — e.g. `UdpSocket::connect(addr)`.
+/// and the system resolver is the (warning-logged) fallback.
+///
+/// Prefer [`resolve_host_all`] for call sites that can try candidates in
+/// order (e.g. a UDP `connect()` loop): taking only the first address
+/// silently drops the family fallback that `TcpStream::connect` gets for
+/// free, which strands the caller on an unreachable family when the
+/// resolver orders AAAA first on an IPv4-only network (or vice versa).
 pub async fn resolve_host(host: &str, port: u16) -> io::Result<SocketAddr> {
+    resolve_host_all(host, port).await.map(|addrs| addrs[0])
+}
+
+/// Resolve `host` to every candidate [`SocketAddr`], in resolver order,
+/// using the same hook chain as [`connect_tcp_host`]: IP literals
+/// short-circuit, the installed `HostResolver` is preferred when a
+/// `SocketProtector` is present (it returns a single address), and the
+/// system resolver is the (warning-logged) fallback.
+///
+/// Never returns an empty `Vec` — no-address resolution is an `Err`, so
+/// callers may index `[0]` safely.
+pub async fn resolve_host_all(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return Ok(SocketAddr::new(ip, port));
+        return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
     #[cfg(any(target_os = "android", all(test, unix)))]
@@ -269,7 +285,7 @@ pub async fn resolve_host(host: &str, port: u16) -> io::Result<SocketAddr> {
         if android::socket_protector().is_some() {
             if let Some(r) = android::host_resolver() {
                 let ip = r.resolve(host).await?;
-                return Ok(SocketAddr::new(ip, port));
+                return Ok(vec![SocketAddr::new(ip, port)]);
             }
             tracing::warn!(
                 host,
@@ -279,15 +295,14 @@ pub async fn resolve_host(host: &str, port: u16) -> io::Result<SocketAddr> {
         }
     }
 
-    tokio::net::lookup_host((host, port))
-        .await?
-        .next()
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("resolve_host: no address for {host}:{port}"),
-            )
-        })
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port)).await?.collect();
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("resolve_host: no address for {host}:{port}"),
+        ));
+    }
+    Ok(addrs)
 }
 
 /// Bind an outbound UDP socket. On Android, applies the installed
@@ -601,6 +616,60 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let sock = bind_udp(addr).await.expect("bind");
         assert!(sock.local_addr().unwrap().port() != 0);
+    }
+
+    // ─── resolve_host / resolve_host_all ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_host_all_ip_literal_is_single_candidate() {
+        let _g = LOCK.lock().await;
+        clear_socket_protector();
+        clear_host_resolver();
+        // Installing a failing resolver + protector proves the literal
+        // short-circuit never consults the hook chain.
+        set_socket_protector(Counting::new() as Arc<dyn SocketProtector>);
+        set_host_resolver(Arc::new(FailingResolver) as Arc<dyn HostResolver>);
+
+        let addrs = resolve_host_all("192.0.2.7", 443).await.expect("literal");
+        assert_eq!(addrs, vec!["192.0.2.7:443".parse().unwrap()]);
+
+        clear_host_resolver();
+        clear_socket_protector();
+    }
+
+    #[tokio::test]
+    async fn resolve_host_all_uses_installed_resolver_when_protected() {
+        let _g = LOCK.lock().await;
+        set_socket_protector(Counting::new() as Arc<dyn SocketProtector>);
+        let resolver = FixedResolver::new(IpAddr::from([127, 0, 0, 1]));
+        set_host_resolver(Arc::clone(&resolver) as Arc<dyn HostResolver>);
+
+        let addrs = resolve_host_all("example.invalid", 8388)
+            .await
+            .expect("resolve");
+        assert_eq!(addrs, vec!["127.0.0.1:8388".parse().unwrap()]);
+        assert_eq!(resolver.count(), 1, "resolver must be consulted once");
+
+        clear_host_resolver();
+        clear_socket_protector();
+    }
+
+    #[tokio::test]
+    async fn resolve_host_first_matches_resolve_host_all_head() {
+        let _g = LOCK.lock().await;
+        clear_socket_protector();
+        clear_host_resolver();
+
+        // `localhost` resolves through the system resolver (/etc/hosts) and
+        // may legitimately return both families — exactly the multi-candidate
+        // shape resolve_host_all exists for.
+        let all = resolve_host_all("localhost", 1080).await.expect("resolve");
+        assert!(!all.is_empty(), "resolve_host_all never returns empty Ok");
+        let single = resolve_host("localhost", 1080).await.expect("resolve");
+        assert_eq!(
+            single, all[0],
+            "resolve_host must stay an alias for the first candidate"
+        );
     }
 
     // ─── registry semantics ─────────────────────────────────────────────────

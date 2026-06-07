@@ -433,23 +433,47 @@ impl ProxyAdapter for ShadowsocksAdapter {
         // `udp_external_addr` returns a literal `SocketAddr` for the standard
         // path and the SIP003 plugin's local listener for external plugins
         // (where the connect is loopback — protect is harmless).
-        let remote = match self.server_config.udp_external_addr() {
-            ServerAddr::SocketAddr(sa) => *sa,
-            ServerAddr::DomainName(host, port) => meow_common::resolve_host(host, *port)
+        let candidates = match self.server_config.udp_external_addr() {
+            ServerAddr::SocketAddr(sa) => vec![*sa],
+            ServerAddr::DomainName(host, port) => meow_common::resolve_host_all(host, *port)
                 .await
                 .map_err(|e| MeowError::Proxy(format!("ss udp lookup {host}:{port}: {e}")))?,
         };
-        let bind_addr: SocketAddr = if remote.is_ipv4() {
-            "0.0.0.0:0".parse().expect("static")
-        } else {
-            "[::]:0".parse().expect("static")
+        // Try candidates in resolver order rather than committing to the
+        // first one: on a single-stack network the resolver can still order
+        // the unreachable family first (AAAA on an IPv4-only path), and a
+        // UDP connect() to an unreachable family fails immediately with
+        // ENETUNREACH — so falling through to the next candidate is cheap
+        // and keeps UDP relay alive where TcpStream::connect's built-in
+        // multi-address loop already keeps TCP alive.
+        let mut connected = None;
+        let mut last_err = None;
+        for remote in candidates {
+            let bind_addr: SocketAddr = if remote.is_ipv4() {
+                "0.0.0.0:0".parse().expect("static")
+            } else {
+                "[::]:0".parse().expect("static")
+            };
+            let udp = match meow_common::bind_udp(bind_addr).await {
+                Ok(udp) => udp,
+                Err(e) => {
+                    last_err = Some(format!("ss udp bind for {remote}: {e}"));
+                    continue;
+                }
+            };
+            match udp.connect(remote).await {
+                Ok(()) => {
+                    connected = Some((udp, remote));
+                    break;
+                }
+                Err(e) => last_err = Some(format!("ss udp connect {remote}: {e}")),
+            }
+        }
+        let Some((udp, remote)) = connected else {
+            return Err(MeowError::Proxy(
+                last_err.unwrap_or_else(|| "ss udp connect: no candidates".into()),
+            ));
         };
-        let udp = meow_common::bind_udp(bind_addr)
-            .await
-            .map_err(|e| MeowError::Proxy(format!("ss udp bind: {e}")))?;
-        udp.connect(remote)
-            .await
-            .map_err(|e| MeowError::Proxy(format!("ss udp connect: {e}")))?;
         let socket = ProxySocket::<TokioUdpDatagram>::from_socket(
             UdpSocketType::Client,
             Arc::clone(&self.context),

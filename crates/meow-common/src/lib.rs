@@ -23,7 +23,7 @@ pub use network::Network;
 pub use process_lookup::{find_process, ProcessInfo};
 pub use rule::{Rule, RuleMatchHelper, RuleType};
 pub use sniffer::SnifferConfig;
-pub use socket_protect::{bind_udp, connect_tcp, connect_tcp_host, resolve_host};
+pub use socket_protect::{bind_udp, connect_tcp, connect_tcp_host, resolve_host, resolve_host_all};
 #[cfg(target_os = "android")]
 pub use socket_protect::{
     clear_host_resolver, clear_socket_protector, host_resolver, set_host_resolver,
