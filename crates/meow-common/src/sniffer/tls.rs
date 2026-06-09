@@ -1,5 +1,10 @@
+use smol_str::SmolStr;
+
 /// Parse SNI hostname from raw TLS ClientHello bytes.
-pub fn sniff_tls(buf: &[u8]) -> Option<String> {
+///
+/// Returns `SmolStr` so typical hostnames (≤ 23 bytes) are inlined without
+/// a heap allocation per sniffed handshake.
+pub fn sniff_tls(buf: &[u8]) -> Option<SmolStr> {
     // TLS record header: content_type(1) + version(2) + length(2)
     if buf.len() < 5 {
         return None;
@@ -61,7 +66,7 @@ pub fn sniff_tls(buf: &[u8]) -> Option<String> {
     None
 }
 
-fn parse_sni_extension(data: &[u8]) -> Option<String> {
+fn parse_sni_extension(data: &[u8]) -> Option<SmolStr> {
     if data.len() < 2 {
         return None;
     }
@@ -76,9 +81,14 @@ fn parse_sni_extension(data: &[u8]) -> Option<String> {
 
         if name_type == 0x00 {
             let name_bytes = list.get(pos..pos + name_len)?;
-            let mut s = String::from_utf8(name_bytes.to_vec()).ok()?;
-            s.make_ascii_lowercase();
-            return Some(s);
+            let s = std::str::from_utf8(name_bytes).ok()?;
+            // Hostnames are usually already lowercase — only pay for a
+            // char-mapped rebuild when one actually contains uppercase.
+            return Some(if s.bytes().any(|b| b.is_ascii_uppercase()) {
+                s.chars().map(|c| c.to_ascii_lowercase()).collect()
+            } else {
+                SmolStr::new(s)
+            });
         }
         pos += name_len;
     }
@@ -139,21 +149,21 @@ mod tests {
     #[test]
     fn test_extract_sni_basic() {
         let data = build_client_hello("example.com");
-        assert_eq!(sniff_tls(&data), Some("example.com".to_string()));
+        assert_eq!(sniff_tls(&data).as_deref(), Some("example.com"));
     }
 
     #[test]
     fn test_extract_sni_subdomain() {
         let data = build_client_hello("www.google.com");
-        assert_eq!(sniff_tls(&data), Some("www.google.com".to_string()));
+        assert_eq!(sniff_tls(&data).as_deref(), Some("www.google.com"));
     }
 
     #[test]
     fn test_extract_sni_long_hostname() {
         let data = build_client_hello("very.long.subdomain.example.co.uk");
         assert_eq!(
-            sniff_tls(&data),
-            Some("very.long.subdomain.example.co.uk".to_string())
+            sniff_tls(&data).as_deref(),
+            Some("very.long.subdomain.example.co.uk")
         );
     }
 
@@ -282,6 +292,6 @@ mod tests {
         record.extend_from_slice(&(record_len as u16).to_be_bytes());
         record.extend_from_slice(&handshake);
 
-        assert_eq!(sniff_tls(&record), Some("target.example.com".to_string()));
+        assert_eq!(sniff_tls(&record).as_deref(), Some("target.example.com"));
     }
 }

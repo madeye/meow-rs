@@ -268,15 +268,22 @@ async fn handle_http_inner(
                 // Rewrite the request line: remove the absolute URI scheme+host,
                 // keep the path. Rebuild headers without Proxy-* headers.
                 let path = extract_path_from_url(url);
-                let mut rewritten = format!("{} {} {}\r\n", method, path, parts[2]);
+                // Capacity hint: the rewrite never grows beyond the original
+                // request (the absolute URI shrinks to a path; headers only
+                // ever drop).
+                let mut rewritten = String::with_capacity(request_str.len());
+                {
+                    use std::fmt::Write as _;
+                    let _ = write!(rewritten, "{} {} {}\r\n", method, path, parts[2]);
+                }
                 for line in request_str.lines().skip(1) {
                     if line.is_empty() {
                         break;
                     }
-                    // Skip proxy-specific headers
-                    let lower = line.to_ascii_lowercase();
-                    if lower.starts_with("proxy-connection")
-                        || lower.starts_with("proxy-authorization")
+                    // Skip proxy-specific headers — case-insensitive compare
+                    // on the slice, no per-line lowercased copy.
+                    if starts_with_ignore_ascii_case(line, "proxy-connection")
+                        || starts_with_ignore_ascii_case(line, "proxy-authorization")
                     {
                         continue;
                     }
@@ -362,6 +369,13 @@ fn extract_path_from_url(url: &str) -> &str {
     without_scheme
         .find('/')
         .map_or("/", |i| &without_scheme[i..])
+}
+
+/// Case-insensitive ASCII prefix test without allocating a lowercased copy.
+/// Byte-wise so a multi-byte UTF-8 char at the boundary can't panic a slice.
+fn starts_with_ignore_ascii_case(line: &str, prefix: &str) -> bool {
+    line.len() >= prefix.len()
+        && line.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
 }
 
 /// Parse `Proxy-Authorization: Basic <base64>` from raw request headers.

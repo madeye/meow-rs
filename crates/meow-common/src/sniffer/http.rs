@@ -1,9 +1,14 @@
+use smol_str::SmolStr;
+
 /// Parse the HTTP `Host:` header from the first request bytes.
 ///
 /// Returns `None` if the buffer does not look like HTTP/1.x or has no Host header.
 /// `httparse::Status::Partial` is treated as success — as long as we've seen
 /// the Host line we don't need the full request.
-pub fn sniff_http(buf: &[u8]) -> Option<String> {
+///
+/// Returns `SmolStr` so typical hostnames (≤ 23 bytes) are inlined without
+/// a heap allocation per sniffed request.
+pub fn sniff_http(buf: &[u8]) -> Option<SmolStr> {
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut req = httparse::Request::new(&mut headers);
     // Both Complete and Partial are fine; an Err means the buffer isn't HTTP.
@@ -23,7 +28,13 @@ pub fn sniff_http(buf: &[u8]) -> Option<String> {
             if host.is_empty() {
                 return None;
             }
-            return Some(host.to_ascii_lowercase());
+            // Hostnames are usually already lowercase — only pay for a
+            // char-mapped rebuild when one actually contains uppercase.
+            return Some(if host.bytes().any(|b| b.is_ascii_uppercase()) {
+                host.chars().map(|c| c.to_ascii_lowercase()).collect()
+            } else {
+                SmolStr::new(host)
+            });
         }
     }
     None
@@ -36,26 +47,26 @@ mod tests {
     #[test]
     fn sniff_http_basic_host_header() {
         let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
-        assert_eq!(sniff_http(buf), Some("example.com".to_string()));
+        assert_eq!(sniff_http(buf).as_deref(), Some("example.com"));
     }
 
     #[test]
     fn sniff_http_host_with_port_stripped() {
         let buf = b"GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n";
-        assert_eq!(sniff_http(buf), Some("example.com".to_string()));
+        assert_eq!(sniff_http(buf).as_deref(), Some("example.com"));
     }
 
     #[test]
     fn sniff_http_case_insensitive_header_name() {
         let buf = b"GET / HTTP/1.1\r\nHOST: example.com\r\n\r\n";
-        assert_eq!(sniff_http(buf), Some("example.com".to_string()));
+        assert_eq!(sniff_http(buf).as_deref(), Some("example.com"));
     }
 
     #[test]
     fn sniff_http_partial_request_ok() {
         // No trailing \r\n\r\n — httparse returns Partial, which we treat as success.
         let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n";
-        assert_eq!(sniff_http(buf), Some("example.com".to_string()));
+        assert_eq!(sniff_http(buf).as_deref(), Some("example.com"));
     }
 
     #[test]
@@ -73,14 +84,14 @@ mod tests {
     #[test]
     fn sniff_http_ipv6_host_brackets_stripped() {
         let buf = b"GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n";
-        assert_eq!(sniff_http(buf), Some("::1".to_string()));
+        assert_eq!(sniff_http(buf).as_deref(), Some("::1"));
     }
 
     #[test]
     fn sniff_http_ipv6_host_no_port() {
         // Bracketed IPv6 host without a `:port` suffix is still recognised.
         let buf = b"GET / HTTP/1.1\r\nHost: [2001:db8::1]\r\n\r\n";
-        assert_eq!(sniff_http(buf), Some("2001:db8::1".to_string()));
+        assert_eq!(sniff_http(buf).as_deref(), Some("2001:db8::1"));
     }
 
     #[test]
@@ -95,6 +106,6 @@ mod tests {
     fn sniff_http_host_with_surrounding_whitespace() {
         // Field-value LWS must be trimmed.
         let buf = b"GET / HTTP/1.1\r\nHost:    example.com   \r\n\r\n";
-        assert_eq!(sniff_http(buf), Some("example.com".to_string()));
+        assert_eq!(sniff_http(buf).as_deref(), Some("example.com"));
     }
 }
