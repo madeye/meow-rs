@@ -1301,14 +1301,18 @@ mod load_config_encoding_tests {
     // step succeeds (i.e. the BOM was stripped and YAML parsing started).
     const MINIMAL_YAML: &str = "port: 7890\n";
 
-    fn write_tmp(bytes: &[u8]) -> std::path::PathBuf {
+    // `tag` must be unique per test: these tests run concurrently in one
+    // process, and SystemTime's clock granularity is coarse enough that two
+    // tests starting in the same tick collide on a pid+nanos-only name (one
+    // test then reads the other's bytes — observed as a flaky failure).
+    fn write_tmp(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
         let pid = std::process::id();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        path.push(format!("meow-cfg-{pid}-{nanos}.yaml"));
+        path.push(format!("meow-cfg-{tag}-{pid}-{nanos}.yaml"));
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(bytes).unwrap();
         path
@@ -1317,7 +1321,7 @@ mod load_config_encoding_tests {
     #[tokio::test]
     async fn invalid_utf8_yields_actionable_error() {
         // 0xFF is never valid in UTF-8.
-        let path = write_tmp(b"port: 7890\nrubbish: \xFF\xFE\n");
+        let path = write_tmp("invalid-utf8", b"port: 7890\nrubbish: \xFF\xFE\n");
         let Err(err) = load_config(path.to_str().unwrap()).await else {
             panic!("non-UTF-8 config must fail");
         };
@@ -1337,7 +1341,7 @@ mod load_config_encoding_tests {
     async fn utf8_bom_is_stripped() {
         let mut bytes = b"\xEF\xBB\xBF".to_vec();
         bytes.extend_from_slice(MINIMAL_YAML.as_bytes());
-        let path = write_tmp(&bytes);
+        let path = write_tmp("bom", &bytes);
         // We don't assert success of full load_config (it requires more fields),
         // but the error — if any — must NOT be the UTF-8/BOM error path.
         let result = load_config(path.to_str().unwrap()).await;
