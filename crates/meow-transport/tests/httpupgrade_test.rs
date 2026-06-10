@@ -172,6 +172,52 @@ async fn httpupgrade_custom_headers_forwarded() {
     );
 }
 
+// ─── E6 ───────────────────────────────────────────────────────────────────────
+
+/// E6: `httpupgrade_retains_payload_after_headers`
+///
+/// Payload bytes the server sends in the same TCP segment as the `101`
+/// response must be delivered as the first bytes of the upgraded stream
+/// (the chunked header read may pull them in alongside the headers).
+#[tokio::test]
+async fn httpupgrade_retains_payload_after_headers() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.expect("accept");
+        // Drain the upgrade request headers.
+        let mut buf = vec![0u8; 4096];
+        let mut total = 0;
+        loop {
+            let n = sock.read(&mut buf[total..]).await.expect("read req");
+            assert!(n > 0, "client closed before sending full request");
+            total += n;
+            if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        // 101 response and early payload in a single write.
+        let mut out = Vec::from(RESPONSE_101.as_bytes());
+        out.extend_from_slice(b"early-payload");
+        sock.write_all(&out).await.expect("write resp");
+        // Hold the socket open until the client is done reading.
+        let mut hold = [0u8; 1];
+        let _ = sock.read(&mut hold).await;
+    });
+
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("tcp connect");
+    let layer = HttpUpgradeLayer::new(HttpUpgradeConfig::default());
+    let mut stream = layer.connect(Box::new(tcp)).await.expect("connect");
+
+    let mut recv = [0u8; 13];
+    stream.read_exact(&mut recv).await.expect("read_exact");
+    assert_eq!(&recv, b"early-payload", "early payload must not be lost");
+}
+
 // ─── E5 ───────────────────────────────────────────────────────────────────────
 
 /// E5: `httpupgrade_host_header_override`

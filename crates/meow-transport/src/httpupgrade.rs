@@ -9,8 +9,11 @@
 //!
 //! upstream: transport/vmess/httpupgrade.go
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
 use crate::{Result, Stream, Transport, TransportError};
 
@@ -85,34 +88,42 @@ impl Transport for HttpUpgradeLayer {
             .await
             .map_err(TransportError::Io)?;
 
-        // ── Read the HTTP/1.1 response headers byte-by-byte ──────────────────
+        // ── Read the HTTP/1.1 response headers in chunks ─────────────────────
         //
-        // We stop exactly at the CRLF-CRLF separator, so there are no leftover
-        // bytes to prepend to the raw stream after the upgrade.
+        // Read into a small stack buffer and scan for the CRLF-CRLF separator
+        // (a typical ~300-byte response previously cost ~300 one-byte reads).
+        // Any bytes received past the separator belong to the stream payload
+        // and are retained as initial buffered data on the returned stream.
         let mut header_buf: Vec<u8> = Vec::with_capacity(512);
-        loop {
-            let mut b = [0u8; 1];
-            let n = inner.read(&mut b).await.map_err(TransportError::Io)?;
+        let mut chunk = [0u8; 512];
+        let header_end = loop {
+            let n = inner.read(&mut chunk).await.map_err(TransportError::Io)?;
             if n == 0 {
                 return Err(TransportError::HttpUpgrade(
                     "connection closed before receiving HTTP response".into(),
                 ));
             }
-            header_buf.push(b[0]);
-            if header_buf.ends_with(b"\r\n\r\n") {
-                break;
+            // The separator may straddle the chunk boundary: rescan from up
+            // to 3 bytes before the previously buffered end.
+            let scan_from = header_buf.len().saturating_sub(3);
+            header_buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = header_buf[scan_from..]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+            {
+                break scan_from + pos + 4;
             }
             if header_buf.len() > 8192 {
                 return Err(TransportError::HttpUpgrade(
                     "HTTP response headers exceeded 8192 bytes".into(),
                 ));
             }
-        }
+        };
 
         // ── Parse with httparse ───────────────────────────────────────────────
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut response = httparse::Response::new(&mut headers);
-        match response.parse(&header_buf) {
+        match response.parse(&header_buf[..header_end]) {
             Ok(httparse::Status::Complete(_)) => {}
             Ok(httparse::Status::Partial) => {
                 // Should not happen: we read until \r\n\r\n above.
@@ -150,7 +161,81 @@ impl Transport for HttpUpgradeLayer {
             ));
         }
 
-        // Connection is now a raw byte stream — return the inner stream as-is.
-        Ok(inner)
+        // Connection is now a raw byte stream. Bytes read past the header
+        // terminator are stream payload — hand them back first.
+        if header_end < header_buf.len() {
+            header_buf.drain(..header_end);
+            Ok(Box::new(PrefixedStream {
+                prefix: header_buf,
+                off: 0,
+                inner,
+            }))
+        } else {
+            Ok(inner)
+        }
+    }
+}
+
+// ─── PrefixedStream ──────────────────────────────────────────────────────────
+
+/// Stream wrapper that yields buffered bytes (payload received in the same
+/// reads as the HTTP response headers) before delegating to the inner stream.
+/// Writes always go straight through.
+struct PrefixedStream {
+    prefix: Vec<u8>,
+    off: usize,
+    inner: Box<dyn Stream>,
+}
+
+impl AsyncRead for PrefixedStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = &mut *self;
+        if this.off < this.prefix.len() {
+            let avail = &this.prefix[this.off..];
+            let take = avail.len().min(buf.remaining());
+            buf.put_slice(&avail[..take]);
+            this.off += take;
+            if this.off >= this.prefix.len() {
+                // Fully drained — release the buffer.
+                this.prefix = Vec::new();
+                this.off = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for PrefixedStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
