@@ -31,7 +31,7 @@ use aes_gcm::aead::generic_array::GenericArray;
 use aes_gcm::aead::AeadInPlace;
 use aes_gcm::Aes128Gcm;
 use rand::RngCore;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader, ReadBuf};
 
 use super::cipher::{aes_gcm, snell_kdf};
 
@@ -48,6 +48,12 @@ const V4_BURST_RESET_AFTER: std::time::Duration = std::time::Duration::from_secs
 
 /// Largest snell frame payload — matches mihomo's `maxLength` (0x3FFF).
 pub const MAX_PAYLOAD_LENGTH: usize = 0x3FFF;
+
+/// Userspace read buffer on the underlying stream. Without it, every frame
+/// costs two `recv()` syscalls (23-byte sealed header + body); 64 KiB holds
+/// ~40 max-size frames per `recv()`. Mirrors mihomo PR #2821. Writes are
+/// unaffected — `BufReader` passes `AsyncWrite` straight through.
+const V4_READ_BUFFER_SIZE: usize = 64 * 1024;
 
 const ZERO_CHUNK_KIND: io::ErrorKind = io::ErrorKind::UnexpectedEof;
 const ZERO_CHUNK_MSG: &str = "snell: zero chunk";
@@ -336,17 +342,17 @@ fn open_in_place(
 
 /// AEAD frame wrapper around an `AsyncRead + AsyncWrite` byte stream.
 pub struct V4Conn<S> {
-    inner: S,
+    inner: BufReader<S>,
     psk: Arc<[u8]>,
     writer: Writer,
     reader: ReaderState,
 }
 
-impl<S> V4Conn<S> {
+impl<S: AsyncRead> V4Conn<S> {
     pub fn new(inner: S, psk: Arc<[u8]>) -> Self {
         let writer = Writer::new(&psk);
         Self {
-            inner,
+            inner: BufReader::with_capacity(V4_READ_BUFFER_SIZE, inner),
             psk,
             writer,
             reader: ReaderState::NeedSalt {
@@ -355,7 +361,9 @@ impl<S> V4Conn<S> {
             },
         }
     }
+}
 
+impl<S> V4Conn<S> {
     /// Stage a single frame carrying `buf` as a UDP datagram payload. The
     /// caller is responsible for draining the stream (calling `poll_write`
     /// with an empty buf is a no-op here; the higher-level
