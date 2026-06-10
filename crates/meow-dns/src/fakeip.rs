@@ -45,9 +45,12 @@ use lru::LruCache;
 /// Bidirectional host↔ip store backing a [`Pool`].
 pub trait Store: Send + Sync {
     fn get_by_host(&self, host: &str) -> Option<IpAddr>;
-    fn put_by_host(&self, host: &str, ip: IpAddr);
     fn get_by_ip(&self, ip: IpAddr) -> Option<SmolStr>;
-    fn put_by_ip(&self, ip: IpAddr, host: &str);
+    /// Insert the host↔ip mapping in both directions atomically. A single
+    /// method (rather than separate `put_by_host`/`put_by_ip`) so no caller
+    /// can leave the two directions inconsistent or — for persistent stores —
+    /// depend on a fragile call ordering for the dirty-flag flush.
+    fn put(&self, host: &str, ip: IpAddr);
     fn del_by_ip(&self, ip: IpAddr);
     fn exists(&self, ip: IpAddr) -> bool;
     fn flush(&self);
@@ -69,51 +72,63 @@ pub trait Store: Send + Sync {
 // ----------------------------------------------------------------------------
 
 /// Two-LRU in-memory store. Identical Size for both directions so eviction
-/// pressure is symmetric.
+/// pressure is symmetric. Both LRUs live under ONE mutex: they are always
+/// read and written together (the reverse side is touched on every forward
+/// hit to keep recency in sync), so a single lock halves the acquisitions
+/// per fake-IP query and makes the paired updates atomic.
 pub struct MemoryStore {
-    by_host: Mutex<LruCache<SmolStr, IpAddr>>,
-    by_ip: Mutex<LruCache<IpAddr, SmolStr>>,
+    inner: Mutex<MemoryInner>,
+}
+
+struct MemoryInner {
+    by_host: LruCache<SmolStr, IpAddr>,
+    by_ip: LruCache<IpAddr, SmolStr>,
 }
 
 impl MemoryStore {
     pub fn new(size: usize) -> Self {
         let cap = NonZeroUsize::new(size.max(1)).unwrap();
         Self {
-            by_host: Mutex::new(LruCache::new(cap)),
-            by_ip: Mutex::new(LruCache::new(cap)),
+            inner: Mutex::new(MemoryInner {
+                by_host: LruCache::new(cap),
+                by_ip: LruCache::new(cap),
+            }),
         }
     }
 }
 
 impl Store for MemoryStore {
     fn get_by_host(&self, host: &str) -> Option<IpAddr> {
-        let ip = *self.by_host.lock().get(host)?;
+        let mut inner = self.inner.lock();
+        let ip = *inner.by_host.get(host)?;
         // Touch the reverse side so both LRUs stay synchronised.
-        let _ = self.by_ip.lock().get(&ip);
+        let _ = inner.by_ip.get(&ip);
         Some(ip)
     }
-    fn put_by_host(&self, host: &str, ip: IpAddr) {
-        self.by_host.lock().put(SmolStr::from(host), ip);
-    }
     fn get_by_ip(&self, ip: IpAddr) -> Option<SmolStr> {
-        let host = self.by_ip.lock().get(&ip).cloned()?;
-        let _ = self.by_host.lock().get(&host);
+        let mut inner = self.inner.lock();
+        let host = inner.by_ip.get(&ip).cloned()?;
+        let _ = inner.by_host.get(&host);
         Some(host)
     }
-    fn put_by_ip(&self, ip: IpAddr, host: &str) {
-        self.by_ip.lock().put(ip, SmolStr::from(host));
+    fn put(&self, host: &str, ip: IpAddr) {
+        let mut inner = self.inner.lock();
+        inner.by_host.put(SmolStr::from(host), ip);
+        inner.by_ip.put(ip, SmolStr::from(host));
     }
     fn del_by_ip(&self, ip: IpAddr) {
-        if let Some(host) = self.by_ip.lock().pop(&ip) {
-            self.by_host.lock().pop(&host);
+        let mut inner = self.inner.lock();
+        if let Some(host) = inner.by_ip.pop(&ip) {
+            inner.by_host.pop(&host);
         }
     }
     fn exists(&self, ip: IpAddr) -> bool {
-        self.by_ip.lock().contains(&ip)
+        self.inner.lock().by_ip.contains(&ip)
     }
     fn flush(&self) {
-        self.by_host.lock().clear();
-        self.by_ip.lock().clear();
+        let mut inner = self.inner.lock();
+        inner.by_host.clear();
+        inner.by_ip.clear();
     }
 }
 
@@ -222,7 +237,10 @@ impl FileStore {
                 // Debounce: wait for more mutations to settle.
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-                if dirty.swap(false, Ordering::SeqCst) {
+                // Relaxed is enough for the flag: it is only a "something
+                // changed" hint, and the `state` mutex acquired below
+                // provides the actual ordering for the snapshot data.
+                if dirty.swap(false, Ordering::Relaxed) {
                     let snap = {
                         let s = state.lock();
                         serialise(&s)
@@ -234,7 +252,10 @@ impl FileStore {
     }
 
     fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::SeqCst);
+        // Relaxed: the flag is only a hint; data ordering comes from the
+        // `state` mutex (writers mutate under it before marking dirty, the
+        // flush task locks it before serialising).
+        self.dirty.store(true, Ordering::Relaxed);
         self.notify.notify_one();
     }
 }
@@ -246,7 +267,7 @@ impl Drop for FileStore {
         // cleared `dirty` — in that case this is a no-op. We do not wake the
         // task because it may be inside its own sleep and there is no
         // guarantee the runtime is still pumping.
-        if self.dirty.swap(false, Ordering::SeqCst) {
+        if self.dirty.swap(false, Ordering::Relaxed) {
             let snap = serialise(&self.state.lock());
             persist_to_file(&self.path, &snap);
         }
@@ -288,23 +309,15 @@ impl Store for FileStore {
     fn get_by_host(&self, host: &str) -> Option<IpAddr> {
         self.state.lock().entries.get(host).copied()
     }
-    fn put_by_host(&self, host: &str, ip: IpAddr) {
+    fn get_by_ip(&self, ip: IpAddr) -> Option<SmolStr> {
+        self.reverse.lock().get(&ip).cloned()
+    }
+    fn put(&self, host: &str, ip: IpAddr) {
+        self.reverse.lock().insert(ip, SmolStr::from(host));
         let mut s = self.state.lock();
         s.entries.insert(host.to_string(), ip);
         drop(s);
         self.mark_dirty();
-    }
-    fn get_by_ip(&self, ip: IpAddr) -> Option<SmolStr> {
-        self.reverse.lock().get(&ip).cloned()
-    }
-    fn put_by_ip(&self, ip: IpAddr, host: &str) {
-        self.reverse.lock().insert(ip, SmolStr::from(host));
-        // `put_by_host` is the canonical persistence path; pool calls both,
-        // so we don't need to write the file twice. But we DO need to ensure
-        // a `put_by_ip` without a matching `put_by_host` still persists
-        // (defensive — current pool always calls both, in this order:
-        //  put_by_ip → put_by_host). To stay safe, do nothing here; the
-        // following `put_by_host` flushes the snapshot.
     }
     fn del_by_ip(&self, ip: IpAddr) {
         let host = self.reverse.lock().remove(&ip);
@@ -421,9 +434,7 @@ impl Pool {
         if let Some(existing) = self.store.get_by_host(&host) {
             return existing;
         }
-        let ip = self.allocate(&host);
-        self.store.put_by_host(&host, ip);
-        ip
+        self.allocate(&host)
     }
 
     /// Reverse lookup: host that `ip` was allocated to, if any. Excludes
@@ -486,7 +497,7 @@ impl Pool {
             // Evict the prior mapping at the cursor (LRU-style oldest-first).
             self.store.del_by_ip(candidate);
         }
-        self.store.put_by_ip(candidate, host);
+        self.store.put(host, candidate);
         inner.offset = candidate;
         if self.store.is_persistent() {
             self.store.put_state(inner.offset, inner.cycle);
