@@ -70,6 +70,8 @@ pub struct ConnectionInfo {
     /// hot path).
     pub rule: SmolStr,
     /// Rule payload (e.g. the domain pattern). Config-derived, low-cardinality.
+    /// Renamed so the derived JSON matches the REST API's camelCase field.
+    #[serde(rename = "rulePayload")]
     pub rule_payload: SmolStr,
 }
 
@@ -142,6 +144,16 @@ impl Statistics {
         self.connections.iter().map(|e| e.value().clone()).collect()
     }
 
+    /// Borrow-serializing view over the active-connections table.
+    ///
+    /// Serialises each entry in place while iterating the DashMap — no
+    /// per-call `Vec` clone, no intermediate `serde_json::Value` tree.
+    /// Shard read locks are held per entry during serialization, the same
+    /// window the clone in [`Self::active_connections`] holds them.
+    pub fn active_connections_view(&self) -> ActiveConnectionsView<'_> {
+        ActiveConnectionsView(self)
+    }
+
     pub fn close_all_connections(&self) {
         self.connections.clear();
     }
@@ -150,6 +162,25 @@ impl Statistics {
 impl Default for Statistics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// See [`Statistics::active_connections_view`].
+pub struct ActiveConnectionsView<'a>(&'a Statistics);
+
+impl Serialize for ActiveConnectionsView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.connections.iter().map(EntryRef))
+    }
+}
+
+/// Wraps a DashMap entry guard so `collect_seq` can serialize the borrowed
+/// `ConnectionInfo` without cloning it out of the map.
+struct EntryRef<'a>(dashmap::mapref::multiple::RefMulti<'a, Uuid, ConnectionInfo>);
+
+impl Serialize for EntryRef<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.value().serialize(serializer)
     }
 }
 

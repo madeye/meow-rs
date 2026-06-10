@@ -2497,3 +2497,56 @@ async fn get_metrics_returns_prometheus_text() {
         "missing meow_connections_active in metrics output"
     );
 }
+
+/// GET /connections serialises entries with the documented camelCase shape
+/// (id/upload/download/start/chains/rule/rulePayload). Guards the
+/// borrow-based `ActiveConnectionsView` serialize path (audit M8), which
+/// replaced the per-entry `serde_json::json!` tree.
+#[tokio::test]
+async fn get_connections_entry_has_camel_case_shape() {
+    use meow_common::{ConnType, Metadata, Network};
+    let state = test_state_default();
+
+    let meta = Metadata {
+        network: Network::Tcp,
+        conn_type: ConnType::Http,
+        host: "example.com".into(),
+        dst_port: 80,
+        ..Default::default()
+    };
+    let conn_id = state.tunnel.statistics().track_connection(
+        meta,
+        smol_str::SmolStr::new_static("DOMAIN"),
+        smol_str::SmolStr::new_static("example.com"),
+        smallvec![Arc::from("DIRECT")],
+    );
+
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::get("/connections")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let conn = &json["connections"].as_array().unwrap()[0];
+
+    assert_eq!(conn["id"], conn_id.to_string());
+    assert_eq!(conn["rule"], "DOMAIN");
+    assert_eq!(conn["rulePayload"], "example.com", "must stay camelCase");
+    assert_eq!(conn["chains"], serde_json::json!(["DIRECT"]));
+    assert_eq!(conn["upload"], 0);
+    assert_eq!(conn["download"], 0);
+    assert!(conn["start"].is_string());
+    assert!(
+        conn.get("metadata").is_none(),
+        "metadata stays serde-skipped"
+    );
+    assert!(
+        conn.get("rule_payload").is_none(),
+        "snake_case key must not appear"
+    );
+}

@@ -360,31 +360,25 @@ async fn get_rules(State(state): State<Arc<AppState>>) -> Json<RulesResponse> {
 }
 
 #[derive(Serialize)]
-struct ConnectionsResponse {
+struct ConnectionsResponse<'a> {
     upload_total: i64,
     download_total: i64,
-    connections: Vec<serde_json::Value>,
+    /// Serialised straight from the live table — no per-connection
+    /// `serde_json::Value` tree, no cloned snapshot Vec (audit M8). The
+    /// JSON shape (id/upload/download/start/chains/rule/rulePayload) comes
+    /// from `ConnectionInfo`'s `Serialize` derive.
+    connections: meow_tunnel::statistics::ActiveConnectionsView<'a>,
 }
 
-async fn get_connections(State(state): State<Arc<AppState>>) -> Json<ConnectionsResponse> {
+async fn get_connections(State(state): State<Arc<AppState>>) -> Response {
     let stats = state.tunnel.statistics();
     let (up, down) = stats.snapshot();
-    let conns = stats.active_connections();
-    let connections: Vec<serde_json::Value> = conns
-        .into_iter()
-        .map(|c| {
-            serde_json::json!({
-                "id": c.id, "upload": c.upload, "download": c.download,
-                "start": c.start, "chains": c.chains, "rule": c.rule,
-                "rulePayload": c.rule_payload,
-            })
-        })
-        .collect();
     Json(ConnectionsResponse {
         upload_total: up,
         download_total: down,
-        connections,
+        connections: stats.active_connections_view(),
     })
+    .into_response()
 }
 
 async fn close_connection(
@@ -1409,16 +1403,59 @@ async fn get_logs(
 // ── WebSocket: memory stream ─────────────────────────────────────────
 
 // upstream: hub/route/memory.go
-async fn get_memory(State(_state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(|mut socket| async move {
+//
+// One process-wide sampler task reads RSS + limit and serialises the JSON
+// frame once per tick; every connected socket forwards the shared string
+// (audit M8 — previously each socket sampled and serialised independently,
+// per-socket per-tick). The sampler starts with the first subscriber and
+// exits once the last socket disconnects, so an idle API server pays nothing.
+// Model: the log websocket's single-serialisation broadcast fan-out.
+static MEMORY_FEED: std::sync::Mutex<Option<broadcast::Sender<Arc<str>>>> =
+    std::sync::Mutex::new(None);
+
+fn subscribe_memory_feed() -> broadcast::Receiver<Arc<str>> {
+    let mut guard = MEMORY_FEED.lock().expect("memory feed lock poisoned");
+    if let Some(tx) = guard.as_ref() {
+        // Sampler still alive (it clears the slot under this lock on exit).
+        return tx.subscribe();
+    }
+    let (tx, rx) = broadcast::channel(2);
+    *guard = Some(tx.clone());
+    tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
+            if tx.receiver_count() == 0 {
+                // Re-check under the lock so a subscriber arriving right now
+                // either sees the live sender or a cleared slot — never a
+                // sender whose sampler has already exited.
+                let mut guard = MEMORY_FEED.lock().expect("memory feed lock poisoned");
+                if tx.receiver_count() == 0 {
+                    *guard = None;
+                    break;
+                }
+            }
             let inuse = read_rss_bytes();
             let oslimit = read_os_memory_limit();
-            let msg = serde_json::json!({ "inuse": inuse, "oslimit": oslimit });
+            let msg: Arc<str> = Arc::from(format!("{{\"inuse\":{inuse},\"oslimit\":{oslimit}}}"));
+            let _ = tx.send(msg);
+        }
+    });
+    rx
+}
+
+async fn get_memory(State(_state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(|mut socket| async move {
+        let mut feed = subscribe_memory_feed();
+        loop {
+            let msg = match feed.recv().await {
+                Ok(msg) => msg,
+                // Slow consumer skipped a tick — just continue with the next.
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
             if socket
-                .send(Message::Text(msg.to_string().into()))
+                .send(Message::Text(msg.as_ref().into()))
                 .await
                 .is_err()
             {
