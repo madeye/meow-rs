@@ -250,10 +250,24 @@ impl AsyncWrite for AnytlsConn {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Dropping the Arc<Stream> + Arc<Session> here would close the
-        // session prematurely if it's pooled for reuse. Rely on the
-        // session pool's idle reaper instead.
+        // Tear down just this stream (not the whole session, which is pooled
+        // and multiplexes other streams): `Stream::close` emits a FIN frame so
+        // the server releases the proxied target connection and evicts the
+        // stream from the session maps. Without this the server-side proxied
+        // socket and the session's per-stream map entry leaked on every dial
+        // (issue #201 item 4). Idempotent and lock-free.
+        self.stream.close();
         Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for AnytlsConn {
+    fn drop(&mut self) {
+        // Belt-and-suspenders: the relay path that drops the boxed `ProxyConn`
+        // without first calling `poll_shutdown` (e.g. on a copy error) must
+        // still FIN the stream so the proxied connection and map entry are
+        // released. `close()` is idempotent with `poll_shutdown`.
+        self.stream.close();
     }
 }
 

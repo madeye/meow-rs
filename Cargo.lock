@@ -141,7 +141,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "anytls-rs"
 version = "0.5.4"
-source = "git+https://github.com/madeye/anytls-rs.git?rev=1d13befb2fdd40685f7e4f75b785e9e77ad5eefa#1d13befb2fdd40685f7e4f75b785e9e77ad5eefa"
+source = "git+https://github.com/madeye/anytls-rs.git?rev=e6134889d3abbfaa2cb7439969dbda2ef6930611#e6134889d3abbfaa2cb7439969dbda2ef6930611"
 dependencies = [
  "anyhow",
  "bytes",
