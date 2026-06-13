@@ -4,90 +4,130 @@
 //! Example:
 //!
 //! ```bash
-//! SNELL_SMOKE=1 SNELL_SERVER=82.40.35.29:63689 SNELL_PSK=... \
+//! SNELL_SMOKE=1 SNELL_SERVER=82.40.35.29:63689 SNELL_PSK=... SNELL_VERSION=3 \
+//!     SNELL_OBFS_MODE=http SNELL_OBFS_HOST=/ \
 //!     cargo test -p meow-proxy --features snell --test snell_smoke -- --nocapture
 //! ```
 
 #![cfg(feature = "snell")]
 
-use meow_proxy::snell::protocol::{write_header, Snell};
-use std::io;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use meow_common::{Metadata, Network, ProxyAdapter};
+use meow_proxy::{SnellAdapter, SnellObfs, SnellVersion};
+use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn opt_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-/// Transparent wrapper that prints every chunk of bytes that flows across
-/// the TCP stream in both directions. Useful for spotting wire-format bugs.
-struct Sniffer {
-    inner: TcpStream,
-    label: &'static str,
+fn split_server_addr(server_addr: &str) -> (&str, u16) {
+    let (host, port) = server_addr
+        .rsplit_once(':')
+        .expect("SNELL_SERVER must be host:port");
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = port.parse().expect("SNELL_SERVER port must be a u16");
+    (host, port)
 }
 
-impl AsyncRead for Sniffer {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let before = buf.filled().len();
-        match Pin::new(&mut self.inner).poll_read(cx, buf) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => {
-                eprintln!("[{}] READ ERR: {e}", self.label);
-                Poll::Ready(Err(e))
-            }
-            Poll::Ready(Ok(())) => {
-                let n = buf.filled().len() - before;
-                if n > 0 {
-                    let slice = &buf.filled()[before..];
-                    eprintln!(
-                        "[{}] READ {} bytes: {}",
-                        self.label,
-                        n,
-                        hex::encode(&slice[..slice.len().min(64)])
-                    );
-                } else {
-                    eprintln!("[{}] READ 0 (EOF)", self.label);
-                }
-                Poll::Ready(Ok(()))
-            }
-        }
+fn parse_version() -> SnellVersion {
+    match opt_env("SNELL_VERSION")
+        .unwrap_or_else(|| "4".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "3" | "v3" => SnellVersion::V3,
+        "4" | "v4" => SnellVersion::V4,
+        "5" | "v5" => SnellVersion::V5,
+        other => panic!("SNELL_VERSION must be 3, 4, or 5; got {other}"),
     }
 }
 
-impl AsyncWrite for Sniffer {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match Pin::new(&mut self.inner).poll_write(cx, buf) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Ready(Ok(n)) => {
-                eprintln!(
-                    "[{}] WRITE {} bytes: {}",
-                    self.label,
-                    n,
-                    hex::encode(&buf[..n.min(64)])
-                );
-                Poll::Ready(Ok(n))
-            }
-        }
+fn parse_obfs(server_host: &str) -> SnellObfs {
+    let mode = opt_env("SNELL_OBFS_MODE")
+        .unwrap_or_else(|| "off".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    let host = opt_env("SNELL_OBFS_HOST").unwrap_or_else(|| server_host.to_string());
+    match mode.as_str() {
+        "" | "off" | "none" => SnellObfs::None,
+        "http" => SnellObfs::Http { host },
+        "tls" => SnellObfs::Tls { server: host },
+        other => panic!("SNELL_OBFS_MODE must be off, http, or tls; got {other}"),
     }
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
+}
+
+fn bool_env(key: &str, default: bool) -> bool {
+    opt_env(key).map_or(default, |v| {
+        matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
+    })
+}
+
+fn dns_query_for_example_com() -> Vec<u8> {
+    let mut query = Vec::with_capacity(29);
+    query.extend_from_slice(&[
+        0x4d, 0x57, // ID
+        0x01, 0x00, // standard recursive query
+        0x00, 0x01, // QDCOUNT
+        0x00, 0x00, // ANCOUNT
+        0x00, 0x00, // NSCOUNT
+        0x00, 0x00, // ARCOUNT
+    ]);
+    query.push(7);
+    query.extend_from_slice(b"example");
+    query.push(3);
+    query.extend_from_slice(b"com");
+    query.push(0);
+    query.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]); // A, IN
+    query
+}
+
+fn assert_dns_response(buf: &[u8]) {
+    assert!(
+        buf.len() >= 12,
+        "DNS response too short: {} bytes",
+        buf.len()
+    );
+    assert_eq!(&buf[..2], &[0x4d, 0x57], "DNS response ID mismatch");
+    assert_ne!(buf[2] & 0x80, 0, "DNS response QR bit not set");
+}
+
+async fn verify_udp(adapter: &SnellAdapter) {
+    let target: SocketAddr = opt_env("SNELL_UDP_TARGET")
+        .unwrap_or_else(|| "1.1.1.1:53".to_string())
+        .parse()
+        .expect("SNELL_UDP_TARGET must be a SocketAddr");
+    eprintln!("snell smoke: sending UDP DNS query via Snell to {target}");
+
+    let metadata = Metadata {
+        network: Network::Udp,
+        ..Default::default()
+    };
+    let packet_conn = tokio::time::timeout(Duration::from_secs(10), adapter.dial_udp(&metadata))
+        .await
+        .expect("snell udp dial timeout")
+        .expect("snell udp dial ok");
+
+    let query = dns_query_for_example_com();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        packet_conn.write_packet(&query, &target),
+    )
+    .await
+    .expect("snell udp write timeout")
+    .expect("snell udp write ok");
+
+    let mut buf = [0u8; 1500];
+    let (n, from) =
+        tokio::time::timeout(Duration::from_secs(10), packet_conn.read_packet(&mut buf))
+            .await
+            .expect("snell udp read timeout")
+            .expect("snell udp read ok");
+    eprintln!("snell smoke: UDP response {n} bytes from {from}");
+    assert_eq!(from.port(), target.port(), "UDP response port mismatch");
+    assert_dns_response(&buf[..n]);
+    packet_conn.close().expect("snell udp close ok");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -99,6 +139,11 @@ async fn snell_dial_real_server() {
     let server_addr =
         opt_env("SNELL_SERVER").expect("SNELL_SERVER (host:port) required when SNELL_SMOKE=1");
     let psk = opt_env("SNELL_PSK").expect("SNELL_PSK required when SNELL_SMOKE=1");
+    let (server_host, server_port) = split_server_addr(&server_addr);
+    let version = parse_version();
+    let obfs = parse_obfs(server_host);
+    let udp = bool_env("SNELL_UDP", false);
+    let reuse = bool_env("SNELL_REUSE", false);
 
     let target_host = opt_env("SNELL_TARGET_HOST").unwrap_or_else(|| "httpbin.org".to_string());
     let target_port: u16 = opt_env("SNELL_TARGET_PORT")
@@ -106,42 +151,48 @@ async fn snell_dial_real_server() {
         .unwrap_or(80);
     let target_path = opt_env("SNELL_TARGET_PATH").unwrap_or_else(|| "/ip".to_string());
 
-    eprintln!("snell smoke: dialing {target_host}:{target_port} via {server_addr} (reuse=false)");
+    eprintln!(
+        "snell smoke: dialing {target_host}:{target_port} via {server_addr} \
+         (version={} udp={udp} reuse={reuse})",
+        version.as_str()
+    );
 
-    let tcp = tokio::time::timeout(Duration::from_secs(8), TcpStream::connect(&server_addr))
-        .await
-        .expect("tcp connect timeout")
-        .expect("tcp connect ok");
-    tcp.set_nodelay(true).ok();
-    let sniffer = Sniffer {
-        inner: tcp,
-        label: "snell-tcp",
+    let adapter = SnellAdapter::new(
+        "snell-smoke",
+        server_host,
+        server_port,
+        &psk,
+        obfs,
+        version,
+        udp,
+        reuse,
+    )
+    .expect("snell adapter config");
+    let metadata = Metadata {
+        network: Network::Tcp,
+        host: target_host.clone().into(),
+        dst_port: target_port,
+        ..Default::default()
     };
-
-    let mut snell = Snell::new(sniffer, Arc::from(psk.as_bytes()));
-
-    // Snell CONNECT request (reuse=false).
-    write_header(&mut snell, &target_host, target_port, false)
+    let mut conn = tokio::time::timeout(Duration::from_secs(10), adapter.dial_tcp(&metadata))
         .await
-        .expect("write snell header");
-    snell.flush().await.expect("flush snell header");
+        .expect("snell dial timeout")
+        .expect("snell dial ok");
 
     // HTTP/1.0 GET.
     let request =
         format!("GET {target_path} HTTP/1.0\r\nHost: {target_host}\r\nConnection: close\r\n\r\n");
-    snell
-        .write_all(request.as_bytes())
+    conn.write_all(request.as_bytes())
         .await
         .expect("write http req");
-    snell.flush().await.expect("flush http req");
+    conn.flush().await.expect("flush http req");
 
     // Read up to 4 KiB; we read in a loop so a mid-stream snell error
     // doesn't discard the bytes we already have.
     let mut buf = Vec::with_capacity(4096);
     let mut scratch = [0u8; 1024];
     loop {
-        let n = match tokio::time::timeout(Duration::from_secs(10), snell.read(&mut scratch)).await
-        {
+        let n = match tokio::time::timeout(Duration::from_secs(10), conn.read(&mut scratch)).await {
             Err(_) => {
                 eprintln!("read timed out after {} bytes", buf.len());
                 break;
@@ -170,4 +221,8 @@ async fn snell_dial_real_server() {
         "expected HTTP response head, got: {:?}",
         &head[..head.len().min(80)]
     );
+
+    if udp && bool_env("SNELL_VALIDATE_UDP", false) {
+        verify_udp(&adapter).await;
+    }
 }

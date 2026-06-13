@@ -10,6 +10,7 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 - **VLESS** -- Plain VLESS and XTLS-Vision splice; TLS, WebSocket, gRPC, H2, HTTPUpgrade transports
 - **HTTP** -- HTTP CONNECT outbound proxy with optional TLS and basic auth
 - **SOCKS5** -- SOCKS5 outbound proxy with optional TLS and auth
+- **Snell** -- v3/v4/v5 TCP, UDP-over-TCP, optional HTTP/TLS obfs; v4/v5 connection reuse
 - **Direct** -- Direct connection to destination
 - **Reject** -- Drop connections (with configurable behavior)
 
@@ -285,14 +286,25 @@ proxies:
     sni: example.com
     skip-cert-verify: false
 
+  - name: my-snell
+    type: snell
+    server: ss.example.com
+    port: 8443
+    psk: "your-psk"
+    version: 3
+    udp: true
+    obfs-opts:
+      mode: http
+      host: /
+
 proxy-groups:
   - name: Proxy
     type: select
-    proxies: [my-ss, my-trojan]
+    proxies: [my-ss, my-trojan, my-snell]
 
   - name: Auto
     type: url-test
-    proxies: [my-ss, my-trojan]
+    proxies: [my-ss, my-trojan, my-snell]
     url: http://www.gstatic.com/generate_204
     interval: 300
 
