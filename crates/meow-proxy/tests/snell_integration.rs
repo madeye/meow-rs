@@ -1,17 +1,17 @@
 #![cfg(feature = "snell")]
 //! Integration tests for the Snell adapter.
 //!
-//! Uses an embedded mock Snell server: the v4 AEAD codec is symmetric (each
-//! direction sends its own salt and derives its own key), so `V4Conn::new`
-//! over an accepted `TcpStream` speaks the server side. No external binaries
-//! required.
+//! Uses embedded mock Snell servers: the AEAD codecs are symmetric (each
+//! direction sends its own salt and derives its own key), so wrapping an
+//! accepted `TcpStream` speaks the server side. No external binaries required.
 
 use meow_common::{MeowError, Metadata, Network, ProxyAdapter};
 use meow_proxy::snell::protocol::{
     write_header, AppError, Snell, COMMAND_CONNECT, COMMAND_CONNECT_V2, COMMAND_UDP,
     COMMAND_UDP_FORWARD, HEADER_VERSION, RESPONSE_ERROR, RESPONSE_TUNNEL,
 };
-use meow_proxy::snell::v4::{is_zero_chunk, V4Conn};
+use meow_proxy::snell::v3::{is_zero_chunk as is_v3_zero_chunk, V3Conn};
+use meow_proxy::snell::v4::{is_zero_chunk as is_v4_zero_chunk, V4Conn};
 use meow_proxy::snell::{SnellAdapter, SnellObfs, SnellVersion};
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -67,11 +67,9 @@ impl MockServer {
     }
 }
 
-/// Emit a v4 zero-chunk (half-close) frame. `write_all(&[])` short-circuits
+/// Emit a Snell zero-chunk (half-close) frame. `write_all(&[])` short-circuits
 /// inside tokio without calling `poll_write`, so drive the poll by hand.
-async fn send_zero_chunk<S: AsyncRead + AsyncWrite + Unpin>(
-    conn: &mut V4Conn<S>,
-) -> std::io::Result<()> {
+async fn send_zero_chunk<S: AsyncRead + AsyncWrite + Unpin>(conn: &mut S) -> std::io::Result<()> {
     std::future::poll_fn(|cx| Pin::new(&mut *conn).poll_write(cx, &[])).await?;
     conn.flush().await
 }
@@ -83,7 +81,13 @@ async fn send_zero_chunk<S: AsyncRead + AsyncWrite + Unpin>(
 /// Runs inside a tokio-spawned task where panics would be swallowed, so
 /// protocol violations are reported as `Err(message)` and surfaced by
 /// [`MockServer::assert_no_violations`].
-async fn serve_udp_echo(conn: &mut V4Conn<TcpStream>) -> Result<(), String> {
+async fn serve_udp_echo<S>(
+    conn: &mut S,
+    is_zero_chunk: fn(&std::io::Error) -> bool,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = match conn.read(&mut buf).await {
@@ -137,9 +141,10 @@ async fn serve_udp_echo(conn: &mut V4Conn<TcpStream>) -> Result<(), String> {
 /// protocol violations are reported as `Err(message)` and surfaced by
 /// [`MockServer::assert_no_violations`].
 async fn serve_conn(
-    mut conn: V4Conn<TcpStream>,
+    mut conn: impl AsyncRead + AsyncWrite + Unpin,
     behavior: Behavior,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    is_zero_chunk: fn(&std::io::Error) -> bool,
 ) -> Result<(), String> {
     loop {
         // Request header: [ver, cmd, client_id_len] then, for CONNECT
@@ -201,7 +206,7 @@ async fn serve_conn(
                     return Ok(());
                 }
                 if cmd == COMMAND_UDP {
-                    return serve_udp_echo(&mut conn).await;
+                    return serve_udp_echo(&mut conn, is_zero_chunk).await;
                 }
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
@@ -250,7 +255,44 @@ async fn start_mock_server(psk: &'static str, behavior: Behavior) -> MockServer 
             let requests_conn = Arc::clone(&requests_task);
             let violations_conn = Arc::clone(&violations_task);
             tokio::spawn(async move {
-                if let Err(violation) = serve_conn(conn, behavior, requests_conn).await {
+                if let Err(violation) =
+                    serve_conn(conn, behavior, requests_conn, is_v4_zero_chunk).await
+                {
+                    violations_conn.lock().unwrap().push(violation);
+                }
+            });
+        }
+    });
+    MockServer {
+        addr,
+        accepted,
+        requests,
+        violations,
+    }
+}
+
+async fn start_v3_mock_server(psk: &'static str, behavior: Behavior) -> MockServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let requests: Arc<Mutex<Vec<RecordedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let violations: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let accepted_task = Arc::clone(&accepted);
+    let requests_task = Arc::clone(&requests);
+    let violations_task = Arc::clone(&violations);
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            accepted_task.fetch_add(1, Ordering::SeqCst);
+            let conn = V3Conn::new(stream, Arc::from(psk.as_bytes()));
+            let requests_conn = Arc::clone(&requests_task);
+            let violations_conn = Arc::clone(&violations_task);
+            tokio::spawn(async move {
+                if let Err(violation) =
+                    serve_conn(conn, behavior, requests_conn, is_v3_zero_chunk).await
+                {
                     violations_conn.lock().unwrap().push(violation);
                 }
             });
@@ -265,13 +307,23 @@ async fn start_mock_server(psk: &'static str, behavior: Behavior) -> MockServer 
 }
 
 fn make_adapter(server_port: u16, psk: &str, udp: bool, reuse: bool) -> SnellAdapter {
+    make_adapter_with_version(server_port, psk, SnellVersion::V4, udp, reuse)
+}
+
+fn make_adapter_with_version(
+    server_port: u16,
+    psk: &str,
+    version: SnellVersion,
+    udp: bool,
+    reuse: bool,
+) -> SnellAdapter {
     SnellAdapter::new(
         "snell-test",
         "127.0.0.1",
         server_port,
         psk,
         SnellObfs::None,
-        SnellVersion::V4,
+        version,
         udp,
         reuse,
     )
@@ -341,6 +393,36 @@ async fn tcp_connect_roundtrip_no_reuse() {
         assert_eq!(requests[0].host, "echo.example.com");
         assert_eq!(requests[0].port, 8080);
     }
+    server.assert_no_violations();
+}
+
+#[tokio::test]
+async fn tcp_connect_roundtrip_v3_reuse_flag_ignored() {
+    let server = start_v3_mock_server(PSK, Behavior::Echo).await;
+    let adapter = make_adapter_with_version(server.addr.port(), PSK, SnellVersion::V3, false, true);
+
+    let metadata = tcp_metadata("v3.example.com", 8443);
+    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
+        .await
+        .expect("dial timed out")
+        .expect("dial failed");
+    roundtrip(&mut conn, b"hello snell v3").await;
+
+    {
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].cmd, COMMAND_CONNECT,
+            "Snell v3 must not use CommandConnectV2 even when reuse=true"
+        );
+        assert_eq!(requests[0].host, "v3.example.com");
+        assert_eq!(requests[0].port, 8443);
+    }
+    assert_eq!(
+        adapter.idle_pool_size(),
+        0,
+        "Snell v3 must not create a reuse pool"
+    );
     server.assert_no_violations();
 }
 
@@ -638,6 +720,46 @@ async fn udp_roundtrip_ipv4() {
 
     let dst: SocketAddr = "1.2.3.4:5353".parse().unwrap();
     let payload = b"dns-query-ipv4";
+    let n = timeout(TIMEOUT, pc.write_packet(payload, &dst))
+        .await
+        .expect("write_packet timed out")
+        .expect("write_packet failed");
+    assert_eq!(n, payload.len());
+
+    let mut buf = [0u8; 1500];
+    let (n, from) = timeout(TIMEOUT, pc.read_packet(&mut buf))
+        .await
+        .expect("read_packet timed out")
+        .expect("read_packet failed");
+    assert_eq!(&buf[..n], payload);
+    assert_eq!(from, dst, "echoed source address must round-trip");
+
+    {
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].cmd, COMMAND_UDP);
+    }
+    server.assert_no_violations();
+}
+
+#[tokio::test]
+async fn udp_roundtrip_ipv4_v3() {
+    let server = start_v3_mock_server(PSK, Behavior::Echo).await;
+    let adapter = make_adapter_with_version(server.addr.port(), PSK, SnellVersion::V3, true, false);
+
+    let metadata = Metadata {
+        network: Network::Udp,
+        dst_ip: Some(IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4))),
+        dst_port: 53,
+        ..Default::default()
+    };
+    let pc = timeout(TIMEOUT, adapter.dial_udp(&metadata))
+        .await
+        .expect("dial_udp timed out")
+        .expect("dial_udp failed");
+
+    let dst: SocketAddr = "8.8.4.4:53".parse().unwrap();
+    let payload = b"dns-query-v3";
     let n = timeout(TIMEOUT, pc.write_packet(payload, &dst))
         .await
         .expect("write_packet timed out")
