@@ -18,9 +18,27 @@ use std::time::Duration;
 
 use meow_transport::grpc::{decode_gun_frame, encode_gun_frame, GrpcConfig, GrpcLayer};
 use meow_transport::Transport;
+use meow_transport::TransportError;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use support::loopback::spawn_grpc_server;
+
+async fn assert_grpc_config_error(config: GrpcConfig, expected: &str) {
+    let (client, _server) = tokio::io::duplex(64);
+    let layer = GrpcLayer::new(config);
+    let Err(err) = layer.connect(Box::new(client)).await else {
+        panic!("invalid grpc config unexpectedly connected");
+    };
+    match err {
+        TransportError::Config(msg) => {
+            assert!(
+                msg.contains(expected),
+                "expected config error containing {expected:?}, got: {msg}"
+            );
+        }
+        other => panic!("expected TransportError::Config, got: {other:?}"),
+    }
+}
 
 // ─── A: Reference framing test ────────────────────────────────────────────────
 //
@@ -99,6 +117,45 @@ fn grpc_framing_matches_upstream() {
     // decode must be the exact inverse.
     let decoded = decode_gun_frame(&encoded).expect("decode_gun_frame");
     assert_eq!(decoded, payload.as_slice());
+}
+
+#[test]
+fn grpc_decode_rejects_payload_length_overflow_without_panic() {
+    let mut frame = vec![
+        0x00, // compression flag
+        0x00, 0x00, 0x00, 0x0B, // inner_len = tag + 10-byte varint
+        0x0A, // proto field 1, wire type 2
+    ];
+    frame.extend_from_slice(&[0xFF; 9]);
+    frame.push(0x01); // uleb128(u64::MAX)
+
+    let err = decode_gun_frame(&frame).expect_err("overflowing payload length must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("payload length") && msg.contains("overflow"),
+        "expected payload length overflow error, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn grpc_rejects_invalid_request_config_before_handshake() {
+    assert_grpc_config_error(
+        GrpcConfig {
+            service_name: "Bad Service".into(),
+            ..Default::default()
+        },
+        "invalid request config",
+    )
+    .await;
+
+    assert_grpc_config_error(
+        GrpcConfig {
+            authority: "bad authority".into(),
+            ..Default::default()
+        },
+        "invalid request config",
+    )
+    .await;
 }
 
 // ─── B: Service name in :path ─────────────────────────────────────────────────

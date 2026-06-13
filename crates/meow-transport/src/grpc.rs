@@ -87,6 +87,17 @@ impl Transport for GrpcLayer {
     async fn connect(&self, inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
         let path = format!("/{}/Tun", self.config.service_name);
 
+        // Build and validate the request before opening the h2 connection.
+        // Invalid service names or authorities are configuration errors, not
+        // transport-handshake failures.
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("http://{}{}", self.config.authority, path))
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .header("te", "trailers")
+            .body(())
+            .map_err(|e| TransportError::Config(format!("grpc: invalid request config: {e}")))?;
+
         // Perform the HTTP/2 client handshake over the inner stream.
         let (mut h2, conn) = h2::client::handshake(inner)
             .await
@@ -98,15 +109,6 @@ impl Transport for GrpcLayer {
         tokio::spawn(async move {
             let _ = conn.await;
         });
-
-        // Build the gRPC POST request.
-        let request = http::Request::builder()
-            .method(http::Method::POST)
-            .uri(format!("http://{}{}", self.config.authority, path))
-            .header(http::header::CONTENT_TYPE, "application/grpc")
-            .header("te", "trailers")
-            .body(())
-            .map_err(|e| TransportError::Grpc(e.to_string()))?;
 
         // Open the h2 stream.  `end_of_stream = false` — we will stream data.
         let (response_future, send_stream) = h2
@@ -185,7 +187,16 @@ pub fn decode_gun_frame(frame: &[u8]) -> std::result::Result<&[u8], TransportErr
     let (payload_len, varint_consumed) =
         decode_varint(&inner[1..]).map_err(TransportError::Grpc)?;
     let payload_start = 1 + varint_consumed;
-    let payload_end = payload_start + payload_len as usize;
+    let payload_len: usize = payload_len.try_into().map_err(|_| {
+        TransportError::Grpc(format!(
+            "grpc: payload length {payload_len} does not fit in usize"
+        ))
+    })?;
+    let payload_end = payload_start.checked_add(payload_len).ok_or_else(|| {
+        TransportError::Grpc(format!(
+            "grpc: payload length overflow (start {payload_start}, len {payload_len})"
+        ))
+    })?;
     if inner.len() < payload_end {
         return Err(TransportError::Grpc(format!(
             "grpc: payload truncated in inner (need {} bytes, have {})",

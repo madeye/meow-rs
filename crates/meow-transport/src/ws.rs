@@ -117,18 +117,27 @@ impl WsLayer {
             ));
         }
 
-        // F2: validate extra_headers at construction time via a dry-run.
-        // build_request can fail on InvalidHeaderName / InvalidHeaderValue;
-        // catching it here makes WsLayer::new a total validator — if it
-        // returns Ok, begin_upgrade cannot fail on header construction.
-        build_request(
-            "ws://localhost/",
-            "localhost",
-            &config.extra_headers,
-            "",
-            "",
-        )
-        .map_err(|e| TransportError::Config(format!("ws: invalid header in extra_headers: {e}")))?;
+        let host = config
+            .host_header
+            .as_deref()
+            .expect("host_header checked above");
+        let uri = format!("ws://{}{}", host, config.path);
+        let early_header = config
+            .early_data_header_name
+            .as_deref()
+            .unwrap_or("Sec-WebSocket-Protocol");
+        let early_value = if config.max_early_data > 0 {
+            "ZWFybHk"
+        } else {
+            ""
+        };
+
+        // F2: validate the actual request shape at construction time.
+        // build_request can fail on InvalidUri, InvalidHeaderName, or
+        // InvalidHeaderValue; catching it here means begin_upgrade cannot panic
+        // on deferred early-data connections.
+        build_request(&uri, host, &config.extra_headers, early_header, early_value)
+            .map_err(|e| TransportError::Config(format!("ws: invalid request config: {e}")))?;
 
         let host_in_extra = config
             .extra_headers
@@ -548,5 +557,61 @@ impl AsyncWrite for WsStream {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_config() -> WsConfig {
+        WsConfig {
+            path: "/".into(),
+            host_header: Some("example.com".into()),
+            extra_headers: Vec::new(),
+            max_early_data: 0,
+            early_data_header_name: None,
+        }
+    }
+
+    fn assert_invalid_config(config: WsConfig, expected: &str) {
+        let Err(err) = WsLayer::new(config) else {
+            panic!("invalid websocket config unexpectedly succeeded");
+        };
+        match err {
+            TransportError::Config(msg) => {
+                assert!(
+                    msg.contains(expected),
+                    "expected config error containing {expected:?}, got: {msg}"
+                );
+            }
+            other => panic!("expected TransportError::Config, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ws_new_rejects_crlf_in_path_before_deferred_upgrade() {
+        let mut config = valid_config();
+        config.path = "/ok\r\nX-Injected: yes".into();
+        config.max_early_data = 1;
+
+        assert_invalid_config(config, "invalid request config");
+    }
+
+    #[test]
+    fn ws_new_rejects_crlf_in_host_header() {
+        let mut config = valid_config();
+        config.host_header = Some("good.example\r\nX-Injected: yes".into());
+
+        assert_invalid_config(config, "invalid request config");
+    }
+
+    #[test]
+    fn ws_new_rejects_invalid_early_data_header_name() {
+        let mut config = valid_config();
+        config.max_early_data = 1;
+        config.early_data_header_name = Some("Bad Header".into());
+
+        assert_invalid_config(config, "invalid request config");
     }
 }

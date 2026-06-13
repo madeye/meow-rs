@@ -64,11 +64,10 @@ async fn handle_socks5_inner(
     stream.read_exact(&mut methods_buf[..nmethods]).await?;
     let methods = &methods_buf[..nmethods];
 
-    let needs_auth = auth.is_some_and(|a| !a.credentials.is_empty())
-        && !auth.is_some_and(|a| a.should_skip(&src_addr.ip()));
-
-    let in_user: Option<String> = if needs_auth {
-        let auth = auth.unwrap();
+    let in_user: Option<String> = if let Some(auth) = auth
+        .filter(|a| !a.credentials.is_empty())
+        .filter(|a| !a.should_skip(&src_addr.ip()))
+    {
         if !methods.contains(&USER_PASS_AUTH) {
             stream
                 .write_all(&[SOCKS5_VERSION, NO_ACCEPTABLE_METHODS])
@@ -90,12 +89,18 @@ async fn handle_socks5_inner(
         stream.read_exact(&mut ulen).await?;
         let mut user_buf = [0u8; 255];
         stream.read_exact(&mut user_buf[..ulen[0] as usize]).await?;
-        let username = std::str::from_utf8(&user_buf[..ulen[0] as usize]).unwrap_or_default();
         let mut plen = [0u8; 1];
         stream.read_exact(&mut plen).await?;
         let mut pass_buf = [0u8; 255];
         stream.read_exact(&mut pass_buf[..plen[0] as usize]).await?;
-        let password = std::str::from_utf8(&pass_buf[..plen[0] as usize]).unwrap_or_default();
+        let Ok(username) = std::str::from_utf8(&user_buf[..ulen[0] as usize]) else {
+            stream.write_all(&[0x01, 0x01]).await?;
+            return Err("invalid SOCKS5 username encoding".into());
+        };
+        let Ok(password) = std::str::from_utf8(&pass_buf[..plen[0] as usize]) else {
+            stream.write_all(&[0x01, 0x01]).await?;
+            return Err("invalid SOCKS5 password encoding".into());
+        };
 
         if !auth.credentials.verify(username, password) {
             stream.write_all(&[0x01, 0x01]).await?;
@@ -104,7 +109,12 @@ async fn handle_socks5_inner(
         stream.write_all(&[0x01, 0x00]).await?;
         Some(username.to_string())
     } else {
-        // No auth required
+        if !methods.contains(&NO_AUTH) {
+            stream
+                .write_all(&[SOCKS5_VERSION, NO_ACCEPTABLE_METHODS])
+                .await?;
+            return Err("client does not support no-auth SOCKS5".into());
+        }
         stream.write_all(&[SOCKS5_VERSION, NO_AUTH]).await?;
         None
     };
@@ -236,7 +246,7 @@ async fn parse_socks5_address(
             let mut port_buf = [0u8; 2];
             stream.read_exact(&mut port_buf).await?;
             let host = std::str::from_utf8(&domain_buf[..dlen])
-                .unwrap_or_default()
+                .map_err(|_| "invalid domain name encoding")?
                 .to_string();
             let port = u16::from_be_bytes(port_buf);
             Ok((host, None, port))

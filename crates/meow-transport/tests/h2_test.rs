@@ -18,8 +18,26 @@ use std::time::Duration;
 
 use meow_transport::h2::{H2Config, H2Layer};
 use meow_transport::Transport;
+use meow_transport::TransportError;
 use support::loopback::spawn_h2_server;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn assert_h2_config_error(config: H2Config, expected: &str) {
+    let (client, _server) = tokio::io::duplex(64);
+    let layer = H2Layer::new(config);
+    let Err(err) = layer.connect(Box::new(client)).await else {
+        panic!("invalid h2 config unexpectedly connected");
+    };
+    match err {
+        TransportError::Config(msg) => {
+            assert!(
+                msg.contains(expected),
+                "expected config error containing {expected:?}, got: {msg}"
+            );
+        }
+        other => panic!("expected TransportError::Config, got: {other:?}"),
+    }
+}
 
 /// D1: `h2_round_trip_1mib`
 ///
@@ -183,4 +201,37 @@ async fn h2_path_forwarded() {
         info.path, "/custom",
         ":path must match configured H2Config.path"
     );
+}
+
+#[tokio::test]
+async fn h2_rejects_empty_hosts_before_handshake() {
+    assert_h2_config_error(
+        H2Config {
+            path: "/".into(),
+            hosts: vec![],
+        },
+        "hosts",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn h2_rejects_invalid_request_config_before_handshake() {
+    assert_h2_config_error(
+        H2Config {
+            path: "/ok\r\nx: y".into(),
+            hosts: vec!["example.com".into()],
+        },
+        "invalid request config",
+    )
+    .await;
+
+    assert_h2_config_error(
+        H2Config {
+            path: "/".into(),
+            hosts: vec!["bad host".into()],
+        },
+        "invalid request config",
+    )
+    .await;
 }

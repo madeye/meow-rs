@@ -121,25 +121,10 @@ impl HttpAdapter {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        use std::io::Write as _;
-        let mut buf = [0u8; 1024];
-        let mut cursor: &mut [u8] = &mut buf;
-        let _ = write!(cursor, "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n");
-
-        if let Some((user, pass)) = &self.auth {
-            let creds = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-            let _ = write!(cursor, "Proxy-Authorization: Basic {creds}\r\n");
-        }
-
-        for (k, v) in &self.extra_headers {
-            let _ = write!(cursor, "{k}: {v}\r\n");
-        }
-        let _ = write!(cursor, "\r\n");
-        let remaining = cursor.len();
-        let written = buf.len() - remaining;
+        let request = self.build_connect_request(target)?;
 
         stream
-            .write_all(&buf[..written])
+            .write_all(request.as_bytes())
             .await
             .map_err(MeowError::Io)?;
 
@@ -180,6 +165,36 @@ impl HttpAdapter {
         }
 
         Ok(())
+    }
+
+    fn build_connect_request(&self, target: &(dyn fmt::Display + Send + Sync)) -> Result<String> {
+        use std::fmt::Write as _;
+
+        let target = target.to_string();
+        validate_connect_target(&target)?;
+
+        let extra_len: usize = self
+            .extra_headers
+            .iter()
+            .map(|(k, v)| k.len() + v.len() + 4)
+            .sum();
+        let mut request = String::with_capacity(64 + target.len() * 2 + extra_len);
+        write!(request, "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n")
+            .expect("writing to String cannot fail");
+
+        if let Some((user, pass)) = &self.auth {
+            let creds = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
+            write!(request, "Proxy-Authorization: Basic {creds}\r\n")
+                .expect("writing to String cannot fail");
+        }
+
+        for (name, value) in &self.extra_headers {
+            validate_header_name(name)?;
+            validate_header_value(name, value)?;
+            write!(request, "{name}: {value}\r\n").expect("writing to String cannot fail");
+        }
+        request.push_str("\r\n");
+        Ok(request)
     }
 }
 
@@ -269,6 +284,54 @@ fn parse_http_status(line: &str) -> Result<u16> {
     code_str
         .parse::<u16>()
         .map_err(|_| MeowError::Proxy(format!("http proxy: invalid status code: {code_str:?}")))
+}
+
+fn validate_connect_target(target: &str) -> Result<()> {
+    if target.is_empty() || target.bytes().any(|b| b <= b' ' || b == 0x7f) {
+        return Err(MeowError::Config(
+            "http proxy: CONNECT target contains whitespace or control bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_header_name(name: &str) -> Result<()> {
+    if name.is_empty() || !name.bytes().all(is_header_token_byte) {
+        return Err(MeowError::Config(format!(
+            "http proxy: invalid extra header name {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_header_value(name: &str, value: &str) -> Result<()> {
+    if value.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
+        return Err(MeowError::Config(format!(
+            "http proxy: invalid value for extra header {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_header_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 /// Read one `\r\n`-terminated line from an async reader.
@@ -501,6 +564,80 @@ mod tests {
         assert!(
             req.contains("X-Foo: bar"),
             "extra header X-Foo must appear in CONNECT request; req=\n{req}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_extra_headers_reject_crlf_in_value() {
+        let adapter = HttpAdapter::new(
+            "test",
+            "127.0.0.1",
+            8080,
+            None,
+            false,
+            false,
+            vec![("X-Foo".into(), "bar\r\nX-Injected: yes".into())],
+        );
+        let (mut client, _server) = tokio::io::duplex(64);
+        let target = "example.com:443";
+        let err = adapter
+            .run_connect(&mut client, &target)
+            .await
+            .expect_err("invalid header must error");
+        assert!(
+            matches!(err, MeowError::Config(ref msg) if msg.contains("X-Foo")),
+            "expected config error naming X-Foo, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_extra_headers_are_not_truncated() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (req_tx, req_rx) = tokio::sync::oneshot::channel::<String>();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 512];
+            loop {
+                let n = stream.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let _ = req_tx.send(String::from_utf8_lossy(&buf).to_string());
+            stream
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let long_value = "a".repeat(1500);
+        let adapter = HttpAdapter::new(
+            "test",
+            "127.0.0.1",
+            addr.port(),
+            None,
+            false,
+            false,
+            vec![("X-Long".into(), long_value.clone())],
+        );
+        let meta = make_metadata("example.com", 443);
+        let _ = adapter.dial_tcp(&meta).await.expect("dial_tcp");
+
+        let req = req_rx.await.expect("request captured");
+        assert!(
+            req.contains(&format!("X-Long: {long_value}\r\n\r\n")),
+            "full long header and terminator must be present; len={}",
+            req.len()
         );
     }
 
