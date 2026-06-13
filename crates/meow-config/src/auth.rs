@@ -28,6 +28,11 @@ pub fn parse_auth_config(
             Some(pos) => {
                 let username = entry[..pos].to_string();
                 let password = entry[pos + 1..].to_string();
+                if username.is_empty() {
+                    return Err(format!(
+                        "authentication: malformed entry {entry:?} — username must not be empty"
+                    ));
+                }
                 if password.is_empty() {
                     // Class B: empty password — warn-once and accept.
                     // Upstream accepts silently; we warn (ADR-0002 Class B).
@@ -128,6 +133,15 @@ mod tests {
         assert!(
             err.contains("malformed"),
             "expected malformed error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_authentication_empty_username_errors() {
+        let err = parse_auth_config(Some(&[":pass".to_string()]), None).unwrap_err();
+        assert!(
+            err.contains("username"),
+            "expected username error, got: {err}"
         );
     }
 

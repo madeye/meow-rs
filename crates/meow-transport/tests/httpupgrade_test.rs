@@ -249,3 +249,69 @@ async fn httpupgrade_host_header_override() {
         "Host header must equal host_header override"
     );
 }
+
+async fn assert_invalid_config(config: HttpUpgradeConfig, expected: &str) {
+    let (client, _server) = tokio::io::duplex(64);
+    let layer = HttpUpgradeLayer::new(config);
+    let Err(err) = layer.connect(Box::new(client)).await else {
+        panic!("invalid httpupgrade config unexpectedly connected");
+    };
+    match err {
+        TransportError::Config(msg) => {
+            assert!(
+                msg.contains(expected),
+                "expected config error containing {expected:?}, got: {msg}"
+            );
+        }
+        other => panic!("expected TransportError::Config, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn httpupgrade_rejects_crlf_in_path() {
+    assert_invalid_config(
+        HttpUpgradeConfig {
+            path: "/ok\r\nX-Injected: yes".into(),
+            host_header: None,
+            extra_headers: vec![],
+        },
+        "path",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn httpupgrade_rejects_crlf_in_host_header() {
+    assert_invalid_config(
+        HttpUpgradeConfig {
+            path: "/".into(),
+            host_header: Some("good.example\r\nX-Injected: yes".into()),
+            extra_headers: vec![],
+        },
+        "host_header",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn httpupgrade_rejects_invalid_extra_headers() {
+    assert_invalid_config(
+        HttpUpgradeConfig {
+            path: "/".into(),
+            host_header: None,
+            extra_headers: vec![("X-Good".into(), "ok\r\nX-Injected: yes".into())],
+        },
+        "X-Good",
+    )
+    .await;
+
+    assert_invalid_config(
+        HttpUpgradeConfig {
+            path: "/".into(),
+            host_header: None,
+            extra_headers: vec![("Bad Header".into(), "ok".into())],
+        },
+        "Bad Header",
+    )
+    .await;
+}

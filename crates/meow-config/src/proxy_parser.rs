@@ -17,6 +17,21 @@ use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn required_port(
+    config: &HashMap<String, serde_yaml::Value>,
+    context: &str,
+) -> std::result::Result<u16, String> {
+    let raw = config
+        .get("port")
+        .and_then(serde_yaml::Value::as_u64)
+        .ok_or_else(|| format!("{context}: missing port"))?;
+    let port = u16::try_from(raw).map_err(|_| format!("{context}: port {raw} exceeds 65535"))?;
+    if port == 0 {
+        return Err(format!("{context}: port must be non-zero"));
+    }
+    Ok(port)
+}
+
 /// Wraps a ProxyAdapter to implement the full Proxy trait
 pub struct WrappedProxy {
     adapter: Box<dyn ProxyAdapter>,
@@ -98,10 +113,7 @@ pub fn parse_proxy(
                 .get("server")
                 .and_then(|v| v.as_str())
                 .ok_or("missing server")?;
-            let port = config
-                .get("port")
-                .and_then(serde_yaml::Value::as_u64)
-                .ok_or("missing port")? as u16;
+            let port = required_port(config, "ss")?;
             let password = config
                 .get("password")
                 .and_then(|v| v.as_str())
@@ -136,10 +148,7 @@ pub fn parse_proxy(
                 .get("server")
                 .and_then(|v| v.as_str())
                 .ok_or("missing server")?;
-            let port = config
-                .get("port")
-                .and_then(serde_yaml::Value::as_u64)
-                .ok_or("missing port")? as u16;
+            let port = required_port(config, "trojan")?;
             let password = config
                 .get("password")
                 .and_then(|v| v.as_str())
@@ -237,13 +246,7 @@ fn parse_snell(
         .get("server")
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("snell[{name}]: missing server"))?;
-    let port = config
-        .get("port")
-        .and_then(serde_yaml::Value::as_u64)
-        .ok_or_else(|| format!("snell[{name}]: missing port"))? as u16;
-    if port == 0 {
-        return Err(format!("snell[{name}]: port must be non-zero"));
-    }
+    let port = required_port(config, &format!("snell[{name}]"))?;
     let psk = config
         .get("psk")
         .and_then(|v| v.as_str())
@@ -340,10 +343,7 @@ fn parse_http(
         .get("server")
         .and_then(|v| v.as_str())
         .ok_or("http: missing server")?;
-    let port = config
-        .get("port")
-        .and_then(serde_yaml::Value::as_u64)
-        .ok_or("http: missing port")? as u16;
+    let port = required_port(config, "http")?;
     let tls = config
         .get("tls")
         .and_then(serde_yaml::Value::as_bool)
@@ -405,10 +405,7 @@ fn parse_socks5(
         .get("server")
         .and_then(|v| v.as_str())
         .ok_or("socks5: missing server")?;
-    let port = config
-        .get("port")
-        .and_then(serde_yaml::Value::as_u64)
-        .ok_or("socks5: missing port")? as u16;
+    let port = required_port(config, "socks5")?;
     let tls = config
         .get("tls")
         .and_then(serde_yaml::Value::as_bool)
@@ -548,13 +545,7 @@ fn parse_anytls(
         .get("server")
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("anytls[{name}]: missing server"))?;
-    let port = config
-        .get("port")
-        .and_then(serde_yaml::Value::as_u64)
-        .ok_or_else(|| format!("anytls[{name}]: missing port"))? as u16;
-    if port == 0 {
-        return Err(format!("anytls[{name}]: port must be non-zero"));
-    }
+    let port = required_port(config, &format!("anytls[{name}]"))?;
     let password = config
         .get("password")
         .and_then(|v| v.as_str())
@@ -590,13 +581,7 @@ fn parse_hysteria2(
         .get("server")
         .and_then(|v| v.as_str())
         .ok_or_else(|| format!("hysteria2[{name}]: missing server"))?;
-    let port = config
-        .get("port")
-        .and_then(serde_yaml::Value::as_u64)
-        .ok_or_else(|| format!("hysteria2[{name}]: missing port"))? as u16;
-    if port == 0 {
-        return Err(format!("hysteria2[{name}]: port must be non-zero"));
-    }
+    let port = required_port(config, &format!("hysteria2[{name}]"))?;
     let password = config
         .get("password")
         .and_then(|v| v.as_str())
@@ -655,10 +640,7 @@ fn parse_vless(
         .get("server")
         .and_then(|v| v.as_str())
         .ok_or("vless: missing server")?;
-    let port = config
-        .get("port")
-        .and_then(serde_yaml::Value::as_u64)
-        .ok_or("vless: missing port")? as u16;
+    let port = required_port(config, "vless")?;
     let uuid_str = config
         .get("uuid")
         .and_then(|v| v.as_str())
@@ -1068,10 +1050,7 @@ fn parse_vmess(
         .get("server")
         .and_then(|v| v.as_str())
         .ok_or("vmess: missing server")?;
-    let port = config
-        .get("port")
-        .and_then(serde_yaml::Value::as_u64)
-        .ok_or("vmess: missing port")? as u16;
+    let port = required_port(config, "vmess")?;
     let uuid_str = config
         .get("uuid")
         .and_then(|v| v.as_str())
@@ -1434,6 +1413,28 @@ fn parse_relay_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn proxy_config(yaml: &str) -> HashMap<String, serde_yaml::Value> {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn parse_proxy_rejects_port_overflow() {
+        let cfg = proxy_config("name: bad\ntype: http\nserver: 1.2.3.4\nport: 65536\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("overflowing port must hard-error");
+        };
+        assert!(err.contains("exceeds 65535"), "msg: {err}");
+    }
+
+    #[test]
+    fn parse_proxy_rejects_port_zero() {
+        let cfg = proxy_config("name: bad\ntype: http\nserver: 1.2.3.4\nport: 0\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("zero port must hard-error");
+        };
+        assert!(err.contains("port must be non-zero"), "msg: {err}");
+    }
 
     #[cfg(feature = "ss")]
     #[test]

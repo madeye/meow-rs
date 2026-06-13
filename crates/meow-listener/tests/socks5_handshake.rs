@@ -10,7 +10,11 @@
 mod common;
 
 use common::{direct_tunnel, spawn_echo_server};
+use meow_common::auth::{AuthConfig, Credentials};
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -104,7 +108,124 @@ async fn socks5_connect_proxies_bytes_to_echo_server() {
 
     // 7. Close the client half — the relay task should terminate cleanly.
     drop(client_stream);
-    tokio::time::timeout(std::time::Duration::from_secs(2), handle)
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("handle_socks5 task did not finish in time")
+        .expect("handle_socks5 task panicked");
+}
+
+#[tokio::test]
+async fn socks5_rejects_no_auth_when_client_does_not_offer_it() {
+    let (server_stream, mut client_stream) = loopback_pair().await;
+    let tunnel = direct_tunnel();
+    let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let handle = tokio::spawn(async move {
+        meow_listener::socks5::handle_socks5(
+            &tunnel,
+            server_stream,
+            server_addr,
+            None,
+            None,
+            "test",
+            0,
+        )
+        .await;
+    });
+
+    client_stream.write_all(&[0x05, 0x01, 0x02]).await.unwrap();
+
+    let mut reply = [0u8; 2];
+    client_stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply, [0x05, 0xFF]);
+
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("handle_socks5 task did not finish in time")
+        .expect("handle_socks5 task panicked");
+}
+
+#[tokio::test]
+async fn socks5_rejects_invalid_utf8_domain_name() {
+    let (server_stream, mut client_stream) = loopback_pair().await;
+    let tunnel = direct_tunnel();
+    let server_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let handle = tokio::spawn(async move {
+        meow_listener::socks5::handle_socks5(
+            &tunnel,
+            server_stream,
+            server_addr,
+            None,
+            None,
+            "test",
+            0,
+        )
+        .await;
+    });
+
+    client_stream
+        .write_all(&[
+            0x05, 0x01, 0x00, // greeting: no-auth
+            0x05, 0x01, 0x00, 0x03, // CONNECT domain
+            0x01, 0xFF, // invalid one-byte UTF-8 domain
+            0x00, 0x50, // port 80
+        ])
+        .await
+        .unwrap();
+
+    let mut greeting = [0u8; 2];
+    client_stream.read_exact(&mut greeting).await.unwrap();
+    assert_eq!(greeting, [0x05, 0x00]);
+
+    let mut eof = [0u8; 1];
+    let n = client_stream.read(&mut eof).await.unwrap();
+    assert_eq!(n, 0, "invalid domain should close the SOCKS5 session");
+
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("handle_socks5 task did not finish in time")
+        .expect("handle_socks5 task panicked");
+}
+
+#[tokio::test]
+async fn socks5_rejects_invalid_utf8_auth_credentials() {
+    let (server_stream, mut client_stream) = loopback_pair().await;
+    let tunnel = direct_tunnel();
+    let server_addr: SocketAddr = "192.0.2.10:12345".parse().unwrap();
+    let mut credentials = HashMap::new();
+    credentials.insert(String::new(), String::new());
+    let auth = AuthConfig::new(Arc::new(Credentials::new(credentials)), Vec::new());
+    let handle = tokio::spawn(async move {
+        meow_listener::socks5::handle_socks5(
+            &tunnel,
+            server_stream,
+            server_addr,
+            None,
+            Some(&auth),
+            "test",
+            0,
+        )
+        .await;
+    });
+
+    client_stream
+        .write_all(&[
+            0x05, 0x01, 0x02, // greeting: username/password auth
+            0x01, // auth sub-negotiation version
+            0x01, 0xFF, // invalid one-byte UTF-8 username
+            0x00, // empty password
+        ])
+        .await
+        .unwrap();
+
+    let mut method_reply = [0u8; 2];
+    client_stream.read_exact(&mut method_reply).await.unwrap();
+    assert_eq!(method_reply, [0x05, 0x02]);
+
+    let mut auth_reply = [0u8; 2];
+    client_stream.read_exact(&mut auth_reply).await.unwrap();
+    assert_eq!(auth_reply, [0x01, 0x01]);
+
+    tokio::time::timeout(Duration::from_secs(2), handle)
         .await
         .expect("handle_socks5 task did not finish in time")
         .expect("handle_socks5 task panicked");

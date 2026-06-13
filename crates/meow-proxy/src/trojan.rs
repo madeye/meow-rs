@@ -35,6 +35,8 @@ const CMD_UDP_ASSOCIATE: u8 = 0x03;
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
+const MAX_DOMAIN_LEN: usize = u8::MAX as usize;
+const TROJAN_HEADER_BUF_SIZE: usize = 320;
 
 pub struct TrojanAdapter {
     name: SmolStr,
@@ -89,7 +91,12 @@ impl TrojanAdapter {
         }
     }
 
-    fn build_header<'a>(&self, metadata: &Metadata, cmd: u8, out: &'a mut [u8; 320]) -> &'a [u8] {
+    fn build_header<'a>(
+        &self,
+        metadata: &Metadata,
+        cmd: u8,
+        out: &'a mut [u8; TROJAN_HEADER_BUF_SIZE],
+    ) -> Result<&'a [u8]> {
         let pw = self.hex_password.as_bytes();
         let mut pos = 0;
         out[..pw.len()].copy_from_slice(pw);
@@ -98,10 +105,10 @@ impl TrojanAdapter {
         pos += 2;
         out[pos] = cmd;
         pos += 1;
-        pos = encode_socks5_addr_from_metadata_buf(out, pos, metadata);
+        pos = encode_socks5_addr_from_metadata_buf(out, pos, metadata)?;
         out[pos..pos + 2].copy_from_slice(b"\r\n");
         pos += 2;
-        &out[..pos]
+        Ok(&out[..pos])
     }
 
     /// Open a TLS stream and write the Trojan request header.
@@ -110,6 +117,9 @@ impl TrojanAdapter {
         metadata: &Metadata,
         cmd: u8,
     ) -> Result<Box<dyn TransportStream>> {
+        let mut hdr_buf = [0u8; TROJAN_HEADER_BUF_SIZE];
+        let header = self.build_header(metadata, cmd, &mut hdr_buf)?;
+
         let tcp = meow_common::connect_tcp_host(&self.server, self.port)
             .await
             .map_err(MeowError::Io)?;
@@ -120,23 +130,28 @@ impl TrojanAdapter {
             .await
             .map_err(transport_to_proxy_err)?;
 
-        let mut hdr_buf = [0u8; 320];
-        let header = self.build_header(metadata, cmd, &mut hdr_buf);
         stream.write_all(header).await.map_err(MeowError::Io)?;
         Ok(stream)
     }
 }
 
 fn encode_socks5_addr_from_metadata_buf(
-    buf: &mut [u8; 320],
+    buf: &mut [u8; TROJAN_HEADER_BUF_SIZE],
     mut pos: usize,
     metadata: &Metadata,
-) -> usize {
+) -> Result<usize> {
     if !metadata.host.is_empty() {
         let host_bytes = metadata.host.as_bytes();
+        if host_bytes.len() > MAX_DOMAIN_LEN {
+            return Err(MeowError::Proxy(format!(
+                "trojan: domain name too long ({} > {})",
+                host_bytes.len(),
+                MAX_DOMAIN_LEN
+            )));
+        }
         buf[pos] = ATYP_DOMAIN;
         pos += 1;
-        buf[pos] = host_bytes.len() as u8;
+        buf[pos] = u8::try_from(host_bytes.len()).expect("domain length checked above");
         pos += 1;
         buf[pos..pos + host_bytes.len()].copy_from_slice(host_bytes);
         pos += host_bytes.len();
@@ -163,7 +178,7 @@ fn encode_socks5_addr_from_metadata_buf(
     }
     let port_bytes = metadata.dst_port.to_be_bytes();
     buf[pos..pos + 2].copy_from_slice(&port_bytes);
-    pos + 2
+    Ok(pos + 2)
 }
 
 #[cfg(test)]
@@ -171,7 +186,7 @@ fn encode_socks5_addr_from_metadata(buf: &mut Vec<u8>, metadata: &Metadata) {
     if !metadata.host.is_empty() {
         buf.push(ATYP_DOMAIN);
         let host_bytes = metadata.host.as_bytes();
-        buf.push(host_bytes.len() as u8);
+        buf.push(u8::try_from(host_bytes.len()).expect("test domain length must fit u8"));
         buf.extend_from_slice(host_bytes);
     } else if let Some(ip) = metadata.dst_ip {
         match ip {
@@ -437,5 +452,44 @@ mod tests {
         assert_eq!(buf[0], ATYP_DOMAIN);
         assert_eq!(buf[1] as usize, "example.com".len());
         assert_eq!(&buf[2..2 + "example.com".len()], b"example.com");
+    }
+
+    #[test]
+    fn build_header_accepts_max_length_domain() {
+        let adapter =
+            TrojanAdapter::new("t", "127.0.0.1", 443, "secret", "example.com", true, false);
+        let md = Metadata {
+            host: "a".repeat(MAX_DOMAIN_LEN).into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let mut buf = [0u8; TROJAN_HEADER_BUF_SIZE];
+        let header = adapter
+            .build_header(&md, CMD_CONNECT, &mut buf)
+            .expect("255-byte domain should fit");
+
+        assert_eq!(header.len(), TROJAN_HEADER_BUF_SIZE);
+        assert_eq!(header[59], ATYP_DOMAIN);
+        assert_eq!(header[60] as usize, MAX_DOMAIN_LEN);
+    }
+
+    #[test]
+    fn build_header_rejects_overlong_domain_without_panic() {
+        let adapter =
+            TrojanAdapter::new("t", "127.0.0.1", 443, "secret", "example.com", true, false);
+        let md = Metadata {
+            host: "a".repeat(MAX_DOMAIN_LEN + 1).into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let mut buf = [0u8; TROJAN_HEADER_BUF_SIZE];
+        let err = adapter
+            .build_header(&md, CMD_CONNECT, &mut buf)
+            .expect_err("256-byte domain must error");
+
+        assert!(
+            matches!(err, MeowError::Proxy(ref msg) if msg.contains("domain name too long")),
+            "expected domain length proxy error, got {err:?}"
+        );
     }
 }

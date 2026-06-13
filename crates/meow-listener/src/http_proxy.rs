@@ -78,10 +78,10 @@ async fn handle_http_inner(
     request_buf.truncate(header_end);
 
     // Auth check: verify Proxy-Authorization before dispatching.
-    let needs_auth = auth.is_some_and(|a| !a.credentials.is_empty())
-        && !auth.is_some_and(|a| a.should_skip(&src_addr.ip()));
-
-    let in_user: Option<String> = if needs_auth {
+    let in_user: Option<String> = if let Some(auth) = auth
+        .filter(|a| !a.credentials.is_empty())
+        .filter(|a| !a.should_skip(&src_addr.ip()))
+    {
         match parse_proxy_authorization(&request_buf) {
             None => {
                 stream
@@ -94,7 +94,7 @@ async fn handle_http_inner(
                 return Err("proxy authentication required".into());
             }
             Some((username, password)) => {
-                if !auth.unwrap().credentials.verify(&username, &password) {
+                if !auth.credentials.verify(&username, &password) {
                     stream
                         .write_all(
                             b"HTTP/1.1 407 Proxy Authentication Required\r\n\
@@ -402,15 +402,14 @@ fn starts_with_ignore_ascii_case(line: &str, prefix: &str) -> bool {
 /// Parse `Proxy-Authorization: Basic <base64>` from raw request headers.
 /// Returns `(username, password)` on success.
 fn parse_proxy_authorization(headers: &[u8]) -> Option<(String, String)> {
+    const PROXY_AUTH_PREFIX: &str = "proxy-authorization:";
+
     let headers_str = std::str::from_utf8(headers).ok()?;
     for line in headers_str.lines() {
-        if line.len() < 20 {
+        if !starts_with_ignore_ascii_case(line, PROXY_AUTH_PREFIX) {
             continue;
         }
-        if !line[..20].eq_ignore_ascii_case("proxy-authorization:") {
-            continue;
-        }
-        let value = line[20..].trim();
+        let value = line[PROXY_AUTH_PREFIX.len()..].trim();
         let encoded = value
             .strip_prefix("Basic ")
             .or_else(|| value.strip_prefix("basic "))?;
@@ -455,5 +454,15 @@ mod tests {
         // Hostnames stay None — resolved later by the adapter / pre_resolve.
         assert_eq!(host_to_ip("www.netflix.com"), None);
         assert_eq!(host_to_ip("nflxvideo.net"), None);
+    }
+
+    #[test]
+    fn parse_proxy_authorization_ignores_non_ascii_header_without_panic() {
+        let headers = concat!(
+            "GET http://example.com/ HTTP/1.1\r\n",
+            "aaaaaaaaaaaaaaaaaaaé: value\r\n",
+            "\r\n"
+        );
+        assert_eq!(parse_proxy_authorization(headers.as_bytes()), None);
     }
 }

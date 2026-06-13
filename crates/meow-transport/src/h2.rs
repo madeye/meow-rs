@@ -61,15 +61,7 @@ pub struct H2Layer {
 impl H2Layer {
     /// Create an `H2Layer` from the given configuration.
     ///
-    /// # Debug assertion
-    ///
-    /// Panics in debug builds if `config.hosts` is empty.  `meow-config`
-    /// enforces this constraint at YAML parse time before construction.
     pub fn new(config: H2Config) -> Self {
-        debug_assert!(
-            !config.hosts.is_empty(),
-            "H2Config.hosts must not be empty (enforced by meow-config)"
-        );
         Self { config }
     }
 }
@@ -79,11 +71,18 @@ impl Transport for H2Layer {
     async fn connect(&self, inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
         // Uniform random host selection per connection.
         // upstream: transport/vmess/h2.go — `cfg.Hosts[randv2.IntN(len(cfg.Hosts))]`
-        let host = self
-            .config
-            .hosts
-            .choose(&mut rand::rng())
-            .expect("hosts non-empty (asserted in constructor)");
+        let Some(host) = self.config.hosts.choose(&mut rand::rng()) else {
+            return Err(TransportError::Config("h2: hosts must not be empty".into()));
+        };
+
+        // Build and validate the request before opening the h2 connection.
+        // Invalid config should fail deterministically instead of depending on
+        // whether a peer is available to complete the h2 handshake.
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("http://{}{}", host, self.config.path))
+            .body(())
+            .map_err(|e| TransportError::Config(format!("h2: invalid request config: {e}")))?;
 
         // HTTP/2 client handshake over the inner stream.
         let (mut h2, conn) = h2::client::handshake(inner)
@@ -95,13 +94,6 @@ impl Transport for H2Layer {
         tokio::spawn(async move {
             let _ = conn.await;
         });
-
-        // Build a POST request with the selected authority and configured path.
-        let request = http::Request::builder()
-            .method(http::Method::POST)
-            .uri(format!("http://{}{}", host, self.config.path))
-            .body(())
-            .map_err(|e| TransportError::H2(e.to_string()))?;
 
         // Open the h2 stream; `end_of_stream = false` — we will stream data.
         let (response_future, send_stream) = h2

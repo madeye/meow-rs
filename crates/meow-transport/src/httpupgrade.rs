@@ -68,6 +68,8 @@ impl HttpUpgradeLayer {
 #[async_trait]
 impl Transport for HttpUpgradeLayer {
     async fn connect(&self, mut inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
+        validate_request_config(&self.config)?;
+
         let host = self.config.host_header.as_deref().unwrap_or("localhost");
 
         // ── Build the HTTP/1.1 upgrade request ───────────────────────────────
@@ -174,6 +176,80 @@ impl Transport for HttpUpgradeLayer {
             Ok(inner)
         }
     }
+}
+
+fn validate_request_config(config: &HttpUpgradeConfig) -> Result<()> {
+    validate_path(&config.path)?;
+    if let Some(host) = &config.host_header {
+        validate_host_header(host)?;
+    }
+    for (name, value) in &config.extra_headers {
+        validate_header_name(name)?;
+        validate_header_value(name, value)?;
+    }
+    Ok(())
+}
+
+fn validate_path(path: &str) -> Result<()> {
+    if !path.starts_with('/') {
+        return Err(TransportError::Config(
+            "httpupgrade: path must start with '/'".into(),
+        ));
+    }
+    if path.bytes().any(|b| b <= b' ' || b == 0x7f) {
+        return Err(TransportError::Config(
+            "httpupgrade: path contains whitespace or control bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_host_header(host: &str) -> Result<()> {
+    if host.is_empty() || host.bytes().any(|b| b <= b' ' || b == 0x7f) {
+        return Err(TransportError::Config(
+            "httpupgrade: host_header contains whitespace or control bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_header_name(name: &str) -> Result<()> {
+    if name.is_empty() || !name.bytes().all(is_header_token_byte) {
+        return Err(TransportError::Config(format!(
+            "httpupgrade: invalid extra header name {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_header_value(name: &str, value: &str) -> Result<()> {
+    if value.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
+        return Err(TransportError::Config(format!(
+            "httpupgrade: invalid value for extra header {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_header_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 // ─── PrefixedStream ──────────────────────────────────────────────────────────
