@@ -20,9 +20,7 @@ use std::time::{Duration, Instant};
 
 use meow_transport::Stream as TransportStream;
 
-use super::protocol::Snell;
-use super::v4::is_zero_chunk;
-use tokio::io::AsyncReadExt;
+use super::protocol::{is_zero_chunk, Snell};
 
 /// Type-erased snell stream used inside the pool. The underlying byte
 /// stream may be a plain TCP connection or an obfs-wrapped one — the pool
@@ -121,9 +119,9 @@ impl Default for Pool {
 /// reuse. Returns `true` when the zero-chunk was observed within
 /// `DRAIN_DEADLINE`, `false` otherwise (caller should discard the conn).
 ///
-/// Reads via the raw `V4Conn` (not the `Snell` wrapper): the wrapper maps
-/// the zero-chunk into a clean EOF, which is indistinguishable from the
-/// peer closing the TCP stream.
+/// Reads via the raw version-specific codec (not the `Snell` wrapper): the
+/// wrapper maps the zero-chunk into a clean EOF, which is indistinguishable
+/// from the peer closing the TCP stream.
 pub async fn drain_for_reuse(conn: &mut PoolStream) -> bool {
     let mut scratch = [0u8; 4096];
     let deadline = tokio::time::sleep(DRAIN_DEADLINE);
@@ -132,7 +130,7 @@ pub async fn drain_for_reuse(conn: &mut PoolStream) -> bool {
         tokio::select! {
             biased;
             () = &mut deadline => return false,
-            res = conn.v4_conn_mut().read(&mut scratch) => {
+            res = conn.read_raw_for_reuse(&mut scratch) => {
                 match res {
                     Ok(0) => return false, // peer closed underlying TCP
                     Ok(_) => continue,

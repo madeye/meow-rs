@@ -1,14 +1,8 @@
 //! Snell outbound adapter — implements `ProxyAdapter` for `type: snell`.
 //!
-//! Wires together the v4 AEAD codec, the optional simple-obfs (http/tls)
-//! layer, the snell request/response framing, and the optional reuse pool
-//! (`CommandConnectV2`).
-//!
-//! Version handling: opensnell's wire is v4 / v5 (both share the same TCP
-//! framing — v5 is identical on the client side, the difference is the
-//! server's optional QUIC mode). Older v1 / v2 / v3 wires are *not*
-//! supported (different AEAD and frame layout); the YAML parser hard-errors
-//! on those values.
+//! Wires together the v3/v4 AEAD codecs, the optional simple-obfs (http/tls)
+//! layer, the snell request/response framing, and the optional v4/v5 reuse
+//! pool (`CommandConnectV2`).
 
 use async_trait::async_trait;
 use meow_common::{
@@ -27,12 +21,11 @@ use super::pool::{drain_for_reuse, Pool, PoolStream};
 use super::protocol::{write_header, write_udp_header, Snell};
 use super::udp::SnellPacketConn;
 
-/// What snell version label the adapter announces. Today both labels
-/// produce identical wire framing — Snell v4 == v5 on the TCP side. The
-/// value is stored so future v5 QUIC support can switch on it without
-/// breaking config compatibility.
+/// What Snell version label the adapter uses. v5 servers are
+/// backward-compatible with the v4 TCP client wire, matching mihomo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnellVersion {
+    V3,
     V4,
     V5,
 }
@@ -40,9 +33,14 @@ pub enum SnellVersion {
 impl SnellVersion {
     pub fn as_str(self) -> &'static str {
         match self {
+            SnellVersion::V3 => "v3",
             SnellVersion::V4 => "v4",
             SnellVersion::V5 => "v5",
         }
+    }
+
+    fn supports_reuse(self) -> bool {
+        matches!(self, SnellVersion::V4 | SnellVersion::V5)
     }
 }
 
@@ -65,10 +63,6 @@ pub struct SnellAdapter {
     obfs: SnellObfs,
     support_udp: bool,
     pool: Option<Arc<Pool>>,
-    /// Currently informational — v4 and v5 share the same TCP wire. Stashed
-    /// so a future v5 QUIC outbound can branch on it without breaking config
-    /// compatibility.
-    #[allow(dead_code, reason = "reserved for v5 QUIC support")]
     version: SnellVersion,
     health: ProxyHealth,
 }
@@ -104,11 +98,12 @@ impl SnellAdapter {
             )));
         }
         let psk_bytes: Arc<[u8]> = Arc::from(psk.as_bytes());
+        let effective_reuse = reuse && version.supports_reuse();
         debug!(
             "snell '{}' configured: version={} reuse={} udp={} obfs={}",
             name,
             version.as_str(),
-            reuse,
+            effective_reuse,
             udp,
             match &obfs {
                 SnellObfs::None => "off",
@@ -124,7 +119,7 @@ impl SnellAdapter {
             psk: psk_bytes,
             obfs,
             support_udp: udp,
-            pool: if reuse {
+            pool: if effective_reuse {
                 Some(Arc::new(Pool::new()))
             } else {
                 None
@@ -146,7 +141,10 @@ impl SnellAdapter {
             SnellObfs::Http { host } => Box::new(HttpObfs::new(tcp, host.clone(), self.port)),
             SnellObfs::Tls { server } => Box::new(TlsObfs::new(tcp, server.clone())),
         };
-        Ok(Snell::new(inner, Arc::clone(&self.psk)))
+        Ok(match self.version {
+            SnellVersion::V3 => Snell::new_v3(inner, Arc::clone(&self.psk)),
+            SnellVersion::V4 | SnellVersion::V5 => Snell::new(inner, Arc::clone(&self.psk)),
+        })
     }
 
     /// Number of idle connections currently parked in the reuse pool.
@@ -238,7 +236,9 @@ impl ProxyAdapter for SnellAdapter {
         }
         let mut snell = self.dial_fresh().await?;
         write_udp_header(&mut snell).await.map_err(MeowError::Io)?;
-        snell.read_reply().await.map_err(MeowError::Io)?;
+        if self.version.supports_reuse() {
+            snell.read_reply().await.map_err(MeowError::Io)?;
+        }
         Ok(Box::new(SnellPacketConn::new(snell)))
     }
 
