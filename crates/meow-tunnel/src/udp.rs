@@ -37,12 +37,20 @@ impl UdpSession {
         }
     }
 
-    fn touch(&self) {
+    /// Mark the session active as of now. Called on every outbound fast-path
+    /// forward so [`spawn_nat_sweeper`] keeps the entry alive. `pub` so an
+    /// out-of-crate reply reader (e.g. the meow-ios FFI, which owns the
+    /// inbound read loop) can refresh the same clock on server→app traffic —
+    /// otherwise a receive-active / send-quiet session is wrongly swept.
+    pub fn touch(&self) {
         self.last_activity_ms
             .store(monotonic_ms(), Ordering::Relaxed);
     }
 
-    fn idle_for(&self) -> Duration {
+    /// Time since the last [`touch`](Self::touch). `pub` so an out-of-crate
+    /// reply reader can gate its own idle backstop on the same bidirectional
+    /// clock the sweeper uses, instead of a one-directional wall-clock timer.
+    pub fn idle_for(&self) -> Duration {
         let now = monotonic_ms();
         let last = self.last_activity_ms.load(Ordering::Relaxed);
         Duration::from_millis(now.saturating_sub(last))
