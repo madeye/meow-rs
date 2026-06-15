@@ -138,7 +138,24 @@ pub async fn handle_udp(
     let key = (src, dst_addr);
 
     // Fast path: existing session — forward and return.
-    if let Some(session) = tunnel.nat_table.get(&key) {
+    //
+    // Clone the `Arc<UdpSession>` out and DROP the DashMap guard before the
+    // `.await` below. `nat_table.get()` returns a `Ref` that holds a *read*
+    // lock on the key's shard for as long as it is alive. Two ways the old
+    // `if let Some(session) = nat_table.get(&key)` form deadlocked:
+    //   1. The guard was held across `write_packet().await`, so while this task
+    //      parked on the upstream round-trip the shard read-lock stayed held,
+    //      blocking every same-shard `insert`/`remove`/sweep.
+    //   2. On a write error it called `nat_table.remove(&key)` — a *write* lock
+    //      on the very shard whose read-lock the `session` guard still held.
+    //      A read+write on the same shard from one thread self-deadlocks the
+    //      shard's RwLock, parking the worker forever; on the 2-worker iOS
+    //      runtime both workers then wedge → total packet stall + dead control
+    //      API. Fires whenever an established session's upstream has died and
+    //      the app sends another datagram (common for QUIC / long-lived UDP).
+    // Holding only the cloned `Arc` keeps the session alive with no lock held.
+    let existing = tunnel.nat_table.get(&key).map(|s| Arc::clone(s.value()));
+    if let Some(session) = existing {
         if let Err(e) = session.conn.write_packet(data, &dst_addr).await {
             debug!("UDP write error for {} -> {}: {}", src, dst_addr, e);
             tunnel.nat_table.remove(&key);
@@ -221,6 +238,27 @@ mod tests {
         Arc::new(UdpSession::new(Box::new(NoopPacketConn), Arc::from("test")))
     }
 
+    /// A packet conn whose `write_packet` always fails — models an established
+    /// UDP session whose upstream relay has died. Used to drive the fast-path
+    /// write-error branch in `handle_udp`.
+    struct FailingPacketConn;
+
+    #[async_trait]
+    impl ProxyPacketConn for FailingPacketConn {
+        async fn read_packet(&self, _buf: &mut [u8]) -> MeowResult<(usize, SocketAddr)> {
+            Ok((0, "0.0.0.0:0".parse().unwrap()))
+        }
+        async fn write_packet(&self, _buf: &[u8], _addr: &SocketAddr) -> MeowResult<usize> {
+            Err(meow_common::MeowError::Other("upstream dead".into()))
+        }
+        fn local_addr(&self) -> MeowResult<SocketAddr> {
+            Ok("0.0.0.0:0".parse().unwrap())
+        }
+        fn close(&self) -> MeowResult<()> {
+            Ok(())
+        }
+    }
+
     fn mk_key(port: u16) -> (SocketAddr, SocketAddr) {
         (
             SocketAddr::from(([127, 0, 0, 1], port)),
@@ -271,6 +309,63 @@ mod tests {
         assert!(
             handle.is_finished(),
             "sweeper should exit once the table is dropped"
+        );
+    }
+
+    /// Regression: a fast-path write failure on an existing session must evict
+    /// the entry and return promptly. The previous code held the
+    /// `nat_table.get()` shard read-guard across `write_packet().await` and then
+    /// called `nat_table.remove()` (same-shard write lock) while the read-guard
+    /// was still alive — a self-deadlock that hangs forever. The `timeout` here
+    /// fails the test instead of hanging CI if that pattern is reintroduced.
+    #[tokio::test(start_paused = false)]
+    async fn fast_path_write_failure_evicts_without_deadlock() {
+        use crate::tunnel::Tunnel;
+        use meow_common::{DnsMode, Metadata, Network};
+        use meow_dns::Resolver;
+        use meow_trie::DomainTrie;
+
+        let resolver = Arc::new(Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            false,
+        ));
+        let tunnel = Tunnel::new(resolver);
+
+        // Literal-IP destination so pre_resolve is a no-op and the NAT key is
+        // deterministic. Insert a session whose upstream write always fails.
+        let src = SocketAddr::from(([127, 0, 0, 1], 5555));
+        let dst = SocketAddr::from(([198, 51, 100, 7], 443));
+        let key = (src, dst);
+        tunnel.inner().nat_table.insert(
+            key,
+            Arc::new(UdpSession::new(
+                Box::new(FailingPacketConn),
+                Arc::from("test"),
+            )),
+        );
+
+        let metadata = Metadata {
+            network: Network::Udp,
+            src_ip: Some(src.ip()),
+            src_port: src.port(),
+            dst_ip: Some(dst.ip()),
+            dst_port: dst.port(),
+            ..Default::default()
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            handle_udp(tunnel.inner(), b"ping", src, metadata),
+        )
+        .await
+        .expect("handle_udp must not deadlock on a fast-path write failure");
+
+        assert!(
+            tunnel.inner().nat_table.get(&key).is_none(),
+            "a session with a dead upstream must be evicted"
         );
     }
 }
