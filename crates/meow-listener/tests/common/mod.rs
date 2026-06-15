@@ -1,4 +1,9 @@
-/// Shared test helpers for meow-listener integration tests.
+//! Shared test helpers for meow-listener integration tests.
+//!
+//! Each integration test binary compiles this module independently, so a
+//! helper used by only some of them looks "dead" to the others.
+#![allow(dead_code)]
+
 use meow_common::DnsMode;
 use meow_dns::Resolver;
 use meow_trie::DomainTrie;

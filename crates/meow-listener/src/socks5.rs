@@ -13,7 +13,6 @@ const NO_AUTH: u8 = 0x00;
 const USER_PASS_AUTH: u8 = 0x02;
 const NO_ACCEPTABLE_METHODS: u8 = 0xFF;
 const CMD_CONNECT: u8 = 0x01;
-#[allow(dead_code)]
 const CMD_UDP_ASSOCIATE: u8 = 0x03;
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
@@ -29,7 +28,7 @@ pub async fn handle_socks5(
     in_name: &str,
     in_port: u16,
 ) {
-    if let Err(e) = handle_socks5_inner(
+    match handle_socks5_inner(
         tunnel,
         &mut stream,
         src_addr,
@@ -40,8 +39,27 @@ pub async fn handle_socks5(
     )
     .await
     {
-        debug!("SOCKS5 error from {}: {}", src_addr, e);
+        Ok(PostHandshake::Done) => {}
+        Ok(PostHandshake::UdpAssociate) => {
+            // The handshake (auth + request) is consumed; the control conn is
+            // now ours for the association's lifetime.
+            if let Err(e) =
+                crate::socks5_udp::handle_udp_associate(tunnel, stream, src_addr, in_name, in_port)
+                    .await
+            {
+                debug!("SOCKS5 UDP ASSOCIATE error from {}: {}", src_addr, e);
+            }
+        }
+        Err(e) => debug!("SOCKS5 error from {}: {}", src_addr, e),
     }
+}
+
+/// Outcome of the SOCKS5 handshake: a CONNECT was fully relayed, or the client
+/// requested UDP ASSOCIATE and the (owned) control connection must be handed to
+/// the UDP relay.
+enum PostHandshake {
+    Done,
+    UdpAssociate,
 }
 
 async fn handle_socks5_inner(
@@ -52,7 +70,7 @@ async fn handle_socks5_inner(
     auth: Option<&AuthConfig>,
     in_name: &str,
     in_port: u16,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<PostHandshake, Box<dyn std::error::Error + Send + Sync>> {
     // 1. Version/method negotiation
     let mut header = [0u8; 2];
     stream.read_exact(&mut header).await?;
@@ -119,8 +137,14 @@ async fn handle_socks5_inner(
     let cmd = req[1];
     let atyp = req[3];
 
-    // Parse address
+    // Parse address (for UDP ASSOCIATE this is the client's advertised source,
+    // which we ignore — the relay learns the real source from the first packet).
     let (host, dst_ip, dst_port) = parse_socks5_address(stream, atyp).await?;
+
+    if cmd == CMD_UDP_ASSOCIATE {
+        // Hand the control connection to the UDP relay; it writes its own reply.
+        return Ok(PostHandshake::UdpAssociate);
+    }
 
     if cmd != CMD_CONNECT {
         // Send command not supported
@@ -210,7 +234,7 @@ async fn handle_socks5_inner(
         Err(e) => warn!("{} SOCKS5 dial error: {}", metadata.remote_address(), e),
     }
 
-    Ok(())
+    Ok(PostHandshake::Done)
 }
 
 async fn parse_socks5_address(
