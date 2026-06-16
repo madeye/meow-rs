@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess", "snell"]
+default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess", "snell", "hysteria2"]
 ss = ["dep:shadowsocks"]
 trojan = []
 vless = []
@@ -20,10 +20,8 @@ snell = ["dep:argon2", "dep:aes-gcm"]
 # features — accept the bloat in exchange for not re-implementing the
 # wire protocol. Off by default.
 anytls = ["dep:anytls-rs"]
-# Hysteria 2 outbound (issue #72). Tracer-bullet implementation: parser
-# wired and QUIC dial path stubbed, but the HTTP/3 auth handshake and
-# the data-stream framing land in follow-up PRs. Off by default.
-hysteria2 = ["dep:quinn"]
+# Hysteria2 outbound implemented in-tree on top of Quinn.
+hysteria2 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:blake2"]
 # Native client for the `ech-tls-tunnel` SIP003 plugin
 # (https://github.com/shadowsocks/ech-tls-tunnel). Requires ECH on rustls,
 # which pulls aws-lc-rs in via meow-transport.
@@ -36,6 +34,9 @@ meow-transport = { workspace = true }
 tokio = { workspace = true }
 anytls-rs = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
+h3 = { workspace = true, optional = true }
+h3-quinn = { workspace = true, optional = true }
+blake2 = { workspace = true, optional = true }
 shadowsocks = { workspace = true, optional = true }
 argon2 = { workspace = true, optional = true }
 tokio-rustls = { workspace = true }
@@ -55,6 +56,8 @@ socket2 = { workspace = true }
 libc = "0.2"
 smol_str = { workspace = true }
 smallvec = { workspace = true }
+http = { workspace = true }
+thiserror = { workspace = true }
 md-5 = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }
