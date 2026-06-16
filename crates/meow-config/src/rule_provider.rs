@@ -413,16 +413,33 @@ fn fetch_http_blocking_with_cache(
 
 fn fetch_http_blocking(url: &str, proxy: Option<&Arc<dyn Proxy>>) -> Result<Vec<u8>> {
     let url = url.to_string();
+    let thread_url = url.clone();
     let proxy = proxy.cloned();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("building temporary tokio runtime for rule-provider fetch")?;
-        rt.block_on(fetch_http_async(&url, proxy.as_ref()))
+        rt.block_on(fetch_http_async(&thread_url, proxy.as_ref()))
     })
     .join()
-    .map_err(|_| anyhow!("rule-provider HTTP fetch thread panicked"))?
+    .map_err(|payload| {
+        anyhow!(
+            "rule-provider HTTP fetch thread panicked while fetching {url}: {}",
+            panic_message(payload.as_ref())
+        )
+    })?
+}
+
+/// Extract a human-readable message from a thread panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 pub(crate) async fn fetch_http_async(url: &str, proxy: Option<&Arc<dyn Proxy>>) -> Result<Vec<u8>> {
@@ -660,8 +677,13 @@ mod tests {
                     Err(e) => panic!("HTTP test listener failed: {e}"),
                 }
             };
+            // The accepted stream can inherit the listener's nonblocking flag, which
+            // would make the read/write below return `WouldBlock`. Force blocking mode.
+            stream.set_nonblocking(false).unwrap();
             let mut buf = [0_u8; 1024];
-            stream.read(&mut buf).unwrap();
+            // Consume the request bytes; the exact length is irrelevant for the test.
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0, "expected an HTTP request from the client");
             let body = "payload:\n  - 'example.com'\n";
             write!(
                 stream,
