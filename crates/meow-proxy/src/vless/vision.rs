@@ -1,130 +1,312 @@
-//! XTLS-Vision splice wrapper for VLESS.
-//!
-//! `VisionConn` wraps a `VlessConn` and intercepts the first application-layer
-//! write.  If the first 5 bytes are a TLS handshake record
-//! (`byte[0] == 0x16 && byte[1] == 0x03`), Vision mode is entered:
-//!
-//! 1. Buffer the full ClientHello (5-byte header + `uint16_BE(bytes[3..5])` body).
-//! 2. Write a Vision padding header (disguised as a TLS AppData record) to inner.
-//! 3. Write the full ClientHello to inner.
-//! 4. Pass all subsequent writes through to inner unchanged.
-//!
-//! If the first 5 bytes are NOT a TLS record, pass-through mode is entered
-//! immediately (no padding, no buffering beyond the initial peek).
-//!
-//! # Padding header wire format
-//!
-//! ```text
-//! 0x17                  TLS AppData record type (disguise)
-//! 0x03 0x03             TLS 1.2 version (always these bytes)
-//! len_be(2)             2-byte big-endian length of the payload below
-//! 0x00                  Vision marker byte (server recognises this)
-//! random(N)             N in PADDING_RANGE
-//! ```
-//!
-//! upstream: transport/vless/vision/vision.go::sendPaddingMessage
-// upstream SHA: xray-core/xray-core main (2024) — pin before Vision PR merges
+//! XTLS-Vision padding wrapper for VLESS.
 
+use std::collections::VecDeque;
 use std::io;
-use std::ops::RangeInclusive;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use meow_common::ProxyConn;
+use rand::RngCore;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::conn::VlessConn;
 
-// ─── Upstream-pinned constant ────────────────────────────────────────────────
+const UUID_LEN: usize = 16;
+const PADDING_HEADER_LEN: usize = UUID_LEN + 1 + 2 + 2;
+const COMMAND_PADDING_CONTINUE: u8 = 0x00;
+const COMMAND_PADDING_END: u8 = 0x01;
+const COMMAND_PADDING_DIRECT: u8 = 0x02;
+const TLS_HANDSHAKE: u8 = 0x16;
+const TLS_APPLICATION_DATA: u8 = 0x17;
+const TLS_MAJOR: u8 = 0x03;
+const TLS_CLIENT_HELLO: u8 = 0x01;
+const TLS_SERVER_HELLO: u8 = 0x02;
+const TLS13_SUPPORTED_VERSIONS_EXT: [u8; 6] = [0x00, 0x2b, 0x00, 0x02, 0x03, 0x04];
+const TLS13_CIPHER_SUITES: [u16; 4] = [0x1301, 0x1302, 0x1303, 0x1304];
+const TLS_FILTER_PACKETS: usize = 8;
 
-/// Padding payload random-byte count range.
-///
-/// upstream: transport/vless/vision/vision.go — const `paddingMaxLen = 900`.
-/// The padding payload is `[0x00] + random(N)` where N ∈ PADDING_RANGE.
-/// Byte-exact match with the upstream constant is required (servers check the
-/// marker byte and reject malformed padding).
-pub const PADDING_RANGE: RangeInclusive<usize> = 0..=900;
-
-// ─── State machine ────────────────────────────────────────────────────────────
-
-enum WriteState {
-    /// Buffering the first 5 bytes of application data.
-    Peek(Vec<u8>),
-    /// TLS ClientHello detected; buffering the body (beyond the 5-byte peek).
-    Body {
-        peek5: [u8; 5],
-        body: Vec<u8>,
-        need_more: usize,
+enum ReadState {
+    Header {
+        buf: Vec<u8>,
+        need_uuid: bool,
     },
-    /// Draining the prebuilt [padding_header + clienthello] buffer to inner.
-    Drain { to_send: Vec<u8>, pos: usize },
-    /// Passthrough — no more buffering.
+    Content {
+        command: u8,
+        remaining_content: usize,
+        remaining_padding: usize,
+    },
+    Padding {
+        command: u8,
+        remaining_padding: usize,
+    },
     Through,
 }
 
-/// Vision-mode wrapper around `VlessConn`.
-///
-/// Returns `VisionConn` when `flow = xtls-rprx-vision` and the outer transport
-/// provides TLS. See module-level docs for the splice algorithm.
+struct PendingWrite {
+    frame: Vec<u8>,
+    pos: usize,
+    consumed: usize,
+    command: u8,
+    end_padding_after_drain: bool,
+}
+
 pub struct VisionConn {
     inner: VlessConn,
-    write_state: WriteState,
-    /// Set to true once we entered Vision mode (padding header emitted).
-    /// Used only in test assertions and the C11 log-noise guard.
-    #[allow(dead_code)]
+    user_uuid: [u8; UUID_LEN],
+    read_state: ReadState,
+    read_plain: VecDeque<u8>,
+    write_pending: Option<PendingWrite>,
+    write_padding: bool,
+    write_sent_uuid: bool,
+    write_seen_tls: bool,
+    write_direct_enabled: bool,
+    read_tls_filter: ServerHelloFilter,
     vision_entered: bool,
 }
 
 impl VisionConn {
-    pub fn new(inner: VlessConn) -> Self {
+    pub fn new(inner: VlessConn, user_uuid: [u8; UUID_LEN]) -> Self {
         Self {
             inner,
-            write_state: WriteState::Peek(Vec::with_capacity(5)),
+            user_uuid,
+            read_state: ReadState::Header {
+                buf: Vec::with_capacity(PADDING_HEADER_LEN),
+                need_uuid: true,
+            },
+            read_plain: VecDeque::new(),
+            write_pending: None,
+            write_padding: true,
+            write_sent_uuid: false,
+            write_seen_tls: false,
+            write_direct_enabled: false,
+            read_tls_filter: ServerHelloFilter::new(),
             vision_entered: false,
         }
     }
 
-    /// Whether Vision mode was triggered (first 5 bytes were a TLS record).
-    /// Used in tests and log-noise guards.
     #[allow(dead_code)]
     pub fn vision_entered(&self) -> bool {
         self.vision_entered
     }
-}
 
-// ─── Padding header builder ───────────────────────────────────────────────────
+    fn drain_pending_write(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<Option<usize>>> {
+        let Some(pending) = &mut self.write_pending else {
+            return Poll::Ready(Ok(None));
+        };
 
-/// Build the Vision padding header.
-///
-/// Wire format:
-/// ```text
-/// 0x17  0x03  0x03  len_hi  len_lo  0x00  random...
-/// ```
-/// upstream: transport/vless/vision/vision.go::sendPaddingMessage
-fn build_padding_header() -> Vec<u8> {
-    use rand::RngCore;
-    let mut rng = rand::rng();
-    let n = {
-        let mut b = [0u8; 4];
-        rng.fill_bytes(&mut b);
-        (u32::from_le_bytes(b) as usize) % (*PADDING_RANGE.end() + 1)
-    };
-    let payload_len = 1 + n; // marker byte + random bytes
-    let len = payload_len as u16;
-    let mut buf = Vec::with_capacity(5 + payload_len);
-    buf.push(0x17); // TLS AppData type
-    buf.push(0x03); // TLS 1.2 major
-    buf.push(0x03); // TLS 1.2 minor
-    buf.push((len >> 8) as u8);
-    buf.push((len & 0xFF) as u8);
-    buf.push(0x00); // Vision marker byte
-    for _ in 0..n {
-        buf.push(rng.next_u32() as u8);
+        while pending.pos < pending.frame.len() {
+            match Pin::new(&mut self.inner).poll_write(cx, &pending.frame[pending.pos..])? {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(0) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "vision: zero write during frame drain",
+                    )));
+                }
+                Poll::Ready(n) => pending.pos += n,
+            }
+        }
+
+        let pending = self.write_pending.take().expect("pending checked above");
+        if pending.end_padding_after_drain {
+            self.write_padding = false;
+            if pending.command == COMMAND_PADDING_DIRECT {
+                if !self.enable_inner_raw_write_passthrough() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "vision: DIRECT requested but transport cannot switch to raw passthrough",
+                    )));
+                }
+                tracing::debug!("XTLS Vision direct write passthrough enabled");
+            }
+        }
+        Poll::Ready(Ok(Some(pending.consumed)))
     }
-    buf
+
+    fn build_write_frame(&mut self, buf: &[u8]) {
+        let contains_tls_handshake = contains_tls_client_hello(buf);
+        let starts_tls_app_data =
+            buf.len() >= 3 && buf[0] == TLS_APPLICATION_DATA && buf[1] == TLS_MAJOR;
+        if contains_tls_handshake {
+            self.write_seen_tls = true;
+            self.vision_entered = true;
+        }
+
+        let padding_tls = self.write_seen_tls;
+        let mut command = COMMAND_PADDING_CONTINUE;
+        let mut end_after_drain = false;
+        if starts_tls_app_data && self.write_seen_tls {
+            command = if self.write_direct_enabled {
+                COMMAND_PADDING_DIRECT
+            } else {
+                COMMAND_PADDING_END
+            };
+            end_after_drain = true;
+        } else if !self.write_seen_tls && !contains_tls_handshake {
+            command = COMMAND_PADDING_END;
+            end_after_drain = true;
+        }
+
+        let frame = build_padding_frame(
+            command,
+            (!self.write_sent_uuid).then_some(&self.user_uuid),
+            buf,
+            padding_tls,
+        );
+        tracing::debug!(
+            command,
+            content_len = buf.len(),
+            frame_len = frame.len(),
+            padding_tls,
+            contains_tls_handshake,
+            starts_tls_app_data,
+            "XTLS Vision write padding"
+        );
+        self.write_sent_uuid = true;
+        self.write_pending = Some(PendingWrite {
+            frame,
+            pos: 0,
+            consumed: buf.len(),
+            command,
+            end_padding_after_drain: end_after_drain,
+        });
+    }
+
+    fn drain_read_plain(&mut self, buf: &mut ReadBuf<'_>) -> bool {
+        if self.read_plain.is_empty() {
+            return false;
+        }
+        let n = buf.remaining().min(self.read_plain.len());
+        for b in self.read_plain.drain(..n) {
+            buf.put_slice(&[b]);
+        }
+        true
+    }
+
+    fn enable_inner_raw_read_passthrough(&mut self) -> bool {
+        self.inner.enable_raw_read_passthrough()
+    }
+
+    fn enable_inner_raw_write_passthrough(&mut self) -> bool {
+        self.inner.enable_raw_write_passthrough()
+    }
+
+    fn filter_server_tls(&mut self, chunk: &[u8]) {
+        if !self.write_direct_enabled && self.read_tls_filter.observe(chunk) {
+            self.write_direct_enabled = true;
+            tracing::debug!("XTLS Vision found TLS 1.3, direct enabled");
+        }
+    }
 }
 
-// ─── AsyncRead ────────────────────────────────────────────────────────────────
+fn contains_tls_client_hello(buf: &[u8]) -> bool {
+    buf.windows(6)
+        .any(|w| w[0] == TLS_HANDSHAKE && w[1] == TLS_MAJOR && w[5] == TLS_CLIENT_HELLO)
+}
+
+struct ServerHelloFilter {
+    packets_left: usize,
+    expected_len: Option<usize>,
+    buffer: Vec<u8>,
+    done: bool,
+}
+
+impl ServerHelloFilter {
+    fn new() -> Self {
+        Self {
+            packets_left: TLS_FILTER_PACKETS,
+            expected_len: None,
+            buffer: Vec::new(),
+            done: false,
+        }
+    }
+
+    fn observe(&mut self, chunk: &[u8]) -> bool {
+        if self.done || self.packets_left == 0 || chunk.is_empty() {
+            return false;
+        }
+        self.packets_left -= 1;
+
+        if self.expected_len.is_none() {
+            self.buffer.extend_from_slice(chunk);
+            let Some(pos) = find_tls_server_hello_start(&self.buffer) else {
+                return false;
+            };
+            if pos > 0 {
+                self.buffer.drain(..pos);
+            }
+            let record_len = u16::from_be_bytes([self.buffer[3], self.buffer[4]]) as usize;
+            self.expected_len = Some(5 + record_len);
+        } else {
+            self.buffer.extend_from_slice(chunk);
+        }
+
+        let expected_len = self.expected_len.unwrap_or(self.buffer.len());
+        if self.buffer.len() < expected_len {
+            return false;
+        }
+
+        self.done = true;
+        let hello = &self.buffer[..expected_len];
+        let Some(cipher) = tls_server_hello_cipher_suite(hello) else {
+            return false;
+        };
+        TLS13_CIPHER_SUITES.contains(&cipher)
+            && hello
+                .windows(TLS13_SUPPORTED_VERSIONS_EXT.len())
+                .any(|w| w == TLS13_SUPPORTED_VERSIONS_EXT)
+    }
+}
+
+fn find_tls_server_hello_start(buf: &[u8]) -> Option<usize> {
+    buf.windows(6).position(|w| {
+        w[0] == TLS_HANDSHAKE && w[1] == TLS_MAJOR && w[2] == TLS_MAJOR && w[5] == TLS_SERVER_HELLO
+    })
+}
+
+fn tls_server_hello_cipher_suite(record: &[u8]) -> Option<u16> {
+    if record.len() < 46 || !matches!(find_tls_server_hello_start(record), Some(0)) {
+        return None;
+    }
+    let session_id_len = *record.get(43)? as usize;
+    let cipher_offset = 44 + session_id_len;
+    let bytes = record.get(cipher_offset..cipher_offset + 2)?;
+    Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn build_padding_frame(
+    command: u8,
+    user_uuid: Option<&[u8; UUID_LEN]>,
+    content: &[u8],
+    padding_tls: bool,
+) -> Vec<u8> {
+    let padding_len = if content.len() < 900 {
+        let mut rng = rand::rng();
+        if padding_tls {
+            (rng.next_u32() as usize % 500) + 900 - content.len()
+        } else {
+            rng.next_u32() as usize % 256
+        }
+    } else {
+        0
+    };
+
+    let header_len = if user_uuid.is_some() {
+        PADDING_HEADER_LEN
+    } else {
+        PADDING_HEADER_LEN - UUID_LEN
+    };
+    let mut frame = Vec::with_capacity(header_len + content.len() + padding_len);
+    if let Some(uuid) = user_uuid {
+        frame.extend_from_slice(uuid);
+    }
+    frame.push(command);
+    frame.extend_from_slice(&(content.len() as u16).to_be_bytes());
+    frame.extend_from_slice(&(padding_len as u16).to_be_bytes());
+    frame.extend_from_slice(content);
+    frame.resize(frame.len() + padding_len, 0);
+    frame
+}
 
 impl AsyncRead for VisionConn {
     fn poll_read(
@@ -132,11 +314,221 @@ impl AsyncRead for VisionConn {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        if self.drain_read_plain(buf) {
+            return Poll::Ready(Ok(()));
+        }
+
+        loop {
+            let state = std::mem::replace(&mut self.read_state, ReadState::Through);
+            match state {
+                ReadState::Through => {
+                    self.read_state = ReadState::Through;
+                    return Pin::new(&mut self.inner).poll_read(cx, buf);
+                }
+                ReadState::Header {
+                    buf: mut h,
+                    need_uuid,
+                } => {
+                    let need = if need_uuid {
+                        PADDING_HEADER_LEN
+                    } else {
+                        PADDING_HEADER_LEN - UUID_LEN
+                    };
+                    while h.len() < need {
+                        let mut tmp = [0u8; PADDING_HEADER_LEN];
+                        let want = (need - h.len()).min(tmp.len());
+                        let mut rb = ReadBuf::new(&mut tmp[..want]);
+                        match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
+                            Poll::Pending => {
+                                self.read_state = ReadState::Header { buf: h, need_uuid };
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(e)) => {
+                                self.read_state = ReadState::Header { buf: h, need_uuid };
+                                return Poll::Ready(Err(e));
+                            }
+                            Poll::Ready(Ok(())) => {
+                                let n = rb.filled().len();
+                                if n == 0 {
+                                    self.read_state = ReadState::Header { buf: h, need_uuid };
+                                    return Poll::Ready(Err(io::Error::new(
+                                        io::ErrorKind::UnexpectedEof,
+                                        "vision: EOF while reading padding header",
+                                    )));
+                                }
+                                h.extend_from_slice(rb.filled());
+                            }
+                        }
+                    }
+
+                    let offset = if need_uuid {
+                        if h[..UUID_LEN] != self.user_uuid {
+                            self.read_state = ReadState::Header { buf: h, need_uuid };
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "vision: server responded with unknown UUID",
+                            )));
+                        }
+                        UUID_LEN
+                    } else {
+                        0
+                    };
+                    let command = h[offset];
+                    let content_len = u16::from_be_bytes([h[offset + 1], h[offset + 2]]) as usize;
+                    let padding_len = u16::from_be_bytes([h[offset + 3], h[offset + 4]]) as usize;
+                    tracing::debug!(
+                        command,
+                        content_len,
+                        padding_len,
+                        need_uuid,
+                        "XTLS Vision read padding"
+                    );
+                    self.read_state = ReadState::Content {
+                        command,
+                        remaining_content: content_len,
+                        remaining_padding: padding_len,
+                    };
+                }
+                ReadState::Content {
+                    command,
+                    mut remaining_content,
+                    remaining_padding,
+                } => {
+                    if remaining_content == 0 {
+                        self.read_state = ReadState::Padding {
+                            command,
+                            remaining_padding,
+                        };
+                        continue;
+                    }
+                    if buf.remaining() == 0 {
+                        self.read_state = ReadState::Content {
+                            command,
+                            remaining_content,
+                            remaining_padding,
+                        };
+                        return Poll::Ready(Ok(()));
+                    }
+
+                    let mut tmp = vec![0u8; remaining_content.min(buf.remaining()).min(8192)];
+                    let mut rb = ReadBuf::new(&mut tmp);
+                    match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
+                        Poll::Pending => {
+                            self.read_state = ReadState::Content {
+                                command,
+                                remaining_content,
+                                remaining_padding,
+                            };
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Err(e)) => {
+                            self.read_state = ReadState::Content {
+                                command,
+                                remaining_content,
+                                remaining_padding,
+                            };
+                            return Poll::Ready(Err(e));
+                        }
+                        Poll::Ready(Ok(())) => {
+                            let n = rb.filled().len();
+                            if n == 0 {
+                                self.read_state = ReadState::Content {
+                                    command,
+                                    remaining_content,
+                                    remaining_padding,
+                                };
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::UnexpectedEof,
+                                    "vision: EOF while reading padded content",
+                                )));
+                            }
+                            remaining_content -= n;
+                            self.filter_server_tls(rb.filled());
+                            buf.put_slice(rb.filled());
+                            self.read_state = if remaining_content == 0 {
+                                ReadState::Padding {
+                                    command,
+                                    remaining_padding,
+                                }
+                            } else {
+                                ReadState::Content {
+                                    command,
+                                    remaining_content,
+                                    remaining_padding,
+                                }
+                            };
+                            return Poll::Ready(Ok(()));
+                        }
+                    }
+                }
+                ReadState::Padding {
+                    command,
+                    mut remaining_padding,
+                } => {
+                    while remaining_padding > 0 {
+                        let mut tmp = [0u8; 1024];
+                        let want = remaining_padding.min(tmp.len());
+                        let mut rb = ReadBuf::new(&mut tmp[..want]);
+                        match Pin::new(&mut self.inner).poll_read(cx, &mut rb) {
+                            Poll::Pending => {
+                                self.read_state = ReadState::Padding {
+                                    command,
+                                    remaining_padding,
+                                };
+                                return Poll::Pending;
+                            }
+                            Poll::Ready(Err(e)) => {
+                                self.read_state = ReadState::Padding {
+                                    command,
+                                    remaining_padding,
+                                };
+                                return Poll::Ready(Err(e));
+                            }
+                            Poll::Ready(Ok(())) => {
+                                let n = rb.filled().len();
+                                if n == 0 {
+                                    self.read_state = ReadState::Padding {
+                                        command,
+                                        remaining_padding,
+                                    };
+                                    return Poll::Ready(Err(io::Error::new(
+                                        io::ErrorKind::UnexpectedEof,
+                                        "vision: EOF while reading padding",
+                                    )));
+                                }
+                                remaining_padding -= n;
+                            }
+                        }
+                    }
+
+                    self.read_state = match command {
+                        COMMAND_PADDING_CONTINUE => ReadState::Header {
+                            buf: Vec::with_capacity(PADDING_HEADER_LEN - UUID_LEN),
+                            need_uuid: false,
+                        },
+                        COMMAND_PADDING_END => ReadState::Through,
+                        COMMAND_PADDING_DIRECT => {
+                            if !self.enable_inner_raw_read_passthrough() {
+                                return Poll::Ready(Err(io::Error::new(
+                                    io::ErrorKind::Unsupported,
+                                    "vision: DIRECT requested but transport cannot switch to raw passthrough",
+                                )));
+                            }
+                            tracing::debug!("XTLS Vision direct passthrough enabled");
+                            ReadState::Through
+                        }
+                        other => {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("vision: unknown padding command {other}"),
+                            )));
+                        }
+                    };
+                }
+            }
+        }
     }
 }
-
-// ─── AsyncWrite (state machine) ───────────────────────────────────────────────
 
 impl AsyncWrite for VisionConn {
     fn poll_write(
@@ -145,134 +537,41 @@ impl AsyncWrite for VisionConn {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-
-        // `src_pos` tracks how many bytes of `buf` have been "consumed" by this
-        // call.  States that buffer (Peek/Body) advance it; Drain/Through write to
-        // inner from their own buffers or from the unconsumed remainder of buf.
-        let mut src_pos = 0usize;
-
-        loop {
-            match &mut this.write_state {
-                // ── Peek: collect first 5 bytes ────────────────────────────
-                WriteState::Peek(pbuf) => {
-                    let need = 5 - pbuf.len();
-                    let take = need.min(buf[src_pos..].len());
-                    pbuf.extend_from_slice(&buf[src_pos..src_pos + take]);
-                    src_pos += take;
-
-                    if pbuf.len() < 5 {
-                        // Still buffering; return what we consumed from buf.
-                        return Poll::Ready(Ok(src_pos));
-                    }
-
-                    // We now have exactly 5 bytes.
-                    let is_tls = pbuf[0] == 0x16 && pbuf[1] == 0x03;
-                    let peek5: [u8; 5] = pbuf[..5].try_into().unwrap();
-
-                    if is_tls {
-                        let body_len = u16::from_be_bytes([pbuf[3], pbuf[4]]) as usize;
-                        this.vision_entered = true;
-
-                        if body_len == 0 {
-                            // Zero-length body — unlikely but handle it.
-                            let mut to_send = build_padding_header();
-                            to_send.extend_from_slice(&peek5);
-                            this.write_state = WriteState::Drain { to_send, pos: 0 };
-                        } else {
-                            this.write_state = WriteState::Body {
-                                peek5,
-                                body: Vec::with_capacity(body_len),
-                                need_more: body_len,
-                            };
-                        }
-                    } else {
-                        // Not TLS — passthrough mode.  Drain the peek bytes first.
-                        let to_send = peek5.to_vec();
-                        this.write_state = WriteState::Drain { to_send, pos: 0 };
-                    }
-
-                    // Continue into the new state (Body or Drain) within this
-                    // same poll_write call so the caller sees data forwarded to
-                    // inner as soon as possible.
-                }
-
-                // ── Body: accumulate full ClientHello ─────────────────────
-                WriteState::Body {
-                    peek5,
-                    body,
-                    need_more,
-                } => {
-                    let remaining_body = *need_more - body.len();
-                    let take = remaining_body.min(buf[src_pos..].len());
-                    body.extend_from_slice(&buf[src_pos..src_pos + take]);
-                    src_pos += take;
-
-                    if body.len() == *need_more {
-                        // Full ClientHello assembled.  Build drain buffer and
-                        // continue to Drain in this same poll_write so that the
-                        // prebuilt buffer is flushed to inner before we return.
-                        let mut to_send = build_padding_header();
-                        to_send.extend_from_slice(peek5);
-                        to_send.extend_from_slice(body);
-                        this.write_state = WriteState::Drain { to_send, pos: 0 };
-                        // continue → Drain
-                    } else {
-                        // Still accumulating body bytes; return what we consumed.
-                        return Poll::Ready(Ok(src_pos));
-                    }
-                }
-
-                // ── Drain: write prebuilt buffer to inner ──────────────────
-                WriteState::Drain { to_send, pos } => {
-                    let remaining = &to_send[*pos..];
-                    if remaining.is_empty() {
-                        this.write_state = WriteState::Through;
-                        continue; // loop → Through
-                    }
-
-                    match Pin::new(&mut this.inner).poll_write(cx, remaining)? {
-                        Poll::Pending => {
-                            // Inner can't accept right now.  Return any buf bytes
-                            // already consumed (if any); otherwise propagate Pending.
-                            if src_pos > 0 {
-                                return Poll::Ready(Ok(src_pos));
-                            }
-                            return Poll::Pending;
-                        }
-                        Poll::Ready(0) => {
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::WriteZero,
-                                "vision: zero write during padding drain",
-                            )));
-                        }
-                        Poll::Ready(n) => {
-                            *pos += n;
-                            // Loop: either drain more or switch to Through.
-                        }
-                    }
-                }
-
-                // ── Through: transparent passthrough ──────────────────────
-                WriteState::Through => {
-                    let remaining_buf = &buf[src_pos..];
-                    if remaining_buf.is_empty() {
-                        // All buf bytes were consumed by earlier states; nothing
-                        // left to forward.  Return the total consumed count.
-                        return Poll::Ready(Ok(src_pos));
-                    }
-                    return Pin::new(&mut this.inner)
-                        .poll_write(cx, remaining_buf)
-                        .map(|r| r.map(|n| src_pos + n));
-                }
+        if let Poll::Ready(done) = this.drain_pending_write(cx) {
+            if let Some(n) = done? {
+                return Poll::Ready(Ok(n));
             }
+        } else {
+            return Poll::Pending;
+        }
+
+        if !this.write_padding {
+            return Pin::new(&mut this.inner).poll_write(cx, buf);
+        }
+        this.build_write_frame(buf);
+        match this.drain_pending_write(cx) {
+            Poll::Ready(Ok(Some(n))) => Poll::Ready(Ok(n)),
+            Poll::Ready(Ok(None)) => Poll::Ready(Ok(0)),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Poll::Ready(done) = self.drain_pending_write(cx) {
+            done?;
+        } else {
+            return Poll::Pending;
+        }
         Pin::new(&mut self.inner).poll_flush(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Poll::Ready(done) = self.drain_pending_write(cx) {
+            done?;
+        } else {
+            return Poll::Pending;
+        }
         Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -281,438 +580,112 @@ impl Unpin for VisionConn {}
 
 impl ProxyConn for VisionConn {}
 
-// ─── Unit tests (§C) ─────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
-    use std::sync::{Arc, Mutex};
-    use tokio::io::AsyncWriteExt;
 
-    // ─── Minimal mock inner stream ────────────────────────────────────────────
+    const UUID: [u8; UUID_LEN] = [0x11; UUID_LEN];
 
-    /// Records what was written to it.
-    struct RecordingStream {
-        written: Arc<Mutex<Vec<Vec<u8>>>>,
-        /// Bytes to deliver on read.
-        read_buf: VecDeque<u8>,
-    }
-
-    impl RecordingStream {
-        fn new(written: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
-            Self {
-                written,
-                read_buf: VecDeque::new(),
-            }
-        }
-    }
-
-    impl AsyncRead for RecordingStream {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            let n = buf.remaining().min(self.read_buf.len());
-            if n == 0 {
-                return Poll::Pending;
-            }
-            for b in self.read_buf.drain(..n) {
-                buf.put_slice(&[b]);
-            }
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    impl AsyncWrite for RecordingStream {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            self.get_mut().written.lock().unwrap().push(buf.to_vec());
-            Poll::Ready(Ok(buf.len()))
-        }
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    impl Unpin for RecordingStream {}
-
-    /// Build a `VisionConn` wrapping a `RecordingStream`.
-    fn vision_over_recorder(written: Arc<Mutex<Vec<Vec<u8>>>>) -> VisionConn {
-        let recorder = Box::new(RecordingStream::new(written));
-        let vless = VlessConn {
-            inner: recorder,
-            response_pending: false,
-        };
-        VisionConn::new(vless)
-    }
-
-    // ─── C1: padding header matches reference ────────────────────────────────
-
-    /// Padding header must match the upstream wire format from
-    /// transport/vless/vision/vision.go::sendPaddingMessage.
-    /// NOT arbitrary bytes — byte-exact marker at payload[0].
     #[test]
-    fn vision_padding_header_matches_reference() {
-        for _ in 0..100 {
-            let hdr = build_padding_header();
-            assert!(
-                hdr.len() >= 5,
-                "padding header must have 5-byte record prefix"
-            );
-            assert_eq!(hdr[0], 0x17, "byte[0] must be TLS AppData 0x17");
-            assert_eq!(hdr[1], 0x03, "byte[1] must be 0x03 (TLS 1.2 major)");
-            assert_eq!(hdr[2], 0x03, "byte[2] must be 0x03 (TLS 1.2 minor)");
-            let payload_len = u16::from_be_bytes([hdr[3], hdr[4]]) as usize;
-            assert_eq!(
-                hdr.len(),
-                5 + payload_len,
-                "record length must match actual bytes"
-            );
-            assert!(
-                payload_len >= 1,
-                "payload must have at least the marker byte"
-            );
-            assert_eq!(hdr[5], 0x00, "payload[0] must be Vision marker 0x00");
-            let n = payload_len - 1;
-            assert!(
-                PADDING_RANGE.contains(&n),
-                "random byte count {n} not in PADDING_RANGE {PADDING_RANGE:?}"
-            );
-        }
+    fn padding_frame_with_uuid_matches_mihomo_layout() {
+        let content = b"\x16\x03\x01\x00\x01\x01";
+        let frame = build_padding_frame(COMMAND_PADDING_CONTINUE, Some(&UUID), content, true);
+
+        assert_eq!(&frame[..UUID_LEN], &UUID);
+        assert_eq!(frame[UUID_LEN], COMMAND_PADDING_CONTINUE);
+
+        let content_len = u16::from_be_bytes([frame[UUID_LEN + 1], frame[UUID_LEN + 2]]) as usize;
+        let padding_len = u16::from_be_bytes([frame[UUID_LEN + 3], frame[UUID_LEN + 4]]) as usize;
+
+        assert_eq!(content_len, content.len());
+        assert_eq!(
+            &frame[PADDING_HEADER_LEN..PADDING_HEADER_LEN + content.len()],
+            content
+        );
+        assert_eq!(
+            frame.len(),
+            PADDING_HEADER_LEN + content.len() + padding_len
+        );
+        assert!(padding_len >= 900 - content.len());
+        assert!(padding_len < 1400 - content.len());
     }
 
-    // ─── C2: PADDING_RANGE matches upstream constant ─────────────────────────
-
-    /// upstream: transport/vless/vision/vision.go paddingMaxLen = 900
     #[test]
-    fn vision_padding_range_is_upstream_constant() {
-        assert_eq!(
-            *PADDING_RANGE.start(),
-            0,
-            "PADDING_RANGE lower bound must be 0"
-        );
-        assert_eq!(
-            *PADDING_RANGE.end(),
-            900,
-            "PADDING_RANGE upper bound must be 900 (upstream paddingMaxLen)"
-        );
+    fn padding_frame_without_uuid_uses_short_header() {
+        let content = b"abc";
+        let frame = build_padding_frame(COMMAND_PADDING_END, None, content, false);
+
+        assert_eq!(frame[0], COMMAND_PADDING_END);
+        let content_len = u16::from_be_bytes([frame[1], frame[2]]) as usize;
+        let padding_len = u16::from_be_bytes([frame[3], frame[4]]) as usize;
+
+        assert_eq!(content_len, content.len());
+        assert_eq!(&frame[5..8], content);
+        assert_eq!(frame.len(), 5 + content.len() + padding_len);
+        assert!(padding_len < 256);
     }
 
-    // ─── C3: Vision mode on TLS first 5 bytes ────────────────────────────────
-
-    #[tokio::test]
-    async fn vision_detects_inner_tls_by_first_5_bytes() {
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(Arc::clone(&written));
-
-        // Write exactly 5 bytes: TLS handshake record type + TLS 1.2 version.
-        // ClientHello body_len = 0x0001 (1 byte body).
-        let first5 = [0x16u8, 0x03, 0x01, 0x00, 0x01];
-        conn.write_all(&first5).await.unwrap();
-
-        // We've fed 5 bytes — Vision should now be in Body state (need 1 more byte).
-        // Feed the body byte.
-        conn.write_all(&[0x42]).await.unwrap();
-
-        // Now Vision should have emitted padding + peek5 + body to inner.
-        let w = written.lock().unwrap();
-        let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
-
-        // The combined output must start with the padding header (0x17 ...).
-        assert_eq!(
-            combined[0], 0x17,
-            "output must start with padding header 0x17"
-        );
-        // Marker byte must be 0x00.
-        let payload_len = u16::from_be_bytes([combined[3], combined[4]]) as usize;
-        assert_eq!(
-            combined[5], 0x00,
-            "Vision marker byte must be 0x00; got: {:#04x}",
-            combined[5]
-        );
-        // After the padding header (5 + payload_len bytes), the ClientHello follows.
-        let ch_start = 5 + payload_len;
-        assert_eq!(
-            &combined[ch_start..ch_start + 5],
-            &first5,
-            "ClientHello must follow padding header verbatim"
-        );
-        assert_eq!(combined[ch_start + 5], 0x42, "ClientHello body must follow");
-    }
-
-    // ─── C4: passthrough on non-TLS first byte ───────────────────────────────
-
-    #[tokio::test]
-    async fn vision_passthrough_on_non_tls_first_byte() {
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(Arc::clone(&written));
-
-        // 0x47 = 'G' — first byte of "GET /"
-        let data = [0x47u8, 0x45, 0x54, 0x20, 0x2F];
-        conn.write_all(&data).await.unwrap();
-
-        // Drain state transitions to Through after emitting the 5 peek bytes.
-        let w = written.lock().unwrap();
-        let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
-
-        // Must NOT start with 0x17 (no padding header emitted).
-        assert_ne!(
-            combined[0], 0x17,
-            "passthrough must NOT emit padding header 0x17"
-        );
-        // The 5 data bytes must appear verbatim (no extra prefix).
-        assert!(
-            combined.windows(5).any(|w| w == data),
-            "passthrough must forward the 5 original bytes; got {combined:?}"
-        );
-        assert!(
-            !conn.vision_entered,
-            "vision_entered must be false for non-TLS data"
-        );
-    }
-
-    // ─── C5: passthrough on TLS type but wrong version ───────────────────────
-
-    /// byte[0] = 0x16 (TLS handshake) but byte[1] = 0x04 (not 0x03).
-    /// Guards against checking only byte[0].
-    #[tokio::test]
-    async fn vision_passthrough_on_tls_type_but_wrong_version() {
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(Arc::clone(&written));
-
-        let data = [0x16u8, 0x04, 0x00, 0x00, 0x00]; // TLS type, version major 0x04
-        conn.write_all(&data).await.unwrap();
-
-        assert!(
-            !conn.vision_entered,
-            "vision must NOT be entered when byte[1] != 0x03"
-        );
-    }
-
-    // ─── C6: passthrough on EOF before 5 bytes ───────────────────────────────
-
-    #[tokio::test]
-    async fn vision_passthrough_on_empty_stream() {
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(Arc::clone(&written));
-
-        // Write only 3 bytes and then nothing more.
-        conn.write_all(&[0x16, 0x03, 0x01]).await.unwrap();
-        // This is an incomplete peek (< 5 bytes buffered).
-        // No panic, no panic, graceful partial handling.
-        assert!(
-            !conn.vision_entered,
-            "vision must not be entered on partial data"
-        );
-    }
-
-    // ─── C7: full ClientHello buffered before sending ─────────────────────────
-
-    /// "Stage a ClientHello arriving in two poll_write chunks; assert VisionConn
-    ///  does not emit any bytes to the underlying writer until the full record is
-    ///  buffered."
-    /// upstream: transport/vless/vision/vision.go::ReadClientHelloRecord
-    /// NOT partial-send on first chunk — truncated ClientHello breaks inner TLS.
-    #[tokio::test]
-    async fn vision_reads_full_clienthello_before_sending() {
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(Arc::clone(&written));
-
-        // ClientHello: 5-byte header claiming body_length=4.
-        let hdr = [0x16u8, 0x03, 0x01, 0x00, 0x04];
-        conn.write_all(&hdr).await.unwrap();
-
-        // After the 5-byte peek, nothing should have been written to inner yet.
-        {
-            let w = written.lock().unwrap();
-            let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
-            assert!(
-                combined.is_empty(),
-                "must NOT write to inner after only the 5-byte header; got {combined:?}"
-            );
-        }
-
-        // Supply the first 2 body bytes.
-        conn.write_all(&[0xAA, 0xBB]).await.unwrap();
-        {
-            let w = written.lock().unwrap();
-            let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
-            assert!(
-                combined.is_empty(),
-                "must NOT write to inner after partial body (2/4 bytes); got {combined:?}"
-            );
-        }
-
-        // Supply remaining 2 body bytes — full record complete.
-        conn.write_all(&[0xCC, 0xDD]).await.unwrap();
-        {
-            let w = written.lock().unwrap();
-            assert!(
-                w.iter().any(|v| !v.is_empty()),
-                "must write to inner once full ClientHello is assembled"
-            );
-        }
-    }
-
-    // ─── C8: body_length parsed from bytes[3..5] ──────────────────────────────
-
-    /// Feed ClientHello where uint16_BE(bytes[3..5]) = 512.
-    /// Guards against off-by-one or wrong byte range.
-    #[tokio::test]
-    async fn vision_clienthello_body_length_from_bytes_3_4() {
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(Arc::clone(&written));
-
-        // body_length = 512 = 0x0200
-        let hdr = [0x16u8, 0x03, 0x01, 0x02, 0x00];
-        conn.write_all(&hdr).await.unwrap();
-
-        // Nothing written yet.
-        assert!(
-            written.lock().unwrap().is_empty(),
-            "no write after 5-byte peek"
-        );
-
-        // Supply 511 bytes (not enough).
-        conn.write_all(&vec![0u8; 511]).await.unwrap();
-        assert!(
-            written.lock().unwrap().iter().all(std::vec::Vec::is_empty)
-                || written.lock().unwrap().is_empty(),
-            "partial body must not trigger send"
-        );
-
-        // Wait — check more carefully.
-        {
-            let w = written.lock().unwrap();
-            let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
-            assert!(
-                combined.is_empty(),
-                "must not write after 511/512 body bytes; got {} bytes",
-                combined.len()
-            );
-        }
-
-        // Supply the last byte.
-        conn.write_all(&[0xFE]).await.unwrap();
-        let w = written.lock().unwrap();
-        assert!(
-            w.iter().any(|v| !v.is_empty()),
-            "must write after all 512 body bytes"
-        );
-    }
-
-    // ─── C9: padding header precedes ClientHello in output ───────────────────
-
-    #[tokio::test]
-    async fn vision_sends_padding_then_clienthello_in_order() {
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let mut conn = vision_over_recorder(Arc::clone(&written));
-
-        let hdr = [0x16u8, 0x03, 0x01, 0x00, 0x02]; // body_len = 2
-        conn.write_all(&hdr).await.unwrap();
-        conn.write_all(&[0xAB, 0xCD]).await.unwrap();
-
-        let w = written.lock().unwrap();
-        let combined: Vec<u8> = w.iter().flat_map(|v| v.iter().copied()).collect();
-        assert!(!combined.is_empty(), "must have written something");
-
-        // First byte must be 0x17 (padding header).
-        assert_eq!(combined[0], 0x17, "padding header 0x17 must come first");
-
-        // Locate the ClientHello (bytes [0x16, 0x03, 0x01, 0x00, 0x02]) in output.
-        let search = [0x16u8, 0x03, 0x01, 0x00, 0x02];
-        let ch_pos = combined
-            .windows(5)
-            .position(|w| w == search)
-            .expect("ClientHello must appear in output");
-
-        // The padding header (at offset 0) must come before the ClientHello.
-        assert_eq!(combined[0], 0x17, "padding header at offset 0");
-        assert!(ch_pos > 0, "ClientHello must follow the padding header");
-
-        // The body bytes must follow the ClientHello header.
-        assert_eq!(combined[ch_pos + 5], 0xAB);
-        assert_eq!(combined[ch_pos + 6], 0xCD);
-    }
-
-    // ─── C11: non-TLS passthrough emits no warn/error logs ───────────────────
-
-    /// Feed non-TLS data in passthrough mode.  Assert no `warn!` or `error!` logged.
-    /// Vision passthrough is the expected path for HTTP-over-VLESS — must not spam logs.
     #[test]
-    fn vision_no_inner_tls_no_log_noise() {
-        use std::sync::Mutex as StdMutex;
-        use tracing_subscriber::fmt::MakeWriter;
+    fn detects_client_hello_inside_vless_prefixed_payload() {
+        let mut payload = vec![0u8; 56];
+        payload.extend_from_slice(&[0x16, 0x03, 0x01, 0x00, 0x01, 0x01]);
 
-        let lines: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
-        let line_buf: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
+        assert!(contains_tls_client_hello(&payload));
+        assert!(!contains_tls_client_hello(b"GET / HTTP/1.1\r\n"));
+    }
 
-        #[derive(Clone)]
-        struct CapWriter(Arc<StdMutex<Vec<String>>>, Arc<StdMutex<String>>);
-        impl std::io::Write for CapWriter {
-            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-                let s = String::from_utf8_lossy(buf).to_string();
-                let mut lb = self.1.lock().unwrap();
-                lb.push_str(&s);
-                if lb.contains('\n') {
-                    let mut log = self.0.lock().unwrap();
-                    for line in lb.split('\n') {
-                        let t = line.trim();
-                        if !t.is_empty() {
-                            log.push(t.to_string());
-                        }
-                    }
-                    lb.clear();
-                }
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> MakeWriter<'a> for CapWriter {
-            type Writer = Self;
-            fn make_writer(&'a self) -> Self {
-                self.clone()
-            }
-        }
+    #[test]
+    fn server_hello_filter_detects_tls13() {
+        let mut filter = ServerHelloFilter::new();
 
-        let cap = CapWriter(Arc::clone(&lines), line_buf);
-        let sub = tracing_subscriber::fmt()
-            .with_writer(cap)
-            .with_ansi(false)
-            .with_level(true)
-            .finish();
+        assert!(filter.observe(&tls13_server_hello(0x1301)));
+    }
 
-        tracing::subscriber::with_default(sub, || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                let written = Arc::new(Mutex::new(Vec::new()));
-                let mut conn = vision_over_recorder(written);
-                // HTTP data — not TLS.
-                conn.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
-            });
-        });
+    #[test]
+    fn server_hello_filter_handles_fragmented_record_header() {
+        let hello = tls13_server_hello(0x1301);
+        let mut filter = ServerHelloFilter::new();
 
-        let captured = lines.lock().unwrap();
-        let bad_lines: Vec<&str> = captured
-            .iter()
-            .filter(|l| l.contains("WARN") || l.contains("ERROR"))
-            .map(std::string::String::as_str)
-            .collect();
-        assert!(
-            bad_lines.is_empty(),
-            "passthrough must not emit WARN/ERROR logs; got: {bad_lines:?}"
-        );
+        assert!(!filter.observe(&hello[..3]));
+        assert!(filter.observe(&hello[3..]));
+    }
+
+    #[test]
+    fn server_hello_filter_rejects_non_tls13_cipher() {
+        let mut filter = ServerHelloFilter::new();
+
+        assert!(!filter.observe(&tls13_server_hello(0xc02f)));
+    }
+
+    fn tls13_server_hello(cipher_suite: u16) -> Vec<u8> {
+        let supported_versions = TLS13_SUPPORTED_VERSIONS_EXT;
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0x42; 32]);
+        body.push(0);
+        body.extend_from_slice(&cipher_suite.to_be_bytes());
+        body.push(0);
+        body.extend_from_slice(&(supported_versions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&supported_versions);
+
+        let mut handshake = Vec::new();
+        handshake.push(TLS_SERVER_HELLO);
+        handshake.extend_from_slice(&[
+            ((body.len() >> 16) & 0xff) as u8,
+            ((body.len() >> 8) & 0xff) as u8,
+            (body.len() & 0xff) as u8,
+        ]);
+        handshake.extend_from_slice(&body);
+
+        let mut record = Vec::new();
+        record.extend_from_slice(&[
+            TLS_HANDSHAKE,
+            TLS_MAJOR,
+            TLS_MAJOR,
+            ((handshake.len() >> 8) & 0xff) as u8,
+            (handshake.len() & 0xff) as u8,
+        ]);
+        record.extend_from_slice(&handshake);
+        record
     }
 }

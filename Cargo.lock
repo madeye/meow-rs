@@ -2264,6 +2264,7 @@ dependencies = [
 name = "meow-transport"
 version = "0.14.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "base64",
  "boring",
@@ -2271,6 +2272,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "h2",
+ "hmac",
  "http",
  "httparse",
  "md5",
@@ -2278,6 +2280,7 @@ dependencies = [
  "rcgen 0.13.2",
  "regex",
  "rustls",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-boring",

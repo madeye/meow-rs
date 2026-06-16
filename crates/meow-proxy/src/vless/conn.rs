@@ -57,6 +57,14 @@ impl VlessConn {
             response_pending: true,
         })
     }
+
+    pub(crate) fn enable_raw_read_passthrough(&mut self) -> bool {
+        meow_transport::enable_raw_read_passthrough(&mut *self.inner)
+    }
+
+    pub(crate) fn enable_raw_write_passthrough(&mut self) -> bool {
+        meow_transport::enable_raw_write_passthrough(&mut *self.inner)
+    }
 }
 
 // ─── AsyncRead / AsyncWrite pass-through ──────────────────────────────────────

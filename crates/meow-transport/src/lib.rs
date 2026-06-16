@@ -20,6 +20,8 @@
 //! * No server-side code (`accept`/`bind`/`listen`/`TcpListener`) in `src/`.
 //!   Test helpers in `tests/support/` are whitelisted.
 
+use std::any::Any;
+
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub use error::TransportError;
@@ -28,6 +30,9 @@ mod error;
 
 #[cfg(feature = "tls")]
 pub mod tls;
+
+#[cfg(all(feature = "tls", feature = "boring-tls"))]
+mod reality_tls;
 
 #[cfg(feature = "ws")]
 pub mod ws;
@@ -51,8 +56,53 @@ pub mod httpupgrade;
 /// requires `Sync` for connection-table access.  All concrete stream types
 /// we use (`TcpStream`, `TlsStream`, `WsStream`) are `Sync`; the bound
 /// adds no real restriction in practice.
-pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + Sync> Stream for T {}
+pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync + Any {
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + Sync + Any> Stream for T {
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+pub fn enable_raw_passthrough(stream: &mut dyn Stream) -> bool {
+    let read = enable_raw_read_passthrough(stream);
+    let write = enable_raw_write_passthrough(stream);
+    read || write
+}
+
+pub fn enable_raw_read_passthrough(stream: &mut dyn Stream) -> bool {
+    #[cfg(all(feature = "tls", feature = "boring-tls"))]
+    {
+        if let Some(reality) = stream
+            .as_any_mut()
+            .downcast_mut::<reality_tls::RealityTlsStream>()
+        {
+            reality.enable_raw_read_passthrough();
+            return true;
+        }
+    }
+
+    let _ = stream;
+    false
+}
+
+pub fn enable_raw_write_passthrough(stream: &mut dyn Stream) -> bool {
+    #[cfg(all(feature = "tls", feature = "boring-tls"))]
+    {
+        if let Some(reality) = stream
+            .as_any_mut()
+            .downcast_mut::<reality_tls::RealityTlsStream>()
+        {
+            reality.enable_raw_write_passthrough();
+            return true;
+        }
+    }
+
+    let _ = stream;
+    false
+}
 
 /// A transport layer that wraps an inner [`Stream`] and produces a new one.
 ///

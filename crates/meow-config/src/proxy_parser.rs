@@ -972,7 +972,7 @@ fn parse_lb_strategy(strategy: Option<&str>) -> std::result::Result<LbStrategy, 
 ///
 /// - `flow: xtls-rprx-direct` / `xtls-rprx-splice` — deprecated and insecure
 /// - Unknown `flow` values — may skip expected security processing
-/// - `reality-opts` present — Reality transport not implemented
+/// - `reality-opts` malformed, used without TLS, or missing `client-fingerprint`
 /// - `flow: xtls-rprx-vision` + no TLS-enforcing transport
 /// - `encryption: <non-empty non-"none">` — unsupported cipher
 /// - `uuid` invalid
@@ -1043,12 +1043,15 @@ fn parse_vless(
         .unwrap_or("tcp");
     let client_fingerprint = config.get("client-fingerprint").and_then(|v| v.as_str());
 
-    // ── Hard error: reality-opts present (Class A) ────────────────────────
-    if config.contains_key("reality-opts") {
-        return Err("vless: reality-opts is not yet implemented; \
-             Reality transport is tracked for post-M1. \
-             Remove reality-opts or wait for the Reality spec to land."
-            .into());
+    // ── Reality opts ──────────────────────────────────────────────────────
+    let reality = parse_vless_reality_opts(config)?;
+    if reality.is_some() {
+        if !tls {
+            return Err("vless: reality-opts requires `tls: true`".into());
+        }
+        if client_fingerprint.is_none() {
+            return Err("vless: REALITY is based on uTLS, please set a client-fingerprint".into());
+        }
     }
 
     // ── Hard error: encryption != "" / "none" ─────────────────────────────
@@ -1179,6 +1182,7 @@ fn parse_vless(
             alpn
         };
         tls_cfg.fingerprint = client_fingerprint.map(std::string::ToString::to_string);
+        tls_cfg.reality = reality;
 
         // ── ECH opts ────────────────────────────────────────────────────
         // DNS-sourced ECH (`enable: true` without `config:`) is resolved by
@@ -1339,6 +1343,75 @@ fn parse_vless(
     Ok(VlessAdapter::new(
         name, server, port, uuid_bytes, flow, udp, chain,
     ))
+}
+
+/// Parse VLESS `reality-opts` into transport-layer REALITY parameters.
+///
+/// Matches mihomo's wire-facing fields: `public-key` is base64 RawURL X25519,
+/// `short-id` is hex-decoded and zero-padded to eight bytes, and
+/// `support-x25519mlkem768` is a capability flag. The TLS layer currently
+/// offers X25519 only; keeping the flag in config preserves the public surface
+/// for future fingerprint-specific ClientHello work.
+#[cfg(feature = "vless")]
+fn parse_vless_reality_opts(
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<Option<meow_transport::tls::RealityConfig>, String> {
+    let Some(opts) = config.get("reality-opts") else {
+        return Ok(None);
+    };
+
+    let public_key_str = opts
+        .get("public-key")
+        .and_then(serde_yaml::Value::as_str)
+        .ok_or_else(|| "vless: reality-opts.public-key is required".to_string())?;
+
+    use base64::Engine;
+    let public_key_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(public_key_str)
+        .map_err(|_| "vless: invalid REALITY public key".to_string())?;
+    if public_key_bytes.len() != 32 {
+        return Err("vless: invalid REALITY public key".into());
+    }
+    let mut public_key = [0u8; 32];
+    public_key.copy_from_slice(&public_key_bytes);
+
+    let short_id_str = match opts.get("short-id") {
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| "vless: reality-opts.short-id must be a hex string".to_string())?,
+        None => "",
+    };
+    let short_id_vec = parse_reality_short_id(short_id_str)?;
+    let mut short_id = [0u8; 8];
+    short_id[..short_id_vec.len()].copy_from_slice(&short_id_vec);
+
+    let support_x25519_mlkem768 = opts
+        .get("support-x25519mlkem768")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+
+    Ok(Some(meow_transport::tls::RealityConfig {
+        public_key,
+        short_id,
+        support_x25519_mlkem768,
+    }))
+}
+
+#[cfg(feature = "vless")]
+fn parse_reality_short_id(s: &str) -> std::result::Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 || s.len() / 2 > 8 {
+        return Err("vless: invalid REALITY short ID".into());
+    }
+
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in s.as_bytes().chunks(2) {
+        let hex = std::str::from_utf8(chunk)
+            .map_err(|_| "vless: invalid REALITY short ID".to_string())?;
+        let byte = u8::from_str_radix(hex, 16)
+            .map_err(|_| "vless: invalid REALITY short ID".to_string())?;
+        out.push(byte);
+    }
+    Ok(out)
 }
 
 /// Parse a UUID string (dashed or hex-only) into a 16-byte array.

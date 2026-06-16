@@ -14,7 +14,7 @@
 //! | D6  | `parse_vless_flow_unknown_hard_errors`           — unknown flow → hard error |
 //! | D7  | `parse_vless_flow_deprecated_direct_hard_errors` — xtls-rprx-direct → hard error |
 //! | D8  | `parse_vless_flow_deprecated_splice_hard_errors` — xtls-rprx-splice → hard error |
-//! | D9  | `parse_vless_reality_opts_hard_errors`           — reality-opts → hard error |
+//! | D9  | `parse_vless_reality_opts_*`                     — REALITY config validation |
 //! | D10 | `parse_vless_tls_false_plain_warns_once`         — tls: false warns + loads |
 //! | D11 | `parse_vless_tls_false_no_duplicate_warn`        — warn fires once per load (not globally) |
 //! | D12 | `parse_vless_vision_without_tls_hard_errors`     — vision + no TLS → hard error |
@@ -304,15 +304,14 @@ proxies:
     );
 }
 
-// ─── D9: reality-opts present → proxy skipped ────────────────────────────────
+// ─── D9: reality-opts parsing ────────────────────────────────────────────────
 
-/// D9: `parse_vless_reality_opts_hard_errors`
+/// D9: `parse_vless_reality_opts_requires_fingerprint`
 ///
-/// `reality-opts:` block → proxy parse error; proxy absent from config.
-/// upstream: `adapter/outbound/vless.go` routes to Reality transport.
-/// NOT silent ignore — Class A per ADR-0002: user assumes Reality, gets plain-TLS.
+/// Reality is tied to a uTLS fingerprint upstream; require the field at config
+/// time so the user cannot accidentally get plain TLS semantics.
 #[tokio::test]
-async fn parse_vless_reality_opts_hard_errors() {
+async fn parse_vless_reality_opts_requires_fingerprint() {
     let yaml = r#"
 proxies:
   - name: v
@@ -320,6 +319,52 @@ proxies:
     server: example.com
     port: 443
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    tls: true
+    reality-opts:
+      public-key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
+"#;
+    let config = load_config_from_str(yaml)
+        .await
+        .expect("config load must succeed (warn-and-skip)");
+    assert!(
+        !config.proxies.contains_key("v"),
+        "proxy with reality-opts but no client-fingerprint must be skipped"
+    );
+}
+
+#[tokio::test]
+async fn parse_vless_reality_opts_requires_tls_true() {
+    let yaml = r#"
+proxies:
+  - name: v
+    type: vless
+    server: example.com
+    port: 443
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
+"#;
+    let config = load_config_from_str(yaml)
+        .await
+        .expect("config load must succeed (warn-and-skip)");
+    assert!(
+        !config.proxies.contains_key("v"),
+        "proxy with reality-opts but tls=false must be skipped"
+    );
+}
+
+#[tokio::test]
+async fn parse_vless_reality_opts_invalid_public_key_skipped() {
+    let yaml = r#"
+proxies:
+  - name: v
+    type: vless
+    server: example.com
+    port: 443
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    tls: true
+    client-fingerprint: chrome
     reality-opts:
       public-key: abc123
 "#;
@@ -328,7 +373,57 @@ proxies:
         .expect("config load must succeed (warn-and-skip)");
     assert!(
         !config.proxies.contains_key("v"),
-        "proxy with reality-opts must be skipped (not implemented — Class A)"
+        "proxy with invalid REALITY public key must be skipped"
+    );
+}
+
+#[tokio::test]
+async fn parse_vless_reality_opts_invalid_short_id_skipped() {
+    let yaml = r#"
+proxies:
+  - name: v
+    type: vless
+    server: example.com
+    port: 443
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    tls: true
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
+      short-id: 001122334455667788
+"#;
+    let config = load_config_from_str(yaml)
+        .await
+        .expect("config load must succeed (warn-and-skip)");
+    assert!(
+        !config.proxies.contains_key("v"),
+        "proxy with >8-byte REALITY short-id must be skipped"
+    );
+}
+
+#[cfg(feature = "boring-tls")]
+#[tokio::test]
+async fn parse_vless_reality_opts_valid_loads_with_boring_tls() {
+    let yaml = r#"
+proxies:
+  - name: v
+    type: vless
+    server: example.com
+    port: 443
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    tls: true
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
+      short-id: 0011223344556677
+      support-x25519mlkem768: false
+"#;
+    let config = load_config_from_str(yaml)
+        .await
+        .expect("valid REALITY VLESS config must load");
+    assert!(
+        config.proxies.contains_key("v"),
+        "valid REALITY VLESS proxy must be registered"
     );
 }
 
