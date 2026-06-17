@@ -122,15 +122,8 @@ pub async fn load_config(path: &str) -> Result<Config, anyhow::Error> {
         )
     })?;
     let raw: raw::RawConfig = parse_raw_yaml(content)?;
-    // Rule-provider cache files live next to config.yaml.
-    let cache_dir: Option<PathBuf> = std::path::Path::new(path).parent().and_then(|p| {
-        if p.as_os_str().is_empty() {
-            None
-        } else {
-            Some(p.to_path_buf())
-        }
-    });
-    build_config(raw, cache_dir.as_deref()).await
+    let cache_dir = resource_cache_dir_for_config_path(path);
+    build_config(raw, Some(cache_dir.as_path())).await
 }
 
 pub async fn load_config_from_str(content: &str) -> Result<Config, anyhow::Error> {
@@ -776,11 +769,32 @@ pub fn meow_config_dir() -> PathBuf {
     if let Some(d) = meow_common::meow_home_dir() {
         return d;
     }
+    default_config_dir_without_home_override()
+}
+
+fn default_config_dir_without_home_override() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("meow")
+}
+
+fn resource_cache_dir_for_config_path(path: &str) -> PathBuf {
+    resource_cache_dir_for_config_path_with_home(path, meow_common::meow_home_dir())
+}
+
+fn resource_cache_dir_for_config_path_with_home(path: &str, home_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(dir) = home_dir {
+        return dir;
+    }
+    std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(
+            default_config_dir_without_home_override,
+            std::path::Path::to_path_buf,
+        )
 }
 
 /// Parse `type:` string from a `listeners:` entry into `ListenerType`.
@@ -1280,6 +1294,29 @@ rule-providers:
         assert_eq!(cn.format.as_deref(), Some("mrs"));
         assert_eq!(cn.interval, Some(86400));
         assert_eq!(cn.url.as_deref(), Some("https://example.invalid/cn.mrs"));
+    }
+
+    #[test]
+    fn provider_cache_dir_prefers_home_override() {
+        let home = PathBuf::from("/tmp/meow-home");
+        let got = super::resource_cache_dir_for_config_path_with_home(
+            "/elsewhere/config.yaml",
+            Some(home.clone()),
+        );
+        assert_eq!(got, home);
+    }
+
+    #[test]
+    fn provider_cache_dir_uses_config_parent_without_home_override() {
+        let got = super::resource_cache_dir_for_config_path_with_home("/tmp/cfg/config.yaml", None);
+        assert_eq!(got, PathBuf::from("/tmp/cfg"));
+    }
+
+    #[test]
+    fn provider_cache_dir_does_not_fall_back_to_cwd_for_bare_config_name() {
+        let got = super::resource_cache_dir_for_config_path_with_home("config.yaml", None);
+        assert_eq!(got, super::default_config_dir_without_home_override());
+        assert_ne!(got, PathBuf::from("."));
     }
 
     #[test]
