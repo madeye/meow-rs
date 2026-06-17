@@ -1293,4 +1293,219 @@ mod tests {
         let out = hkdf_expand_label(&secret, b"finished", &[], 32);
         assert_eq!(out.len(), 32);
     }
+
+    // ─── AEAD record layer ───────────────────────────────────────────────────
+
+    /// Two `RecordKey`s derived from the same secret model the matched
+    /// write/read pair on the two ends of a connection. Sealing then opening
+    /// must round-trip, and the per-record nonce sequence must advance in
+    /// lockstep so the second record also decrypts.
+    #[test]
+    fn record_key_seal_open_round_trips_and_sequences() {
+        let secret = [0x2bu8; 32];
+        let mut sender = RecordKey::new(CipherSuite::Aes128GcmSha256, &secret);
+        let mut receiver = RecordKey::new(CipherSuite::Aes128GcmSha256, &secret);
+
+        for payload in [b"first record".as_slice(), b"second record".as_slice()] {
+            let record = sender
+                .seal(TLS_RECORD_APPLICATION_DATA, payload)
+                .expect("seal");
+            let header: [u8; 5] = record[..5].try_into().unwrap();
+            let (inner_type, plaintext) = receiver.open(&header, &record[5..]).expect("open");
+            assert_eq!(inner_type, TLS_RECORD_APPLICATION_DATA);
+            assert_eq!(plaintext, payload);
+        }
+        // Both counters advanced once per record.
+        assert_eq!(sender.seq, 2);
+        assert_eq!(receiver.seq, 2);
+    }
+
+    /// A flipped authentication-tag byte must make `open` fail rather than
+    /// return forged plaintext.
+    #[test]
+    fn record_key_open_rejects_tampered_ciphertext() {
+        let secret = [0x42u8; 32];
+        let mut sender = RecordKey::new(CipherSuite::Aes128GcmSha256, &secret);
+        let mut receiver = RecordKey::new(CipherSuite::Aes128GcmSha256, &secret);
+
+        let mut record = sender
+            .seal(TLS_RECORD_APPLICATION_DATA, b"authentic")
+            .expect("seal");
+        let header: [u8; 5] = record[..5].try_into().unwrap();
+        let last = record.len() - 1;
+        record[last] ^= 0xff;
+        assert!(receiver.open(&header, &record[5..]).is_err());
+    }
+
+    // ─── Reality certificate authentication (anti-MITM gate) ──────────────────
+
+    /// Minimal DER TLV writer (definite length, short or long form).
+    fn der(tag: u8, value: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        let len = value.len();
+        if len < 0x80 {
+            out.push(len as u8);
+        } else {
+            let bytes = len.to_be_bytes();
+            let first = bytes.iter().position(|&b| b != 0).unwrap();
+            let trimmed = &bytes[first..];
+            out.push(0x80 | trimmed.len() as u8);
+            out.extend_from_slice(trimmed);
+        }
+        out.extend_from_slice(value);
+        out
+    }
+
+    /// Build a minimal X.509 cert carrying an Ed25519 SPKI and a signature
+    /// `BIT STRING` containing `signature`, just enough for
+    /// `extract_ed25519_cert_parts` / `verify_reality_certificate`.
+    fn build_test_ed25519_cert(pubkey: &[u8; 32], signature: &[u8]) -> Vec<u8> {
+        let oid = der(0x06, &[0x2b, 0x65, 0x70]); // 1.3.101.112 (Ed25519)
+        let alg = der(0x30, &oid);
+        let mut spki_bits = vec![0u8]; // unused-bits count
+        spki_bits.extend_from_slice(pubkey);
+        let spki_bitstring = der(0x03, &spki_bits);
+        let mut spki_body = alg;
+        spki_body.extend_from_slice(&spki_bitstring);
+        let spki = der(0x30, &spki_body);
+
+        // tbsCertificate children: version[0], serial, sigAlg, issuer, validity,
+        // subject, subjectPublicKeyInfo — SPKI at index 6 (base 1 + 5).
+        let mut tbs_body = Vec::new();
+        tbs_body.extend_from_slice(&der(0xa0, &der(0x02, &[0x00]))); // version
+        tbs_body.extend_from_slice(&der(0x02, &[0x01])); // serial
+        tbs_body.extend_from_slice(&der(0x30, &[])); // sigAlg
+        tbs_body.extend_from_slice(&der(0x30, &[])); // issuer
+        tbs_body.extend_from_slice(&der(0x30, &[])); // validity
+        tbs_body.extend_from_slice(&der(0x30, &[])); // subject
+        tbs_body.extend_from_slice(&spki);
+        let tbs = der(0x30, &tbs_body);
+
+        let mut sig_bits = vec![0u8]; // unused-bits count
+        sig_bits.extend_from_slice(signature);
+        let sig_bitstring = der(0x03, &sig_bits);
+
+        let mut cert_body = tbs;
+        cert_body.extend_from_slice(&der(0x30, &[])); // outer signatureAlgorithm
+        cert_body.extend_from_slice(&sig_bitstring);
+        der(0x30, &cert_body)
+    }
+
+    fn reality_cert_hmac(auth_key: &[u8], pubkey: &[u8; 32]) -> Vec<u8> {
+        let mut mac = <HmacSha512 as Mac>::new_from_slice(auth_key).unwrap();
+        mac.update(pubkey);
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    #[test]
+    fn verify_reality_certificate_accepts_matching_hmac() {
+        let auth_key = [0x11u8; 32];
+        let pubkey = [0x22u8; 32];
+        let sig = reality_cert_hmac(&auth_key, &pubkey);
+        let cert = build_test_ed25519_cert(&pubkey, &sig);
+        verify_reality_certificate(&cert, &auth_key).expect("authentic Reality cert must verify");
+    }
+
+    #[test]
+    fn verify_reality_certificate_rejects_wrong_hmac() {
+        let auth_key = [0x11u8; 32];
+        let pubkey = [0x22u8; 32];
+
+        // Garbage signature is rejected.
+        let cert = build_test_ed25519_cert(&pubkey, &[0u8; 64]);
+        assert!(verify_reality_certificate(&cert, &auth_key).is_err());
+
+        // A correctly-formed cert verified against the wrong auth key is
+        // rejected — this is the anti-MITM property.
+        let sig = reality_cert_hmac(&auth_key, &pubkey);
+        let cert_ok = build_test_ed25519_cert(&pubkey, &sig);
+        assert!(verify_reality_certificate(&cert_ok, &[0x99u8; 32]).is_err());
+    }
+
+    #[test]
+    fn verify_reality_certificate_rejects_non_ed25519_leaf() {
+        // RSA-ish OID instead of Ed25519: parser must refuse the leaf.
+        let oid = der(
+            0x06,
+            &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01],
+        );
+        let alg = der(0x30, &oid);
+        let mut bits = vec![0u8];
+        bits.extend_from_slice(&[1u8; 32]);
+        let spki = der(0x30, &{
+            let mut b = alg;
+            b.extend_from_slice(&der(0x03, &bits));
+            b
+        });
+        assert!(extract_ed25519_spki(&spki[2..]).is_none());
+    }
+
+    // ─── Reality ClientHello session_id seal ──────────────────────────────────
+
+    /// The 32-byte session_id must decrypt, under the key/nonce/AAD a real
+    /// Reality server reconstructs, to the authentication payload
+    /// (`[1, 8, 2, 0] || timestamp || short_id`). Asserting the plaintext —
+    /// not just the length — is what proves the server could authenticate us.
+    #[test]
+    fn reality_client_hello_session_id_decrypts_to_auth_payload() {
+        let reality = RealityConfig {
+            public_key: [9u8; 32],
+            short_id: [1, 2, 3, 4, 5, 6, 7, 8],
+            support_x25519_mlkem768: false,
+        };
+        let random = [7u8; 32];
+        let client_public = [3u8; 32];
+        let auth_key = [5u8; 32];
+        let (hello, returned_key) = build_reality_client_hello(
+            "example.com",
+            &[],
+            &random,
+            &client_public,
+            &auth_key,
+            &reality,
+        )
+        .expect("client hello");
+
+        // Key the server derives: HKDF(auth_key, salt = random[0..20], "REALITY").
+        let aead_key = hkdf_sha256(&auth_key, &random[..20], b"REALITY", 32);
+        assert_eq!(returned_key.as_slice(), aead_key.as_slice());
+
+        // AAD is the ClientHello with the session_id field zeroed (its state at
+        // seal time); nonce is the trailing 12 bytes of client_random.
+        let mut aad = hello.clone();
+        for b in &mut aad[39..71] {
+            *b = 0;
+        }
+        let (ciphertext, tag) = hello[39..71].split_at(16);
+        let cipher = Aes256Gcm::new_from_slice(&aead_key).unwrap();
+        let nonce = Nonce::from_slice(&random[20..32]);
+        let mut buf = ciphertext.to_vec();
+        cipher
+            .decrypt_in_place_detached(nonce, &aad, &mut buf, Tag::from_slice(tag))
+            .expect("session_id must decrypt under the server-derived key");
+
+        assert_eq!(&buf[0..4], &[1, 8, 2, 0], "reality auth header");
+        assert_eq!(&buf[8..16], &reality.short_id, "short_id echoed");
+    }
+
+    // ─── Adversarial parser inputs ────────────────────────────────────────────
+
+    #[test]
+    fn der_read_rejects_truncated_and_overlong_length() {
+        // Claims 4 content bytes, only 1 present.
+        let mut pos = 0;
+        assert!(der_read(&[0x04, 0x04, 0xaa], &mut pos).is_none());
+        // Length-of-length > 4 is refused.
+        let mut pos = 0;
+        assert!(der_read(&[0x04, 0x85, 0, 0, 0, 0, 0], &mut pos).is_none());
+    }
+
+    #[test]
+    fn parse_server_hello_rejects_malformed_input() {
+        assert!(parse_server_hello(&[]).is_err());
+        assert!(parse_server_hello(&[HS_SERVER_HELLO; 10]).is_err()); // < 42 bytes
+        let mut buf = vec![0u8; 50];
+        buf[0] = HS_CLIENT_HELLO; // wrong handshake type
+        assert!(parse_server_hello(&buf).is_err());
+    }
 }
