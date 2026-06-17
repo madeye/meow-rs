@@ -1293,6 +1293,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "h3"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662bec4a9d016056b3be"
+dependencies = [
+ "bytes",
+ "fastrand",
+ "futures-util",
+ "http",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
+name = "h3-quinn"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2e732c8d91a74731663ac8479ab505042fbf547b9a207213ab7fbcbfc4f8b4"
+dependencies = [
+ "bytes",
+ "futures",
+ "h3",
+ "quinn",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2179,12 +2207,16 @@ dependencies = [
  "argon2",
  "async-trait",
  "base64",
+ "blake2",
  "bytes",
  "chacha20poly1305",
  "crc32fast",
  "futures",
+ "h3",
+ "h3-quinn",
  "hex",
  "hmac",
+ "http",
  "libc",
  "md-5",
  "meow-common",
@@ -2202,6 +2234,7 @@ dependencies = [
  "smol_str",
  "socket2 0.5.10",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
  "tracing",
@@ -2231,6 +2264,7 @@ dependencies = [
 name = "meow-transport"
 version = "0.14.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
  "base64",
  "boring",
@@ -2238,6 +2272,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "h2",
+ "hmac",
  "http",
  "httparse",
  "md5",
@@ -2245,6 +2280,7 @@ dependencies = [
  "rcgen 0.13.2",
  "regex",
  "rustls",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-boring",
@@ -2721,6 +2757,7 @@ checksum = "b9e20a958963c291dc322d98411f541009df2ced7b5a4f2bd52337638cfccf20"
 dependencies = [
  "bytes",
  "cfg_aliases",
+ "futures-io",
  "pin-project-lite",
  "quinn-proto",
  "quinn-udp",

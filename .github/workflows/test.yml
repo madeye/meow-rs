@@ -113,6 +113,11 @@ jobs:
       - name: Trojan integration tests
         run: cargo test --test trojan_integration -- --nocapture
 
+      - name: Hysteria2 Docker integration tests
+        env:
+          MEOW_REQUIRE_DOCKER: "1"
+        run: cargo test -p meow-proxy --features hysteria2 --test hysteria2_integration -- --nocapture
+
       - name: v2ray-plugin integration tests
         run: cargo test --test v2ray_plugin_integration -- --nocapture
 

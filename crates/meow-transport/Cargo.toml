@@ -62,6 +62,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
+aes-gcm = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 
 # tls feature
 tokio-rustls    = { workspace = true, optional = true }

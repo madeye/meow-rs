@@ -105,6 +105,17 @@ pub enum EchOpts {
     Config(Vec<u8>),
 }
 
+/// REALITY client authentication parameters for TLS-based outbound proxies.
+///
+/// Built by `meow-config` from `reality-opts:`. The public key is the server's
+/// X25519 public key, and `short_id` is the decoded, zero-padded short id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RealityConfig {
+    pub public_key: [u8; 32],
+    pub short_id: [u8; 8],
+    pub support_x25519_mlkem768: bool,
+}
+
 /// TLS layer configuration, built by `meow-config` from YAML and passed
 /// into [`TlsLayer::new`].  This struct never sees YAML directly.
 ///
@@ -149,6 +160,11 @@ pub struct TlsConfig {
     /// Requires `boring-tls` feature.  With `boring-tls` absent and
     /// `ech = Some(_)`, [`TlsLayer::new`] returns [`TransportError::Config`].
     pub ech: Option<EchOpts>,
+
+    /// REALITY authentication options. When present, TLS uses the dedicated
+    /// REALITY TLS 1.3 path because the ClientHello session_id must be computed
+    /// from this connection's X25519 key share before it is written.
+    pub reality: Option<RealityConfig>,
 }
 
 impl TlsConfig {
@@ -163,6 +179,7 @@ impl TlsConfig {
             fingerprint: None,
             additional_roots: Vec::new(),
             ech: None,
+            reality: None,
         }
     }
 }
@@ -180,6 +197,8 @@ pub struct ClientCert {
 
 enum TlsBackend {
     Rustls(RustlsInner),
+    #[cfg(feature = "boring-tls")]
+    Reality(crate::reality_tls::RealityTlsLayer),
     #[cfg(feature = "boring-tls")]
     Boring(Box<LazyBoringInner>),
 }
@@ -242,6 +261,22 @@ impl TlsLayer {
     /// * [`TransportError::Config`] — `client_cert` PEM is unparseable (rustls path).
     /// * [`TransportError::Tls`] — client cert + key don't match (rustls path).
     pub fn new(config: &TlsConfig) -> Result<Self> {
+        #[cfg(not(feature = "boring-tls"))]
+        if config.reality.is_some() {
+            return Err(TransportError::Config(
+                "reality-opts requires the `boring-tls` Cargo feature in this build; \
+                 recompile with `--features boring-tls`."
+                    .into(),
+            ));
+        }
+
+        #[cfg(feature = "boring-tls")]
+        if config.reality.is_some() {
+            return Ok(Self {
+                backend: TlsBackend::Reality(crate::reality_tls::RealityTlsLayer::new(config)?),
+            });
+        }
+
         // ECH without either feature is a hard error.
         #[cfg(all(not(feature = "boring-tls"), not(feature = "ech")))]
         if config.ech.is_some() {
@@ -290,6 +325,8 @@ impl Transport for TlsLayer {
     async fn connect(&self, inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
         match &self.backend {
             TlsBackend::Rustls(r) => r.connect(inner).await,
+            #[cfg(feature = "boring-tls")]
+            TlsBackend::Reality(r) => r.connect(inner).await,
             #[cfg(feature = "boring-tls")]
             TlsBackend::Boring(lazy) => lazy.connect(inner).await,
         }
@@ -1009,7 +1046,7 @@ impl BoringInner {
             Ok(tls_stream) => {
                 let ech_accepted = tls_stream.ssl().ech_accepted();
                 let version = tls_stream.ssl().version_str();
-                tracing::info!(
+                tracing::debug!(
                     sni = %self.server_name,
                     ech_requested = ech_requested,
                     ech_accepted = ech_accepted,

@@ -110,7 +110,15 @@ fn main() -> Result<()> {
 
     // Load config
     let config_path = if let Some(dir) = &args.directory {
-        format!("{}/{}", dir, args.config)
+        let config = std::path::Path::new(&args.config);
+        if config.is_absolute() {
+            args.config.clone()
+        } else {
+            std::path::Path::new(dir)
+                .join(config)
+                .to_string_lossy()
+                .to_string()
+        }
     } else {
         args.config.clone()
     };

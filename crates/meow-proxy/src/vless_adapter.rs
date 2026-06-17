@@ -148,10 +148,9 @@ impl ProxyAdapter for VlessAdapter {
         )
         .await?;
 
-        // Wrap in VisionConn if Vision flow requested.
         match self.flow {
             #[cfg(feature = "vless-vision")]
-            Some(VlessFlow::XtlsRprxVision) => Ok(Box::new(VisionConn::new(conn))),
+            Some(VlessFlow::XtlsRprxVision) => Ok(Box::new(VisionConn::new(conn, self.uuid_bytes))),
             _ => Ok(Box::new(StreamConn(Box::new(conn)))),
         }
     }

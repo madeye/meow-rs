@@ -7,6 +7,7 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 ### Proxy Protocols
 - **Shadowsocks** -- TCP and UDP relay, AEAD and stream ciphers (aes-256-gcm, chacha20-ietf-poly1305, etc.)
 - **Trojan** -- TLS 1.2/1.3 via rustls, SNI, optional skip-cert-verify
+- **Hysteria2** -- QUIC-based TCP and UDP relay, Salamander obfs, port hopping, down bandwidth auth hint, SNI, skip-cert-verify, and certificate pinning
 - **VLESS** -- Plain VLESS and XTLS-Vision splice; TLS, WebSocket, gRPC, H2, HTTPUpgrade transports
 - **HTTP** -- HTTP CONNECT outbound proxy with optional TLS and basic auth
 - **SOCKS5** -- SOCKS5 outbound proxy with optional TLS and auth
@@ -297,14 +298,29 @@ proxies:
       mode: http
       host: /
 
+  - name: my-hy2
+    type: hysteria2
+    server: hy2.example.com
+    port: 443
+    ports: "443,8443-8445"
+    hop-interval: 30
+    password: "secret"
+    sni: hy2.example.com
+    skip-cert-verify: false
+    udp: true
+    up: "100 Mbps"
+    down: "100 Mbps"
+    obfs: salamander
+    obfs-password: "obfs-secret"
+
 proxy-groups:
   - name: Proxy
     type: select
-    proxies: [my-ss, my-trojan, my-snell]
+    proxies: [my-ss, my-trojan, my-snell, my-hy2]
 
   - name: Auto
     type: url-test
-    proxies: [my-ss, my-trojan, my-snell]
+    proxies: [my-ss, my-trojan, my-snell, my-hy2]
     url: http://www.gstatic.com/generate_204
     interval: 300
 
@@ -333,6 +349,9 @@ cargo test --test config_persistence_test
 
 # Trojan integration tests (embedded mock server, no external deps)
 cargo test --test trojan_integration
+
+# Hysteria2 Docker integration tests (requires Docker)
+MEOW_REQUIRE_DOCKER=1 cargo test -p meow-proxy --features hysteria2 --test hysteria2_integration -- --nocapture
 
 # Shadowsocks integration tests (requires ssserver)
 cargo install shadowsocks-rust --features "stream-cipher aead-cipher-2022" --locked

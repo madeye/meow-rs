@@ -542,17 +542,19 @@ fn parse_anytls(
     meow_proxy::AnytlsAdapter::new(name, server, port, password, sni, skip_cert_verify)
 }
 
-/// Parse a `type: hysteria2` proxy block (issue #72, tracer-bullet PR).
+/// Parse a `type: hysteria2` proxy block.
 ///
-/// Required fields: `server`, `port`, `password`. Optional: `sni`,
-/// `skip-cert-verify`. Bigger surface (obfs, fast-open, congestion
-/// control overrides) lands once the data plane is implemented.
+/// Required fields: `server`, `port`, `password`. Optional fields follow the
+/// mihomo surface supported by the in-tree Rust backend: `up`, `down`,
+/// `obfs: salamander`, `obfs-password`, `ports`, `hop-interval`, `sni`,
+/// `skip-cert-verify`, `fingerprint`, `udp`, and `fast-open`.
 ///
 /// # Hard errors (Class A per ADR-0002)
 ///
 /// - missing `server`, `port`, or `password`.
 /// - `port == 0`.
 /// - empty `password` — caught downstream by `Hy2Adapter::new`.
+/// - unsupported security/transport options (`gecko`, mTLS, ECH, realm).
 ///
 /// upstream: `adapter/outbound/hysteria2.go`
 #[cfg(feature = "hysteria2")]
@@ -560,6 +562,8 @@ fn parse_hysteria2(
     name: &str,
     config: &HashMap<String, serde_yaml::Value>,
 ) -> std::result::Result<meow_proxy::Hy2Adapter, String> {
+    use meow_proxy::{Hy2HopInterval, Hy2Obfs, Hy2Options};
+
     let server = config
         .get("server")
         .and_then(|v| v.as_str())
@@ -574,8 +578,351 @@ fn parse_hysteria2(
         .get("skip-cert-verify")
         .and_then(serde_yaml::Value::as_bool)
         .unwrap_or(false);
+    let udp = config
+        .get("udp")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(true);
+    let up_bps = parse_hy2_bandwidth_field(name, "up", config.get("up"))?;
+    let down_bps = parse_hy2_bandwidth_field(name, "down", config.get("down"))?;
 
-    meow_proxy::Hy2Adapter::new(name, server, port, password, sni, skip_cert_verify)
+    let obfs_raw = optional_nonempty_str(config, "obfs");
+    let obfs = match obfs_raw.as_deref() {
+        None => None,
+        Some("salamander") => Some(Hy2Obfs::Salamander),
+        Some("gecko") => {
+            return Err(format!(
+                "hysteria2[{name}]: obfs 'gecko' is not supported by the Rust backend"
+            ));
+        }
+        Some(other) => return Err(format!("hysteria2[{name}]: unknown obfs type: {other}")),
+    };
+    let obfs_password = optional_nonempty_str(config, "obfs-password");
+    if obfs.is_some() && obfs_password.is_none() {
+        return Err(format!("hysteria2[{name}]: missing obfs-password"));
+    }
+
+    let ports = optional_nonempty_str(config, "ports");
+    if let Some(ports) = &ports {
+        validate_hy2_ports(name, ports)?;
+    }
+    let hop_interval = parse_hy2_hop_interval(name, config.get("hop-interval"))?;
+    let fingerprint = parse_hy2_fingerprint(name, config.get("fingerprint"))?;
+    let fast_open = config
+        .get("fast-open")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(true);
+    validate_hy2_alpn(name, config.get("alpn"))?;
+    reject_unsupported_hy2_options(name, config)?;
+
+    meow_proxy::Hy2Adapter::new(Hy2Options {
+        name: name.to_string(),
+        server: server.to_string(),
+        port,
+        password: password.to_string(),
+        sni: sni.map(str::to_string),
+        skip_cert_verify,
+        udp,
+        up_bps,
+        down_bps,
+        obfs,
+        obfs_password,
+        ports,
+        hop_interval: hop_interval
+            .map(|(min_secs, max_secs)| Hy2HopInterval { min_secs, max_secs }),
+        fingerprint,
+        fast_open,
+    })
+}
+
+#[cfg(feature = "hysteria2")]
+const HY2_MIN_HOP_INTERVAL_SECS: u64 = 5;
+#[cfg(feature = "hysteria2")]
+const HY2_DEFAULT_HOP_INTERVAL_SECS: u64 = 30;
+
+#[cfg(feature = "hysteria2")]
+fn optional_nonempty_str(config: &HashMap<String, serde_yaml::Value>, key: &str) -> Option<String> {
+    config
+        .get(key)
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(feature = "hysteria2")]
+fn parse_hy2_bandwidth_field(
+    name: &str,
+    field: &str,
+    value: Option<&serde_yaml::Value>,
+) -> std::result::Result<u64, String> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    if let Some(v) = value.as_u64() {
+        return Ok(mbps_to_bytes_per_second(v));
+    }
+    if let Some(s) = value.as_str() {
+        return parse_hy2_bandwidth(s).map_err(|e| format!("hysteria2[{name}]: {field}: {e}"));
+    }
+    Err(format!(
+        "hysteria2[{name}]: {field} must be a string like '30 Mbps' or an integer Mbps value"
+    ))
+}
+
+#[cfg(feature = "hysteria2")]
+fn parse_hy2_bandwidth(input: &str) -> std::result::Result<u64, String> {
+    static RATE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"^(\d+)\s*([KMGTkmgt]?)([Bb])ps$").expect("valid rate regex")
+    });
+
+    let s = input.trim();
+    if s.is_empty() || s == "0" {
+        return Ok(0);
+    }
+    if let Ok(mbps) = s.parse::<u64>() {
+        return Ok(mbps_to_bytes_per_second(mbps));
+    }
+
+    let Some(caps) = RATE_RE.captures(s) else {
+        return Err(format!(
+            "invalid bandwidth '{input}', expected integer Mbps or e.g. '30 Mbps'"
+        ));
+    };
+    let value = caps[1]
+        .parse::<u64>()
+        .map_err(|e| format!("invalid number: {e}"))?;
+    let multiplier = match caps[2].to_ascii_uppercase().as_str() {
+        "" => 1,
+        "K" => 1_000,
+        "M" => 1_000_000,
+        "G" => 1_000_000_000,
+        "T" => 1_000_000_000_000,
+        _ => unreachable!("regex restricts unit prefix"),
+    };
+    let bytes = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| "bandwidth overflows u64".to_string())?;
+    if &caps[3] == "b" {
+        Ok(bytes / 8)
+    } else {
+        Ok(bytes)
+    }
+}
+
+#[cfg(feature = "hysteria2")]
+fn mbps_to_bytes_per_second(mbps: u64) -> u64 {
+    mbps.saturating_mul(1_000_000) / 8
+}
+
+#[cfg(feature = "hysteria2")]
+fn validate_hy2_ports(name: &str, ports: &str) -> std::result::Result<(), String> {
+    let ports = ports.trim();
+    if ports == "*" || ports.eq_ignore_ascii_case("all") {
+        return Ok(());
+    }
+    for part in ports.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(format!("hysteria2[{name}]: invalid ports '{ports}'"));
+        }
+        if let Some((start, end)) = part.split_once('-') {
+            parse_hy2_port_part(name, start)?;
+            parse_hy2_port_part(name, end)?;
+        } else {
+            parse_hy2_port_part(name, part)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "hysteria2")]
+fn parse_hy2_port_part(name: &str, value: &str) -> std::result::Result<u16, String> {
+    value
+        .trim()
+        .parse::<u16>()
+        .map_err(|e| format!("hysteria2[{name}]: invalid port '{value}': {e}"))
+}
+
+#[cfg(feature = "hysteria2")]
+fn parse_hy2_hop_interval(
+    name: &str,
+    value: Option<&serde_yaml::Value>,
+) -> std::result::Result<Option<(u64, u64)>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let raw = if let Some(n) = value.as_u64() {
+        n.to_string()
+    } else {
+        value
+            .as_str()
+            .ok_or_else(|| format!("hysteria2[{name}]: hop-interval must be a number or range"))?
+            .trim()
+            .to_string()
+    };
+    if raw.is_empty() {
+        return Err(format!("hysteria2[{name}]: hop-interval must not be empty"));
+    }
+    if raw.contains(',') {
+        return Err(format!(
+            "hysteria2[{name}]: hop-interval only supports one range"
+        ));
+    }
+    if let Some((start, end)) = raw.split_once('-') {
+        let start = parse_hy2_u64(name, "hop-interval", start)?;
+        let end = parse_hy2_u64(name, "hop-interval", end)?;
+        Ok(Some(normalize_hy2_hop_interval(start, end)))
+    } else {
+        let start = parse_hy2_u64(name, "hop-interval", &raw)?;
+        Ok(Some(normalize_hy2_hop_interval(start, 0)))
+    }
+}
+
+#[cfg(feature = "hysteria2")]
+fn parse_hy2_u64(name: &str, field: &str, value: &str) -> std::result::Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| format!("hysteria2[{name}]: invalid {field} '{value}': {e}"))
+}
+
+#[cfg(feature = "hysteria2")]
+fn normalize_hy2_hop_interval(start: u64, end: u64) -> (u64, u64) {
+    let start = if start == 0 {
+        HY2_DEFAULT_HOP_INTERVAL_SECS
+    } else {
+        start.max(HY2_MIN_HOP_INTERVAL_SECS)
+    };
+    let end = if end == 0 { start } else { end.max(start) };
+    (start, end)
+}
+
+#[cfg(feature = "hysteria2")]
+fn parse_hy2_fingerprint(
+    name: &str,
+    value: Option<&serde_yaml::Value>,
+) -> std::result::Result<Option<String>, String> {
+    let Some(raw) = value.and_then(serde_yaml::Value::as_str) else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let raw = raw.rsplit_once('=').map_or(raw, |(_, fp)| fp.trim());
+    let hex: String = raw
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ':')
+        .collect();
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "hysteria2[{name}]: fingerprint must be a SHA-256 hex digest"
+        ));
+    }
+    Ok(Some(raw.to_string()))
+}
+
+#[cfg(feature = "hysteria2")]
+fn validate_hy2_alpn(
+    name: &str,
+    value: Option<&serde_yaml::Value>,
+) -> std::result::Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let mut alpns = Vec::new();
+    if let Some(items) = value.as_sequence() {
+        for item in items {
+            let alpn = item
+                .as_str()
+                .ok_or_else(|| format!("hysteria2[{name}]: alpn entries must be strings"))?;
+            alpns.push(alpn);
+        }
+    } else if let Some(alpn) = value.as_str() {
+        alpns.push(alpn);
+    } else {
+        return Err(format!(
+            "hysteria2[{name}]: alpn must be a string or string list"
+        ));
+    }
+    if alpns.iter().any(|alpn| *alpn != "h3") {
+        return Err(format!(
+            "hysteria2[{name}]: custom alpn is unsupported; only 'h3' is allowed"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "hysteria2")]
+fn reject_unsupported_hy2_options(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<(), String> {
+    for key in [
+        "certificate",
+        "private-key",
+        "obfs-min-packet-size",
+        "obfs-max-packet-size",
+    ] {
+        if config.contains_key(key) {
+            return Err(format!(
+                "hysteria2[{name}]: '{key}' is not supported by the Rust backend"
+            ));
+        }
+    }
+    reject_enabled_hy2_map(name, config, "ech-opts")?;
+    reject_enabled_hy2_map(name, config, "realm-opts")?;
+    reject_nonzero_hy2_option(name, config, "cwnd")?;
+    reject_nonzero_hy2_option(name, config, "udp-mtu")?;
+    reject_nonzero_hy2_option(name, config, "initial-stream-receive-window")?;
+    reject_nonzero_hy2_option(name, config, "max-stream-receive-window")?;
+    reject_nonzero_hy2_option(name, config, "initial-connection-receive-window")?;
+    reject_nonzero_hy2_option(name, config, "max-connection-receive-window")?;
+    if optional_nonempty_str(config, "bbr-profile").is_some() {
+        return Err(format!(
+            "hysteria2[{name}]: 'bbr-profile' is not supported by the Rust backend"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "hysteria2")]
+fn reject_enabled_hy2_map(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+    key: &str,
+) -> std::result::Result<(), String> {
+    if let Some(value) = config.get(key) {
+        let enabled = value
+            .as_mapping()
+            .and_then(|map| map.get(serde_yaml::Value::String("enable".into())))
+            .and_then(serde_yaml::Value::as_bool)
+            .unwrap_or(true);
+        if enabled {
+            return Err(format!(
+                "hysteria2[{name}]: '{key}' is not supported by the Rust backend"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "hysteria2")]
+fn reject_nonzero_hy2_option(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+    key: &str,
+) -> std::result::Result<(), String> {
+    if let Some(value) = config.get(key) {
+        let nonzero =
+            value.as_u64().is_some_and(|v| v != 0) || value.as_i64().is_some_and(|v| v != 0);
+        if nonzero {
+            return Err(format!(
+                "hysteria2[{name}]: '{key}' is not supported by the Rust backend"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parse the `strategy` field for a `load-balance` group.
@@ -602,7 +949,7 @@ fn parse_lb_strategy(strategy: Option<&str>) -> std::result::Result<LbStrategy, 
 ///
 /// - `flow: xtls-rprx-direct` / `xtls-rprx-splice` — deprecated and insecure
 /// - Unknown `flow` values — may skip expected security processing
-/// - `reality-opts` present — Reality transport not implemented
+/// - `reality-opts` malformed, used without TLS, or missing `client-fingerprint`
 /// - `flow: xtls-rprx-vision` + no TLS-enforcing transport
 /// - `encryption: <non-empty non-"none">` — unsupported cipher
 /// - `uuid` invalid
@@ -670,12 +1017,15 @@ fn parse_vless(
         .unwrap_or("tcp");
     let client_fingerprint = config.get("client-fingerprint").and_then(|v| v.as_str());
 
-    // ── Hard error: reality-opts present (Class A) ────────────────────────
-    if config.contains_key("reality-opts") {
-        return Err("vless: reality-opts is not yet implemented; \
-             Reality transport is tracked for post-M1. \
-             Remove reality-opts or wait for the Reality spec to land."
-            .into());
+    // ── Reality opts ──────────────────────────────────────────────────────
+    let reality = parse_vless_reality_opts(config)?;
+    if reality.is_some() {
+        if !tls {
+            return Err("vless: reality-opts requires `tls: true`".into());
+        }
+        if client_fingerprint.is_none() {
+            return Err("vless: REALITY is based on uTLS, please set a client-fingerprint".into());
+        }
     }
 
     // ── Hard error: encryption != "" / "none" ─────────────────────────────
@@ -806,6 +1156,7 @@ fn parse_vless(
             alpn
         };
         tls_cfg.fingerprint = client_fingerprint.map(std::string::ToString::to_string);
+        tls_cfg.reality = reality;
 
         // ── ECH opts ────────────────────────────────────────────────────
         // DNS-sourced ECH (`enable: true` without `config:`) is resolved by
@@ -966,6 +1317,75 @@ fn parse_vless(
     Ok(VlessAdapter::new(
         name, server, port, uuid_bytes, flow, udp, chain,
     ))
+}
+
+/// Parse VLESS `reality-opts` into transport-layer REALITY parameters.
+///
+/// Matches mihomo's wire-facing fields: `public-key` is base64 RawURL X25519,
+/// `short-id` is hex-decoded and zero-padded to eight bytes, and
+/// `support-x25519mlkem768` is a capability flag. The TLS layer currently
+/// offers X25519 only; keeping the flag in config preserves the public surface
+/// for future fingerprint-specific ClientHello work.
+#[cfg(feature = "vless")]
+fn parse_vless_reality_opts(
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<Option<meow_transport::tls::RealityConfig>, String> {
+    let Some(opts) = config.get("reality-opts") else {
+        return Ok(None);
+    };
+
+    let public_key_str = opts
+        .get("public-key")
+        .and_then(serde_yaml::Value::as_str)
+        .ok_or_else(|| "vless: reality-opts.public-key is required".to_string())?;
+
+    use base64::Engine;
+    let public_key_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(public_key_str)
+        .map_err(|_| "vless: invalid REALITY public key".to_string())?;
+    if public_key_bytes.len() != 32 {
+        return Err("vless: invalid REALITY public key".into());
+    }
+    let mut public_key = [0u8; 32];
+    public_key.copy_from_slice(&public_key_bytes);
+
+    let short_id_str = match opts.get("short-id") {
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| "vless: reality-opts.short-id must be a hex string".to_string())?,
+        None => "",
+    };
+    let short_id_vec = parse_reality_short_id(short_id_str)?;
+    let mut short_id = [0u8; 8];
+    short_id[..short_id_vec.len()].copy_from_slice(&short_id_vec);
+
+    let support_x25519_mlkem768 = opts
+        .get("support-x25519mlkem768")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+
+    Ok(Some(meow_transport::tls::RealityConfig {
+        public_key,
+        short_id,
+        support_x25519_mlkem768,
+    }))
+}
+
+#[cfg(feature = "vless")]
+fn parse_reality_short_id(s: &str) -> std::result::Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) || s.len() / 2 > 8 {
+        return Err("vless: invalid REALITY short ID".into());
+    }
+
+    let mut out = Vec::with_capacity(s.len() / 2);
+    for chunk in s.as_bytes().chunks(2) {
+        let hex = std::str::from_utf8(chunk)
+            .map_err(|_| "vless: invalid REALITY short ID".to_string())?;
+        let byte = u8::from_str_radix(hex, 16)
+            .map_err(|_| "vless: invalid REALITY short ID".to_string())?;
+        out.push(byte);
+    }
+    Ok(out)
 }
 
 /// Parse a UUID string (dashed or hex-only) into a 16-byte array.
@@ -1570,7 +1990,7 @@ tls: true
         assert!(err.contains("port must be non-zero"), "msg: {err}");
     }
 
-    // ─── hysteria2 parser (issue #72, tracer bullet) ─────────────────────────
+    // ─── hysteria2 parser ────────────────────────────────────────────────────
 
     #[cfg(feature = "hysteria2")]
     fn hy2_config(yaml: &str) -> HashMap<String, serde_yaml::Value> {
@@ -1617,6 +2037,106 @@ tls: true
             panic!("must hard-error");
         };
         assert!(err.contains("password must not be empty"), "msg: {err}");
+    }
+
+    #[cfg(feature = "hysteria2")]
+    #[test]
+    fn parse_hysteria2_accepts_mihomo_common_fields() {
+        let cfg = hy2_config(
+            "name: jp-hy2\n\
+             type: hysteria2\n\
+             server: 1.2.3.4\n\
+             port: 443\n\
+             password: secret\n\
+             udp: true\n\
+             up: '30 Mbps'\n\
+             down: 100\n\
+             obfs: salamander\n\
+             obfs-password: obfs-secret\n\
+             ports: '443,8443-8444'\n\
+             hop-interval: '15-30'\n\
+             sni: example.com\n\
+             skip-cert-verify: true\n\
+             fingerprint: 'SHA256 Fingerprint=00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00'\n\
+             alpn:\n\
+               - h3\n",
+        );
+        assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[cfg(feature = "hysteria2")]
+    #[test]
+    fn parse_hysteria2_bandwidth_matches_mihomo_units() {
+        assert_eq!(parse_hy2_bandwidth("8 Mbps").unwrap(), 1_000_000);
+        assert_eq!(parse_hy2_bandwidth("8 MBps").unwrap(), 8_000_000);
+        assert_eq!(parse_hy2_bandwidth("10").unwrap(), 1_250_000);
+        assert_eq!(parse_hy2_bandwidth("").unwrap(), 0);
+    }
+
+    #[cfg(feature = "hysteria2")]
+    #[test]
+    fn parse_hysteria2_rejects_gecko_obfs() {
+        let cfg = hy2_config(
+            "name: jp-hy2\n\
+             type: hysteria2\n\
+             server: 1.2.3.4\n\
+             port: 443\n\
+             password: secret\n\
+             obfs: gecko\n\
+             obfs-password: secret\n",
+        );
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("must hard-error");
+        };
+        assert!(err.contains("gecko"), "msg: {err}");
+    }
+
+    #[cfg(feature = "hysteria2")]
+    #[test]
+    fn parse_hysteria2_rejects_obfs_without_password() {
+        let cfg = hy2_config(
+            "name: jp-hy2\n\
+             type: hysteria2\n\
+             server: 1.2.3.4\n\
+             port: 443\n\
+             password: secret\n\
+             obfs: salamander\n",
+        );
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("must hard-error");
+        };
+        assert!(err.contains("missing obfs-password"), "msg: {err}");
+    }
+
+    #[cfg(feature = "hysteria2")]
+    #[test]
+    fn parse_hysteria2_rejects_unsupported_mtls() {
+        let cfg = hy2_config(
+            "name: jp-hy2\n\
+             type: hysteria2\n\
+             server: 1.2.3.4\n\
+             port: 443\n\
+             password: secret\n\
+             certificate: ./client.crt\n",
+        );
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("must hard-error");
+        };
+        assert!(err.contains("certificate"), "msg: {err}");
+    }
+
+    #[cfg(feature = "hysteria2")]
+    #[test]
+    fn parse_hysteria2_hop_interval_matches_mihomo_floor() {
+        assert_eq!(parse_hy2_hop_interval("hy2", None).unwrap(), None);
+        assert_eq!(
+            parse_hy2_hop_interval("hy2", Some(&serde_yaml::Value::from(0))).unwrap(),
+            Some((30, 30))
+        );
+        assert_eq!(
+            parse_hy2_hop_interval("hy2", Some(&serde_yaml::Value::from("1-2"))).unwrap(),
+            Some((5, 5))
+        );
     }
 
     // ─── Load-balance strategy parser (F1-F7) ────────────────────────────────

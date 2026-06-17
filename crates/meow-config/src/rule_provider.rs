@@ -18,7 +18,7 @@ use meow_rules::{
 };
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 use crate::internal_http;
 use crate::raw::RawRuleProvider;
@@ -106,7 +106,7 @@ impl RuleProvider {
         let new_rules: Arc<dyn RuleSet> = Arc::from(boxed);
         *self.rules.write() = new_rules;
         self.touch();
-        info!(provider = %self.name, "rule-provider refreshed: {} rules", count);
+        debug!(provider = %self.name, "rule-provider refreshed: {} rules", count);
         Ok(())
     }
 
@@ -140,7 +140,7 @@ pub fn load_providers(
     for (name, cfg) in raw_providers {
         match load_one(name, cfg, cache_dir, ctx, download_proxy) {
             Ok(provider) => {
-                info!(
+                debug!(
                     "Loaded rule-provider '{}' ({}/{}): {} entries",
                     name,
                     provider.provider_type,
@@ -484,7 +484,7 @@ fn write_cache(path: &Path, bytes: &[u8]) {
             e
         );
     } else {
-        info!("rule-provider cache updated: {}", path.display());
+        debug!("rule-provider cache updated: {}", path.display());
     }
 }
 
