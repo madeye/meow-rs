@@ -2198,6 +2198,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shadowsocks",
+ "smallvec",
  "smol_str",
  "socket2 0.5.10",
  "tempfile",

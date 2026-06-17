@@ -209,8 +209,8 @@ pub fn parse_proxy(
 
 /// Parse a `type: snell` proxy block.
 ///
-/// Aligned with opensnell's client-side surface — v4 / v5 wire only (older
-/// v1/v2/v3 are hard-rejected, mirroring opensnell's own scope decision).
+/// Mihomo-compatible Snell outbound. v3 uses the legacy Snell AEAD stream;
+/// v4/v5 use the newer Snell v4 TCP wire (v5 is client-side compatible).
 ///
 /// YAML schema (mihomo-compatible):
 ///
@@ -220,7 +220,7 @@ pub fn parse_proxy(
 ///   server: 1.2.3.4
 ///   port: 443
 ///   psk: shared-secret
-///   version: 4         # optional; default 4. Accepts 4, 5, "v4", "v5".
+///   version: 4         # optional; default 4. Accepts 3, 4, 5, "v3", "v4", "v5".
 ///   udp: true          # optional; UDP-over-TCP relay.
 ///   reuse: true        # optional; CommandConnectV2 + connection pool.
 ///   obfs-opts:         # optional
@@ -233,7 +233,7 @@ pub fn parse_proxy(
 /// - missing `server`, `port`, or `psk` — required by the protocol.
 /// - `port == 0` — never a valid endpoint.
 /// - empty `psk` — caught by [`meow_proxy::SnellAdapter::new`].
-/// - `version` ∈ {1, 2, 3} — opensnell does not implement those wires.
+/// - `version` ∈ {1, 2} — this adapter does not implement those wires.
 /// - `obfs-opts.mode` is not one of off / http / tls.
 #[cfg(feature = "snell")]
 fn parse_snell(
@@ -272,22 +272,22 @@ fn parse_snell(
                 s.to_string()
             } else {
                 return Err(format!(
-                    "snell[{name}]: version must be an integer or string (4 or 5)"
+                    "snell[{name}]: version must be an integer or string (3, 4 or 5)"
                 ));
             };
             match label.trim().to_ascii_lowercase().as_str() {
+                "3" | "v3" => SnellVersion::V3,
                 "" | "4" | "v4" => SnellVersion::V4,
                 "5" | "v5" => SnellVersion::V5,
-                "1" | "2" | "3" | "v1" | "v2" | "v3" => {
+                "1" | "2" | "v1" | "v2" => {
                     return Err(format!(
                         "snell[{name}]: version '{label}' is not supported; \
-                         this adapter implements the v4 / v5 wire only \
-                         (mihomo's older v1/v2/v3 are deprecated)"
+                         this adapter implements Snell v3 / v4 / v5 only"
                     ));
                 }
                 other => {
                     return Err(format!(
-                        "snell[{name}]: unknown version '{other}'; valid: 4, 5"
+                        "snell[{name}]: unknown version '{other}'; valid: 3, 4, 5"
                     ));
                 }
             }
@@ -392,9 +392,7 @@ fn parse_http(
 ///
 /// - `username` set without `password` (or vice versa) — orphaned credential.
 ///
-/// # Warn-once (Class B per ADR-0002)
-///
-/// - `udp: true` — SOCKS5 UDP ASSOCIATE is deferred to M1.x.
+/// `udp: true` enables SOCKS5 UDP ASSOCIATE (HTTP/3 / QUIC relay).
 ///
 /// upstream: `adapter/outbound/socks5.go`
 fn parse_socks5(
@@ -428,27 +426,12 @@ fn parse_socks5(
         }
     };
 
-    // Warn-once if UDP is requested (deferred, ADR-0002 Class B).
-    if config
+    let udp = config
         .get("udp")
         .and_then(serde_yaml::Value::as_bool)
-        .unwrap_or(false)
-    {
-        tracing::warn!(
-            proxy = name,
-            "socks5: `udp: true` is not supported in M1 (SOCKS5 UDP ASSOCIATE deferred); \
-             treating as false. Class B — ADR-0002."
-        );
-    }
+        .unwrap_or(false);
 
-    Ok(Socks5Adapter::new(
-        name,
-        server,
-        port,
-        auth,
-        tls,
-        skip_cert_verify,
-    ))
+    Ok(Socks5Adapter::new(name, server, port, auth, tls, skip_cert_verify).with_udp(udp))
 }
 
 /// Parse a `type: direct` proxy block into a [`DirectAdapter`].
@@ -1878,6 +1861,8 @@ tls: true
     #[test]
     fn parse_snell_version_aliases() {
         for yaml in &[
+            "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nversion: 3\n",
+            "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nversion: v3\n",
             "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nversion: 4\n",
             "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nversion: v4\n",
             "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nversion: V5\n",
@@ -1890,7 +1875,7 @@ tls: true
 
     #[cfg(feature = "snell")]
     #[test]
-    fn parse_snell_rejects_legacy_versions() {
+    fn parse_snell_rejects_unsupported_legacy_versions() {
         for (yaml, ver) in &[
             (
                 "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nversion: 1\n",
@@ -1901,17 +1886,13 @@ tls: true
                 "2",
             ),
             (
-                "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nversion: 3\n",
-                "3",
-            ),
-            (
                 "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nversion: v2\n",
                 "v2",
             ),
         ] {
             let cfg = snell_config(yaml);
             let Err(err) = parse_proxy(&cfg) else {
-                panic!("legacy version {ver} must hard-error (Class A)");
+                panic!("unsupported legacy version {ver} must hard-error (Class A)");
             };
             assert!(
                 err.contains("not supported"),

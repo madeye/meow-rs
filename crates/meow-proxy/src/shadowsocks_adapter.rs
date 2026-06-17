@@ -115,11 +115,18 @@ impl ShadowsocksAdapter {
                 PluginKind::EchTlsTunnel(cfg, tls)
             }
             Some(pname) => {
+                // SIP003u: a `mode=tcp_and_udp` / `udp_only` token in plugin-opts
+                // selects whether UDP relay is tunneled through the plugin. The
+                // token is consumed here (not forwarded to the plugin process)
+                // and translated to the shadowsocks plugin transport mode.
+                // Default stays TcpOnly, so UDP keeps going direct to the server
+                // for plugins that don't speak SIP003u (unchanged behaviour).
+                let (plugin_mode, filtered_opts) = extract_sip003_plugin_mode(plugin_opts);
                 let plugin_config = PluginConfig {
                     plugin: pname.to_string(),
-                    plugin_opts: plugin_opts.map(String::from),
+                    plugin_opts: filtered_opts,
                     plugin_args: vec![],
-                    plugin_mode: Mode::TcpOnly,
+                    plugin_mode,
                 };
                 let started =
                     Plugin::start(&plugin_config, server_config.addr(), PluginMode::Client)
@@ -146,6 +153,52 @@ impl ShadowsocksAdapter {
             health: ProxyHealth::new(),
         })
     }
+}
+
+/// SIP003u: extract the plugin transport mode from SIP003 `plugin-opts`.
+///
+/// A `mode=tcp_and_udp` / `mode=udp_only` / `mode=tcp_only` token selects
+/// whether UDP relay is tunneled through the SIP003 plugin. Any *other* `mode=`
+/// value (e.g. simple-obfs `mode=tls`, v2ray-plugin `mode=quic`) is a
+/// plugin-specific option and is left in place. Returns the resolved
+/// [`Mode`] (default [`Mode::TcpOnly`], preserving the pre-SIP003u behaviour
+/// where UDP bypasses the plugin) and the opts string with a recognised
+/// transport-mode token removed so it is not forwarded to the plugin process.
+fn extract_sip003_plugin_mode(opts: Option<&str>) -> (Mode, Option<String>) {
+    let Some(opts) = opts else {
+        return (Mode::TcpOnly, None);
+    };
+    let mut mode = Mode::TcpOnly;
+    let mut kept: Vec<&str> = Vec::new();
+    for tok in opts.split(';') {
+        if let Some((k, v)) = tok.split_once('=') {
+            if k.trim().eq_ignore_ascii_case("mode") {
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "tcp_and_udp" => {
+                        mode = Mode::TcpAndUdp;
+                        continue;
+                    }
+                    "udp_only" => {
+                        mode = Mode::UdpOnly;
+                        continue;
+                    }
+                    "tcp_only" => {
+                        mode = Mode::TcpOnly;
+                        continue;
+                    }
+                    // Plugin-specific mode (obfs tls/http, v2ray quic/ws) — keep.
+                    _ => {}
+                }
+            }
+        }
+        kept.push(tok);
+    }
+    let filtered = if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join(";"))
+    };
+    (mode, filtered)
 }
 
 /// Returns true if the given plugin name selects the built-in simple-obfs.
@@ -560,6 +613,40 @@ impl DatagramSend for TokioUdpDatagram {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sip003u_mode_extraction() {
+        // Mode has no PartialEq; compare via its tcp/udp semantics.
+        let sem = |m: Mode| (m.enable_tcp(), m.enable_udp());
+
+        // Default: no opts → TcpOnly, nothing forwarded.
+        let (m, o) = extract_sip003_plugin_mode(None);
+        assert_eq!(sem(m), (true, false));
+        assert_eq!(o, None);
+
+        // No mode token → TcpOnly, opts preserved verbatim.
+        let (m, o) = extract_sip003_plugin_mode(Some("host=a.com;path=/x"));
+        assert_eq!(sem(m), (true, false));
+        assert_eq!(o.as_deref(), Some("host=a.com;path=/x"));
+
+        // SIP003u transport mode is consumed and translated; other opts kept.
+        let (m, o) = extract_sip003_plugin_mode(Some("mode=tcp_and_udp;host=a.com"));
+        assert_eq!(sem(m), (true, true));
+        assert_eq!(o.as_deref(), Some("host=a.com"));
+
+        let (m, o) = extract_sip003_plugin_mode(Some("mode=udp_only"));
+        assert_eq!(sem(m), (false, true));
+        assert_eq!(o, None, "a lone transport-mode token leaves empty opts");
+
+        // A plugin-specific `mode` value (v2ray quic, obfs tls) is NOT consumed.
+        let (m, o) = extract_sip003_plugin_mode(Some("mode=quic;host=a.com"));
+        assert_eq!(
+            sem(m),
+            (true, false),
+            "non-transport mode must not change Mode"
+        );
+        assert_eq!(o.as_deref(), Some("mode=quic;host=a.com"));
+    }
 
     #[test]
     fn test_is_builtin_obfs_plugin_accepts_aliases() {

@@ -1,6 +1,6 @@
 use crate::resolver::Resolver;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_proto::rr::RecordType;
+use hickory_proto::rr::{Record, RecordType};
 use meow_common::DnsMode;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -182,8 +182,17 @@ impl DnsServer {
         match lookup {
             Some(l) => {
                 resp.metadata.response_code = ResponseCode::NoError;
+                // In fake-IP mode, drop ipv4hint/ipv6hint from HTTPS/SVCB
+                // answers for faked hosts so an HTTP/3 client cannot read a
+                // real origin IP out of the hint and bypass the fake-IP
+                // routing the tunnel depends on.
+                let strip_hints = resolver.fake_ip_active_for(domain);
                 for rec in &l.answers {
-                    resp.add_answer(rec.clone());
+                    if strip_hints {
+                        resp.add_answer(strip_svc_ip_hints(rec));
+                    } else {
+                        resp.add_answer(rec.clone());
+                    }
                 }
             }
             None => {
@@ -371,6 +380,66 @@ impl DnsServer {
     }
 }
 
+/// Return a copy of `rec` with `ipv4hint` / `ipv6hint` SvcParams removed when
+/// it is an HTTPS or SVCB record; any other record type is cloned unchanged.
+///
+/// Used only in fake-IP mode (see [`Resolver::fake_ip_active_for`]). Those
+/// hints carry the origin's real addresses; stripping them forces an HTTP/3
+/// client back onto the A/AAAA records, which return fake IPs, so the
+/// connection stays inside fake-IP routing. All other SvcParams (alpn, port,
+/// ech, …) are preserved so HTTP/3 and ECH keep working — a deliberate, more
+/// surgical divergence from upstream mihomo, which returns an empty answer.
+/// See ADR-0013 for the dual-stack correctness analysis.
+fn strip_svc_ip_hints(rec: &Record) -> Record {
+    use hickory_proto::rr::rdata::svcb::{Mandatory, SvcParamKey, SvcParamValue, SVCB};
+    use hickory_proto::rr::rdata::HTTPS;
+    use hickory_proto::rr::RData;
+
+    fn is_hint(k: SvcParamKey) -> bool {
+        matches!(k, SvcParamKey::Ipv4Hint | SvcParamKey::Ipv6Hint)
+    }
+
+    fn strip(svcb: &SVCB) -> SVCB {
+        let mut params = Vec::with_capacity(svcb.svc_params.len());
+        for (key, value) in &svcb.svc_params {
+            // Drop the address hints themselves.
+            if is_hint(*key) {
+                continue;
+            }
+            // RFC 9460 §8: a key listed in `mandatory` that is absent from the
+            // RR makes the whole record malformed, so the client discards it —
+            // which would take the `alpn` (HTTP/3) and `ech` params we want to
+            // keep with it. Scrub the hint keys out of the mandatory list, and
+            // drop `mandatory` entirely if nothing else remains (an empty
+            // mandatory list is itself malformed).
+            if let (SvcParamKey::Mandatory, SvcParamValue::Mandatory(Mandatory(keys))) =
+                (key, value)
+            {
+                let kept: Vec<SvcParamKey> =
+                    keys.iter().copied().filter(|k| !is_hint(*k)).collect();
+                if kept.is_empty() {
+                    continue;
+                }
+                params.push((
+                    SvcParamKey::Mandatory,
+                    SvcParamValue::Mandatory(Mandatory(kept)),
+                ));
+                continue;
+            }
+            params.push((*key, value.clone()));
+        }
+        SVCB::new(svcb.svc_priority, svcb.target_name.clone(), params)
+    }
+
+    let new_rdata = match &rec.data {
+        RData::HTTPS(https) => RData::HTTPS(HTTPS(strip(&https.0))),
+        RData::SVCB(svcb) => RData::SVCB(strip(svcb)),
+        // Not an HTTPS/SVCB record (e.g. a CNAME in the chain) — leave intact.
+        _ => return rec.clone(),
+    };
+    Record::from_rdata(rec.name.clone(), rec.ttl, new_rdata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +462,167 @@ mod tests {
         q.extend_from_slice(&qtype.to_be_bytes()); // QTYPE
         q.extend_from_slice(&[0x00, 0x01]); // QCLASS IN
         q
+    }
+
+    fn https_record_with_hints() -> Record {
+        use hickory_proto::rr::rdata::svcb::{Alpn, IpHint, SvcParamKey, SvcParamValue, SVCB};
+        use hickory_proto::rr::rdata::{A, AAAA, HTTPS};
+        use hickory_proto::rr::{Name, RData};
+        use std::str::FromStr;
+
+        let params = vec![
+            (
+                SvcParamKey::Alpn,
+                SvcParamValue::Alpn(Alpn(vec!["h3".to_string(), "h2".to_string()])),
+            ),
+            (SvcParamKey::Port, SvcParamValue::Port(443)),
+            (
+                SvcParamKey::Ipv4Hint,
+                SvcParamValue::Ipv4Hint(IpHint(vec![A::new(1, 2, 3, 4)])),
+            ),
+            (
+                SvcParamKey::Ipv6Hint,
+                SvcParamValue::Ipv6Hint(IpHint(vec![AAAA::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)])),
+            ),
+        ];
+        let name = Name::from_str("example.com.").unwrap();
+        let svcb = SVCB::new(1, name.clone(), params);
+        Record::from_rdata(name, 300, RData::HTTPS(HTTPS(svcb)))
+    }
+
+    #[test]
+    fn strip_hints_drops_ip_hints_keeps_alpn_and_port() {
+        use hickory_proto::rr::rdata::svcb::SvcParamKey;
+        use hickory_proto::rr::RData;
+
+        let stripped = strip_svc_ip_hints(&https_record_with_hints());
+        let RData::HTTPS(https) = &stripped.data else {
+            panic!("expected HTTPS rdata");
+        };
+        let keys: Vec<&SvcParamKey> = https.0.svc_params.iter().map(|(k, _)| k).collect();
+        assert!(
+            !keys.contains(&&SvcParamKey::Ipv4Hint),
+            "ipv4hint must be stripped"
+        );
+        assert!(
+            !keys.contains(&&SvcParamKey::Ipv6Hint),
+            "ipv6hint must be stripped"
+        );
+        assert!(keys.contains(&&SvcParamKey::Alpn), "alpn must be preserved");
+        assert!(keys.contains(&&SvcParamKey::Port), "port must be preserved");
+    }
+
+    #[test]
+    fn strip_hints_preserves_ech_and_scrubs_mandatory_list() {
+        use hickory_proto::rr::rdata::svcb::{
+            Alpn, EchConfigList, IpHint, Mandatory, SvcParamKey, SvcParamValue, SVCB,
+        };
+        use hickory_proto::rr::rdata::{A, AAAA, HTTPS};
+        use hickory_proto::rr::{Name, RData};
+        use std::str::FromStr;
+
+        // `mandatory` lists ipv4hint, so a naive strip would leave a dangling
+        // mandatory key → malformed RR → client discards it, losing ech (which
+        // is only ever delivered via the HTTPS record). Verify we scrub it.
+        let params = vec![
+            (
+                SvcParamKey::Mandatory,
+                SvcParamValue::Mandatory(Mandatory(vec![SvcParamKey::Alpn, SvcParamKey::Ipv4Hint])),
+            ),
+            (
+                SvcParamKey::Alpn,
+                SvcParamValue::Alpn(Alpn(vec!["h3".to_string()])),
+            ),
+            (
+                SvcParamKey::EchConfigList,
+                SvcParamValue::EchConfigList(EchConfigList(vec![0xab, 0xcd])),
+            ),
+            (
+                SvcParamKey::Ipv4Hint,
+                SvcParamValue::Ipv4Hint(IpHint(vec![A::new(1, 2, 3, 4)])),
+            ),
+            (
+                SvcParamKey::Ipv6Hint,
+                SvcParamValue::Ipv6Hint(IpHint(vec![AAAA::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)])),
+            ),
+        ];
+        let name = Name::from_str("example.com.").unwrap();
+        let rec = Record::from_rdata(
+            name.clone(),
+            300,
+            RData::HTTPS(HTTPS(SVCB::new(1, name, params))),
+        );
+
+        let RData::HTTPS(https) = &strip_svc_ip_hints(&rec).data else {
+            panic!("expected HTTPS rdata");
+        };
+        let p = &https.0.svc_params;
+
+        // Hints gone.
+        assert!(!p.iter().any(|(k, _)| *k == SvcParamKey::Ipv4Hint));
+        assert!(!p.iter().any(|(k, _)| *k == SvcParamKey::Ipv6Hint));
+        // ECH and ALPN preserved — the whole point of not returning empty.
+        assert!(p.iter().any(|(k, _)| *k == SvcParamKey::EchConfigList));
+        assert!(p.iter().any(|(k, _)| *k == SvcParamKey::Alpn));
+        // `mandatory` survives but with the stripped hint scrubbed out, so the
+        // record stays well-formed (mandatory = [alpn] only).
+        let mandatory = p
+            .iter()
+            .find_map(|(k, v)| match (k, v) {
+                (SvcParamKey::Mandatory, SvcParamValue::Mandatory(Mandatory(keys))) => Some(keys),
+                _ => None,
+            })
+            .expect("mandatory must remain");
+        assert_eq!(mandatory, &vec![SvcParamKey::Alpn]);
+    }
+
+    #[test]
+    fn strip_hints_drops_mandatory_when_only_hints_were_mandatory() {
+        use hickory_proto::rr::rdata::svcb::{IpHint, Mandatory, SvcParamKey, SvcParamValue, SVCB};
+        use hickory_proto::rr::rdata::{A, HTTPS};
+        use hickory_proto::rr::{Name, RData};
+        use std::str::FromStr;
+
+        let params = vec![
+            (
+                SvcParamKey::Mandatory,
+                SvcParamValue::Mandatory(Mandatory(vec![SvcParamKey::Ipv4Hint])),
+            ),
+            (
+                SvcParamKey::Ipv4Hint,
+                SvcParamValue::Ipv4Hint(IpHint(vec![A::new(1, 2, 3, 4)])),
+            ),
+        ];
+        let name = Name::from_str("example.com.").unwrap();
+        let rec = Record::from_rdata(
+            name.clone(),
+            300,
+            RData::HTTPS(HTTPS(SVCB::new(1, name, params))),
+        );
+
+        let RData::HTTPS(https) = &strip_svc_ip_hints(&rec).data else {
+            panic!("expected HTTPS rdata");
+        };
+        // An empty mandatory list is itself malformed, so it must be dropped.
+        assert!(
+            https.0.svc_params.is_empty(),
+            "mandatory must be removed when only hint keys were listed"
+        );
+    }
+
+    #[test]
+    fn strip_hints_passes_through_non_svc_records() {
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::{Name, RData};
+        use std::str::FromStr;
+
+        let rec = Record::from_rdata(
+            Name::from_str("example.com.").unwrap(),
+            300,
+            RData::A(A::new(93, 184, 216, 34)),
+        );
+        let out = strip_svc_ip_hints(&rec);
+        assert_eq!(out, rec, "non-HTTPS/SVCB records must be unchanged");
     }
 
     #[test]

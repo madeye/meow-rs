@@ -423,6 +423,34 @@ impl ProxyAdapter for TrojanAdapter {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn read_packet_handles_coalesced_frames() {
+        use tokio::io::AsyncWriteExt;
+        // QUIC first flight: server sends ~3 datagrams that coalesce into one
+        // TLS record → meow must yield all three, not just the first.
+        let (client, mut server) = tokio::io::duplex(64 * 1024);
+        let conn = TrojanPacketConn::new(Box::new(client));
+
+        let src: SocketAddr = "9.9.9.9:443".parse().unwrap();
+        let payloads: [&[u8]; 3] = [b"\xc0one", b"\xc0two", b"\xc0three!"];
+        let mut wire = Vec::new();
+        for p in &payloads {
+            encode_socks5_addr_socket(&mut wire, &src);
+            wire.extend_from_slice(&(p.len() as u16).to_be_bytes());
+            wire.extend_from_slice(b"\r\n");
+            wire.extend_from_slice(p);
+        }
+        server.write_all(&wire).await.unwrap(); // one write → coalesced
+        server.flush().await.unwrap();
+
+        for expect in &payloads {
+            let mut buf = [0u8; 2048];
+            let (n, addr) = conn.read_packet(&mut buf).await.unwrap();
+            assert_eq!(addr, src);
+            assert_eq!(&buf[..n], *expect, "frame mismatch / dropped frame");
+        }
+    }
+
     #[test]
     fn encode_socket_v4() {
         let mut buf = Vec::new();

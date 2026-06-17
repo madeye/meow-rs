@@ -899,6 +899,28 @@ impl Resolver {
         self.cache.reverse_lookup(ip)
     }
 
+    /// True when fake-IP synthesis applies to `host` — i.e. its A/AAAA
+    /// answers will be synthetic. Mirrors the gating in [`Self::lookup_ipv4`] /
+    /// [`Self::lookup_ipv6`]: fake-IP mode, at least one pool configured, the
+    /// host is not an explicit hosts-trie mapping, and the skipper does not
+    /// bypass it.
+    ///
+    /// The DNS server uses this to strip `ipv4hint` / `ipv6hint` SvcParams
+    /// from HTTPS/SVCB answers for the same host. Those hints carry the
+    /// origin's *real* addresses; an HTTP/3 client that reads them connects
+    /// straight to the real IP, bypassing the fake-IP mapping the tunnel
+    /// relies on for domain-based routing and sniffing.
+    pub fn fake_ip_active_for(&self, host: &str) -> bool {
+        if self.mode != DnsMode::FakeIp {
+            return false;
+        }
+        // Explicit hosts-trie mappings are never rewritten to fake IPs.
+        if self.use_hosts && self.hosts.search(host).is_some() {
+            return false;
+        }
+        (self.fakeip_v4.is_some() || self.fakeip_v6.is_some()) && !self.skipper_bypasses(host)
+    }
+
     /// True if `ip` is an active fake-IP allocation (either family).
     pub fn is_fake_ip(&self, ip: IpAddr) -> bool {
         if let Some(pool) = &self.fakeip_v4 {
@@ -982,6 +1004,97 @@ mod tests {
             .cache
             .put("cached.test", &[real], Duration::from_secs(60));
         assert_eq!(resolver.resolve_ip("cached.test").await, Some(real));
+    }
+
+    #[test]
+    fn fake_ip_active_for_gates_on_mode_pool_and_skipper() {
+        use crate::fakeip::{MemoryStore, SkipperMode};
+
+        let new_hosts = || -> DomainTrie<Vec<IpAddr>> { DomainTrie::new() };
+
+        // Normal mode: never active.
+        let normal = Resolver::new(vec![], vec![], DnsMode::Normal, new_hosts(), true);
+        assert!(!normal.fake_ip_active_for("example.com"));
+
+        // Fake-IP mode but no pool configured: not active.
+        let no_pool = Resolver::new(vec![], vec![], DnsMode::FakeIp, new_hosts(), true);
+        assert!(!no_pool.fake_ip_active_for("example.com"));
+
+        // Fake-IP mode with a v4 pool: active.
+        let mut faked = Resolver::new(vec![], vec![], DnsMode::FakeIp, new_hosts(), true);
+        let pool = Arc::new(
+            Pool::new(
+                "198.18.0.0/16".parse().unwrap(),
+                Arc::new(MemoryStore::new(1024)),
+            )
+            .unwrap(),
+        );
+        faked.set_fakeip_v4(pool);
+        assert!(faked.fake_ip_active_for("example.com"));
+
+        // A skipper-bypassed host falls back to real resolution → not faked.
+        faked.set_fakeip_skipper(Skipper::new(
+            &["+.direct.example".to_string()],
+            SkipperMode::BlackList,
+        ));
+        assert!(!faked.fake_ip_active_for("api.direct.example"));
+        assert!(faked.fake_ip_active_for("example.com"));
+    }
+
+    /// Dual-stack contract that the stripped-HTTPS path relies on: with the
+    /// IP hints removed, the client falls back to A/AAAA, so the per-family
+    /// fake synthesis must do the right thing for each pool configuration.
+    #[tokio::test]
+    async fn fake_ip_dual_stack_synthesis_is_per_family() {
+        use crate::fakeip::MemoryStore;
+
+        let v4_pool = || {
+            Arc::new(
+                Pool::new(
+                    "198.18.0.0/16".parse().unwrap(),
+                    Arc::new(MemoryStore::new(1024)),
+                )
+                .unwrap(),
+            )
+        };
+
+        // v4-only pool (the common default): A synthesises a v4 fake; AAAA is
+        // suppressed (None → server emits NOERROR-empty) so a dual-stack
+        // client cleanly falls back to the v4 fake instead of stalling.
+        let mut v4_only = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+        v4_only.set_fakeip_v4(v4_pool());
+        let a = v4_only.lookup_ipv4("example.com").await;
+        assert!(
+            a.is_some_and(|ip| ip.is_ipv4() && v4_only.is_fake_ip(ip)),
+            "A must return a v4 fake IP"
+        );
+        assert_eq!(
+            v4_only.lookup_ipv6("example.com").await,
+            None,
+            "v4-only pool must suppress AAAA so the client uses the v4 fake"
+        );
+
+        // Dual pool: both families synthesise → Happy Eyeballs picks between
+        // two fakes, both of which route through the tunnel.
+        let mut dual = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+        dual.set_fakeip_v4(v4_pool());
+        dual.set_fakeip_v6(Arc::new(
+            Pool::new(
+                "fc00::/64".parse().unwrap(),
+                Arc::new(MemoryStore::new(1024)),
+            )
+            .unwrap(),
+        ));
+        let a = dual.lookup_ipv4("example.com").await;
+        let aaaa = dual.lookup_ipv6("example.com").await;
+        assert!(
+            a.is_some_and(|ip| ip.is_ipv4() && dual.is_fake_ip(ip)),
+            "A must return a v4 fake IP"
+        );
+        assert!(
+            aaaa.is_some_and(|ip| ip.is_ipv6() && dual.is_fake_ip(ip)),
+            "AAAA must return a v6 fake IP when a v6 pool is configured"
+        );
     }
 
     #[test]

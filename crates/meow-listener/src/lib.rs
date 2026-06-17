@@ -6,6 +6,8 @@ pub mod http_proxy;
 pub mod mixed;
 #[cfg(feature = "listener-socks5")]
 pub mod socks5;
+#[cfg(feature = "listener-socks5")]
+mod socks5_udp;
 #[cfg(feature = "listener-tproxy")]
 pub mod tproxy;
 

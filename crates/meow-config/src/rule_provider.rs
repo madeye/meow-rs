@@ -412,11 +412,34 @@ fn fetch_http_blocking_with_cache(
 }
 
 fn fetch_http_blocking(url: &str, proxy: Option<&Arc<dyn Proxy>>) -> Result<Vec<u8>> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("building temporary tokio runtime for rule-provider fetch")?;
-    rt.block_on(fetch_http_async(url, proxy))
+    let url = url.to_string();
+    let thread_url = url.clone();
+    let proxy = proxy.cloned();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("building temporary tokio runtime for rule-provider fetch")?;
+        rt.block_on(fetch_http_async(&thread_url, proxy.as_ref()))
+    })
+    .join()
+    .map_err(|payload| {
+        anyhow!(
+            "rule-provider HTTP fetch thread panicked while fetching {url}: {}",
+            panic_message(payload.as_ref())
+        )
+    })?
+}
+
+/// Extract a human-readable message from a thread panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 pub(crate) async fn fetch_http_async(url: &str, proxy: Option<&Arc<dyn Proxy>>) -> Result<Vec<u8>> {
@@ -473,6 +496,8 @@ fn write_cache(path: &Path, bytes: &[u8]) {
 mod tests {
     use super::*;
     use meow_rules::mrs_parser::{write_ruleset_mrs, TYPE_DOMAIN};
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
 
     fn ctx() -> ParserContext {
         ParserContext::empty()
@@ -630,6 +655,64 @@ mod tests {
         );
         let out = load_providers(&providers, None, &ctx(), None);
         assert_eq!(out.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn http_provider_loads_inside_existing_tokio_runtime() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out waiting for HTTP client"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("HTTP test listener failed: {e}"),
+                }
+            };
+            // The accepted stream can inherit the listener's nonblocking flag, which
+            // would make the read/write below return `WouldBlock`. Force blocking mode.
+            stream.set_nonblocking(false).unwrap();
+            let mut buf = [0_u8; 1024];
+            // Consume the request bytes; the exact length is irrelevant for the test.
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0, "expected an HTTP request from the client");
+            let body = "payload:\n  - 'example.com'\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "http-test".to_string(),
+            RawRuleProvider {
+                provider_type: "http".to_string(),
+                behavior: "domain".to_string(),
+                format: Some("yaml".to_string()),
+                url: Some(format!("http://{addr}/rules.yaml")),
+                path: None,
+                interval: None,
+                payload: None,
+            },
+        );
+
+        let out = load_providers(&providers, None, &ctx(), None);
+        server.join().unwrap();
+        let provider = out.get("http-test").expect("HTTP provider should load");
+        assert_eq!(provider.provider_type, ProviderType::Http);
+        assert_eq!(provider.rule_count(), 1);
     }
 
     #[test]

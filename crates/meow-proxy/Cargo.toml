@@ -11,9 +11,9 @@ trojan = []
 vless = []
 vmess = ["dep:md-5", "dep:hmac", "dep:aes", "dep:aes-gcm", "dep:chacha20poly1305", "dep:crc32fast"]
 vless-vision = ["vless"]
-# Snell v4/v5 outbound — argon2id KDF + AES-128-GCM AEAD frames,
+# Snell v3/v4/v5 outbound — argon2id KDF + AES-128-GCM AEAD frames,
 # optional http/tls obfs (reused from the SS simple-obfs module),
-# UDP-over-TCP, and an opt-in reuse pool (CommandConnectV2).
+# UDP-over-TCP, and an opt-in v4/v5 reuse pool (CommandConnectV2).
 snell = ["dep:argon2", "dep:aes-gcm"]
 # Opt-in anytls outbound (uses the `anytls-rs` crate). Adds ~one extra TLS
 # provider to the binary because the upstream crate pins default rustls
@@ -54,6 +54,7 @@ serde_json = { workspace = true }
 socket2 = { workspace = true }
 libc = "0.2"
 smol_str = { workspace = true }
+smallvec = { workspace = true }
 md-5 = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 aes = { workspace = true, optional = true }

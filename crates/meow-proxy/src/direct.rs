@@ -266,8 +266,25 @@ impl ProxyAdapter for DirectAdapter {
         Ok(Box::new(DirectConn(stream)))
     }
 
-    async fn dial_udp(&self, _metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
-        let socket = meow_common::bind_udp("0.0.0.0:0")
+    async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
+        // Bind the reply socket in the destination's address family. Hardcoding
+        // an IPv4 (`0.0.0.0:0`) bind here broke QUIC/HTTP3 direct connections:
+        // HTTP/3 origins are almost always dual-stack and the client prefers
+        // IPv6 (Happy Eyeballs), so `send_to()` to a v6 destination failed on
+        // the AF_INET socket. `handle_udp`'s initial write then errored and the
+        // NAT session was never inserted, so no reply reader could ever form —
+        // server→app QUIC replies had no socket to arrive on.
+        //
+        // The NAT key in `handle_udp` is `(src, dst)`, so a single direct UDP
+        // session only ever targets one destination → one address family; we
+        // can bind the matching family up front. Falls back to IPv4 when the
+        // destination family is unknown (preserves the legacy behaviour).
+        let dst_is_v6 = match metadata.dst_ip {
+            Some(ip) => ip.is_ipv6(),
+            None => metadata.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv6()),
+        };
+        let bind_addr = if dst_is_v6 { "[::]:0" } else { "0.0.0.0:0" };
+        let socket = meow_common::bind_udp(bind_addr)
             .await
             .map_err(MeowError::Io)?;
         Ok(Box::new(DirectPacketConn(socket)))
@@ -298,10 +315,91 @@ impl ProxyAdapter for DirectAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn fake_dest() -> SocketAddr {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 1)
+    }
+
+    fn udp_metadata(dst_ip: IpAddr) -> Metadata {
+        Metadata {
+            dst_ip: Some(dst_ip),
+            dst_port: 443,
+            ..Default::default()
+        }
+    }
+
+    /// Regression for QUIC/HTTP3 direct: `dial_udp` must bind the reply socket
+    /// in the destination's address family. A v6 destination on an AF_INET
+    /// socket cannot be written, so the NAT session — and thus the reply
+    /// reader — never forms. We only assert the *bound family* here so the
+    /// test is independent of host IPv6 routing.
+    #[tokio::test]
+    async fn dial_udp_binds_v6_socket_for_v6_destination() {
+        let adapter = DirectAdapter::new();
+        let conn = adapter
+            .dial_udp(&udp_metadata(IpAddr::V6(Ipv6Addr::LOCALHOST)))
+            .await
+            .expect("dial_udp must succeed for a v6 destination");
+        let local = conn.local_addr().expect("local_addr");
+        assert!(
+            local.is_ipv6(),
+            "v6 destination must bind a v6 socket, got {local}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dial_udp_binds_v4_socket_for_v4_destination() {
+        let adapter = DirectAdapter::new();
+        let conn = adapter
+            .dial_udp(&udp_metadata(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            .await
+            .expect("dial_udp must succeed for a v4 destination");
+        let local = conn.local_addr().expect("local_addr");
+        assert!(
+            local.is_ipv4(),
+            "v4 destination must bind a v4 socket, got {local}"
+        );
+    }
+
+    /// Full bidirectional round-trip over IPv6: prove server→app replies flow
+    /// back through the direct UDP conn. Skipped when the host has no IPv6
+    /// loopback (some minimal CI sandboxes).
+    #[tokio::test]
+    async fn dial_udp_v6_round_trip_delivers_reply() {
+        let Ok(echo) = tokio::net::UdpSocket::bind("[::1]:0").await else {
+            eprintln!("no IPv6 loopback available; skipping v6 round-trip test");
+            return;
+        };
+        let echo_addr = echo.local_addr().unwrap();
+
+        let adapter = DirectAdapter::new();
+        let conn = adapter
+            .dial_udp(&udp_metadata(echo_addr.ip()))
+            .await
+            .expect("dial_udp v6");
+
+        // app → server
+        conn.write_packet(b"ping", &echo_addr)
+            .await
+            .expect("write_packet to v6 destination must succeed");
+
+        // server receives and replies
+        let mut sbuf = [0u8; 16];
+        let (n, from) = tokio::time::timeout(Duration::from_secs(2), echo.recv_from(&mut sbuf))
+            .await
+            .expect("echo recv timed out")
+            .expect("echo recv");
+        assert_eq!(&sbuf[..n], b"ping");
+        echo.send_to(b"pong", from).await.expect("echo reply");
+
+        // server → app: the reply must flow back through the same conn
+        let mut cbuf = [0u8; 16];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), conn.read_packet(&mut cbuf))
+            .await
+            .expect("reply read timed out")
+            .expect("read_packet");
+        assert_eq!(&cbuf[..n], b"pong");
     }
 
     /// Drive `apply_connect_timeout` against a future that never completes,
