@@ -66,8 +66,9 @@ enum RuleOp {
     DomainRegex(Regex),
     DomainWildcard(Regex),
     IpCidr { net: IpNet, src: bool },
-    Port { ranges: Vec<PortRange>, src: bool },
-    InPort { lo: u16, hi: u16 },
+    SrcPort(PortMatcher),
+    DstPort(PortMatcher),
+    InPort(PortMatcher),
     Dscp(u8),
     ProcessName(String),
     ProcessPath(ProcessPathOp),
@@ -87,6 +88,13 @@ enum PortRange {
 }
 
 #[derive(Debug, Clone)]
+enum PortMatcher {
+    Single(u16),
+    Range(u16, u16),
+    Multiple(Vec<PortRange>),
+}
+
+#[derive(Debug, Clone)]
 enum ProcessPathOp {
     Glob(Regex),
     Prefix(String),
@@ -100,6 +108,11 @@ struct InTypeMask {
     socks5: bool,
     tproxy: bool,
     inner: bool,
+}
+
+struct MatchInput<'a> {
+    metadata: &'a Metadata,
+    host: &'a str,
 }
 
 /// One borrowed result from a compiled rule-set match.
@@ -185,22 +198,22 @@ impl CompiledRuleSet {
         );
 
         let helper = RuleMatchHelper;
+        let input = MatchInput::new(metadata);
         if self.execution_plan == ExecutionPlan::LinearScan {
-            return self.scan_range(0..self.slots.len(), metadata, rules, &helper);
+            return self.scan_range(0..self.slots.len(), &input, rules, &helper);
         }
 
-        let host = metadata.rule_host();
-        let trie_hit = if host.is_empty() {
+        let trie_hit = if input.host.is_empty() {
             None
         } else {
-            self.domain_index.search(host)
+            self.domain_index.search(input.host)
         };
 
         // Preserve DomainIndex early-exit behavior:
         // if a trie hit occurs at T, scan only [0..T] for an earlier match,
         // then return T. On trie miss, scan the full rule list.
         let scan_end = trie_hit.unwrap_or(self.slots.len());
-        if let Some(matched) = self.scan_range(0..scan_end, metadata, rules, &helper) {
+        if let Some(matched) = self.scan_range(0..scan_end, &input, rules, &helper) {
             return Some(matched);
         }
 
@@ -208,7 +221,7 @@ impl CompiledRuleSet {
             return self.slots.get(trie_idx).map(|slot| self.static_match(slot));
         }
 
-        self.scan_range(scan_end..self.slots.len(), metadata, rules, &helper)
+        self.scan_range(scan_end..self.slots.len(), &input, rules, &helper)
     }
 
     pub fn domain_index(&self) -> &DomainIndex {
@@ -250,28 +263,32 @@ impl CompiledRuleSet {
     fn scan_range<'a>(
         &'a self,
         range: Range<usize>,
-        metadata: &Metadata,
+        input: &MatchInput<'_>,
         rules: &'a [Box<dyn Rule>],
         helper: &RuleMatchHelper,
     ) -> Option<CompiledMatchResult<'a>> {
         for slot in &self.slots[range] {
-            let rule = rules.get(slot.rule_index)?.as_ref();
             match &slot.op {
-                RuleOp::Fallback => match slot.target_plan {
-                    TargetPlan::StaticAdapter => {
-                        if rule.match_metadata(metadata, helper) {
-                            return Some(self.static_match(slot));
+                RuleOp::Fallback => {
+                    let rule = rules.get(slot.rule_index)?.as_ref();
+                    match slot.target_plan {
+                        TargetPlan::StaticAdapter => {
+                            if rule.match_metadata(input.metadata, helper) {
+                                return Some(self.static_match(slot));
+                            }
+                        }
+                        TargetPlan::DynamicAdapter => {
+                            if let Some(adapter_name) =
+                                rule.match_and_resolve(input.metadata, helper)
+                            {
+                                let adapter_index = self.adapter_lookup.get(adapter_name).copied();
+                                return Some(self.make_match(slot, adapter_name, adapter_index));
+                            }
                         }
                     }
-                    TargetPlan::DynamicAdapter => {
-                        if let Some(adapter_name) = rule.match_and_resolve(metadata, helper) {
-                            let adapter_index = self.adapter_lookup.get(adapter_name).copied();
-                            return Some(self.make_match(slot, adapter_name, adapter_index));
-                        }
-                    }
-                },
+                }
                 op => {
-                    if matches_op(op, metadata) {
+                    if matches_op(op, input) {
                         return Some(self.static_match(slot));
                     }
                 }
@@ -300,6 +317,15 @@ impl CompiledRuleSet {
             rule_type: slot.rule_type,
             rule_payload: slot.payload.as_str(),
             rule_index: slot.rule_index,
+        }
+    }
+}
+
+impl<'a> MatchInput<'a> {
+    fn new(metadata: &'a Metadata) -> Self {
+        Self {
+            metadata,
+            host: metadata.rule_host(),
         }
     }
 }
@@ -377,12 +403,8 @@ fn compile_op(rule_type: RuleType, payload: &str) -> Option<RuleOp> {
             .parse()
             .ok()
             .map(|net| RuleOp::IpCidr { net, src: true }),
-        RuleType::SrcPort => {
-            compile_ports(payload).map(|ranges| RuleOp::Port { ranges, src: true })
-        }
-        RuleType::DstPort => {
-            compile_ports(payload).map(|ranges| RuleOp::Port { ranges, src: false })
-        }
+        RuleType::SrcPort => compile_port_matcher(payload).map(RuleOp::SrcPort),
+        RuleType::DstPort => compile_port_matcher(payload).map(RuleOp::DstPort),
         RuleType::InPort => compile_in_port(payload),
         RuleType::Dscp => payload
             .trim()
@@ -411,44 +433,35 @@ fn compile_op(rule_type: RuleType, payload: &str) -> Option<RuleOp> {
     }
 }
 
-fn matches_op(op: &RuleOp, metadata: &Metadata) -> bool {
+fn matches_op(op: &RuleOp, input: &MatchInput<'_>) -> bool {
     match op {
-        RuleOp::Domain(domain) => metadata.rule_host().eq_ignore_ascii_case(domain),
-        RuleOp::DomainSuffix(suffix) => domain_suffix_matches(metadata.rule_host(), suffix),
-        RuleOp::DomainKeyword(keyword) => domain_keyword_matches(metadata.rule_host(), keyword),
-        RuleOp::DomainRegex(regex) | RuleOp::DomainWildcard(regex) => {
-            regex.is_match(metadata.rule_host())
-        }
+        RuleOp::Domain(domain) => input.host.eq_ignore_ascii_case(domain),
+        RuleOp::DomainSuffix(suffix) => domain_suffix_matches(input.host, suffix),
+        RuleOp::DomainKeyword(keyword) => domain_keyword_matches(input.host, keyword),
+        RuleOp::DomainRegex(regex) | RuleOp::DomainWildcard(regex) => regex.is_match(input.host),
         RuleOp::IpCidr { net, src } => {
             let ip = if *src {
-                metadata.src_ip
+                input.metadata.src_ip
             } else {
-                metadata.dst_ip
+                input.metadata.dst_ip
             };
             ip.is_some_and(|addr| net.contains(&addr))
         }
-        RuleOp::Port { ranges, src } => {
-            let port = if *src {
-                metadata.src_port
-            } else {
-                metadata.dst_port
-            };
-            ranges.iter().any(|range| match range {
-                PortRange::Single(p) => port == *p,
-                PortRange::Range(lo, hi) => port >= *lo && port <= *hi,
-            })
+        RuleOp::SrcPort(matcher) => matcher.matches(input.metadata.src_port),
+        RuleOp::DstPort(matcher) => matcher.matches(input.metadata.dst_port),
+        RuleOp::InPort(matcher) => {
+            input.metadata.in_port != 0 && matcher.matches(input.metadata.in_port)
         }
-        RuleOp::InPort { lo, hi } => {
-            metadata.in_port != 0 && metadata.in_port >= *lo && metadata.in_port <= *hi
+        RuleOp::Dscp(value) => input.metadata.dscp == Some(*value),
+        RuleOp::ProcessName(name) => input.metadata.process.eq_ignore_ascii_case(name),
+        RuleOp::ProcessPath(op) => process_path_matches(op, &input.metadata.process_path),
+        RuleOp::Network(network) => input.metadata.network == *network,
+        RuleOp::Uid(uid) => uid_matches(input.metadata, *uid),
+        RuleOp::InName(name) => {
+            !input.metadata.in_name.is_empty() && input.metadata.in_name.as_str() == name
         }
-        RuleOp::Dscp(value) => metadata.dscp == Some(*value),
-        RuleOp::ProcessName(name) => metadata.process.eq_ignore_ascii_case(name),
-        RuleOp::ProcessPath(op) => process_path_matches(op, &metadata.process_path),
-        RuleOp::Network(network) => metadata.network == *network,
-        RuleOp::Uid(uid) => uid_matches(metadata, *uid),
-        RuleOp::InName(name) => !metadata.in_name.is_empty() && metadata.in_name.as_str() == name,
-        RuleOp::InType(mask) => in_type_matches(*mask, metadata.conn_type),
-        RuleOp::InUser(user) => metadata.in_user.as_deref() == Some(user.as_str()),
+        RuleOp::InType(mask) => in_type_matches(*mask, input.metadata.conn_type),
+        RuleOp::InUser(user) => input.metadata.in_user.as_deref() == Some(user.as_str()),
         RuleOp::Match => true,
         RuleOp::Fallback => false,
     }
@@ -486,7 +499,26 @@ fn compile_domain_wildcard(pattern: &str) -> Option<Regex> {
     Regex::new(&format!("^(?i){expanded}$")).ok()
 }
 
-fn compile_ports(payload: &str) -> Option<Vec<PortRange>> {
+impl PortMatcher {
+    fn matches(&self, port: u16) -> bool {
+        match self {
+            Self::Single(value) => port == *value,
+            Self::Range(lo, hi) => port >= *lo && port <= *hi,
+            Self::Multiple(ranges) => ranges.iter().any(|range| range.matches(port)),
+        }
+    }
+}
+
+impl PortRange {
+    fn matches(&self, port: u16) -> bool {
+        match self {
+            Self::Single(value) => port == *value,
+            Self::Range(lo, hi) => port >= *lo && port <= *hi,
+        }
+    }
+}
+
+fn compile_port_matcher(payload: &str) -> Option<PortMatcher> {
     let mut ranges = Vec::new();
     for part in payload.split(',') {
         let part = part.trim();
@@ -499,22 +531,25 @@ fn compile_ports(payload: &str) -> Option<Vec<PortRange>> {
             ranges.push(PortRange::Single(part.parse().ok()?));
         }
     }
-    Some(ranges)
+    match ranges.as_slice() {
+        [PortRange::Single(value)] => Some(PortMatcher::Single(*value)),
+        [PortRange::Range(lo, hi)] => Some(PortMatcher::Range(*lo, *hi)),
+        _ => Some(PortMatcher::Multiple(ranges)),
+    }
 }
 
 fn compile_in_port(payload: &str) -> Option<RuleOp> {
-    let (lo, hi) = if let Some((lo, hi)) = payload.split_once('-') {
+    let matcher = if let Some((lo, hi)) = payload.split_once('-') {
         let lo: u16 = lo.trim().parse().ok()?;
         let hi: u16 = hi.trim().parse().ok()?;
         if lo > hi {
             return None;
         }
-        (lo, hi)
+        PortMatcher::Range(lo, hi)
     } else {
-        let p = payload.trim().parse().ok()?;
-        (p, p)
+        PortMatcher::Single(payload.trim().parse().ok()?)
     };
-    Some(RuleOp::InPort { lo, hi })
+    Some(RuleOp::InPort(matcher))
 }
 
 fn compile_network(payload: &str) -> Option<RuleOp> {

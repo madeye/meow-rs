@@ -213,7 +213,7 @@ slots:
     payload       = "443"
     adapter_index = 1  # "DIRECT"
     target_plan   = StaticAdapter
-    op            = RuleOp::Port { ranges: [Single(443)], src: false }
+    op            = RuleOp::DstPort(PortMatcher::Single(443))
 
   2:
     rule_index    = 2
@@ -235,7 +235,7 @@ Execution for `host = "other.test", dst_port = 443`:
 
 ```text
 scan slot 0 -> no match
-scan slot 1 -> RuleOp::Port matches
+scan slot 1 -> RuleOp::DstPort matches
 return adapter_names[1], DST-PORT, "443", rule_index 1
 ```
 
@@ -260,7 +260,7 @@ Compiled rule set:
 execution_plan = DomainIndexed
 domain_index   = { "example.com" => 75, ... }
 
-slots[0].op   = RuleOp::Port { ranges: [Single(443)], src: false }
+slots[0].op   = RuleOp::DstPort(PortMatcher::Single(443))
 slots[1].op   = RuleOp::Fallback  # GEOSITE owns private geosite state
 slots[75].op  = RuleOp::DomainSuffix("example.com")
 slots[100].op = RuleOp::Match
@@ -424,7 +424,10 @@ For each source rule, the compiler:
 3. Chooses `TargetPlan::StaticAdapter` for normal rules or
    `TargetPlan::DynamicAdapter` for rules such as `SUB-RULE`.
 4. Attempts to lower the rule into a native `RuleOp`.
-5. Uses `RuleOp::Fallback` when lowering would be incomplete or unsafe.
+5. Specializes lowered opcodes when a narrower form is available. For example,
+   `DST-PORT,443` becomes `RuleOp::DstPort(PortMatcher::Single(443))` instead
+   of a generic port-range loop.
+6. Uses `RuleOp::Fallback` when lowering would be incomplete or unsafe.
 
 Then the compiler selects the top-level execution plan:
 
@@ -444,8 +447,14 @@ unbounded ordered scans.
 
 ### Match Time
 
-At runtime, `CompiledRuleSet::match_rules(metadata, rules)` executes the
-compiled plan without rebuilding or mutating anything.
+At runtime, `CompiledRuleSet::match_rules(metadata, rules)` creates one
+`MatchInput` view for the request and executes the compiled plan without
+rebuilding or mutating anything.
+
+`MatchInput` caches request fields that many opcodes need, starting with
+`metadata.rule_host()`. Lowered domain opcodes and the domain-index probe share
+that borrowed host view instead of repeatedly asking `Metadata` for the rule
+host.
 
 For `LinearScan`, the hot path is:
 
@@ -454,8 +463,10 @@ for slot in slots:
     if slot.op is lowered:
         evaluate RuleOp directly against Metadata
     else if slot.target_plan is StaticAdapter:
+        load rules[slot.rule_index]
         call rules[slot.rule_index].match_metadata(...)
     else:
+        load rules[slot.rule_index]
         call rules[slot.rule_index].match_and_resolve(...)
 
     if matched:
@@ -465,7 +476,7 @@ for slot in slots:
 For `DomainIndexed`, the hot path is:
 
 ```text
-host = metadata.rule_host()
+host = input.host
 T = domain_index.search(host)
 
 if T exists:
@@ -487,6 +498,11 @@ The IR removes repeated hot-path work that was previously paid through dynamic
   `rule.adapter()`.
 - Rule type and payload are copied once at compile time instead of fetched for
   every successful match.
+- `MatchInput` computes common request views once per match call.
+- Lowered slots do not load from the source `rules` slice at all; source-rule
+  lookup is deferred until a fallback slot needs it.
+- Specialized port matchers avoid a range loop for single-port and single-range
+  rules.
 - Small rule sets avoid domain-trie probe overhead entirely.
 - Large rule sets can still use domain-index early exit before falling back to
   ordered slot scans.
@@ -522,7 +538,7 @@ For `LinearScan`, execution is:
 
 For `DomainIndexed`, execution is:
 
-1. Read `metadata.rule_host()`.
+1. Read the request host from `MatchInput`.
 2. If the host is non-empty, probe the embedded `DomainIndex`.
 3. If the trie returns a domain hit at index `T`, scan slots `[0, T)` in order.
    This is required because an earlier non-domain rule, or a broader domain
