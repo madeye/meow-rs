@@ -195,3 +195,26 @@ cargo bench -p meow-tunnel --bench rules_bench -- --noplot --sample-size 10 --me
 The fixture is intentionally smaller than synthetic 10k-rule stress tests. It
 measures real rule mix overhead and fallback behavior, while synthetic large-rule
 benches remain useful for worst-case scan pressure.
+
+## Memory Footprint Coverage
+
+`crates/meow-tunnel/tests/rule_ir_footprint.rs` is an opt-in measurement test for
+the same fixture. It installs a counting allocator for that integration-test
+binary, resets counters around each measured phase, and prints:
+
+- retained heap delta for fixture rule parsing
+- retained heap delta for the legacy `DomainIndex`
+- retained heap delta for `CompiledRuleSet`
+- allocation counts for linear, indexed, and IR hot loops
+- coarse RSS snapshots before/after each build phase
+
+Use:
+
+```bash
+cargo test -p meow-tunnel --test rule_ir_footprint --release -- --ignored --nocapture
+```
+
+RSS is page-granular and includes loaded geodata, runtime state, and allocator
+behavior. The counting allocator rows are the authoritative per-component signal
+for the rule IR itself. The hot-loop allocation rows should remain zero for all
+matchers.
