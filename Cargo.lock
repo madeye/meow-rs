@@ -2320,6 +2320,7 @@ dependencies = [
  "parking_lot",
  "regex",
  "serde",
+ "serde_yaml",
  "smallvec",
  "smol_str",
  "tokio",

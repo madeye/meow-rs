@@ -40,6 +40,7 @@ dashmap = { workspace = true }
 ipnet = { workspace = true }
 meow-config = { workspace = true }
 meow-rules = { workspace = true }
+serde_yaml = { workspace = true }
 
 [lints]
 workspace = true
