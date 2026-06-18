@@ -407,6 +407,96 @@ This is the main compiler-style optimization in the current IR: pick a cheap
 straight-line plan for small rule programs, and pay indexing overhead only when
 the rule set is large enough to amortize it.
 
+## How IR Optimization Works
+
+The rule matcher optimization has two phases: compile time and match time.
+
+### Compile Time
+
+`CompiledRuleSet::build(rules)` walks the source rule list once and produces a
+compact ordered slot sequence.
+
+For each source rule, the compiler:
+
+1. Copies stable result metadata into the slot: rule index, rule type, payload,
+   and top-level adapter index.
+2. Interns static adapter names in `adapter_names`.
+3. Chooses `TargetPlan::StaticAdapter` for normal rules or
+   `TargetPlan::DynamicAdapter` for rules such as `SUB-RULE`.
+4. Attempts to lower the rule into a native `RuleOp`.
+5. Uses `RuleOp::Fallback` when lowering would be incomplete or unsafe.
+
+Then the compiler selects the top-level execution plan:
+
+```text
+if rules.len() <= 64:
+    execution_plan = LinearScan
+    domain_index = empty
+else:
+    execution_plan = DomainIndexed
+    domain_index = DomainIndex::build(rules)
+```
+
+The threshold is deliberately simple. The fixture benchmark showed that small
+configs can lose more time to domain-trie probing than they save. The 10k-rule
+benchmark showed that large configs still need an index-backed plan to avoid
+unbounded ordered scans.
+
+### Match Time
+
+At runtime, `CompiledRuleSet::match_rules(metadata, rules)` executes the
+compiled plan without rebuilding or mutating anything.
+
+For `LinearScan`, the hot path is:
+
+```text
+for slot in slots:
+    if slot.op is lowered:
+        evaluate RuleOp directly against Metadata
+    else if slot.target_plan is StaticAdapter:
+        call rules[slot.rule_index].match_metadata(...)
+    else:
+        call rules[slot.rule_index].match_and_resolve(...)
+
+    if matched:
+        return cached or dynamic CompiledMatchResult
+```
+
+For `DomainIndexed`, the hot path is:
+
+```text
+host = metadata.rule_host()
+T = domain_index.search(host)
+
+if T exists:
+    scan slots [0, T)
+    if prefix matched:
+        return prefix match
+    return cached static result for slots[T]
+
+scan full slot range
+```
+
+### What Gets Faster
+
+The IR removes repeated hot-path work that was previously paid through dynamic
+`Rule` trait calls:
+
+- Lowered predicates avoid virtual `match_metadata()` dispatch.
+- Static matches return interned adapter names instead of calling
+  `rule.adapter()`.
+- Rule type and payload are copied once at compile time instead of fetched for
+  every successful match.
+- Small rule sets avoid domain-trie probe overhead entirely.
+- Large rule sets can still use domain-index early exit before falling back to
+  ordered slot scans.
+
+### What Does Not Change
+
+The optimizer cannot reorder rules, pre-resolve DNS, inspect proxies, or skip
+fallback rules whose private state may affect the result. Every optimization is
+constrained by source-order first-match semantics.
+
 ## Adapter Resolution
 
 Most rules have a static top-level adapter. For those, a successful match returns
