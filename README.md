@@ -39,13 +39,10 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 | DST-PORT | `DST-PORT,80,443,8080,Proxy` | Destination port(s) |
 | SRC-PORT | `SRC-PORT,1234,DIRECT` | Source port(s) |
 | NETWORK | `NETWORK,udp,Proxy` | TCP or UDP |
-| PROCESS-NAME | `PROCESS-NAME,curl,DIRECT` | Process name |
-| PROCESS-PATH | `PROCESS-PATH,/usr/bin/curl,DIRECT` | Process path |
 | GEOIP | `GEOIP,CN,DIRECT,no-resolve` | MaxMind GeoIP lookup |
 | SRC-GEOIP | `SRC-GEOIP,CN,DIRECT` | Source GeoIP lookup |
 | DSCP | `DSCP,46,Proxy` | IP DSCP field |
 | IN-PORT | `IN-PORT,7890,Proxy` | Inbound listener port |
-| UID | `UID,1000,DIRECT` | Process UID (Linux) |
 | MATCH | `MATCH,Proxy` | Catch-all fallback |
 
 Logic composition rules (AND, OR, NOT) are also supported for combining conditions.

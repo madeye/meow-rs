@@ -112,8 +112,5 @@ rules:
   # Network
   - NETWORK,udp,DIRECT
 
-  # Process
-  - PROCESS-NAME,curl,DIRECT
-
   # Final fallback
   - MATCH,Proxy

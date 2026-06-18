@@ -17,10 +17,7 @@ pub enum RuleType {
     DstPort,
     InPort,
     Dscp,
-    ProcessName,
-    ProcessPath,
     Network,
-    Uid,
     Match,
     RuleSet,
     And,
@@ -51,10 +48,7 @@ impl RuleType {
             RuleType::DstPort => "DST-PORT",
             RuleType::InPort => "IN-PORT",
             RuleType::Dscp => "DSCP",
-            RuleType::ProcessName => "PROCESS-NAME",
-            RuleType::ProcessPath => "PROCESS-PATH",
             RuleType::Network => "NETWORK",
-            RuleType::Uid => "UID",
             RuleType::Match => "MATCH",
             RuleType::RuleSet => "RULE-SET",
             RuleType::And => "AND",
@@ -87,10 +81,7 @@ impl fmt::Display for RuleType {
             RuleType::DstPort => write!(f, "DST-PORT"),
             RuleType::InPort => write!(f, "IN-PORT"),
             RuleType::Dscp => write!(f, "DSCP"),
-            RuleType::ProcessName => write!(f, "PROCESS-NAME"),
-            RuleType::ProcessPath => write!(f, "PROCESS-PATH"),
             RuleType::Network => write!(f, "NETWORK"),
-            RuleType::Uid => write!(f, "UID"),
             RuleType::Match => write!(f, "MATCH"),
             RuleType::RuleSet => write!(f, "RULE-SET"),
             RuleType::And => write!(f, "AND"),
@@ -107,13 +98,9 @@ impl fmt::Display for RuleType {
     }
 }
 
-/// Helper passed to `Rule::match_metadata`. Historically this carried a
-/// platform-specific `find_process` closure, but process lookup is now
-/// performed once per dispatch in the tunnel match engine (which populates
-/// `Metadata.process` / `process_path` / `uid` before rule iteration). The
-/// struct is kept as an empty marker so the `Rule` trait signature can grow
-/// future per-match context (e.g. shared regex cache) without touching every
-/// call site again.
+/// Helper passed to `Rule::match_metadata`. Currently an empty marker, kept so
+/// the `Rule` trait signature can grow future per-match context (e.g. a shared
+/// regex cache) without touching every call site again.
 #[derive(Default)]
 pub struct RuleMatchHelper;
 
@@ -123,9 +110,6 @@ pub trait Rule: Send + Sync {
     fn adapter(&self) -> &str;
     fn payload(&self) -> &str;
     fn should_resolve_ip(&self) -> bool {
-        false
-    }
-    fn should_find_process(&self) -> bool {
         false
     }
 

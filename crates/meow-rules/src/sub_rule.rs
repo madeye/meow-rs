@@ -92,10 +92,6 @@ impl Rule for SubRuleRule {
         self.block.iter().any(|r| r.should_resolve_ip())
     }
 
-    fn should_find_process(&self) -> bool {
-        self.block.iter().any(|r| r.should_find_process())
-    }
-
     fn match_and_resolve<'a>(
         &'a self,
         metadata: &Metadata,

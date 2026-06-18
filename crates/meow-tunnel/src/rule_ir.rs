@@ -5,7 +5,6 @@ use regex::Regex;
 use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::Path;
 
 /// Below this size, trie probing costs more than it saves for common configs
 /// with early matches. Compile small configs to straight-line ordered IR scan.
@@ -25,7 +24,6 @@ pub struct CompiledRuleSet {
     domain_index: DomainIndex,
     execution_plan: ExecutionPlan,
     needs_ip_resolution: bool,
-    needs_process_lookup: bool,
 }
 
 pub type RuleIr = CompiledRuleSet;
@@ -70,10 +68,7 @@ enum RuleOp {
     DstPort(PortMatcher),
     InPort(PortMatcher),
     Dscp(u8),
-    ProcessName(String),
-    ProcessPath(ProcessPathOp),
     Network(Network),
-    Uid(u32),
     InName(String),
     InType(InTypeMask),
     InUser(String),
@@ -98,13 +93,6 @@ enum PortMatcher {
 struct RegexMatcher {
     regex: Regex,
     required_literal: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-enum ProcessPathOp {
-    Glob(Box<Regex>),
-    Prefix(String),
-    Exact(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -139,7 +127,6 @@ impl CompiledRuleSet {
             domain_index: DomainIndex::empty(),
             execution_plan: ExecutionPlan::LinearScan,
             needs_ip_resolution: false,
-            needs_process_lookup: false,
         }
     }
 
@@ -148,7 +135,6 @@ impl CompiledRuleSet {
         let mut adapter_names = Vec::new();
         let mut adapter_lookup = HashMap::new();
         let mut needs_ip_resolution = false;
-        let mut needs_process_lookup = false;
 
         for (rule_index, rule) in rules.iter().enumerate() {
             let rule_type = rule.rule_type();
@@ -157,7 +143,6 @@ impl CompiledRuleSet {
                 intern_adapter(&mut adapter_names, &mut adapter_lookup, adapter_name);
 
             needs_ip_resolution |= rule.should_resolve_ip();
-            needs_process_lookup |= rule.should_find_process();
 
             slots.push(CompiledRuleSlot {
                 rule_index,
@@ -182,7 +167,6 @@ impl CompiledRuleSet {
             domain_index,
             execution_plan,
             needs_ip_resolution,
-            needs_process_lookup,
         }
     }
 
@@ -244,10 +228,6 @@ impl CompiledRuleSet {
 
     pub fn needs_ip_resolution(&self) -> bool {
         self.needs_ip_resolution
-    }
-
-    pub fn needs_process_lookup(&self) -> bool {
-        self.needs_process_lookup
     }
 
     pub fn len(&self) -> usize {
@@ -418,10 +398,7 @@ fn compile_op(rule_type: RuleType, payload: &str) -> Option<RuleOp> {
             .ok()
             .filter(|v| *v <= 63)
             .map(RuleOp::Dscp),
-        RuleType::ProcessName => Some(RuleOp::ProcessName(payload.to_string())),
-        RuleType::ProcessPath => compile_process_path(payload).map(RuleOp::ProcessPath),
         RuleType::Network => compile_network(payload),
-        RuleType::Uid => payload.trim().parse::<u32>().ok().map(RuleOp::Uid),
         RuleType::InName => Some(RuleOp::InName(payload.to_string())),
         RuleType::InType => compile_in_type(payload).map(RuleOp::InType),
         RuleType::InUser => Some(RuleOp::InUser(payload.to_string())),
@@ -460,10 +437,7 @@ fn matches_op(op: &RuleOp, input: &MatchInput<'_>) -> bool {
             input.metadata.in_port != 0 && matcher.matches(input.metadata.in_port)
         }
         RuleOp::Dscp(value) => input.metadata.dscp == Some(*value),
-        RuleOp::ProcessName(name) => input.metadata.process.eq_ignore_ascii_case(name),
-        RuleOp::ProcessPath(op) => process_path_matches(op, &input.metadata.process_path),
         RuleOp::Network(network) => input.metadata.network == *network,
-        RuleOp::Uid(uid) => uid_matches(input.metadata, *uid),
         RuleOp::InName(name) => {
             !input.metadata.in_name.is_empty() && input.metadata.in_name.as_str() == name
         }
@@ -779,57 +753,6 @@ fn in_type_matches(mask: InTypeMask, conn_type: ConnType) -> bool {
         ConnType::TProxy => mask.tproxy,
         ConnType::Inner => mask.inner,
         _ => false,
-    }
-}
-
-fn compile_process_path(payload: &str) -> Option<ProcessPathOp> {
-    if payload.contains('*') {
-        let escaped = regex::escape(payload);
-        let pattern = escaped.replace(r"\*", r"[^/\\]*");
-        Regex::new(&format!("^(?i){pattern}$"))
-            .ok()
-            .map(Box::new)
-            .map(ProcessPathOp::Glob)
-    } else if payload.starts_with('/') || payload.starts_with('\\') {
-        Some(ProcessPathOp::Prefix(payload.to_string()))
-    } else {
-        Some(ProcessPathOp::Exact(payload.to_string()))
-    }
-}
-
-fn process_path_matches(op: &ProcessPathOp, process_path: &str) -> bool {
-    if process_path.is_empty() {
-        return false;
-    }
-    match op {
-        ProcessPathOp::Glob(regex) => regex.is_match(process_path),
-        ProcessPathOp::Prefix(prefix) => {
-            if process_path == prefix {
-                return true;
-            }
-            process_path
-                .strip_prefix(prefix)
-                .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
-        }
-        ProcessPathOp::Exact(exact) => {
-            let filename = Path::new(process_path)
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or(process_path);
-            filename == exact
-        }
-    }
-}
-
-fn uid_matches(metadata: &Metadata, uid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        metadata.uid == Some(uid)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (metadata, uid);
-        false
     }
 }
 

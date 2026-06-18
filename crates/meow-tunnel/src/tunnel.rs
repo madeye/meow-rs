@@ -1,4 +1,4 @@
-use crate::match_engine::{self, DomainIndex};
+use crate::match_engine::DomainIndex;
 use crate::rule_ir::CompiledRuleSet;
 use crate::statistics::Statistics;
 use crate::udp::{self, NatTable};
@@ -55,10 +55,6 @@ pub struct TunnelInner {
     /// Cached: true if any rule needs the dst_ip resolved (GeoIP / IP-CIDR).
     /// Recomputed by `Tunnel::update_rules`.
     pub needs_ip_resolution: AtomicBool,
-    /// Cached: true if any rule needs process-name enrichment (PROCESS-NAME /
-    /// PROCESS-PATH / UID). Recomputed by `Tunnel::update_rules`. Avoids an
-    /// O(n) virtual-dispatch scan of the rule list on every connection.
-    pub needs_process_lookup: AtomicBool,
 }
 
 impl TunnelInner {
@@ -156,16 +152,9 @@ impl TunnelInner {
                 // One ArcSwap load — rules + index + proxies all read from a
                 // consistent snapshot. Replaces three RwLock acquisitions.
                 let route = self.route.load();
-                let needs_proc = self.needs_process_lookup.load(Ordering::Relaxed);
-                let enriched = if needs_proc {
-                    match_engine::maybe_enrich_with_process(metadata)
-                } else {
-                    None
-                };
-                let match_metadata = enriched.as_ref().unwrap_or(metadata);
                 let result = route
                     .compiled_rules
-                    .match_rules(match_metadata, route.rules.as_ref());
+                    .match_rules(metadata, route.rules.as_ref());
                 match result {
                     Some(m) => {
                         let action = if m.adapter_name == "DIRECT" {
@@ -223,7 +212,6 @@ impl Tunnel {
                 nat_table: udp::new_nat_table(),
                 stats: Arc::new(Statistics::new()),
                 needs_ip_resolution: AtomicBool::new(false),
-                needs_process_lookup: AtomicBool::new(false),
             }),
         }
     }
@@ -243,7 +231,6 @@ impl Tunnel {
 
     pub fn update_rules(&self, rules: Vec<Box<dyn Rule>>) {
         let needs_ip = rules.iter().any(|r| r.should_resolve_ip());
-        let needs_proc = rules.iter().any(|r| r.should_find_process());
         let new_index = DomainIndex::build(&rules);
         let compiled_rules = CompiledRuleSet::build(&rules);
         // Build a new route table on top of the current proxies map. The
@@ -260,13 +247,7 @@ impl Tunnel {
         self.inner
             .needs_ip_resolution
             .store(needs_ip, Ordering::Relaxed);
-        self.inner
-            .needs_process_lookup
-            .store(needs_proc, Ordering::Relaxed);
-        info!(
-            "Rules updated (needs_ip_resolution={}, needs_process_lookup={})",
-            needs_ip, needs_proc
-        );
+        info!("Rules updated (needs_ip_resolution={})", needs_ip);
     }
 
     pub fn update_proxies(&self, proxies: HashMap<SmolStr, Arc<dyn Proxy>>) {

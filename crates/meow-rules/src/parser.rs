@@ -24,10 +24,7 @@ use crate::ipcidr::IpCidrRule;
 use crate::logic::{AndRule, NotRule, OrRule};
 use crate::network::NetworkRule;
 use crate::port::PortRule;
-use crate::process::ProcessRule;
-use crate::process_path::ProcessPathRule;
 use crate::src_geoip::SrcGeoIpRule;
-use crate::uid::UidRule;
 
 /// Shared context for `parse_rule` — carries resources that context-requiring
 /// rule types (GEOIP, SRC-GEOIP, IP-ASN, GEOSITE) need in order to build
@@ -150,7 +147,6 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
         "SRC-PORT" => PortRule::new(payload, adapter, true).map(|r| Box::new(r) as Box<dyn Rule>),
         "DST-PORT" => PortRule::new(payload, adapter, false).map(|r| Box::new(r) as Box<dyn Rule>),
         "NETWORK" => NetworkRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
-        "PROCESS-NAME" => Ok(Box::new(ProcessRule::new(payload, adapter))),
         "GEOIP" => {
             let index = ctx.geoip.as_ref().ok_or_else(|| {
                 "GEOIP rule requires a GeoIP database, but none is configured".to_string()
@@ -189,10 +185,6 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
         "IN-TYPE" => InTypeRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "IN-USER" => InUserRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
         "DSCP" => DscpRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
-        "UID" => UidRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>),
-        "PROCESS-PATH" => {
-            ProcessPathRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>)
-        }
         "DOMAIN-WILDCARD" => {
             DomainWildcardRule::new(payload, adapter).map(|r| Box::new(r) as Box<dyn Rule>)
         }

@@ -10,7 +10,6 @@ use meow_rules::ipcidr::IpCidrRule;
 use meow_rules::logic::{AndRule, NotRule, OrRule};
 use meow_rules::network::NetworkRule;
 use meow_rules::port::PortRule;
-use meow_rules::process::ProcessRule;
 use meow_rules::{parse_rule as parse_rule_raw, ParserContext};
 
 /// Shim matching the pre-`ParserContext` single-argument shape so the bulk
@@ -345,38 +344,6 @@ fn network_invalid() {
     assert!(NetworkRule::new("icmp", "Proxy").is_err());
 }
 
-// ─── PROCESS-NAME ───────────────────────────────────────────────────
-
-#[test]
-fn process_match() {
-    let r = ProcessRule::new("chrome", "Proxy");
-    let mut m = meta("", 443);
-    m.process = "chrome".into();
-    assert!(r.match_metadata(&m, &helper()));
-}
-
-#[test]
-fn process_case_insensitive() {
-    let r = ProcessRule::new("Chrome", "Proxy");
-    let mut m = meta("", 443);
-    m.process = "chrome".into();
-    assert!(r.match_metadata(&m, &helper()));
-}
-
-#[test]
-fn process_no_match() {
-    let r = ProcessRule::new("chrome", "Proxy");
-    let mut m = meta("", 443);
-    m.process = "firefox".into();
-    assert!(!r.match_metadata(&m, &helper()));
-}
-
-#[test]
-fn process_should_find() {
-    let r = ProcessRule::new("chrome", "Proxy");
-    assert!(r.should_find_process());
-}
-
 // ─── MATCH (FinalRule) ──────────────────────────────────────────────
 
 #[test]
@@ -606,15 +573,6 @@ fn parse_network() {
 }
 
 #[test]
-fn parse_process_name() {
-    let r = parse_rule("PROCESS-NAME,firefox,Proxy").unwrap();
-    assert_eq!(r.rule_type(), RuleType::ProcessName);
-    let mut m = meta("", 80);
-    m.process = "firefox".into();
-    assert!(r.match_metadata(&m, &helper()));
-}
-
-#[test]
 fn parse_match() {
     let r = parse_rule("MATCH,DIRECT").unwrap();
     assert_eq!(r.rule_type(), RuleType::Match);
@@ -783,26 +741,6 @@ fn parse_dscp_none_never_matches() {
     assert!(!r.match_metadata(&m, &helper()));
 }
 
-// ─── UID (M1.D-1) ──────────────────────────────────────────────────
-
-#[test]
-fn parse_uid_succeeds_cross_platform() {
-    // upstream: rules/common/uid.go — UID rules are Linux-only at match time
-    // but parse must succeed on every platform (Class B per ADR-0002).
-    let r = parse_rule("UID,1000,DIRECT").unwrap();
-    assert_eq!(r.rule_type(), RuleType::Uid);
-}
-
-#[test]
-fn parse_uid_none_metadata_never_matches() {
-    let r = parse_rule("UID,1000,DIRECT").unwrap();
-    let m = Metadata {
-        uid: None,
-        ..Default::default()
-    };
-    assert!(!r.match_metadata(&m, &helper()));
-}
-
 // ─── SRC-GEOIP (M1.D-1) — fixture-DB-backed, skipped without reader ─
 
 #[test]
@@ -810,32 +748,6 @@ fn parse_src_geoip_missing_reader_errors() {
     // Class A per ADR-0002 — upstream: rules/common/geoip.go (isSource path).
     // NOT a silent pass-through when reader absent.
     assert!(parse_rule("SRC-GEOIP,AU,PROXY").is_err());
-}
-
-// ─── PROCESS-PATH (M1.D-1) ─────────────────────────────────────────
-
-#[test]
-fn parse_process_path_prefix_match() {
-    // Divergence from upstream exact-match (Class B per ADR-0002).
-    // upstream: rules/common/process.go — exact match only.
-    // NOT exact-only in our impl.
-    let r = parse_rule("PROCESS-PATH,/usr/bin,PROXY").unwrap();
-    assert_eq!(r.rule_type(), RuleType::ProcessPath);
-    let m = Metadata {
-        process_path: "/usr/bin/curl".into(),
-        ..Default::default()
-    };
-    assert!(r.match_metadata(&m, &helper()));
-}
-
-#[test]
-fn parse_process_path_different_dir_no_match() {
-    let r = parse_rule("PROCESS-PATH,/usr/bin,PROXY").unwrap();
-    let m = Metadata {
-        process_path: "/usr/local/bin/curl".into(),
-        ..Default::default()
-    };
-    assert!(!r.match_metadata(&m, &helper()));
 }
 
 // ─── DOMAIN-WILDCARD (M1.D-6) ──────────────────────────────────────
