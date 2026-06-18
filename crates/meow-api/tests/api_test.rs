@@ -1983,6 +1983,49 @@ async fn e1_group_delay_dials_all_members_concurrently() {
 }
 
 #[tokio::test]
+async fn e1b_group_delay_limits_large_group_inflight_probes() {
+    // 17 members with the production group limit of 16. The first 16 may
+    // start immediately, but the final member must wait for an earlier probe
+    // to finish instead of creating an unbounded burst.
+    let mut starts_vec = Vec::new();
+    let mut members: Vec<Arc<dyn meow_common::Proxy>> = Vec::new();
+    let mut named: Vec<(&str, Arc<dyn meow_common::Proxy>)> = Vec::new();
+    let names: Vec<String> = (0..17).map(|i| format!("P{i:02}")).collect();
+
+    for name in &names {
+        let adapter = TestAdapter::new(
+            name,
+            DialBehavior::SleepThenOk(std::time::Duration::from_millis(120)),
+        );
+        starts_vec.push(Arc::clone(&adapter.dial_starts));
+        let p = adapter.into_proxy();
+        members.push(Arc::clone(&p));
+        named.push((name.as_str(), p));
+    }
+
+    let group = fallback_group("G", members);
+    named.push(("G", group));
+    let state = state_with_proxies(named);
+    let app = create_router(state);
+    let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut first_starts: Vec<std::time::Instant> = starts_vec
+        .iter()
+        .map(|s| *s.lock().unwrap().first().expect("each member dialed once"))
+        .collect();
+    first_starts.sort();
+    let spread = first_starts
+        .last()
+        .unwrap()
+        .duration_since(*first_starts.first().unwrap());
+    assert!(
+        spread >= std::time::Duration::from_millis(80),
+        "17th dial should wait behind the 16-probe group limit, spread was {spread:?}"
+    );
+}
+
+#[tokio::test]
 async fn e2_group_delay_total_walltime_bounded_by_timeout() {
     // 3 instant-ok members with a generous budget; total wall time should
     // be well under 100ms. Guards against accidental serial dispatch (which

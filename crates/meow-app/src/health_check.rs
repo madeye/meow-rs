@@ -64,21 +64,17 @@ async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
             .collect();
         drop(route);
 
-        let url = spec.url.clone();
-        let mut set: tokio::task::JoinSet<(String, u16)> = tokio::task::JoinSet::new();
-        for (name, proxy) in members {
-            let url = url.clone();
-            set.spawn(async move {
-                let delay = meow_proxy::health::probe_and_record(&proxy, &url, None, PROBE_TIMEOUT)
-                    .await
-                    .unwrap_or(0);
-                (name, delay)
-            });
-        }
-
         let mut alive_count = 0u32;
         let mut total_count = 0u32;
-        while let Some(Ok((name, delay))) = set.join_next().await {
+        for (name, delay) in meow_proxy::health::probe_many_bounded(
+            members,
+            &spec.url,
+            None,
+            PROBE_TIMEOUT,
+            meow_proxy::health::PROVIDER_HEALTHCHECK_CONCURRENCY,
+        )
+        .await
+        {
             total_count += 1;
             if delay > 0 {
                 alive_count += 1;

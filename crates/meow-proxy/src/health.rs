@@ -1,11 +1,24 @@
+use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use meow_common::{Proxy, ProxyAdapter};
 use smol_str::SmolStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tracing::{debug, trace, warn};
 
 pub use meow_common::ProxyHealth;
+
+pub const GROUP_DELAY_CONCURRENCY: usize = 16;
+pub const PROVIDER_HEALTHCHECK_CONCURRENCY: usize = 10;
+pub const GLOBAL_DELAY_PROBE_CONCURRENCY: usize = 32;
+
+#[derive(Debug)]
+pub struct NamedProbeResult {
+    pub name: String,
+    pub delay: u16,
+    pub error: Option<UrlTestError>,
+}
 
 /// Outcome of a single [`url_test`] probe. Callers distinguish transport
 /// failure from deadline expiry to pick the right HTTP status code
@@ -81,6 +94,10 @@ pub async fn probe_and_record(
     expected: Option<&str>,
     timeout: Duration,
 ) -> Result<u16, UrlTestError> {
+    let _permit = global_delay_probe_limiter()
+        .acquire()
+        .await
+        .expect("global delay probe semaphore is never closed");
     let adapter: &dyn ProxyAdapter = proxy.as_ref();
     let result = url_test(adapter, url, expected, timeout).await;
     match &result {
@@ -88,6 +105,92 @@ pub async fn probe_and_record(
         Err(_) => proxy.health().record_delay(0),
     }
     result
+}
+
+pub async fn probe_many_bounded(
+    probes: Vec<(String, Arc<dyn Proxy + 'static>)>,
+    url: &str,
+    expected: Option<&str>,
+    timeout: Duration,
+    concurrency: usize,
+) -> Vec<(String, u16)> {
+    probe_many_bounded_detailed(probes, url, expected, timeout, concurrency)
+        .await
+        .into_iter()
+        .map(|result| (result.name, result.delay))
+        .collect()
+}
+
+pub async fn probe_many_bounded_detailed(
+    probes: Vec<(String, Arc<dyn Proxy + 'static>)>,
+    url: &str,
+    expected: Option<&str>,
+    timeout: Duration,
+    concurrency: usize,
+) -> Vec<NamedProbeResult> {
+    let url = Arc::<str>::from(url.to_owned());
+    let expected = expected.map(|s| Arc::<str>::from(s.to_owned()));
+    let concurrency = concurrency.max(1);
+
+    let mut probes = probes.into_iter();
+    let mut pending = FuturesUnordered::new();
+    for _ in 0..concurrency {
+        let Some((name, proxy)) = probes.next() else {
+            break;
+        };
+        pending.push(named_probe_future(
+            name,
+            proxy,
+            Arc::clone(&url),
+            expected.clone(),
+            timeout,
+        ));
+    }
+
+    let mut results = Vec::new();
+    while let Some(result) = pending.next().await {
+        results.push(result);
+        if let Some((name, proxy)) = probes.next() {
+            pending.push(named_probe_future(
+                name,
+                proxy,
+                Arc::clone(&url),
+                expected.clone(),
+                timeout,
+            ));
+        }
+    }
+
+    results
+}
+
+fn named_probe_future(
+    name: String,
+    proxy: Arc<dyn Proxy + 'static>,
+    url: Arc<str>,
+    expected: Option<Arc<str>>,
+    timeout: Duration,
+) -> BoxFuture<'static, NamedProbeResult> {
+    async move {
+        match probe_and_record(&proxy, url.as_ref(), expected.as_deref(), timeout).await {
+            Ok(delay) => NamedProbeResult {
+                name,
+                delay,
+                error: None,
+            },
+            Err(error) => NamedProbeResult {
+                name,
+                delay: 0,
+                error: Some(error),
+            },
+        }
+    }
+    .boxed()
+}
+
+fn global_delay_probe_limiter() -> &'static Semaphore {
+    static LIMITER: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
+    LIMITER.get_or_init(|| Semaphore::new(GLOBAL_DELAY_PROBE_CONCURRENCY))
 }
 
 async fn probe_once(

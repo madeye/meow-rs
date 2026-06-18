@@ -22,7 +22,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use tokio::task::JoinSet;
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info};
 
@@ -1096,40 +1095,32 @@ async fn get_group_delay(
         .collect();
     drop(route);
 
-    let url_shared = Arc::new(url);
-    let expected_shared = Arc::new(expected);
-    let mut set: JoinSet<(String, u16)> = JoinSet::new();
-    for (member_name, proxy) in members {
-        let url = Arc::clone(&url_shared);
-        let expected = Arc::clone(&expected_shared);
-        set.spawn(async move {
-            // Per-member errors collapse to 0 in the map — upstream uses the
-            // same sentinel for both timeout and transport-error inside the
-            // group result body.
-            let delay = probe_and_record(&proxy, &url, expected.as_deref(), timeout)
-                .await
-                .unwrap_or(0);
-            (member_name, delay)
-        });
-    }
-
-    // upstream: group probe wraps the whole JoinSet in one context.WithTimeout,
+    // upstream: group probe wraps the whole batch in one context.WithTimeout,
     // not per-member. A slow member does not get its own budget.
-    let mut result: BTreeMap<String, u16> = BTreeMap::new();
-    let collected = tokio::time::timeout(timeout, async {
-        while let Some(join) = set.join_next().await {
-            if let Ok((member_name, delay)) = join {
-                result.insert(member_name, delay);
-            }
-        }
-    })
+    let collected = tokio::time::timeout(
+        timeout,
+        meow_proxy::health::probe_many_bounded_detailed(
+            members,
+            &url,
+            expected.as_deref(),
+            timeout,
+            meow_proxy::health::GROUP_DELAY_CONCURRENCY,
+        ),
+    )
     .await;
 
-    if collected.is_err() {
+    let Ok(pairs) = collected else {
         // upstream: 504 "Timeout". Even if some members completed before the
         // deadline, upstream still returns the timeout error — we match.
-        set.abort_all();
         return msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout");
+    };
+
+    let mut result: BTreeMap<String, u16> = BTreeMap::new();
+    for pair in pairs {
+        if matches!(pair.error, Some(meow_proxy::health::UrlTestError::Timeout)) {
+            return msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout");
+        }
+        result.insert(pair.name, pair.delay);
     }
     Json(result).into_response()
 }
@@ -1589,23 +1580,22 @@ async fn provider_healthcheck(
         None => return msg_err(StatusCode::NOT_FOUND, "resource not found"),
     };
 
-    let members = provider.proxies();
-    let url_shared = Arc::new(url);
-    let expected_shared = Arc::new(expected);
-    let mut set: JoinSet<(String, u16)> = JoinSet::new();
-    for proxy in members {
-        let url = Arc::clone(&url_shared);
-        let expected = Arc::clone(&expected_shared);
-        set.spawn(async move {
-            let delay = probe_and_record(&proxy, &url, expected.as_deref(), timeout)
-                .await
-                .unwrap_or(0);
-            (proxy.name().to_string(), delay)
-        });
-    }
+    let members = provider
+        .proxies()
+        .into_iter()
+        .map(|proxy| (proxy.name().to_string(), proxy))
+        .collect();
 
     let mut results = serde_json::Map::new();
-    while let Some(Ok((pname, delay))) = set.join_next().await {
+    for (pname, delay) in meow_proxy::health::probe_many_bounded(
+        members,
+        &url,
+        expected.as_deref(),
+        timeout,
+        meow_proxy::health::PROVIDER_HEALTHCHECK_CONCURRENCY,
+    )
+    .await
+    {
         results.insert(pname, serde_json::Value::Number(delay.into()));
     }
 
