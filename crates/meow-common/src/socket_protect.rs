@@ -318,13 +318,13 @@ async fn resolve_addrs(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
 }
 
 /// Dial an outbound TCP stream to `host:port`. The hostname is resolved
-/// through [`resolve_addrs`] (installed `HostResolver` → cache → system
+/// through `resolve_addrs` (installed `HostResolver` → cache → system
 /// resolver), then each candidate is dialed via [`connect_tcp`] so the
 /// `SocketProtector` (Android) still applies. If every candidate fails to
 /// connect, any cached system-resolver entry is evicted so the next dial
 /// re-resolves instead of reusing a dead address.
 ///
-/// IP literals short-circuit inside [`resolve_addrs`] — no resolver hook is
+/// IP literals short-circuit inside `resolve_addrs` — no resolver hook is
 /// consulted, but the protector still applies to the literal dial.
 pub async fn connect_tcp_host(host: &str, port: u16) -> io::Result<TcpStream> {
     let addrs = resolve_addrs(host, port).await?;
@@ -359,7 +359,7 @@ pub async fn resolve_host(host: &str, port: u16) -> io::Result<SocketAddr> {
 }
 
 /// Resolve `host` to every candidate [`SocketAddr`], in resolver order,
-/// via [`resolve_addrs`]. Never returns an empty `Vec` — no-address
+/// via `resolve_addrs`. Never returns an empty `Vec` — no-address
 /// resolution is an `Err`, so callers may index `[0]` safely.
 pub async fn resolve_host_all(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     resolve_addrs(host, port).await
