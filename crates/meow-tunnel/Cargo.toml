@@ -10,6 +10,8 @@ meow-dns = { workspace = true, default-features = false }
 meow-rules = { workspace = true }
 meow-proxy = { workspace = true, default-features = false }
 meow-trie = { workspace = true }
+ipnet = { workspace = true }
+regex = { workspace = true }
 tokio = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }

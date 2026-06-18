@@ -1,7 +1,10 @@
-/// Rule-engine match benchmark — linear scan vs domain-index early-exit (ADR-0008 §7 sub-area 0).
+/// Rule-engine match benchmark — linear scan vs domain-index early-exit vs
+/// compiled native IR (ADR-0008 §7 sub-area 0).
 ///
 /// BEFORE: `scan_linear` — iterate all rules in order until a match.
-/// AFTER:  `match_engine::match_rules` with `DomainIndex` — trie probe + partial scan.
+/// INDEXED: `match_engine::match_rules` with `DomainIndex` — trie probe + partial scan.
+/// IR: `rule_ir::CompiledRuleSet` — native opcodes for simple predicates,
+/// fallback slots for rules with private embedded state.
 ///
 /// The domain-suffix hit at the last indexed rule (worst-case for the trie) still
 /// wins because it scans rules[0..trie_idx] instead of the full list.
@@ -9,6 +12,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use meow_common::{Metadata, Rule, RuleMatchHelper};
 use meow_rules::{domain_suffix::DomainSuffixRule, final_rule::FinalRule, ipcidr::IpCidrRule};
 use meow_tunnel::match_engine::{match_rules, DomainIndex};
+use meow_tunnel::rule_ir::CompiledRuleSet;
 use std::net::IpAddr;
 
 fn build_rules(n: usize) -> Vec<Box<dyn Rule>> {
@@ -53,11 +57,11 @@ fn make_metadata_miss() -> Metadata {
     }
 }
 
-fn scan_linear(rules: &[Box<dyn Rule>], metadata: &Metadata) -> Option<String> {
+fn scan_linear<'a>(rules: &'a [Box<dyn Rule>], metadata: &Metadata) -> Option<&'a str> {
     let helper = RuleMatchHelper;
     for rule in rules {
         if let Some(adapter) = rule.match_and_resolve(metadata, &helper) {
-            return Some(adapter.into());
+            return Some(adapter);
         }
     }
     None
@@ -67,6 +71,7 @@ fn bench_rules(c: &mut Criterion) {
     for n in [50usize, 200, 500, 10_000] {
         let rules = build_rules(n);
         let index = DomainIndex::build(&rules);
+        let compiled = CompiledRuleSet::build(&rules);
         let meta_hit = make_metadata_hit(n);
         let meta_miss = make_metadata_miss();
 
@@ -88,6 +93,10 @@ fn bench_rules(c: &mut Criterion) {
             });
         });
 
+        group.bench_with_input(BenchmarkId::new("after_ir", n), &n, |b, _| {
+            b.iter(|| black_box(compiled.match_rules(black_box(&meta_hit), black_box(&rules))));
+        });
+
         group.finish();
 
         // ── Miss: FINAL rule (full scan — index can't help) ──────────────────
@@ -106,6 +115,10 @@ fn bench_rules(c: &mut Criterion) {
                     black_box(&index),
                 ))
             });
+        });
+
+        group.bench_with_input(BenchmarkId::new("after_ir", n), &n, |b, _| {
+            b.iter(|| black_box(compiled.match_rules(black_box(&meta_miss), black_box(&rules))));
         });
 
         group.finish();

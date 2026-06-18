@@ -2318,6 +2318,7 @@ dependencies = [
  "meow-rules",
  "meow-trie",
  "parking_lot",
+ "regex",
  "serde",
  "smallvec",
  "smol_str",

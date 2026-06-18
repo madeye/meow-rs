@@ -1,5 +1,6 @@
 pub mod match_engine;
 pub mod relay;
+pub mod rule_ir;
 pub mod statistics;
 pub mod tcp;
 pub mod tunnel;
