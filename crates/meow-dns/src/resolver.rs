@@ -682,16 +682,24 @@ impl Resolver {
         Arc::new(client)
     }
 
-    pub async fn resolve_ip(&self, host: &str) -> Option<IpAddr> {
+    pub async fn resolve_ips(&self, host: &str) -> Option<Vec<IpAddr>> {
         if self.use_hosts {
             if let Some(ips) = self.hosts.search(host) {
-                return ips.first().copied();
+                if !ips.is_empty() {
+                    return Some(ips.clone());
+                }
             }
         }
         if let Some(ips) = self.cache.get(host) {
-            return ips.first().copied();
+            if !ips.is_empty() {
+                return Some(ips.to_vec());
+            }
         }
-        self.lookup_actual(host).await
+        self.lookup_actual_all(host).await
+    }
+
+    pub async fn resolve_ip(&self, host: &str) -> Option<IpAddr> {
+        self.resolve_ips(host).await?.into_iter().next()
     }
 
     pub async fn resolve_ip_real(&self, host: &str) -> Option<IpAddr> {
@@ -765,11 +773,6 @@ impl Resolver {
             return None;
         }
         self.hosts.search(host)
-    }
-
-    async fn lookup_actual(&self, host: &str) -> Option<IpAddr> {
-        let ips = self.lookup_actual_all(host).await?;
-        ips.into_iter().next()
     }
 
     async fn lookup_actual_all(&self, host: &str) -> Option<Vec<IpAddr>> {
@@ -983,7 +986,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[tokio::test]
     async fn resolve_ip_uses_hosts_file() {
@@ -996,6 +999,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_ips_preserves_all_hosts_file_addresses() {
+        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let ips = vec![
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+        ];
+        hosts.insert("example.test", ips.clone());
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+
+        assert_eq!(resolver.resolve_ips("example.test").await, Some(ips));
+        assert_eq!(
+            resolver.resolve_ip("example.test").await,
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_ip_returns_cached_entry() {
         let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
         let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
@@ -1004,6 +1024,21 @@ mod tests {
             .cache
             .put("cached.test", &[real], Duration::from_secs(60));
         assert_eq!(resolver.resolve_ip("cached.test").await, Some(real));
+    }
+
+    #[tokio::test]
+    async fn resolve_ips_preserves_all_cached_addresses() {
+        let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+        let ips = vec![
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ];
+        resolver
+            .cache
+            .put("cached.test", &ips, Duration::from_secs(60));
+
+        assert_eq!(resolver.resolve_ips("cached.test").await, Some(ips));
     }
 
     #[test]

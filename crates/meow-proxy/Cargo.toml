@@ -67,6 +67,7 @@ crc32fast = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+meow-trie = { workspace = true }
 rcgen = "0.13"
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }

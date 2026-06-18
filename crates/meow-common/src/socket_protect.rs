@@ -60,6 +60,15 @@ use tokio::net::{TcpStream, ToSocketAddrs, UdpSocket};
 pub trait HostResolver: Send + Sync {
     /// Resolve `host` to one `IpAddr`. Returning `Err` aborts the dial.
     async fn resolve(&self, host: &str) -> io::Result<IpAddr>;
+
+    /// Resolve `host` to all candidate addresses, in resolver order.
+    ///
+    /// Implementations that only support single-address lookup may rely on
+    /// this default. Multi-address resolvers should override it so callers can
+    /// fall back across families or stale endpoints before failing the dial.
+    async fn resolve_all(&self, host: &str) -> io::Result<Vec<IpAddr>> {
+        self.resolve(host).await.map(|ip| vec![ip])
+    }
 }
 
 static RESOLVER: RwLock<Option<Arc<dyn HostResolver>>> = RwLock::new(None);
@@ -269,13 +278,13 @@ pub async fn connect_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
 /// [`resolve_host`] and [`resolve_host_all`]. Resolution order:
 ///
 /// 1. IP literal → returned verbatim (no lookup, no hook).
-/// 2. Installed [`HostResolver`] (e.g. `meow_dns::ResolverHostHook`) → one
-///    address. Preferred on every platform when present: it runs async (no
-///    blocking-pool `getaddrinfo`), caches + coalesces concurrent lookups,
-///    and on a VPN-active device its upstream sockets don't loop the query
-///    back through our own tunnel. Consulted independently of whether a
-///    `SocketProtector` is installed — iOS uses the resolver hook without a
-///    protector.
+/// 2. Installed [`HostResolver`] (e.g. `meow_dns::ResolverHostHook`) → all
+///    addresses it knows about. Preferred on every platform when present: it
+///    runs async (no blocking-pool `getaddrinfo`), caches + coalesces
+///    concurrent lookups, and on a VPN-active device its upstream sockets
+///    don't loop the query back through our own tunnel. Consulted
+///    independently of whether a `SocketProtector` is installed — iOS uses
+///    the resolver hook without a protector.
 /// 3. Short-TTL cache of prior system-resolver results (Android / iOS only)
 ///    → collapses a wake-time burst of dials to one `getaddrinfo`.
 /// 4. System resolver (`tokio::net::lookup_host`), result cached.
@@ -287,8 +296,17 @@ async fn resolve_addrs(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     }
 
     if let Some(r) = host_resolver() {
-        let ip = r.resolve(host).await?;
-        return Ok(vec![SocketAddr::new(ip, port)]);
+        let ips = r.resolve_all(host).await?;
+        if ips.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("resolve: no address for {host}:{port}"),
+            ));
+        }
+        return Ok(ips
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, port))
+            .collect());
     }
 
     if let Some(cached) = sys_cache_get(host, port) {
@@ -387,7 +405,7 @@ pub async fn bind_udp<A: ToSocketAddrs>(local: A) -> io::Result<UdpSocket> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
     use std::os::fd::RawFd;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -426,16 +444,20 @@ mod tests {
         }
     }
 
-    /// Counts every `resolve` and always returns a fixed `IpAddr`.
+    /// Counts every resolver call and returns fixed `IpAddr` candidates.
     struct FixedResolver {
-        ip: IpAddr,
+        ips: Vec<IpAddr>,
         count: AtomicUsize,
         last_host: parking_lot::Mutex<Option<String>>,
     }
     impl FixedResolver {
         fn new(ip: IpAddr) -> Arc<Self> {
+            Self::new_all(vec![ip])
+        }
+
+        fn new_all(ips: Vec<IpAddr>) -> Arc<Self> {
             Arc::new(Self {
-                ip,
+                ips,
                 count: AtomicUsize::new(0),
                 last_host: parking_lot::Mutex::new(None),
             })
@@ -452,7 +474,16 @@ mod tests {
         async fn resolve(&self, host: &str) -> io::Result<IpAddr> {
             self.count.fetch_add(1, Ordering::SeqCst);
             *self.last_host.lock() = Some(host.to_string());
-            Ok(self.ip)
+            self.ips
+                .first()
+                .copied()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no fixed address"))
+        }
+
+        async fn resolve_all(&self, host: &str) -> io::Result<Vec<IpAddr>> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            *self.last_host.lock() = Some(host.to_string());
+            Ok(self.ips.clone())
         }
     }
 
@@ -461,6 +492,10 @@ mod tests {
     #[async_trait]
     impl HostResolver for FailingResolver {
         async fn resolve(&self, _host: &str) -> io::Result<IpAddr> {
+            Err(io::Error::other("resolve denied"))
+        }
+
+        async fn resolve_all(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
             Err(io::Error::other("resolve denied"))
         }
     }
@@ -599,7 +634,10 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let resolver = FixedResolver::new(IpAddr::from([127, 0, 0, 1]));
+        let resolver = FixedResolver::new_all(vec![
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::from([127, 0, 0, 1]),
+        ]);
         set_host_resolver(Arc::clone(&resolver) as Arc<dyn HostResolver>);
 
         let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
@@ -610,7 +648,11 @@ mod tests {
 
         assert_eq!(resolver.count(), 1, "resolver must be consulted once");
         assert_eq!(resolver.last_host().as_deref(), Some("example.invalid"));
-        assert_eq!(counter.count(), 1, "protector still applies");
+        assert_eq!(
+            counter.count(),
+            2,
+            "protector must apply to each resolved connect candidate"
+        );
 
         clear_host_resolver();
         clear_socket_protector();
@@ -701,13 +743,22 @@ mod tests {
     async fn resolve_host_all_uses_installed_resolver_when_protected() {
         let _g = LOCK.lock().await;
         set_socket_protector(Counting::new() as Arc<dyn SocketProtector>);
-        let resolver = FixedResolver::new(IpAddr::from([127, 0, 0, 1]));
+        let resolver = FixedResolver::new_all(vec![
+            IpAddr::from([127, 0, 0, 1]),
+            IpAddr::from([127, 0, 0, 2]),
+        ]);
         set_host_resolver(Arc::clone(&resolver) as Arc<dyn HostResolver>);
 
         let addrs = resolve_host_all("example.invalid", 8388)
             .await
             .expect("resolve");
-        assert_eq!(addrs, vec!["127.0.0.1:8388".parse().unwrap()]);
+        assert_eq!(
+            addrs,
+            vec![
+                "127.0.0.1:8388".parse().unwrap(),
+                "127.0.0.2:8388".parse().unwrap()
+            ]
+        );
         assert_eq!(resolver.count(), 1, "resolver must be consulted once");
 
         clear_host_resolver();

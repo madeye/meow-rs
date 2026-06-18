@@ -10,7 +10,7 @@
 //! `getaddrinfo` queries from libc bypass the per-fd protection and loop DNS
 //! back through meow-rs's own tunnel; even where they don't loop, they run on
 //! the blocking pool one thread per lookup. Routing the lookup through
-//! `Resolver::resolve_ip` instead resolves async, coalesces + caches, and
+//! `Resolver::resolve_ips` instead resolves async, coalesces + caches, and
 //! keeps the query off the tunnel.
 
 use std::io;
@@ -23,7 +23,7 @@ use meow_common::HostResolver;
 use crate::Resolver;
 
 /// Adapter that implements `meow_common::HostResolver` by delegating to
-/// `Resolver::resolve_ip` — i.e. the same path `DirectAdapter` uses, so
+/// `Resolver::resolve_ips` — i.e. the same path `DirectAdapter` uses, so
 /// hosts file entries and fake-IP rules behave consistently between the
 /// direct outbound and the socket-protect dial path.
 pub struct ResolverHostHook {
@@ -40,6 +40,15 @@ impl ResolverHostHook {
 impl HostResolver for ResolverHostHook {
     async fn resolve(&self, host: &str) -> io::Result<IpAddr> {
         self.resolver.resolve_ip(host).await.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("meow-dns resolver: no address for {host}"),
+            )
+        })
+    }
+
+    async fn resolve_all(&self, host: &str) -> io::Result<Vec<IpAddr>> {
+        self.resolver.resolve_ips(host).await.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("meow-dns resolver: no address for {host}"),

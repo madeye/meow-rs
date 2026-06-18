@@ -2222,6 +2222,7 @@ dependencies = [
  "meow-common",
  "meow-dns",
  "meow-transport",
+ "meow-trie",
  "parking_lot",
  "quinn",
  "rand 0.9.4",

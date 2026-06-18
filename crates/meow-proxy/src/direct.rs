@@ -58,18 +58,18 @@ impl DirectAdapter {
         self
     }
 
-    /// Determine the concrete `SocketAddr` to dial for `metadata`, avoiding
-    /// the OS resolver whenever possible.
-    async fn resolve_target(&self, metadata: &Metadata) -> Result<SocketAddr> {
+    /// Determine the concrete `SocketAddr` candidates to dial for `metadata`,
+    /// avoiding the OS resolver whenever possible.
+    async fn resolve_targets(&self, metadata: &Metadata) -> Result<Vec<SocketAddr>> {
         // 1. Destination already resolved (e.g. by rule-matching pre_resolve,
         //    or when the client supplied an IP literal).
         if let Some(ip) = metadata.dst_ip {
-            return Ok(SocketAddr::new(ip, metadata.dst_port));
+            return Ok(vec![SocketAddr::new(ip, metadata.dst_port)]);
         }
 
         // 2. `host` is an IP literal — no DNS needed.
         if let Ok(ip) = metadata.host.parse::<IpAddr>() {
-            return Ok(SocketAddr::new(ip, metadata.dst_port));
+            return Ok(vec![SocketAddr::new(ip, metadata.dst_port)]);
         }
 
         // 3. Resolve via meow-rs's internal resolver if available. Falls back
@@ -77,10 +77,17 @@ impl DirectAdapter {
         //    standalone usage).
         if !metadata.host.is_empty() {
             if let Some(resolver) = &self.resolver {
-                return match resolver.resolve_ip(&metadata.host).await {
-                    Some(ip) => Ok(SocketAddr::new(ip, metadata.dst_port)),
+                return match resolver.resolve_ips(&metadata.host).await {
+                    Some(ips) if !ips.is_empty() => Ok(ips
+                        .into_iter()
+                        .map(|ip| SocketAddr::new(ip, metadata.dst_port))
+                        .collect()),
                     None => Err(MeowError::Dns(format!(
                         "direct: failed to resolve {}",
+                        metadata.host
+                    ))),
+                    Some(_) => Err(MeowError::Dns(format!(
+                        "direct: no address for {}",
                         metadata.host
                     ))),
                 };
@@ -88,12 +95,18 @@ impl DirectAdapter {
 
             // Legacy fallback: let tokio use getaddrinfo. Only reachable when
             // no resolver was injected — production code paths always inject.
-            let addr = format!("{}:{}", metadata.host, metadata.dst_port);
-            return tokio::net::lookup_host(&addr)
-                .await
-                .map_err(MeowError::Io)?
-                .next()
-                .ok_or_else(|| MeowError::Dns(format!("direct: no address for {addr}")));
+            let addrs: Vec<SocketAddr> =
+                tokio::net::lookup_host((&*metadata.host, metadata.dst_port))
+                    .await
+                    .map_err(MeowError::Io)?
+                    .collect();
+            if addrs.is_empty() {
+                return Err(MeowError::Dns(format!(
+                    "direct: no address for {}:{}",
+                    metadata.host, metadata.dst_port
+                )));
+            }
+            return Ok(addrs);
         }
 
         Err(MeowError::Proxy(
@@ -256,14 +269,23 @@ impl ProxyAdapter for DirectAdapter {
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-        let dest = self.resolve_target(metadata).await?;
-        let stream = apply_connect_timeout(
-            connect_with_mark(dest, self.routing_mark),
-            self.connect_timeout,
-            dest,
-        )
-        .await?;
-        Ok(Box::new(DirectConn(stream)))
+        let dests = self.resolve_targets(metadata).await?;
+        let mut last_err = None;
+
+        for dest in dests {
+            match apply_connect_timeout(
+                connect_with_mark(dest, self.routing_mark),
+                self.connect_timeout,
+                dest,
+            )
+            .await
+            {
+                Ok(stream) => return Ok(Box::new(DirectConn(stream))),
+                Err(err) => last_err = Some(err),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| MeowError::Proxy("direct: no reachable address".into())))
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
@@ -315,6 +337,8 @@ impl ProxyAdapter for DirectAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meow_common::DnsMode;
+    use meow_trie::DomainTrie;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn fake_dest() -> SocketAddr {
@@ -327,6 +351,41 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         }
+    }
+
+    fn tcp_metadata(host: &str, port: u16) -> Metadata {
+        Metadata {
+            host: host.into(),
+            dst_port: port,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn dial_tcp_tries_next_resolved_address_after_first_fails() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        hosts.insert(
+            "multi.test",
+            vec![
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ],
+        );
+        let resolver = Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
+        let adapter = DirectAdapter::new()
+            .with_resolver(resolver)
+            .with_connect_timeout(Duration::from_secs(2));
+
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let conn = adapter
+            .dial_tcp(&tcp_metadata("multi.test", port))
+            .await
+            .expect("second resolved address should connect");
+        let _ = accept.await.unwrap();
+        drop(conn);
     }
 
     /// Regression for QUIC/HTTP3 direct: `dial_udp` must bind the reply socket
