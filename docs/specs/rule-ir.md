@@ -176,6 +176,182 @@ Execution-plan selection is a compiler optimization over the same slots.
 - `needs_ip_resolution()` and `needs_process_lookup()` are aggregate hints
   copied from source rules. The tunnel owns the actual enrichment work.
 
+## Example IR Sequences
+
+The IR is not a bytecode VM. An "IR sequence" is the ordered `slots` array plus
+the selected execution plan and any side indexes needed by that plan.
+
+### Example 1: Small Lowered Rule List
+
+Source rules:
+
+| index | source rule |
+| ---: | --- |
+| 0 | `DOMAIN-SUFFIX,example.com,Proxy` |
+| 1 | `DST-PORT,443,DIRECT` |
+| 2 | `MATCH,DIRECT` |
+
+Compiled rule set:
+
+```text
+execution_plan = LinearScan
+adapter_names  = ["Proxy", "DIRECT"]
+domain_index   = empty
+
+slots:
+  0:
+    rule_index    = 0
+    rule_type     = DOMAIN-SUFFIX
+    payload       = "example.com"
+    adapter_index = 0  # "Proxy"
+    target_plan   = StaticAdapter
+    op            = RuleOp::DomainSuffix("example.com")
+
+  1:
+    rule_index    = 1
+    rule_type     = DST-PORT
+    payload       = "443"
+    adapter_index = 1  # "DIRECT"
+    target_plan   = StaticAdapter
+    op            = RuleOp::Port { ranges: [Single(443)], src: false }
+
+  2:
+    rule_index    = 2
+    rule_type     = MATCH
+    payload       = ""
+    adapter_index = 1  # "DIRECT"
+    target_plan   = StaticAdapter
+    op            = RuleOp::Match
+```
+
+Execution for `host = "www.example.com", dst_port = 80`:
+
+```text
+scan slot 0 -> RuleOp::DomainSuffix matches
+return adapter_names[0], DOMAIN-SUFFIX, "example.com", rule_index 0
+```
+
+Execution for `host = "other.test", dst_port = 443`:
+
+```text
+scan slot 0 -> no match
+scan slot 1 -> RuleOp::Port matches
+return adapter_names[1], DST-PORT, "443", rule_index 1
+```
+
+No source `Rule` method is called on the match hot path for these three slots.
+
+### Example 2: Large Domain-Indexed Rule List
+
+Source rules, reduced to the relevant prefix:
+
+| index | source rule |
+| ---: | --- |
+| 0 | `DST-PORT,443,DIRECT` |
+| 1 | `GEOSITE,github,Proxy` |
+| ... | non-domain rules and other domain rules |
+| 75 | `DOMAIN-SUFFIX,example.com,Proxy` |
+| ... | remaining rules |
+| 100 | `MATCH,DIRECT` |
+
+Compiled rule set:
+
+```text
+execution_plan = DomainIndexed
+domain_index   = { "example.com" => 75, ... }
+
+slots[0].op   = RuleOp::Port { ranges: [Single(443)], src: false }
+slots[1].op   = RuleOp::Fallback  # GEOSITE owns private geosite state
+slots[75].op  = RuleOp::DomainSuffix("example.com")
+slots[100].op = RuleOp::Match
+```
+
+Execution for `host = "www.example.com", dst_port = 80`:
+
+```text
+trie probe host "www.example.com" -> hit T = 75
+scan slots [0, 75):
+  slot 0 -> port does not match
+  slot 1 -> fallback GEOSITE does not match
+  ...
+prefix scan has no match
+return static result for slot 75
+```
+
+Execution for `host = "www.example.com", dst_port = 443`:
+
+```text
+trie probe host "www.example.com" -> hit T = 75
+scan slots [0, 75):
+  slot 0 -> port matches
+return slot 0
+```
+
+The prefix scan before returning trie hit `75` is mandatory. Without it, the
+domain index would incorrectly skip the earlier `DST-PORT` rule.
+
+### Example 3: Fallback and Dynamic Adapter
+
+Source rules:
+
+| index | source rule |
+| ---: | --- |
+| 0 | `OR,((DOMAIN-SUFFIX,corp.example),(DST-PORT,8443)),Proxy` |
+| 1 | `SUB-RULE,private-block,PrivateBlock` |
+| 2 | `MATCH,DIRECT` |
+
+Compiled rule set:
+
+```text
+execution_plan = LinearScan
+adapter_names  = ["Proxy", "PrivateBlock", "DIRECT"]
+
+slots:
+  0:
+    rule_index    = 0
+    rule_type     = OR
+    payload       = "..."
+    adapter_index = 0  # "Proxy"
+    target_plan   = StaticAdapter
+    op            = RuleOp::Fallback
+
+  1:
+    rule_index    = 1
+    rule_type     = SUB-RULE
+    payload       = "private-block"
+    adapter_index = 1  # outer block name, not necessarily returned
+    target_plan   = DynamicAdapter
+    op            = RuleOp::Fallback
+
+  2:
+    rule_index    = 2
+    rule_type     = MATCH
+    payload       = ""
+    adapter_index = 2  # "DIRECT"
+    target_plan   = StaticAdapter
+    op            = RuleOp::Match
+```
+
+Execution:
+
+```text
+slot 0 is static fallback:
+  call rules[0].match_metadata(metadata, helper)
+  if true, return captured adapter "Proxy"
+
+slot 1 is dynamic fallback:
+  call rules[1].match_and_resolve(metadata, helper)
+  if it returns "Proxy-A", return adapter "Proxy-A"
+  adapter_index is Some(i) only when "Proxy-A" exists in adapter_lookup
+
+slot 2 is lowered:
+  RuleOp::Match returns captured adapter "DIRECT"
+```
+
+The `SUB-RULE` slot must not return `PrivateBlock` just because that is the
+outer rule adapter. Its runtime adapter is the matched nested rule's adapter, so
+it stays dynamic fallback.
+
 ## Lowered Predicates
 
 The IR currently lowers rule types whose full matching behavior is represented
