@@ -427,7 +427,10 @@ For each source rule, the compiler:
 5. Specializes lowered opcodes when a narrower form is available. For example,
    `DST-PORT,443` becomes `RuleOp::DstPort(PortMatcher::Single(443))` instead
    of a generic port-range loop.
-6. Uses `RuleOp::Fallback` when lowering would be incomplete or unsafe.
+6. Adds conservative regex prefilters when a required literal is known. For
+   example, `DOMAIN-WILDCARD,*.example.com` stores `.example.com` as a
+   case-insensitive prefilter before running the full regex.
+7. Uses `RuleOp::Fallback` when lowering would be incomplete or unsafe.
 
 Then the compiler selects the top-level execution plan:
 
@@ -503,6 +506,8 @@ The IR removes repeated hot-path work that was previously paid through dynamic
   lookup is deferred until a fallback slot needs it.
 - Specialized port matchers avoid a range loop for single-port and single-range
   rules.
+- Regex-heavy domain wildcard misses can skip `regex.is_match()` when the host
+  does not contain the required literal.
 - Small rule sets avoid domain-trie probe overhead entirely.
 - Large rule sets can still use domain-index early exit before falling back to
   ordered slot scans.
@@ -611,6 +616,7 @@ The synthetic cases cover:
 
 - 10k-rule late `DOMAIN-SUFFIX` hit
 - 10k-rule full fallthrough to `MATCH`
+- 10k-rule `DOMAIN-WILDCARD` miss for regex-prefilter coverage
 
 Use:
 

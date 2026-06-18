@@ -6,7 +6,10 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use meow_common::{Metadata, Rule, RuleMatchHelper, RuleType};
 use meow_config::raw::RawConfig;
-use meow_rules::{domain_suffix::DomainSuffixRule, final_rule::FinalRule, ipcidr::IpCidrRule};
+use meow_rules::{
+    domain_suffix::DomainSuffixRule, domain_wildcard::DomainWildcardRule, final_rule::FinalRule,
+    ipcidr::IpCidrRule,
+};
 use meow_tunnel::match_engine::{match_rules, DomainIndex};
 use meow_tunnel::rule_ir::CompiledRuleSet;
 use std::net::IpAddr;
@@ -139,6 +142,31 @@ fn synthetic_10k_cases() -> Vec<BenchCase> {
     ]
 }
 
+fn build_synthetic_wildcard_rules(n: usize) -> Vec<Box<dyn Rule>> {
+    let mut rules: Vec<Box<dyn Rule>> = Vec::with_capacity(n + 1);
+    for i in 0..n {
+        rules.push(Box::new(
+            DomainWildcardRule::new(&format!("*.blocked{i}.example.com"), "Proxy")
+                .expect("synthetic wildcard rule must compile"),
+        ));
+    }
+    rules.push(Box::new(FinalRule::new("DIRECT")));
+    rules
+}
+
+fn synthetic_10k_wildcard_cases() -> Vec<BenchCase> {
+    vec![BenchCase {
+        name: "synthetic_10k_wildcard_miss",
+        metadata: Metadata {
+            host: "nomatch.unknown.invalid".into(),
+            dst_port: 443,
+            ..Default::default()
+        },
+        expected_rule_type: RuleType::Match,
+        expected_payload: "",
+    }]
+}
+
 fn scan_linear<'a>(
     rules: &'a [Box<dyn Rule>],
     metadata: &Metadata,
@@ -237,5 +265,21 @@ fn bench_synthetic_10k_rules(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_fixture_rules, bench_synthetic_10k_rules);
+fn bench_synthetic_10k_wildcard_rules(c: &mut Criterion) {
+    let rules = build_synthetic_wildcard_rules(10_000);
+    let index = DomainIndex::build(&rules);
+    let compiled = CompiledRuleSet::build(&rules);
+    let cases = synthetic_10k_wildcard_cases();
+
+    for case in &cases {
+        bench_case_group(c, &rules, &index, &compiled, case);
+    }
+}
+
+criterion_group!(
+    benches,
+    bench_fixture_rules,
+    bench_synthetic_10k_rules,
+    bench_synthetic_10k_wildcard_rules
+);
 criterion_main!(benches);

@@ -63,8 +63,8 @@ enum RuleOp {
     Domain(String),
     DomainSuffix(String),
     DomainKeyword(String),
-    DomainRegex(Regex),
-    DomainWildcard(Regex),
+    DomainRegex(Box<RegexMatcher>),
+    DomainWildcard(Box<RegexMatcher>),
     IpCidr { net: IpNet, src: bool },
     SrcPort(PortMatcher),
     DstPort(PortMatcher),
@@ -95,8 +95,14 @@ enum PortMatcher {
 }
 
 #[derive(Debug, Clone)]
+struct RegexMatcher {
+    regex: Regex,
+    required_literal: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 enum ProcessPathOp {
-    Glob(Regex),
+    Glob(Box<Regex>),
     Prefix(String),
     Exact(String),
 }
@@ -393,7 +399,7 @@ fn compile_op(rule_type: RuleType, payload: &str) -> Option<RuleOp> {
         RuleType::Domain => Some(RuleOp::Domain(payload.to_ascii_lowercase())),
         RuleType::DomainSuffix => Some(RuleOp::DomainSuffix(payload.to_ascii_lowercase())),
         RuleType::DomainKeyword => Some(RuleOp::DomainKeyword(payload.to_ascii_lowercase())),
-        RuleType::DomainRegex => Regex::new(payload).ok().map(RuleOp::DomainRegex),
+        RuleType::DomainRegex => compile_domain_regex(payload).map(RuleOp::DomainRegex),
         RuleType::DomainWildcard => compile_domain_wildcard(payload).map(RuleOp::DomainWildcard),
         RuleType::IpCidr => payload
             .parse()
@@ -438,7 +444,7 @@ fn matches_op(op: &RuleOp, input: &MatchInput<'_>) -> bool {
         RuleOp::Domain(domain) => input.host.eq_ignore_ascii_case(domain),
         RuleOp::DomainSuffix(suffix) => domain_suffix_matches(input.host, suffix),
         RuleOp::DomainKeyword(keyword) => domain_keyword_matches(input.host, keyword),
-        RuleOp::DomainRegex(regex) | RuleOp::DomainWildcard(regex) => regex.is_match(input.host),
+        RuleOp::DomainRegex(regex) | RuleOp::DomainWildcard(regex) => regex.matches(input.host),
         RuleOp::IpCidr { net, src } => {
             let ip = if *src {
                 input.metadata.src_ip
@@ -493,10 +499,66 @@ fn domain_keyword_matches(host: &str, keyword: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-fn compile_domain_wildcard(pattern: &str) -> Option<Regex> {
+impl RegexMatcher {
+    fn matches(&self, host: &str) -> bool {
+        if let Some(required_literal) = &self.required_literal {
+            if !domain_keyword_matches(host, required_literal) {
+                return false;
+            }
+        }
+        self.regex.is_match(host)
+    }
+}
+
+fn compile_domain_regex(pattern: &str) -> Option<Box<RegexMatcher>> {
+    Some(Box::new(RegexMatcher {
+        regex: Regex::new(pattern).ok()?,
+        required_literal: required_literal_from_plain_regex(pattern),
+    }))
+}
+
+fn compile_domain_wildcard(pattern: &str) -> Option<Box<RegexMatcher>> {
     let escaped = regex::escape(pattern);
     let expanded = escaped.replace(r"\*", r"[^.]+");
-    Regex::new(&format!("^(?i){expanded}$")).ok()
+    Some(Box::new(RegexMatcher {
+        regex: Regex::new(&format!("^(?i){expanded}$")).ok()?,
+        required_literal: required_literal_from_wildcard(pattern),
+    }))
+}
+
+fn required_literal_from_plain_regex(pattern: &str) -> Option<String> {
+    if pattern.is_empty() || pattern.bytes().any(is_regex_meta_byte) {
+        return None;
+    }
+    Some(pattern.to_ascii_lowercase())
+}
+
+fn required_literal_from_wildcard(pattern: &str) -> Option<String> {
+    pattern
+        .split('*')
+        .filter(|part| !part.is_empty())
+        .max_by_key(|part| part.len())
+        .map(str::to_ascii_lowercase)
+}
+
+fn is_regex_meta_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'\\'
+            | b'.'
+            | b'+'
+            | b'*'
+            | b'?'
+            | b'('
+            | b')'
+            | b'|'
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b'^'
+            | b'$'
+    )
 }
 
 impl PortMatcher {
@@ -599,6 +661,7 @@ fn compile_process_path(payload: &str) -> Option<ProcessPathOp> {
         let pattern = escaped.replace(r"\*", r"[^/\\]*");
         Regex::new(&format!("^(?i){pattern}$"))
             .ok()
+            .map(Box::new)
             .map(ProcessPathOp::Glob)
     } else if payload.starts_with('/') || payload.starts_with('\\') {
         Some(ProcessPathOp::Prefix(payload.to_string()))
@@ -649,9 +712,10 @@ mod tests {
     use crate::match_engine::{self, DomainIndex as LegacyDomainIndex};
     use meow_common::{Metadata, Rule};
     use meow_rules::{
-        domain::DomainRule, domain_keyword::DomainKeywordRule, domain_suffix::DomainSuffixRule,
-        domain_wildcard::DomainWildcardRule, final_rule::FinalRule, ipcidr::IpCidrRule,
-        logic::OrRule, port::PortRule, sub_rule::SubRuleRule,
+        domain::DomainRule, domain_keyword::DomainKeywordRule, domain_regex::DomainRegexRule,
+        domain_suffix::DomainSuffixRule, domain_wildcard::DomainWildcardRule,
+        final_rule::FinalRule, ipcidr::IpCidrRule, logic::OrRule, port::PortRule,
+        sub_rule::SubRuleRule,
     };
     use std::net::IpAddr;
     use std::sync::{
@@ -804,6 +868,62 @@ mod tests {
         assert_eq!(result.adapter_index, None);
         assert_eq!(result.rule_type, RuleType::SubRule);
         assert_eq!(result.rule_payload, "block-a");
+    }
+
+    #[test]
+    fn domain_wildcard_regex_prefilter_preserves_matches() {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainWildcardRule::new("*.wild.example", "WildcardProxy").unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let index = LegacyDomainIndex::build(&rules);
+        let compiled = CompiledRuleSet::build(&rules);
+
+        for host in ["one.wild.example", "two.notwild.example"] {
+            let metadata = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let legacy = match_engine::match_rules(&metadata, &rules, &index)
+                .map(|m| (m.adapter_name, m.rule_type, m.rule_payload));
+            let compiled = compiled
+                .match_rules(&metadata, &rules)
+                .map(|m| (m.adapter_name, m.rule_type, m.rule_payload));
+
+            assert_eq!(compiled, legacy, "metadata host={host}");
+        }
+    }
+
+    #[test]
+    fn plain_domain_regex_gets_literal_prefilter_only_when_safe() {
+        assert_eq!(
+            required_literal_from_plain_regex("github"),
+            Some("github".to_string())
+        );
+        assert_eq!(required_literal_from_plain_regex(r"^github\.com$"), None);
+
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainRegexRule::new("github", "RegexProxy").unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let index = LegacyDomainIndex::build(&rules);
+        let compiled = CompiledRuleSet::build(&rules);
+
+        for host in ["api.github.com", "gitlab.com"] {
+            let metadata = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let legacy = match_engine::match_rules(&metadata, &rules, &index)
+                .map(|m| (m.adapter_name, m.rule_type, m.rule_payload));
+            let compiled = compiled
+                .match_rules(&metadata, &rules)
+                .map(|m| (m.adapter_name, m.rule_type, m.rule_payload));
+
+            assert_eq!(compiled, legacy, "metadata host={host}");
+        }
     }
 
     #[test]
