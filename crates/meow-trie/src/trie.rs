@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 pub struct DomainTrie<T: Clone + 'static> {
@@ -154,8 +155,7 @@ impl<T: Clone + 'static> DomainTrie<T> {
 
         let trimmed = domain.trim();
         if trimmed.bytes().any(|b| b.is_ascii_uppercase()) {
-            let lower = trimmed.to_ascii_lowercase();
-            self.search_inner(lower.trim_end_matches('.'))
+            self.search_ascii_case_insensitive_inner(trimmed.trim_end_matches('.'))
         } else {
             self.search_inner(trimmed.trim_end_matches('.'))
         }
@@ -179,6 +179,16 @@ impl<T: Clone + 'static> DomainTrie<T> {
         }
     }
 
+    fn search_ascii_case_insensitive_inner(&self, query: &str) -> Option<&T> {
+        if query.is_empty() {
+            return None;
+        }
+        match &self.state {
+            TrieState::Building(root) => Self::search_build_case_insensitive(root, query),
+            TrieState::Sealed(root) => Self::search_sealed_case_insensitive(root, query),
+        }
+    }
+
     fn search_build<'a>(root: &'a BuildNode<T>, query: &str) -> Option<&'a T> {
         // Count labels up front (dots + 1) so `remaining` is known while
         // iterating `rsplit` directly — no per-search SmallVec collection.
@@ -190,6 +200,40 @@ impl<T: Clone + 'static> DomainTrie<T> {
             match node.children.get(label) {
                 None => break,
                 Some(child) => {
+                    node = child;
+                    let remaining = n - d - 1;
+                    if remaining == 0 {
+                        if let Some(ref v) = node.exact_value {
+                            return Some(v);
+                        }
+                    } else if remaining == 1 {
+                        if let Some(ref v) = node.star_value {
+                            best = Some(v);
+                        } else if let Some(ref v) = node.dot_value {
+                            best = Some(v);
+                        }
+                    } else if let Some(ref v) = node.dot_value {
+                        best = Some(v);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    fn search_build_case_insensitive<'a>(root: &'a BuildNode<T>, query: &str) -> Option<&'a T> {
+        let n = query.bytes().filter(|&b| b == b'.').count() + 1;
+        let mut node = root;
+        let mut best: Option<&T> = None;
+
+        for (d, label) in query.rsplit('.').enumerate() {
+            match node
+                .children
+                .iter()
+                .find(|(k, _)| k.as_bytes().eq_ignore_ascii_case(label.as_bytes()))
+            {
+                None => break,
+                Some((_, child)) => {
                     node = child;
                     let remaining = n - d - 1;
                     if remaining == 0 {
@@ -245,9 +289,54 @@ impl<T: Clone + 'static> DomainTrie<T> {
         best
     }
 
+    fn search_sealed_case_insensitive<'a>(root: &'a SealedNode<T>, query: &str) -> Option<&'a T> {
+        let n = query.bytes().filter(|&b| b == b'.').count() + 1;
+        let mut node = root;
+        let mut best: Option<&T> = None;
+
+        for (d, label) in query.rsplit('.').enumerate() {
+            let label = label.as_bytes();
+            let found = node
+                .children
+                .binary_search_by(|(k, _)| cmp_ascii_lower_to_mixed(k.as_bytes(), label));
+            match found {
+                Err(_) => break,
+                Ok(idx) => {
+                    node = &node.children[idx].1;
+                    let remaining = n - d - 1;
+                    if remaining == 0 {
+                        if let Some(ref v) = node.exact_value {
+                            return Some(v);
+                        }
+                    } else if remaining == 1 {
+                        if let Some(ref v) = node.star_value {
+                            best = Some(v);
+                        } else if let Some(ref v) = node.dot_value {
+                            best = Some(v);
+                        }
+                    } else if let Some(ref v) = node.dot_value {
+                        best = Some(v);
+                    }
+                }
+            }
+        }
+        best
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+}
+
+fn cmp_ascii_lower_to_mixed(lower: &[u8], mixed: &[u8]) -> Ordering {
+    for (&a, &b) in lower.iter().zip(mixed.iter()) {
+        let b = b.to_ascii_lowercase();
+        match a.cmp(&b) {
+            Ordering::Equal => {}
+            non_eq => return non_eq,
+        }
+    }
+    lower.len().cmp(&mixed.len())
 }
 
 impl<T: Clone + 'static> Default for DomainTrie<T> {

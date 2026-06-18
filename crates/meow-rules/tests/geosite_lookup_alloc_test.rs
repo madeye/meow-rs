@@ -1,24 +1,15 @@
-//! Regression test: `GeositeDB::lookup` must not allocate for already-lowercase
-//! input.
+//! Regression test: `GeositeDB::lookup` must not allocate while matching.
 //!
-//! The category argument is guarded — only lowercased when it actually contains
-//! an uppercase byte (geosite.rs:77-82). Before the fix the domain was
-//! lowercased UNCONDITIONALLY via `domain.to_ascii_lowercase()`, even though the
-//! sole production caller, `GeoSiteRule::match_metadata`, passes
-//! `metadata.rule_host()` — guaranteed ASCII-lowercase at every ingestion point
-//! since commit 0068548. `str::to_ascii_lowercase` always allocates a fresh
-//! `String`, so that was ≈1 wasted heap allocation per match on the rule hot
-//! path. The fix guards the domain lowercase the same way the category is
-//! guarded.
-//!
-//! This installs a counting global allocator and asserts the per-lookup
-//! allocation count for already-lowercase input is ~0. It FAILS if the guard
-//! regresses.
+//! The rule hot path can see both trie-backed domains and geosite regexes. Trie
+//! lookup must handle mixed-case host/category input without lowercasing into a
+//! new `String`, and regex patterns must already be compiled before lookup.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use meow_rules::geosite::GeositeDB;
+use meow_trie::DomainTrie;
 
 struct CountingAlloc;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -41,31 +32,36 @@ fn under_coverage() -> bool {
 }
 
 #[test]
-fn geosite_lookup_is_zero_alloc_for_normalized_input() {
-    let mut db = GeositeDB::empty();
-    // A category with a few domains so the trie path is exercised on lookup.
-    db.insert("ads", "doubleclick.net");
-    db.insert("ads", "ad.example.com");
-    db.insert("cn", "example.cn");
+fn geosite_lookup_is_zero_alloc_for_domain_and_regex_paths() {
+    let mut trie = DomainTrie::new();
+    trie.insert("+.example.com", ());
 
-    // All inputs already lowercase (the production contract) and category is
-    // lowercase too (so the category guard takes its zero-alloc branch).
-    let domain = "lookup.misses.every.category.test";
+    let db = GeositeDB::from_parts(
+        HashMap::from([("ads".to_string(), trie)]),
+        HashMap::from([("ads".to_string(), 1)]),
+        HashMap::from([(
+            "ads".to_string(),
+            vec![r"^tracker\d+\.example\.net$".to_string()],
+        )]),
+        HashMap::new(),
+    );
 
-    // Warm any lazy init (regex OnceLock etc. — none here, but be safe).
-    let _ = db.lookup("ads", domain);
+    // Warm any one-time initialization before measuring.
+    assert!(db.lookup("ADS", "Sub.Example.COM"));
+    assert!(db.lookup("ads", "tracker123.example.net"));
 
     let before = ALLOCS.load(Ordering::SeqCst);
     let n = 10_000;
     for _ in 0..n {
-        let hit = db.lookup("ads", domain);
-        std::hint::black_box(hit);
+        std::hint::black_box(db.lookup("ADS", "Sub.Example.COM"));
+        std::hint::black_box(db.lookup("ads", "tracker123.example.net"));
     }
     let allocs = ALLOCS.load(Ordering::SeqCst) - before;
-    let per_lookup = allocs as f64 / n as f64;
+    let lookups = n * 2;
+    let per_lookup = allocs as f64 / lookups as f64;
     println!(
-        "GeositeDB::lookup (already-lowercase input): {allocs} allocs / {n} lookups = \
-         {per_lookup:.3} allocs/lookup  (must be ~0 — the domain lowercase is guarded like cat)"
+        "GeositeDB::lookup: {allocs} allocs / {lookups} lookups = \
+         {per_lookup:.3} allocs/lookup"
     );
 
     if under_coverage() {
@@ -73,9 +69,7 @@ fn geosite_lookup_is_zero_alloc_for_normalized_input() {
         return;
     }
     assert!(
-        per_lookup < 0.1,
-        "GeositeDB::lookup allocates {per_lookup:.3} heap allocations per lookup for \
-         already-lowercase input — the domain lowercase must be guarded like the category arg \
-         (geosite.rs:77-82) given the rule_host() lowercase-at-ingestion contract (commit 0068548)."
+        allocs == 0,
+        "GeositeDB::lookup must not allocate during trie or regex matching; got {allocs} allocations"
     );
 }

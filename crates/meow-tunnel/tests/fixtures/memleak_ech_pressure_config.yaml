@@ -1,0 +1,240 @@
+# url 里填写自己的订阅,名称不能重复
+proxy-providers:
+  provider1:
+    url: ""
+    type: http
+    interval: 86400
+    health-check: {enable: true,url: "https://www.gstatic.com/generate_204", interval: 300}
+    override:
+      additional-prefix: "[provider1]"
+
+  provider2:
+    url: ""
+    type: http
+    interval: 86400
+    health-check: {enable: true,url: "https://www.gstatic.com/generate_204",interval: 300}
+    override:
+      additional-prefix: "[provider2]"
+
+proxies:
+  - name: "直连"
+    type: direct
+    udp: true
+
+  # SS + ech-tls-tunnel (meow-rs 内置 SIP003 client transport)
+  - name: "🇸🇬 ech-sgp"
+    type: ss
+    server: sgp.example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: a6wfmS1PBTVVC7L23YDTAW2mmXgPGb2
+    udp: false
+    plugin: ech-tls-tunnel
+    plugin-opts:
+      mode: client
+      sni: example.com
+      path: /ws-e6ebfddbb858dfe8
+      ech_config: "AEn+DQBF/gAgACCQeNQYP6XhS1bAPcT1x0nWjCNDLiaAg83tJwDi3QhDDwAIAAEAAQABAAMAEnd3dy5jbG91ZGZsYXJlLmNvbQAA"
+      fingerprint: chrome
+
+  - name: "🇯🇵 ech-tyo"
+    type: ss
+    server: tyo.example.com
+    port: 443
+    cipher: aes-128-gcm
+    password: dEVKfRcyKoTqh0Gzm3jNZMwHlsXRXrvt
+    udp: false
+    plugin: ech-tls-tunnel
+    plugin-opts:
+      mode: client
+      sni: tyo.example.com
+      path: /ws-2c6af267052c82c3
+      ech_config: "AEn+DQBFugAgACCuFeWIakYIR6OK4qfni8rg9k6lVvfQTi4jxSpRAgnPTQAIAAEAAQABAAMAEnd3dy5jbG91ZGZsYXJlLmNvbQAA"
+      fingerprint: chrome
+      fast_open: true
+
+mixed-port: 17890
+ipv6: true
+allow-lan: true
+unified-delay: false
+tcp-concurrent: true
+external-controller: 127.0.0.1:19090
+external-ui: ui
+external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
+
+geodata-mode: true
+geox-url:
+  geoip: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip-lite.dat"
+  geosite: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat"
+  mmdb: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb"
+  asn: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
+
+geodata:
+  mmdb-path: /Users/mlv/.config/meow/Country.mmdb
+  asn-path: /Users/mlv/.config/meow/GeoLite2-ASN.mmdb
+  geosite-path: /Users/mlv/.config/meow/geosite.dat
+
+find-process-mode: strict
+global-client-fingerprint: chrome
+
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+sniffer:
+  enable: true
+  sniff:
+    HTTP:
+      ports: [80, 8080]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+  skip-domain:
+    - "Mijia Cloud"
+    - "+.push.apple.com"
+
+tun:
+  enable: false
+  stack: mixed
+  dns-hijack:
+    - "any:53"
+    - "tcp://any:53"
+  auto-route: true
+  auto-redirect: true
+  auto-detect-interface: true
+
+dns:
+  enable: true
+  ipv6: true
+  enhanced-mode: fake-ip
+  fake-ip-filter:
+    - "*"
+    - "+.lan"
+    - "+.local"
+    - "+.market.xiaomi.com"
+  default-nameserver:
+    - udp://223.5.5.5
+    - udp://223.6.6.6
+  nameserver:
+    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query
+
+proxy-groups:
+
+  - name: 默认
+    type: select
+    proxies: [自动选择,直连,🇸🇬 ech-sgp,🇯🇵 ech-tyo,香港,台湾,日本,新加坡,美国,其它地区,全部节点]
+
+  - name: Google
+    type: select
+    proxies: [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: Telegram
+    type: select
+    proxies: [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: Twitter
+    type: select
+    proxies: [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: 哔哩哔哩
+    type: select
+    proxies: [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: 巴哈姆特
+    type: select
+    proxies: [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: YouTube
+    type: select
+    proxies: [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: NETFLIX
+    type: select
+    proxies: [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: Spotify
+    type: select
+    proxies:  [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: Github
+    type: select
+    proxies:  [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  - name: 国内
+    type: select
+    proxies:  [直连,默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择]
+
+  - name: 其他
+    type: select
+    proxies:  [默认,香港,台湾,日本,新加坡,美国,其它地区,全部节点,自动选择,直连]
+
+  #分隔,下面是地区分组
+  - name: 香港
+    type: select
+    include-all: true
+    exclude-type: [direct]
+    filter: "(?i)港|hk|hongkong|hong kong"
+
+  - name: 台湾
+    type: select
+    include-all: true
+    exclude-type: [direct]
+    filter: "(?i)台|tw|taiwan"
+
+  - name: 日本
+    type: select
+    include-all: true
+    exclude-type: [direct]
+    filter: "(?i)日|jp|japan|tyo"
+
+  - name: 美国
+    type: select
+    include-all: true
+    exclude-type: [direct]
+    filter: "(?i)美|us|unitedstates|united states"
+
+  - name: 新加坡
+    type: select
+    include-all: true
+    exclude-type: [direct]
+    filter: "(?i)(新|sg|singapore|sgp)"
+
+  - name: 其它地区
+    type: select
+    include-all: true
+    exclude-type: [direct]
+    filter: "(?i)^(?!.*(?:🇭🇰|🇯🇵|🇺🇸|🇸🇬|🇨🇳|港|hk|hongkong|台|tw|taiwan|日|jp|japan|tyo|新|sg|singapore|sgp|美|us|unitedstates)).*"
+
+  - name: 全部节点
+    type: select
+    include-all: true
+    exclude-type: [direct]
+
+  - name: 自动选择
+    type: url-test
+    include-all: true
+    exclude-type: [direct]
+    tolerance: 10
+
+rules:
+  - GEOIP,lan,直连,no-resolve
+  - DOMAIN-SUFFIX,maxlv.net,直连
+  - GEOSITE,github,Github
+  - GEOSITE,twitter,Twitter
+  - GEOSITE,youtube,YouTube
+  - GEOSITE,google,Google
+  - GEOSITE,telegram,Telegram
+  - GEOSITE,netflix,NETFLIX
+  - GEOSITE,bilibili,哔哩哔哩
+  - GEOSITE,bahamut,巴哈姆特
+  - GEOSITE,spotify,Spotify
+  - GEOSITE,CN,国内
+  - GEOSITE,geolocation-!cn,其他
+
+  - GEOIP,google,Google
+  - GEOIP,netflix,NETFLIX
+  - GEOIP,telegram,Telegram
+  - GEOIP,twitter,Twitter
+  - GEOIP,CN,国内
+  - MATCH,其他

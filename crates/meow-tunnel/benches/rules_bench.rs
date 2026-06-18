@@ -84,7 +84,6 @@ fn bench_rules(c: &mut Criterion) {
                     black_box(&meta_hit),
                     black_box(&rules),
                     black_box(&index),
-                    false,
                 ))
             });
         });
@@ -105,7 +104,6 @@ fn bench_rules(c: &mut Criterion) {
                     black_box(&meta_miss),
                     black_box(&rules),
                     black_box(&index),
-                    false,
                 ))
             });
         });

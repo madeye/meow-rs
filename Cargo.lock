@@ -2311,6 +2311,7 @@ dependencies = [
  "ipnet",
  "itoa",
  "meow-common",
+ "meow-config",
  "meow-dns",
  "meow-proxy",
  "meow-rules",

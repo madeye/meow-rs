@@ -1,0 +1,20 @@
+# Direct-only regression config for rule-engine memory-footprint testing.
+# No proxy nodes or server details belong in this fixture; it exercises rule
+# matching while routing every hit to the built-in DIRECT adapter.
+
+mixed-port: 17890
+allow-lan: false
+bind-address: "127.0.0.1"
+mode: rule
+log-level: warning
+ipv6: false
+
+dns:
+  enable: false
+
+rules:
+  - DOMAIN,rule-engine-regression.test,DIRECT
+  - DOMAIN-SUFFIX,example.org,DIRECT
+  - DOMAIN-KEYWORD,telemetry,DIRECT
+  - DST-PORT,80,DIRECT
+  - MATCH,DIRECT

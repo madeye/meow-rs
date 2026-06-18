@@ -118,12 +118,10 @@ impl TunnelInner {
 
     /// Resolve which proxy to use for the given metadata.
     ///
-    /// The `(rule_name, rule_payload)` strings are `SmolStr` (inline ≤23 B)
-    /// rather than `String`, so the common-case fixed names (`Direct`,
-    /// `Global`, `Final`, short rule_type names like `DOMAIN`, `GEOIP`) and
-    /// short payloads (`example.com`, `192.168.1.0/24`) populate without
-    /// touching the heap. This is the HP-3 hot path (ADR-0008): every TCP
-    /// connection and every UDP NAT session creation flows through here.
+    /// Rule matching returns borrowed adapter/payload text, so the rule engine
+    /// itself stays heap-allocation-free. This method materializes the public
+    /// tracking payloads as `SmolStr` after matching, where short common names
+    /// still remain inline.
     pub fn resolve_proxy(
         &self,
         metadata: &Metadata,
@@ -156,11 +154,16 @@ impl TunnelInner {
                 // consistent snapshot. Replaces three RwLock acquisitions.
                 let route = self.route.load();
                 let needs_proc = self.needs_process_lookup.load(Ordering::Relaxed);
+                let enriched = if needs_proc {
+                    match_engine::maybe_enrich_with_process(metadata)
+                } else {
+                    None
+                };
+                let match_metadata = enriched.as_ref().unwrap_or(metadata);
                 let result = match_engine::match_rules(
-                    metadata,
+                    match_metadata,
                     route.rules.as_ref(),
                     route.domain_index.as_ref(),
-                    needs_proc,
                 );
                 match result {
                     Some(m) => {
@@ -174,23 +177,19 @@ impl TunnelInner {
                         self.stats
                             .rule_match
                             .increment(m.rule_type.as_str(), action);
-                        let proxy = route
-                            .proxies
-                            .get(m.adapter_name.as_str())
-                            .cloned()
-                            .map_or_else(
-                                || {
-                                    debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
-                                    Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>
-                                },
-                                |p| p as Arc<dyn ProxyAdapter>,
-                            );
+                        let proxy = route.proxies.get(m.adapter_name).cloned().map_or_else(
+                            || {
+                                debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
+                                Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>
+                            },
+                            |p| p as Arc<dyn ProxyAdapter>,
+                        );
                         // `rule_type.as_str()` is a `&'static str` — wrap it
                         // inline without heap.
                         Some((
                             proxy,
                             SmolStr::new_static(m.rule_type.as_str()),
-                            m.rule_payload,
+                            SmolStr::from(m.rule_payload),
                         ))
                     }
                     None => {

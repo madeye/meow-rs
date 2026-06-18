@@ -1,4 +1,5 @@
 use meow_common::{ConnType, DnsMode, Metadata, Network, Rule, RuleType};
+use meow_config::load_config_from_str;
 use meow_tunnel::match_engine::{match_rules, DomainIndex};
 use meow_tunnel::Statistics;
 use smallvec::smallvec;
@@ -6,11 +7,13 @@ use smol_str::SmolStr;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 struct CountingAlloc;
 
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static DEALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ALLOC_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -119,20 +122,26 @@ fn test_metadata() -> Metadata {
 
 #[test]
 fn rule_match_zero_alloc_on_hot_path() {
+    let _guard = ALLOC_TEST_LOCK.lock().unwrap();
+    let long_adapter = "ProxyNameThatExceedsSmolStrInlineCapacity";
+    let long_domain = "very-long-subdomain-name-that-exceeds-inline-capacity.example.com";
     let rules: Vec<Box<dyn Rule>> = vec![
-        Box::new(SimpleDomainRule::new("example.com", "Proxy")),
+        Box::new(SimpleDomainRule::new(long_domain, long_adapter)),
         Box::new(FinalRule::new("DIRECT")),
     ];
     let index = DomainIndex::build(&rules);
-    let meta = test_metadata();
+    let meta = Metadata {
+        host: SmolStr::from(long_domain),
+        ..test_metadata()
+    };
 
     // Warm up
-    let _ = match_rules(&meta, &rules, &index, false);
+    let _ = match_rules(&meta, &rules, &index);
 
     reset_counts();
     let n = 1000;
     for _ in 0..n {
-        let result = match_rules(&meta, &rules, &index, false);
+        let result = match_rules(&meta, &rules, &index);
         let _ = std::hint::black_box(result);
     }
     let (allocs, _) = snapshot();
@@ -143,17 +152,126 @@ fn rule_match_zero_alloc_on_hot_path() {
         println!("skipping alloc assertion under coverage instrumentation");
         return;
     }
-    // Rule matching with short adapter names (≤23B) and no process lookup.
-    // The trie's internal SmallVec and HashMap traversal may cause minor
-    // allocator activity in debug builds. Target: ≤ 2 per match.
+    // Rule matching returns borrowed adapter/payload text and the domain index
+    // is sealed, so even long adapter names and payloads must not allocate.
     assert!(
-        per_match <= 2.0,
-        "expected ≤ 2 heap allocations per rule match, got {per_match:.3}"
+        allocs == 0,
+        "expected zero heap allocations per rule match, got {allocs} total ({per_match:.3}/match)"
+    );
+}
+
+#[tokio::test]
+async fn rule_engine_pressure_zero_alloc_free_on_critical_path() {
+    const ITERS: usize = 50_000;
+
+    let required_providers = [
+        "/Users/mlv/.config/meow/Country.mmdb",
+        "/Users/mlv/.config/meow/geosite.dat",
+    ];
+    if let Some(missing) = required_providers
+        .iter()
+        .find(|path| !std::path::Path::new(path).exists())
+    {
+        println!("skipping provider-backed pressure test; missing {missing}");
+        return;
+    }
+
+    let config = load_config_from_str(include_str!("fixtures/memleak_ech_pressure_config.yaml"))
+        .await
+        .expect("memleak ECH pressure config must load with geodata providers");
+    let rules = config.rules;
+    let index = DomainIndex::build(&rules);
+    let domain_hit = Metadata {
+        host: SmolStr::new_static("api.maxlv.net"),
+        ..test_metadata()
+    };
+    let geosite_hit = Metadata {
+        host: SmolStr::new_static("github.com"),
+        ..test_metadata()
+    };
+    let geoip_hit = Metadata {
+        dst_ip: Some("223.5.5.5".parse().expect("valid CN DNS IP")),
+        ..test_metadata()
+    };
+    let full_scan_final = Metadata {
+        host: SmolStr::new_static("no-index-hit.example.net"),
+        ..test_metadata()
+    };
+
+    // Warm up any lazy test/runtime state outside the measured critical path.
+    assert_eq!(
+        match_rules(&domain_hit, &rules, &index)
+            .expect("domain suffix rule should match")
+            .adapter_name,
+        "直连"
+    );
+    assert_eq!(
+        match_rules(&geosite_hit, &rules, &index)
+            .expect("GEOSITE github rule should match")
+            .adapter_name,
+        "Github"
+    );
+    assert_eq!(
+        match_rules(&geoip_hit, &rules, &index)
+            .expect("GEOIP CN rule should match")
+            .adapter_name,
+        "国内"
+    );
+    assert_eq!(
+        match_rules(&full_scan_final, &rules, &index)
+            .expect("final rule should match")
+            .adapter_name,
+        "其他"
+    );
+
+    let _guard = ALLOC_TEST_LOCK.lock().unwrap();
+    reset_counts();
+    for _ in 0..ITERS {
+        let domain = match_rules(
+            std::hint::black_box(&domain_hit),
+            std::hint::black_box(&rules),
+            std::hint::black_box(&index),
+        );
+        let geosite = match_rules(
+            std::hint::black_box(&geosite_hit),
+            std::hint::black_box(&rules),
+            std::hint::black_box(&index),
+        );
+        let geoip = match_rules(
+            std::hint::black_box(&geoip_hit),
+            std::hint::black_box(&rules),
+            std::hint::black_box(&index),
+        );
+        let full_scan = match_rules(
+            std::hint::black_box(&full_scan_final),
+            std::hint::black_box(&rules),
+            std::hint::black_box(&index),
+        );
+        std::hint::black_box((domain, geosite, geoip, full_scan));
+    }
+    let (allocs, deallocs) = snapshot();
+
+    println!(
+        "rule_engine_pressure: {allocs} allocs / {deallocs} frees across {} match calls",
+        ITERS * 4
+    );
+    if under_coverage_instrumentation() {
+        println!("skipping alloc/free assertion under coverage instrumentation");
+        return;
+    }
+    assert_eq!(
+        allocs, 0,
+        "rule engine critical path allocated {allocs} times under pressure"
+    );
+    assert_eq!(
+        deallocs, 0,
+        "rule engine critical path freed heap memory {deallocs} times under pressure"
     );
 }
 
 #[test]
 fn track_connection_alloc_count() {
+    let _guard = ALLOC_TEST_LOCK.lock().unwrap();
     let stats = Statistics::new();
     let meta = test_metadata();
 
@@ -204,6 +322,7 @@ fn track_connection_alloc_count() {
 
 #[test]
 fn metadata_remote_address_zero_alloc() {
+    let _guard = ALLOC_TEST_LOCK.lock().unwrap();
     let meta = test_metadata();
 
     reset_counts();

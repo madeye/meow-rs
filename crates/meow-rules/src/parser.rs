@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use meow_common::Rule;
 
+use crate::asn_index::AsnIndex;
 use crate::country_index::CountryIndex;
 use crate::domain::DomainRule;
 use crate::domain_keyword::DomainKeywordRule;
@@ -41,10 +42,12 @@ pub struct ParserContext {
     /// MMDB Reader itself is dropped after the index is built; per-rule
     /// matching uses Patricia-trie `IpRange` lookups, not MMDB lookups.
     pub geoip: Option<Arc<CountryIndex>>,
-    /// Optional GeoLite2-ASN MaxMindDB reader for `IP-ASN` rules. `None`
-    /// triggers a parse-time hard-error on any `IP-ASN` payload — silent
-    /// skipping would misroute ASN-gated traffic (Class A per ADR-0002).
-    pub asn: Option<Arc<maxminddb::Reader<Vec<u8>>>>,
+    /// Optional GeoLite2-ASN range index for `IP-ASN` rules. `None` triggers
+    /// a parse-time hard-error on any `IP-ASN` payload — silent skipping would
+    /// misroute ASN-gated traffic (Class A per ADR-0002). The MMDB Reader
+    /// itself is dropped after the index is built; per-rule matching uses
+    /// Patricia-trie `IpRange` lookups, not MMDB lookups.
+    pub asn: Option<Arc<AsnIndex>>,
     /// Optional geosite database for `GEOSITE` rules. Unlike GEOIP/ASN,
     /// absence does NOT hard-error at parse time — per spec §Divergences
     /// #3, GEOSITE tolerates an absent DB (always-no-match) so that configs
@@ -204,28 +207,41 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
                 .map(|r| Box::new(r) as Box<dyn Rule>)
         }
         "IP-ASN" => {
-            let reader = ctx.asn.clone().ok_or_else(|| {
+            let index = ctx.asn.clone().ok_or_else(|| {
                 "IP-ASN rule requires an ASN database (GeoLite2-ASN.mmdb); drop the file at \
                  $XDG_CONFIG_HOME/meow/GeoLite2-ASN.mmdb, $HOME/.config/meow/GeoLite2-ASN.mmdb, \
                  or ./meow/GeoLite2-ASN.mmdb"
                     .to_string()
             })?;
+            let asn = parse_asn_payload(payload)?;
             let no_resolve = extra.is_some_and(|e| e.eq_ignore_ascii_case("no-resolve"));
-            IpAsnRule::new(payload, adapter, reader, false, no_resolve)
-                .map(|r| Box::new(r) as Box<dyn Rule>)
+            let ranges = index.ranges_for(asn);
+            Ok(Box::new(IpAsnRule::new(
+                asn, payload, adapter, ranges, false, no_resolve,
+            )))
         }
         "SRC-IP-ASN" => {
-            let reader = ctx.asn.clone().ok_or_else(|| {
+            let index = ctx.asn.clone().ok_or_else(|| {
                 "SRC-IP-ASN rule requires an ASN database (GeoLite2-ASN.mmdb); drop the file at \
                  $XDG_CONFIG_HOME/meow/GeoLite2-ASN.mmdb, $HOME/.config/meow/GeoLite2-ASN.mmdb, \
                  or ./meow/GeoLite2-ASN.mmdb"
                     .to_string()
             })?;
-            IpAsnRule::new(payload, adapter, reader, true, true)
-                .map(|r| Box::new(r) as Box<dyn Rule>)
+            let asn = parse_asn_payload(payload)?;
+            let ranges = index.ranges_for(asn);
+            Ok(Box::new(IpAsnRule::new(
+                asn, payload, adapter, ranges, true, true,
+            )))
         }
         _ => Err(format!("unknown rule type: {rule_type}")),
     }
+}
+
+fn parse_asn_payload(payload: &str) -> Result<u32, String> {
+    payload
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid IP-ASN value '{}': {}", payload.trim(), e))
 }
 
 fn split_once_trimmed(s: &str, sep: char) -> Option<(&str, &str)> {

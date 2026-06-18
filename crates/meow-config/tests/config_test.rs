@@ -373,6 +373,18 @@ async fn test_empty_rules() {
 }
 
 #[tokio::test]
+async fn test_memleak_regression_config_is_direct_only() {
+    let config = load_config_from_str(include_str!("fixtures/memleak_regression_direct.yaml"))
+        .await
+        .unwrap();
+
+    assert_eq!(config.listeners.mixed_port, Some(17890));
+    assert!(config.proxies.contains_key("DIRECT"));
+    assert!(config.raw.proxies.as_ref().is_none_or(Vec::is_empty));
+    assert!(config.rules.iter().all(|rule| rule.adapter() == "DIRECT"));
+}
+
+#[tokio::test]
 async fn test_proxy_group_select() {
     let yaml = r#"
 proxies:
@@ -882,7 +894,7 @@ rules:
         ..Default::default()
     };
     let target = config.rules[0].match_and_resolve(&m, &helper);
-    assert_eq!(target.as_deref(), Some("Stream"));
+    assert_eq!(target, Some("Stream"));
 }
 
 /// A2/L — block exhaustion returns None so outer loop continues.
@@ -909,7 +921,7 @@ rules:
     assert!(config.rules[0].match_and_resolve(&m, &helper).is_none());
     // MATCH still wins.
     assert_eq!(
-        config.rules[1].match_and_resolve(&m, &helper).as_deref(),
+        config.rules[1].match_and_resolve(&m, &helper),
         Some("DIRECT")
     );
 }

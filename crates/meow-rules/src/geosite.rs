@@ -35,9 +35,8 @@ pub enum GeositeError {
 pub struct GeositeDB {
     categories: HashMap<String, DomainTrie<()>>,
     counts: HashMap<String, usize>,
-    /// Raw regex patterns per category; compiled lazily on first lookup.
-    regex_patterns: HashMap<String, Vec<String>>,
-    regex_compiled: HashMap<String, std::sync::OnceLock<Vec<regex::Regex>>>,
+    /// Regex patterns are compiled at load time so matching never allocates.
+    regex_compiled: HashMap<String, Vec<regex::Regex>>,
     keywords: HashMap<String, Vec<String>>,
 }
 
@@ -55,7 +54,6 @@ impl GeositeDB {
         Self {
             categories: HashMap::new(),
             counts: HashMap::new(),
-            regex_patterns: HashMap::new(),
             regex_compiled: HashMap::new(),
             keywords: HashMap::new(),
         }
@@ -73,28 +71,12 @@ impl GeositeDB {
     /// True iff `domain` is in the named category. Category match is
     /// case-insensitive. Unknown categories return `false` (no error).
     pub fn lookup(&self, category: &str, domain: &str) -> bool {
-        let cat_key;
-        let cat = if category.bytes().any(|b| b.is_ascii_uppercase()) {
-            cat_key = category.to_ascii_lowercase();
-            &cat_key
-        } else {
-            category
-        };
-
-        // `domain` is already ASCII-lowercased at every ingestion point
-        // (rule_host(), commit 0068548), so only pay for a lowercase copy on
-        // the rare mixed-case input — mirroring the `cat` guard above instead
-        // of allocating a String on every lookup.
-        let domain_lower;
-        let domain = if domain.bytes().any(|b| b.is_ascii_uppercase()) {
-            domain_lower = domain.to_ascii_lowercase();
-            domain_lower.as_str()
-        } else {
-            domain
+        let Some(cat) = self.category_key(category) else {
+            return false;
         };
 
         if let Some(trie) = self.categories.get(cat) {
-            if trie.search_normalized(domain).is_some() {
+            if trie.search(domain).is_some() {
                 return true;
             }
         }
@@ -105,23 +87,25 @@ impl GeositeDB {
             }
         }
 
-        if let Some(lock) = self.regex_compiled.get(cat) {
-            let compiled = lock.get_or_init(|| {
-                self.regex_patterns
-                    .get(cat)
-                    .map(|pats| {
-                        pats.iter()
-                            .filter_map(|p| regex::Regex::new(p).ok())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            });
+        if let Some(compiled) = self.regex_compiled.get(cat) {
             if compiled.iter().any(|re| re.is_match(domain)) {
                 return true;
             }
         }
 
         false
+    }
+
+    fn category_key<'a>(&'a self, category: &'a str) -> Option<&'a str> {
+        if !category.bytes().any(|b| b.is_ascii_uppercase()) {
+            return Some(category);
+        }
+        self.categories
+            .keys()
+            .chain(self.keywords.keys())
+            .chain(self.regex_compiled.keys())
+            .find(|key| key.as_bytes().eq_ignore_ascii_case(category.as_bytes()))
+            .map(String::as_str)
     }
 
     /// Number of categories in the DB.
@@ -136,20 +120,27 @@ impl GeositeDB {
     }
 
     pub fn from_parts(
-        categories: HashMap<String, DomainTrie<()>>,
+        mut categories: HashMap<String, DomainTrie<()>>,
         counts: HashMap<String, usize>,
         regex_patterns: HashMap<String, Vec<String>>,
         keywords: HashMap<String, Vec<String>>,
     ) -> Self {
-        let regex_compiled: HashMap<String, std::sync::OnceLock<Vec<regex::Regex>>> =
-            regex_patterns
-                .keys()
-                .map(|k| (k.clone(), std::sync::OnceLock::new()))
-                .collect();
+        for trie in categories.values_mut() {
+            trie.seal();
+        }
+        let regex_compiled: HashMap<String, Vec<regex::Regex>> = regex_patterns
+            .into_iter()
+            .map(|(category, patterns)| {
+                let compiled = patterns
+                    .into_iter()
+                    .filter_map(|p| regex::Regex::new(&p).ok())
+                    .collect();
+                (category, compiled)
+            })
+            .collect();
         Self {
             categories,
             counts,
-            regex_patterns,
             regex_compiled,
             keywords,
         }
@@ -189,13 +180,13 @@ impl GeositeDB {
                             inserted += 1;
                         }
                     }
+                    trie.seal();
                     counts.insert(name.clone(), inserted);
                     categories.insert(name, trie);
                 }
                 Ok(Self {
                     categories,
                     counts,
-                    regex_patterns: HashMap::new(),
                     regex_compiled: HashMap::new(),
                     keywords: HashMap::new(),
                 })

@@ -577,7 +577,14 @@ fn build_parser_context_at(
 
     let asn_trigger = lines.iter().find(|l| line_is_asn_rule(l));
     let asn = match asn_trigger {
-        Some(trigger) => Some(Arc::new(load_mmdb(asn_path, "GeoLite2-ASN", trigger)?)),
+        Some(trigger) => {
+            let reader = load_mmdb_mmap(asn_path, "GeoLite2-ASN", trigger)?;
+            let allowed = collect_asn_numbers(lines);
+            let index = meow_rules::asn_index::AsnIndex::build(&reader, &allowed)
+                .map_err(|e| anyhow::anyhow!("failed to build ASN index: {e}"))?;
+            drop(reader);
+            Some(Arc::new(index))
+        }
         None => None,
     };
 
@@ -599,33 +606,6 @@ fn build_parser_context_at(
         geosite,
         ..Default::default()
     })
-}
-
-fn load_mmdb(
-    path: &Path,
-    kind: &str,
-    trigger: &str,
-) -> Result<maxminddb::Reader<Vec<u8>>, anyhow::Error> {
-    let bytes = std::fs::read(path).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to load {} database at {}\n  required by rule: {}\n  underlying error: {}",
-            kind,
-            path.display(),
-            trigger.trim(),
-            e
-        )
-    })?;
-    let reader = maxminddb::Reader::from_source(bytes).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to parse {} database at {}\n  required by rule: {}\n  underlying error: {}",
-            kind,
-            path.display(),
-            trigger.trim(),
-            e
-        )
-    })?;
-    info!("Loaded {} database from {}", kind, path.display());
-    Ok(reader)
 }
 
 /// Memory-map an MMDB file. The OS reclaims pages immediately on drop,
@@ -699,6 +679,30 @@ fn collect_geosite_categories(lines: &[String]) -> std::collections::HashSet<Str
         }
         for cap in re.captures_iter(line) {
             out.insert(cap[1].to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// Scan raw rule lines and return the ASN numbers referenced by `IP-ASN,` /
+/// `SRC-IP-ASN,` payloads, including occurrences inside logic rules.
+fn collect_asn_numbers(lines: &[String]) -> std::collections::HashSet<u32> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:SRC-)?IP-ASN\s*,\s*(\d+)").expect("compile IP-ASN scan regex")
+    });
+    let mut out = std::collections::HashSet::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        for cap in re.captures_iter(line) {
+            if let Ok(asn) = cap[1].parse::<u32>() {
+                out.insert(asn);
+            }
         }
     }
     out

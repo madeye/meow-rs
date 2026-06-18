@@ -220,6 +220,7 @@ impl DomainRuleSet {
                 warn!("rule-set (domain): skipping invalid entry '{}'", entry);
             }
         }
+        trie.seal();
         Self { trie, count }
     }
 }

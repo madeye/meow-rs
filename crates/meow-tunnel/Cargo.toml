@@ -36,6 +36,7 @@ meow-trie = { workspace = true }
 criterion = { workspace = true }
 dashmap = { workspace = true }
 ipnet = { workspace = true }
+meow-config = { workspace = true }
 meow-rules = { workspace = true }
 
 [lints]

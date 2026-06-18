@@ -1,31 +1,25 @@
 use meow_common::{find_process, Metadata, Rule, RuleMatchHelper, RuleType};
 use meow_trie::DomainTrie;
-use smol_str::SmolStr;
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tracing::trace;
 
-/// One match result. Both string fields are `SmolStr` (inline ≤23 bytes,
-/// heap-backed via `Arc<str>` above that) so a connection on the rule
-/// hot path (ADR-0008 HP-3) typically incurs zero heap allocations to
-/// populate this struct — the common DIRECT / REJECT / short-named
-/// proxy / short CIDR payload cases all inline.
-pub struct MatchResult {
-    pub adapter_name: SmolStr,
+/// One borrowed match result. String fields point into the matched rule, so
+/// rule matching itself does not allocate even for long adapter names or
+/// diagnostic payloads.
+pub struct MatchResult<'a> {
+    pub adapter_name: &'a str,
     pub rule_type: RuleType,
-    pub rule_payload: SmolStr,
+    pub rule_payload: &'a str,
 }
 
 /// Index of DOMAIN and DOMAIN-SUFFIX rules keyed by the trie.
 ///
-/// Stores `(rule_index, adapter_name)` for each pattern, keeping the
-/// minimum (earliest) rule index so the match algorithm can short-circuit
-/// the linear scan at the right position. The adapter name is shared as
-/// `Arc<str>` so the trie clone-on-lookup is a refcount bump rather than
-/// a string copy.
+/// Stores only the earliest matching rule index for each pattern. The adapter
+/// and payload are borrowed from the rule slice after lookup, which keeps the
+/// index compact and avoids per-match result allocation.
 pub struct DomainIndex {
-    trie: DomainTrie<(usize, Arc<str>)>,
+    trie: DomainTrie<usize>,
 }
 
 impl DomainIndex {
@@ -39,7 +33,7 @@ impl DomainIndex {
     /// occurrence of each domain pattern.
     pub fn build(rules: &[Box<dyn Rule>]) -> Self {
         use std::borrow::Cow;
-        let mut trie: DomainTrie<(usize, Arc<str>)> = DomainTrie::new();
+        let mut trie: DomainTrie<usize> = DomainTrie::new();
         let mut seen: HashSet<String> = HashSet::new();
         for (idx, rule) in rules.iter().enumerate() {
             match rule.rule_type() {
@@ -61,26 +55,23 @@ impl DomainIndex {
                     // For DomainSuffix: use "+." prefix so trie matches subdomains.
                     if rule.rule_type() == RuleType::DomainSuffix {
                         let trie_key = format!("+.{pattern}");
-                        trie.insert(&trie_key, (idx, Arc::from(rule.adapter())));
+                        trie.insert(&trie_key, idx);
                     } else {
-                        trie.insert(&pattern, (idx, Arc::from(rule.adapter())));
+                        trie.insert(&pattern, idx);
                     }
                     seen.insert(pattern);
                 }
                 _ => {}
             }
         }
+        trie.seal();
         Self { trie }
     }
 
-    /// Probe the trie for a hostname. Returns `(rule_index, adapter_name)` of
-    /// the minimum-index matching DOMAIN/DOMAIN-SUFFIX rule, or `None`.
-    /// The returned `&Arc<str>` lives as long as `self` — the caller can
-    /// `Arc::clone` it for free if it needs to keep the name.
-    pub fn search(&self, host: &str) -> Option<(usize, &Arc<str>)> {
-        self.trie
-            .search_normalized(host)
-            .map(|(idx, adapter)| (*idx, adapter))
+    /// Probe the trie for a production-normalized hostname. Returns the
+    /// matching DOMAIN/DOMAIN-SUFFIX rule index, or `None`.
+    pub fn search(&self, host: &str) -> Option<usize> {
+        self.trie.search_normalized(host).copied()
     }
 }
 
@@ -96,22 +87,14 @@ impl DomainIndex {
 ///
 /// Pre-resolution of `metadata.dst_ip` from a hostname must happen before this
 /// function is called (see `TunnelInner::pre_resolve`).
-pub fn match_rules(
+pub fn match_rules<'rules>(
     metadata: &Metadata,
-    rules: &[Box<dyn Rule>],
+    rules: &'rules [Box<dyn Rule>],
     index: &DomainIndex,
-    needs_process_lookup: bool,
-) -> Option<MatchResult> {
+) -> Option<MatchResult<'rules>> {
     let helper = RuleMatchHelper;
 
-    let enriched = if needs_process_lookup {
-        maybe_enrich_with_process(metadata)
-    } else {
-        None
-    };
-    let meta: &Metadata = enriched.as_ref().unwrap_or(metadata);
-
-    let host = meta.rule_host();
+    let host = metadata.rule_host();
     let trie_hit = if host.is_empty() {
         None
     } else {
@@ -124,35 +107,35 @@ pub fn match_rules(
     // all patterns that match this host.  A broader rule at index < T (e.g.
     // DOMAIN-SUFFIX "example.com" at idx 0 before DOMAIN "sub.example.com" at
     // idx 1) can still match, so we cannot skip domain rules in the prefix scan.
-    let scan_end = trie_hit.map_or(rules.len(), |(t, _)| t);
+    let scan_end = trie_hit.unwrap_or(rules.len());
 
     for rule in &rules[..scan_end] {
-        if let Some(adapter_name) = rule.match_and_resolve(meta, &helper) {
+        if let Some(adapter_name) = rule.match_and_resolve(metadata, &helper) {
             return Some(MatchResult {
                 adapter_name,
                 rule_type: rule.rule_type(),
-                rule_payload: SmolStr::from(rule.payload()),
+                rule_payload: rule.payload(),
             });
         }
     }
 
     // Return trie hit if it beat the linear scan.
-    if let Some((trie_idx, adapter)) = trie_hit {
+    if let Some(trie_idx) = trie_hit {
         let rule = &rules[trie_idx];
         return Some(MatchResult {
-            adapter_name: SmolStr::from(adapter.as_ref()),
+            adapter_name: rule.adapter(),
             rule_type: rule.rule_type(),
-            rule_payload: SmolStr::from(rule.payload()),
+            rule_payload: rule.payload(),
         });
     }
 
     // No match in [0..T]; continue scanning the remainder (trie miss path).
     for rule in &rules[scan_end..] {
-        if let Some(adapter_name) = rule.match_and_resolve(meta, &helper) {
+        if let Some(adapter_name) = rule.match_and_resolve(metadata, &helper) {
             return Some(MatchResult {
                 adapter_name,
                 rule_type: rule.rule_type(),
-                rule_payload: SmolStr::from(rule.payload()),
+                rule_payload: rule.payload(),
             });
         }
     }
@@ -160,7 +143,7 @@ pub fn match_rules(
     None
 }
 
-fn maybe_enrich_with_process(metadata: &Metadata) -> Option<Metadata> {
+pub fn maybe_enrich_with_process(metadata: &Metadata) -> Option<Metadata> {
     if !metadata.process.is_empty() {
         return None;
     }
@@ -232,7 +215,8 @@ mod tests {
 
         let meta = base_metadata(local);
         let index = DomainIndex::build(&rules);
-        let result = match_rules(&meta, &rules, &index, true).expect("engine must return a match");
+        let enriched = maybe_enrich_with_process(&meta).expect("process lookup must succeed");
+        let result = match_rules(&enriched, &rules, &index).expect("engine must return a match");
         assert_eq!(result.adapter_name, "Proxy");
         assert_eq!(result.rule_type.as_str(), "PROCESS-NAME");
     }
@@ -251,7 +235,8 @@ mod tests {
 
         let meta = base_metadata(local);
         let index = DomainIndex::build(&rules);
-        let result = match_rules(&meta, &rules, &index, true).expect("final rule should match");
+        let enriched = maybe_enrich_with_process(&meta).expect("process lookup must succeed");
+        let result = match_rules(&enriched, &rules, &index).expect("final rule should match");
         assert_eq!(result.adapter_name, "DIRECT");
         assert_eq!(result.rule_type.as_str(), "MATCH");
     }
@@ -270,7 +255,7 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         };
-        let result = match_rules(&meta, &rules, &index, true).expect("final rule should match");
+        let result = match_rules(&meta, &rules, &index).expect("final rule should match");
         assert_eq!(result.adapter_name, "DIRECT");
     }
 
@@ -290,7 +275,7 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         };
-        let result = match_rules(&meta, &rules, &index, true).expect("must match");
+        let result = match_rules(&meta, &rules, &index).expect("must match");
         assert_eq!(result.adapter_name, "Proxy");
         assert_eq!(result.rule_type.as_str(), "DOMAIN-SUFFIX");
     }
@@ -313,7 +298,7 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         };
-        let result = match_rules(&meta, &rules, &index, true).expect("must match");
+        let result = match_rules(&meta, &rules, &index).expect("must match");
         assert_eq!(result.adapter_name, "Direct");
     }
 
@@ -341,7 +326,7 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         };
-        let result = match_rules(&meta, &rules, &index, true).expect("must match");
+        let result = match_rules(&meta, &rules, &index).expect("must match");
         assert_eq!(
             result.adapter_name, "Broad",
             "first-match-wins: broader rule at lower index must take precedence"

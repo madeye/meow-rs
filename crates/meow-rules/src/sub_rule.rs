@@ -96,11 +96,11 @@ impl Rule for SubRuleRule {
         self.block.iter().any(|r| r.should_find_process())
     }
 
-    fn match_and_resolve(
-        &self,
+    fn match_and_resolve<'a>(
+        &'a self,
         metadata: &Metadata,
         helper: &RuleMatchHelper,
-    ) -> Option<smol_str::SmolStr> {
+    ) -> Option<&'a str> {
         // upstream: rules/logic/logic.go::matchSubRules lines 179–190
         for rule in self.block.iter() {
             if let Some(target) = rule.match_and_resolve(metadata, helper) {
@@ -175,7 +175,7 @@ mod tests {
     fn sub_rule_inner_match_returns_inner_target() {
         let sub = SubRuleRule::from_rules("BLOCK", vec![match_rule("DIRECT")]);
         let m = Metadata::default();
-        assert_eq!(sub.match_and_resolve(&m, &helper()), Some("DIRECT".into()));
+        assert_eq!(sub.match_and_resolve(&m, &helper()), Some("DIRECT"));
     }
 
     /// A2 — block exhaustion propagates as None.
@@ -194,7 +194,7 @@ mod tests {
             vec![no_match_rule("A"), match_rule("B"), match_rule("C")],
         );
         let m = Metadata::default();
-        assert_eq!(sub.match_and_resolve(&m, &helper()), Some("B".into()));
+        assert_eq!(sub.match_and_resolve(&m, &helper()), Some("B"));
     }
 
     /// A4 — empty block returns None.
@@ -210,10 +210,7 @@ mod tests {
     fn sub_rule_match_rule_inside_block() {
         let sub = SubRuleRule::from_rules("BLOCK", vec![match_rule("Fallback")]);
         let m = Metadata::default();
-        assert_eq!(
-            sub.match_and_resolve(&m, &helper()),
-            Some("Fallback".into())
-        );
+        assert_eq!(sub.match_and_resolve(&m, &helper()), Some("Fallback"));
     }
 
     /// A6 — target comes from inner rule, not from block_name.
@@ -223,8 +220,8 @@ mod tests {
         let a = SubRuleRule::new("BLOCK-A", Arc::clone(&block));
         let b = SubRuleRule::new("BLOCK-B", block);
         let m = Metadata::default();
-        assert_eq!(a.match_and_resolve(&m, &helper()), Some("DIRECT".into()));
-        assert_eq!(b.match_and_resolve(&m, &helper()), Some("DIRECT".into()));
+        assert_eq!(a.match_and_resolve(&m, &helper()), Some("DIRECT"));
+        assert_eq!(b.match_and_resolve(&m, &helper()), Some("DIRECT"));
     }
 
     /// B1 — nested SubRule returns leaf target.
@@ -234,10 +231,7 @@ mod tests {
         let nested = SubRuleRule::new("B", inner);
         let outer = SubRuleRule::from_rules("A", vec![Box::new(nested)]);
         let m = Metadata::default();
-        assert_eq!(
-            outer.match_and_resolve(&m, &helper()),
-            Some("DIRECT".into())
-        );
+        assert_eq!(outer.match_and_resolve(&m, &helper()), Some("DIRECT"));
     }
 
     /// B2 — inner no-match propagates as None.
@@ -259,6 +253,6 @@ mod tests {
         let top_mid = SubRuleRule::new("B", outer_mid);
         let top = SubRuleRule::from_rules("A", vec![Box::new(top_mid)]);
         let m = Metadata::default();
-        assert_eq!(top.match_and_resolve(&m, &helper()), Some("LEAF".into()));
+        assert_eq!(top.match_and_resolve(&m, &helper()), Some("LEAF"));
     }
 }
