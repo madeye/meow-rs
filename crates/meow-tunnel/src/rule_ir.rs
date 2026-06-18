@@ -7,6 +7,10 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::Path;
 
+/// Below this size, trie probing costs more than it saves for common configs
+/// with early matches. Compile small configs to straight-line ordered IR scan.
+const LINEAR_SCAN_RULE_LIMIT: usize = 64;
+
 /// Native compiled rule metadata plus indexes for hot-path matching.
 ///
 /// This IR is intentionally hybrid: common parser-produced predicates lower to
@@ -19,6 +23,7 @@ pub struct CompiledRuleSet {
     adapter_names: Vec<SmolStr>,
     adapter_lookup: HashMap<SmolStr, usize>,
     domain_index: DomainIndex,
+    execution_plan: ExecutionPlan,
     needs_ip_resolution: bool,
     needs_process_lookup: bool,
 }
@@ -41,6 +46,16 @@ enum TargetPlan {
     StaticAdapter,
     /// The target adapter can be returned by nested rule evaluation.
     DynamicAdapter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionPlan {
+    /// Straight ordered slot scan. Best for small configs where trie overhead
+    /// dominates and first-match order usually exits early.
+    LinearScan,
+    /// Domain trie early-exit plus ordered prefix scan. Best for large configs
+    /// where avoiding long scans matters.
+    DomainIndexed,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +118,7 @@ impl CompiledRuleSet {
             adapter_names: Vec::new(),
             adapter_lookup: HashMap::new(),
             domain_index: DomainIndex::empty(),
+            execution_plan: ExecutionPlan::LinearScan,
             needs_ip_resolution: false,
             needs_process_lookup: false,
         }
@@ -134,11 +150,18 @@ impl CompiledRuleSet {
             });
         }
 
+        let execution_plan = select_execution_plan(rules.len());
+        let domain_index = match execution_plan {
+            ExecutionPlan::LinearScan => DomainIndex::empty(),
+            ExecutionPlan::DomainIndexed => DomainIndex::build(rules),
+        };
+
         Self {
             slots,
             adapter_names,
             adapter_lookup,
-            domain_index: DomainIndex::build(rules),
+            domain_index,
+            execution_plan,
             needs_ip_resolution,
             needs_process_lookup,
         }
@@ -162,6 +185,10 @@ impl CompiledRuleSet {
         );
 
         let helper = RuleMatchHelper;
+        if self.execution_plan == ExecutionPlan::LinearScan {
+            return self.scan_range(0..self.slots.len(), metadata, rules, &helper);
+        }
+
         let host = metadata.rule_host();
         let trie_hit = if host.is_empty() {
             None
@@ -214,6 +241,10 @@ impl CompiledRuleSet {
 
     pub fn is_compatible_with(&self, rules: &[Box<dyn Rule>]) -> bool {
         self.slots.len() == rules.len()
+    }
+
+    pub fn uses_linear_scan_plan(&self) -> bool {
+        self.execution_plan == ExecutionPlan::LinearScan
     }
 
     fn scan_range<'a>(
@@ -320,6 +351,14 @@ fn target_plan(rule_type: RuleType) -> TargetPlan {
         // rule's adapter/block name.
         RuleType::SubRule => TargetPlan::DynamicAdapter,
         _ => TargetPlan::StaticAdapter,
+    }
+}
+
+fn select_execution_plan(rule_count: usize) -> ExecutionPlan {
+    if rule_count <= LINEAR_SCAN_RULE_LIMIT {
+        ExecutionPlan::LinearScan
+    } else {
+        ExecutionPlan::DomainIndexed
     }
 }
 
@@ -584,6 +623,34 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn small_rule_sets_use_linear_scan_plan() {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainSuffixRule::new("example.com", "Proxy")),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+
+        assert!(set.uses_linear_scan_plan());
+    }
+
+    #[test]
+    fn large_rule_sets_use_domain_indexed_plan() {
+        let mut rules: Vec<Box<dyn Rule>> = Vec::new();
+        for i in 0..=LINEAR_SCAN_RULE_LIMIT {
+            rules.push(Box::new(DomainSuffixRule::new(
+                &format!("suffix{i}.example.com"),
+                "Proxy",
+            )));
+        }
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+
+        assert!(!set.uses_linear_scan_plan());
+    }
 
     #[test]
     fn domain_index_early_exit_skips_later_rules() {

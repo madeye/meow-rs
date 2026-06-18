@@ -6,6 +6,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use meow_common::{Metadata, Rule, RuleMatchHelper, RuleType};
 use meow_config::raw::RawConfig;
+use meow_rules::{domain_suffix::DomainSuffixRule, final_rule::FinalRule, ipcidr::IpCidrRule};
 use meow_tunnel::match_engine::{match_rules, DomainIndex};
 use meow_tunnel::rule_ir::CompiledRuleSet;
 use std::net::IpAddr;
@@ -14,6 +15,13 @@ const ECH_PRESSURE_CONFIG: &str =
     include_str!("../tests/fixtures/memleak_ech_pressure_config.yaml");
 
 struct FixtureCase {
+    name: &'static str,
+    metadata: Metadata,
+    expected_rule_type: RuleType,
+    expected_payload: &'static str,
+}
+
+struct BenchCase {
     name: &'static str,
     metadata: Metadata,
     expected_rule_type: RuleType,
@@ -80,6 +88,57 @@ fn fixture_cases() -> Vec<FixtureCase> {
     ]
 }
 
+fn build_synthetic_rules(n: usize) -> Vec<Box<dyn Rule>> {
+    let mut rules: Vec<Box<dyn Rule>> = Vec::with_capacity(n + 1);
+    for i in 0..n {
+        match i % 3 {
+            0 => rules.push(Box::new(DomainSuffixRule::new(
+                &format!("suffix{i}.example.com"),
+                "DIRECT",
+            ))),
+            1 => rules.push(Box::new(DomainSuffixRule::new(
+                &format!("other{i}.net"),
+                "Proxy",
+            ))),
+            _ => {
+                let cidr = format!("10.{}.0.0/16", i % 256);
+                if let Ok(rule) = IpCidrRule::new(&cidr, "DIRECT", false, true) {
+                    rules.push(Box::new(rule));
+                }
+            }
+        }
+    }
+    rules.push(Box::new(FinalRule::new("DIRECT")));
+    rules
+}
+
+fn synthetic_10k_cases() -> Vec<BenchCase> {
+    let last_suffix_i = (0..10_000).rev().find(|&i| i % 3 == 0).unwrap_or(0);
+    vec![
+        BenchCase {
+            name: "synthetic_10k_domain_suffix_hit",
+            metadata: Metadata {
+                host: format!("host.suffix{last_suffix_i}.example.com").into(),
+                dst_port: 443,
+                ..Default::default()
+            },
+            expected_rule_type: RuleType::DomainSuffix,
+            expected_payload: "suffix9999.example.com",
+        },
+        BenchCase {
+            name: "synthetic_10k_match_fallthrough",
+            metadata: Metadata {
+                host: "nomatch.unknown.invalid".into(),
+                dst_port: 80,
+                dst_ip: Some("203.0.113.1".parse::<IpAddr>().unwrap()),
+                ..Default::default()
+            },
+            expected_rule_type: RuleType::Match,
+            expected_payload: "",
+        },
+    ]
+}
+
 fn scan_linear<'a>(
     rules: &'a [Box<dyn Rule>],
     metadata: &Metadata,
@@ -97,7 +156,7 @@ fn assert_matchers_agree(
     rules: &[Box<dyn Rule>],
     index: &DomainIndex,
     compiled: &CompiledRuleSet,
-    case: &FixtureCase,
+    case: &BenchCase,
 ) {
     let linear = scan_linear(rules, &case.metadata);
     let indexed = match_rules(&case.metadata, rules, index)
@@ -110,46 +169,73 @@ fn assert_matchers_agree(
     assert_eq!(ir, linear, "IR diverged for {}", case.name);
 
     let Some((_, rule_type, payload)) = ir else {
-        panic!("fixture case {} did not match", case.name);
+        panic!("benchmark case {} did not match", case.name);
     };
     assert_eq!(rule_type, case.expected_rule_type, "{}", case.name);
     assert_eq!(payload, case.expected_payload, "{}", case.name);
 }
 
-fn bench_rules(c: &mut Criterion) {
+fn bench_case_group(
+    c: &mut Criterion,
+    rules: &[Box<dyn Rule>],
+    index: &DomainIndex,
+    compiled: &CompiledRuleSet,
+    case: &BenchCase,
+) {
+    assert_matchers_agree(rules, index, compiled, case);
+
+    let mut group = c.benchmark_group(case.name);
+
+    group.bench_function(BenchmarkId::new("before_linear", case.name), |b| {
+        b.iter(|| black_box(scan_linear(black_box(rules), black_box(&case.metadata))));
+    });
+
+    group.bench_function(BenchmarkId::new("after_indexed", case.name), |b| {
+        b.iter(|| {
+            black_box(match_rules(
+                black_box(&case.metadata),
+                black_box(rules),
+                black_box(index),
+            ))
+        });
+    });
+
+    group.bench_function(BenchmarkId::new("after_ir", case.name), |b| {
+        b.iter(|| black_box(compiled.match_rules(black_box(&case.metadata), black_box(rules))));
+    });
+
+    group.finish();
+}
+
+fn bench_fixture_rules(c: &mut Criterion) {
     let rules = load_fixture_rules();
     let index = DomainIndex::build(&rules);
     let compiled = CompiledRuleSet::build(&rules);
-    let cases = fixture_cases();
+    let cases = fixture_cases()
+        .into_iter()
+        .map(|case| BenchCase {
+            name: case.name,
+            metadata: case.metadata,
+            expected_rule_type: case.expected_rule_type,
+            expected_payload: case.expected_payload,
+        })
+        .collect::<Vec<_>>();
 
     for case in &cases {
-        assert_matchers_agree(&rules, &index, &compiled, case);
-
-        let mut group = c.benchmark_group(case.name);
-
-        group.bench_function(BenchmarkId::new("before_linear", case.name), |b| {
-            b.iter(|| black_box(scan_linear(black_box(&rules), black_box(&case.metadata))));
-        });
-
-        group.bench_function(BenchmarkId::new("after_indexed", case.name), |b| {
-            b.iter(|| {
-                black_box(match_rules(
-                    black_box(&case.metadata),
-                    black_box(&rules),
-                    black_box(&index),
-                ))
-            });
-        });
-
-        group.bench_function(BenchmarkId::new("after_ir", case.name), |b| {
-            b.iter(|| {
-                black_box(compiled.match_rules(black_box(&case.metadata), black_box(&rules)))
-            });
-        });
-
-        group.finish();
+        bench_case_group(c, &rules, &index, &compiled, case);
     }
 }
 
-criterion_group!(benches, bench_rules);
+fn bench_synthetic_10k_rules(c: &mut Criterion) {
+    let rules = build_synthetic_rules(10_000);
+    let index = DomainIndex::build(&rules);
+    let compiled = CompiledRuleSet::build(&rules);
+    let cases = synthetic_10k_cases();
+
+    for case in &cases {
+        bench_case_group(c, &rules, &index, &compiled, case);
+    }
+}
+
+criterion_group!(benches, bench_fixture_rules, bench_synthetic_10k_rules);
 criterion_main!(benches);
