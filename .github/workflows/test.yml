@@ -118,6 +118,11 @@ jobs:
           MEOW_REQUIRE_DOCKER: "1"
         run: cargo test -p meow-proxy --features hysteria2 --test hysteria2_integration -- --nocapture
 
+      - name: Snell v3 Docker integration tests
+        env:
+          MEOW_REQUIRE_DOCKER: "1"
+        run: cargo test -p meow-proxy --features snell --test snell_server_docker_integration -- --nocapture
+
       - name: v2ray-plugin integration tests
         run: cargo test --test v2ray_plugin_integration -- --nocapture
 

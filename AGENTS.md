@@ -25,6 +25,7 @@ cargo test --lib
 cargo test --test rules_test           # 78 rule matching tests
 cargo test --test trojan_integration   # embedded mock server, no external deps
 cargo test --test shadowsocks_integration  # requires ssserver (see below)
+cargo test -p meow-proxy --features snell --test snell_server_docker_integration  # requires Docker; real Snell v3 server
 bash tests/test_tproxy_qemu.sh             # Docker-based tproxy e2e tests
 
 # Install ssserver for SS integration tests
@@ -36,6 +37,93 @@ cargo test -p meow-dns --lib
 # Lint
 cargo clippy --all-targets
 ```
+
+## Manual Real-Node Smoke Tests
+
+Real-node tests are opt-in and must never run in CI. Use this flow to test any
+single outbound proxy type end-to-end through the real app path: config parser
+→ tunnel routing → listener → adapter → remote server. It applies to Snell,
+VLESS, VMess, Trojan, Hysteria2, AnyTLS, or any future outbound with a Clash
+Meta-style `proxies:` entry.
+
+Keep node secrets in environment variables or temporary files under `/tmp`; do
+not commit PSKs, UUIDs, passwords, private subscription files, or expanded
+provider nodes.
+
+### Generic single-proxy curl smoke
+
+Create a temporary one-node config under `/tmp`. Replace only the proxy block
+with the outbound being tested and keep `rules: [MATCH,<name>]` so every curl
+request must use that proxy.
+
+```bash
+cat >/tmp/meow-one-proxy.yml <<'EOF'
+mixed-port: 18080
+mode: rule
+log-level: debug
+ipv6: false
+allow-lan: false
+
+dns:
+  enable: true
+  listen: 127.0.0.1:18053
+  nameserver:
+    - 1.1.1.1
+
+proxies:
+  - name: sample
+    type: <proxy-type>
+    server: <server>
+    port: <port>
+    # Add the fields required by this proxy type, such as:
+    # password, uuid, psk, cipher, tls, servername, reality-opts,
+    # transport options, obfs options, udp, alpn, client-fingerprint.
+
+rules:
+  - MATCH,sample
+EOF
+```
+
+If the proxy type needs Cargo features, add them to both `cargo run` commands
+below.
+
+Config validation:
+
+```bash
+cargo run -p meow-app -- -f /tmp/meow-one-proxy.yml -t
+```
+
+Start meow:
+
+```bash
+RUST_LOG=meow=debug,meow_config=debug,meow_proxy=debug,meow_tunnel=debug \
+cargo run -p meow-app -- -f /tmp/meow-one-proxy.yml
+```
+
+Default HTTPS curl:
+
+```bash
+curl -fsS --max-time 30 \
+  --proxy socks5h://127.0.0.1:18080 \
+  https://www.gstatic.com/generate_204 \
+  -o /tmp/meow-generate-204.out \
+  -w 'http_code=%{http_code} http_version=%{http_version} time_total=%{time_total}\n'
+```
+
+HTTP/1.1 comparison:
+
+```bash
+curl -fsS --http1.1 --max-time 30 \
+  --proxy socks5h://127.0.0.1:18080 \
+  https://www.gstatic.com/generate_204 \
+  -o /tmp/meow-generate-204-http11.out \
+  -w 'http_code=%{http_code} http_version=%{http_version} time_total=%{time_total}\n'
+```
+
+Expected result: both curl commands return `http_code=204`. Default curl may
+report `http_version=2` when local curl and the target negotiate HTTP/2; keep
+the `--http1.1` comparison because some transport bugs only show up on one of
+the two HTTPS paths.
 
 ## Architecture
 

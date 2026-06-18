@@ -53,22 +53,47 @@ async fn read_response_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
     out: &mut [u8],
 ) -> io::Result<(usize, SocketAddr)> {
-    let mut family = [0u8; 1];
-    reader.read_exact(&mut family).await?;
-    let addr = match family[0] {
+    let mut frame = vec![0u8; super::v4::MAX_PAYLOAD_LENGTH];
+    let n = reader.read(&mut frame).await?;
+    if n < 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "snell udp: empty response frame",
+        ));
+    }
+    frame.truncate(n);
+
+    let (addr, payload_start) = match frame[0] {
         0x04 => {
-            let mut ip = [0u8; 4];
-            reader.read_exact(&mut ip).await?;
-            let mut port = [0u8; 2];
-            reader.read_exact(&mut port).await?;
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), u16::from_be_bytes(port))
+            const HEAD_LEN: usize = 1 + 4 + 2;
+            if frame.len() < HEAD_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "snell udp: short IPv4 response frame",
+                ));
+            }
+            let ip = [frame[1], frame[2], frame[3], frame[4]];
+            let port = [frame[5], frame[6]];
+            (
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), u16::from_be_bytes(port)),
+                HEAD_LEN,
+            )
         }
         0x06 => {
+            const HEAD_LEN: usize = 1 + 16 + 2;
+            if frame.len() < HEAD_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "snell udp: short IPv6 response frame",
+                ));
+            }
             let mut ip = [0u8; 16];
-            reader.read_exact(&mut ip).await?;
-            let mut port = [0u8; 2];
-            reader.read_exact(&mut port).await?;
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::from(ip)), u16::from_be_bytes(port))
+            ip.copy_from_slice(&frame[1..17]);
+            let port = [frame[17], frame[18]];
+            (
+                SocketAddr::new(IpAddr::V6(Ipv6Addr::from(ip)), u16::from_be_bytes(port)),
+                HEAD_LEN,
+            )
         }
         other => {
             return Err(io::Error::new(
@@ -77,20 +102,11 @@ async fn read_response_frame<R: AsyncRead + Unpin>(
             ));
         }
     };
-    // The remainder of the snell frame is the payload. The v4 codec already
-    // re-assembles a frame's payload into a contiguous read, but the snell
-    // AEAD frame is sized to hold exactly one datagram, so a single
-    // `read` returns the entire payload. Pull until we observe the end.
-    //
-    // We can't know the payload length from the snell frame header alone
-    // (it's been consumed by the v4 codec). Instead we keep reading into
-    // `out` until the next read would block — but we have no zero-frame
-    // sentinel here. opensnell's PacketConn.ReadFrom does a single Read
-    // call and relies on the snell frame == one datagram invariant. We do
-    // the same: one `read` gives us the payload up to `out.len()`, and any
-    // extra is dropped (datagram-truncation semantics matching net.UDPConn).
-    let n = reader.read(out).await?;
-    Ok((n, addr))
+
+    let payload = &frame[payload_start..];
+    let copied = payload.len().min(out.len());
+    out[..copied].copy_from_slice(&payload[..copied]);
+    Ok((copied, addr))
 }
 
 /// Per-connection snell UDP relay. Multiplexes datagrams over a single AEAD
