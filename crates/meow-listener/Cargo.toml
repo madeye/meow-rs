@@ -25,6 +25,7 @@ smallvec = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 meow-dns = { workspace = true }
 meow-trie = { workspace = true }
+ipnet = { workspace = true }
 
 [lints]
 workspace = true

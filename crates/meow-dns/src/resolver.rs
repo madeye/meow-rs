@@ -981,6 +981,15 @@ impl Resolver {
     pub fn clear_cache(&self) {
         self.cache.clear();
     }
+
+    /// Seed the positive-resolution cache directly with a known mapping.
+    ///
+    /// Production lookups populate the cache from upstream queries; this is for
+    /// preloading known answers (and for tests) without a round-trip. Mirrors
+    /// the bound used by ordinary cached entries via `ttl`.
+    pub fn preload_cache(&self, host: &str, ips: &[IpAddr], ttl: std::time::Duration) {
+        self.cache.put(host, ips, ttl);
+    }
 }
 
 #[cfg(test)]
