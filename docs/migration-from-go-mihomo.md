@@ -1,22 +1,22 @@
 # Migration guide: Go mihomo → meow-rs
 
-Last updated: 2026-04-18. Tracks M1 feature state.
+Last updated: 2026-06-19. Tracks the current default app feature set.
 Owner: pm. Tracks roadmap item: **M1.H-3**.
 Review cadence: updated at each milestone exit.
 
 This document is for operators migrating a working Go mihomo (Clash Meta)
 deployment to meow-rs. It covers:
 
-- What config surface is supported, partially supported, or not yet supported in M1.
+- What config surface is supported, partially supported, or not yet supported.
 - Behavioral divergences and what to do about them.
 - Migration steps for common subscription types.
 - Feature flags equivalent to Go mihomo build tags.
 
 If you are starting fresh (not migrating), read the main README instead.
 
-**Scope note:** Features marked *M1.x*, *M2*, or *M3* are planned but not yet
-shipped. This guide is a snapshot of M1 at release, not a promise about future
-milestones.
+**Scope note:** This guide describes the default `meow-app` build unless a
+feature flag is called out explicitly. Features marked *M2* or later are planned
+but not yet shipped.
 
 ---
 
@@ -39,7 +39,7 @@ loads. If `-t` exits 0, the config will load.
 Before migrating, scan your config for the following. Items marked ✗ will
 cause problems; items marked ~ work with caveats; items marked ✓ work.
 
-| Config section / feature | M1 status | Notes |
+| Config section / feature | Status | Notes |
 |--------------------------|:---------:|-------|
 | `port`, `socks-port`, `mixed-port` | ✓ | Fully supported. |
 | `allow-lan`, `bind-address` | ✓ | Fully supported. |
@@ -52,38 +52,41 @@ cause problems; items marked ~ work with caveats; items marked ✓ work.
 | `proxies:` — Shadowsocks | ✓ | Including AEAD 2022 ciphers. |
 | `proxies:` — Trojan | ✓ | TLS + WebSocket transport. |
 | `proxies:` — Direct, Reject | ✓ | Fully supported. |
-| `proxies:` — VMess | ✗ | Not implemented — use VLESS instead. |
-| `proxies:` — VLESS | ~ | M1.B-2 — see §Protocols. |
+| `proxies:` — VMess | ✓ | AEAD VMess outbound with TCP/WebSocket transports. |
+| `proxies:` — VLESS | ✓ | Plain VLESS, XTLS-Vision, and Reality/uTLS paths in the default app build. |
 | `proxies:` — HTTP CONNECT outbound | ✓ | Full parity (M1.B-3). |
 | `proxies:` — SOCKS5 outbound | ✓ | Full parity (M1.B-4). |
-| `proxies:` — Hysteria2 / TUIC / WireGuard | ✗ | Deferred to M1.5/M2. |
+| `proxies:` — Snell | ✓ | v3/v4/v5, UDP-over-TCP, optional HTTP/TLS obfs. |
+| `proxies:` — Hysteria2 | ✓ | QUIC TCP/UDP, Salamander obfs, port hopping, bandwidth hints. |
+| `proxies:` — AnyTLS | ~ | Implemented behind the opt-in `anytls` feature, not in the default app bundle. |
+| `proxies:` — TUIC / WireGuard / SSH | ✗ | Not implemented. |
 | `proxy-groups:` — selector, url-test, fallback | ✓ | Fully supported. |
 | `proxy-groups:` — load-balance | ✓ | round-robin + consistent-hashing (M1.C-1). |
 | `proxy-groups:` — relay | ✓ | Chain multiple outbounds (M1.C-2). |
 | `rules:` — DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD | ✓ | Fully supported. |
 | `rules:` — IP-CIDR, IP-CIDR6 | ✓ | Fully supported. |
 | `rules:` — GEOIP | ✓ | MaxMind MMDB. |
-| `rules:` — GEOSITE | ~ | M1.D-2, mrs format only — see §Rules. |
+| `rules:` — GEOSITE | ✓ | mrs format only — see §Rules. |
 | `rules:` — RULE-SET | ✓ | M1.D-5, mrs + yaml formats. |
-| `rules:` — PROCESS-NAME | ~ | M1.D-1, platform lookup wired. |
-| `rules:` — IN-NAME, IN-TYPE, IN-PORT, IN-USER | ~ | M1.D-4/F-1/F-3. |
-| `rules:` — SUB-RULE | ~ | M1.D-7 — blocked on upstream verification. |
+| `rules:` — PROCESS-NAME | ✓ | Platform lookup wired. |
+| `rules:` — IN-NAME, IN-TYPE, IN-PORT, IN-USER | ✓ | Named listeners and auth metadata are wired. |
+| `rules:` — SUB-RULE | ✓ | Named rule subsets with cycle detection. |
 | `rules:` — AND, OR, NOT | ✓ | Logic composition supported. |
 | `rules:` — MATCH | ✓ | Fully supported. |
 | `rule-providers:` — http, file | ✓ | With interval refresh (M1.D-5). |
 | `rule-providers:` — inline | ✓ | M1.D-5. |
 | `dns:` — udp, tcp nameservers | ✓ | Fully supported. |
-| `dns:` — DoH (`https://`) | ~ | M1.E-1 — see §DNS. |
-| `dns:` — DoT (`tls://`) | ~ | M1.E-1 — see §DNS. |
+| `dns:` — DoH (`https://`) | ✓ | See §DNS. |
+| `dns:` — DoT (`tls://`) | ✓ | See §DNS. |
 | `dns:` — DoQ (`quic://`) | ✗ | Deferred to M1.E-6/M2. Hard error (not silent). |
-| `dns:` — `default-nameserver` | ~ | M1.E-2, bundled with M1.E-1. |
-| `dns:` — `nameserver-policy` | ~ | M1.E-3 — see §DNS. |
-| `dns:` — `fallback-filter` | ~ | M1.E-4, bundled with M1.E-3. |
+| `dns:` — `default-nameserver` | ✓ | Bootstrap resolver for encrypted upstream hostnames. |
+| `dns:` — `nameserver-policy` | ✓ | Exact, wildcard, and `geosite:` policy keys. |
+| `dns:` — `fallback-filter` | ✓ | GeoIP/IP-CIDR/domain gates. |
 | `dns:` — `hosts` + `use-system-hosts` | ✓ | M1.E-5, wildcards supported. |
 | `dns:` — `fake-ip` mode | ✓ | v4/v6 pools, `fake-ip-filter`, `fake-ip-filter-mode`, `store-fake-ip` JSON persistence. See §fake-ip mode. |
 | `tproxy-port` | ✓ | Linux nftables / macOS pf. |
-| `proxy-providers:` | ~ | M1.H-1 — see §Providers. |
-| `geodata:` / `geox-url` | ✗ | M2+ (auto-update, path overrides). M1 uses XDG discovery. |
+| `proxy-providers:` | ✓ | http/file sources, provider filters, health checks, and group `use:`. |
+| `geodata:` | ✓ | Path overrides, auto-update, interval, and download URL overrides. |
 | `/metrics` Prometheus endpoint | ✓ | meow-rs enhancement (no Go upstream equiv). |
 
 ---
@@ -142,9 +145,8 @@ security gaps and typo-likely mistakes become hard errors (Class A).
 
 ## Protocols
 
-Protocol sections are populated from approved specs as M1.B/C code lands.
-Sections marked "Supported in M1.B-x" describe the spec-approved behaviour;
-"Known-broken" bullets are filled in after integration and soak testing.
+Protocol sections summarize the current default app build unless a feature flag
+is called out explicitly.
 
 ### Shadowsocks
 
@@ -155,13 +157,15 @@ WebSocket transport is included. External plugin binaries are not supported
 ### Trojan
 
 Fully supported. TLS via rustls (not OpenSSL). WebSocket transport via the
-built-in transport layer. gRPC transport: M1.A-3.
+built-in transport layer. gRPC transport is available through the shared
+transport layer.
 
 ### VLESS
 
-Supported in M1.B-2. Plain VLESS — UUID auth header, no body cipher. Security
-comes entirely from the outer transport (`tls: true`). XTLS-Vision flow
-(`flow: xtls-rprx-vision`) supported; Reality transport deferred.
+Supported. Plain VLESS uses the UUID auth header and has no body cipher.
+Security comes from the outer transport (`tls: true`). XTLS-Vision flow
+(`flow: xtls-rprx-vision`) and Reality/uTLS paths are supported in the default
+app build.
 
 ```yaml
 proxies:
@@ -191,14 +195,12 @@ proxies:
 | `mux: {enabled: true}` | Multiplexes | Warn-once, ignored. |
 | `tls: false` with no outer encryption | Accepted silently | Warn-once at load — traffic is plaintext. |
 
-**Deferred:** Reality transport (`reality-opts:`), VLESS inbound, Mux.Cool.
-
-**Known-broken:** *(fill in after M1 smoke test).*
+**Deferred:** VLESS inbound and Mux.Cool.
 
 ### HTTP CONNECT outbound
 
-Supported in M1.B-3. HTTP/1.1 CONNECT tunnel with optional Basic auth and
-custom headers. Optional TLS wrapping of the proxy connection.
+Supported. HTTP/1.1 CONNECT tunnel with optional Basic auth and custom headers.
+Optional TLS wrapping of the proxy connection.
 
 ```yaml
 proxies:
@@ -222,12 +224,10 @@ proxies:
 | Proxy auth schemes other than Basic (Digest, NTLM) | Supported | M1 supports Basic only. Unknown auth challenge → `Err(ProxyAuthFailed)`. |
 | Proxy returns 407 | `ProxyAuthFailed` | Same, clearly named in logs: "http proxy auth failed". |
 
-**Known-broken:** *(fill in after M1 smoke test).*
-
 ### SOCKS5 outbound
 
-Supported in M1.B-4. SOCKS5 TCP tunnel (CMD `0x01` CONNECT) with optional
-username/password auth. Optional TLS-over-SOCKS5.
+Supported. SOCKS5 TCP tunnel (CMD `0x01` CONNECT) with optional username/password
+auth. Optional TLS-over-SOCKS5.
 
 ```yaml
 proxies:
@@ -254,21 +254,17 @@ proxies:
 an `atyp 0x03` (domain) request. IP-only dial is used only when no hostname is
 available. This preserves domain for SNI and logging on the destination server.
 
-**Known-broken:** *(fill in after M1 smoke test).*
+### Not supported in the default app build
 
-### Not supported in M1
+The following protocols are not available in the default app build. Using them
+in `proxies:` will produce a hard parse error unless a feature note says
+otherwise:
 
-The following protocols are not available in M1. Using them in `proxies:` will
-produce a hard parse error:
-
-- **VMess** — intentionally not implemented; use VLESS instead. Protocol
-  complexity (AEAD KDF, auth-id replay cache, legacy cipher quirks) for
-  diminishing returns as most deployments have migrated to VLESS. Hard parse
-  error with a message directing users to the VLESS equivalent.
-- **Hysteria2** — QUIC dep tree; deferred to M1.5/M2.
-- **TUIC** — same reason.
+- **TUIC** — not implemented.
 - **WireGuard** — niche; deferred.
-- **Snell, SSH** — niche; deferred.
+- **SSH** — niche; deferred.
+- **AnyTLS** — implemented behind the opt-in `anytls` feature, not compiled
+  into the default `meow-app` bundle.
 
 ---
 
@@ -499,10 +495,9 @@ using them will produce a clear error at startup.
 
 | Feature | Reason | Alternative |
 |---------|--------|-------------|
-| `geodata:` YAML subsection | M2+ only | M1 uses XDG file discovery |
 | External plugin subprocess (v2ray-plugin bin) | No subprocess exec in M1 | Built-in transport layer (WS + TLS) |
-| Hysteria2, TUIC, WireGuard protocols | QUIC dep tree + size budget | Revisit in M1.5/M2 |
-| VMess protocol | Protocol complexity for diminishing returns (decision 2026-04-11) | Use VLESS — same ecosystem, simpler wire format |
+| TUIC, WireGuard, SSH protocols | Protocol scope and dependency budget | Revisit in M2+ if users need them |
+| TUN inbound | Out of scope for this kernel | Use `tproxy-port` with nftables/pf |
 
 ---
 
@@ -530,10 +525,10 @@ meow-rs uses Cargo feature flags where Go mihomo uses build tags:
 | Go mihomo build tag / upstream | meow-rs Cargo feature | Default |
 |-------------------------------|--------------------------|:-------:|
 | Encrypted DNS (DoH, DoT) | `meow-dns/encrypted` | on |
-| *(M2: minimal build)* | `--no-default-features` | — |
-
-Note: the `vmess-legacy` feature flag is defined in the dropped VMess spec —
-it does not exist in the codebase since VMess was not implemented.
+| BoringSSL-backed uTLS/ECH paths | `meow-app/boring-tls` | on for `meow-app` |
+| Full app bundle | `meow-app/full` | on |
+| Minimal app bundle | `meow-app/minimal` | off |
+| AnyTLS outbound | non-default build enabling `meow-config/anytls` and `meow-proxy/anytls` | off |
 
 To build without encrypted DNS (smaller binary):
 
@@ -549,8 +544,10 @@ cargo build --release --no-default-features -p meow-dns
 
 Most common format from public providers. Typical issues:
 
-1. **VMess proxies** — replace with VLESS alternatives from your provider, or
-   remove them. meow-rs hard-errors on `type: vmess`.
+1. **Unsupported proxy types** — TUIC, WireGuard, SSH, ShadowsocksR, and other
+   niche upstream protocols still need replacement or removal. AnyTLS requires
+   a non-default build enabling the `meow-config/anytls` and `meow-proxy/anytls`
+   features.
 2. **`enhanced-mode: fake-ip`** — supported. Migration from a prior
    meow-rs release that warned-and-fell-back to `normal` is automatic;
    no config change required.
@@ -571,8 +568,8 @@ Most common format from public providers. Typical issues:
    array (M1.F-1). Shorthand ports (`mixed-port`, `socks-port`) get auto-names
    (`"mixed"`, `"socks"`) — `IN-NAME,mixed,...` works without changes.
 2. **`nameserver-policy` with `geosite:` keys** — entries like
-   `"geosite:cn": [...]` are skipped with a warn-once until geosite-in-policy
-   integration lands post-M1. Use exact domain or `+.` wildcard patterns instead.
+   `"geosite:cn": [...]` work when a geosite `.mrs` database is loaded. If no
+   geosite DB is available, those policy entries are skipped with a warn-once.
 3. **`authentication:`** — ensure each entry has a colon separating username and
    password. Entries without a colon are a hard parse error.
 4. **`skip-auth-prefixes:`** — loopback (`127.0.0.1/32`, `::1/128`) is always
@@ -591,8 +588,8 @@ Most common format from public providers. Typical issues:
 1. **`proxy-providers:`** — supported in M1.H-1 (http + file sources, health-check,
    `include-all` shorthand).
 2. **`interval:` refresh** — supported in M1.D-5. No config change needed.
-3. **`use:` in proxy groups** — wired in M1.H-1. Until that PR merges, list
-   proxies explicitly in the group's `proxies:` array.
+3. **`use:` in proxy groups** — wired for proxy providers. Provider filters and
+   `include-all` shorthands are applied when groups are resolved.
 
 ---
 
@@ -603,23 +600,31 @@ These have been tested against a real subscription and confirmed working:
 - Rule-based routing with DOMAIN, DOMAIN-SUFFIX, IP-CIDR, GEOIP rules
 - Shadowsocks AEAD proxies with selector group + url-test health check
 - Trojan with TLS + WebSocket transport
+- VLESS with TLS/WebSocket/gRPC/H2/HTTPUpgrade transports
+- VMess AEAD TCP/WebSocket outbound
+- Snell v3/v4/v5 outbound with UDP-over-TCP
+- Hysteria2 TCP/UDP with Docker integration coverage
+- Proxy providers with group `use:`
 - Mixed listener on a single port with SOCKS5 + HTTP clients
 - TProxy on Linux (nftables mark-based routing)
 - DNS with plain UDP nameservers + fallback
+- DoH/DoT upstreams, nameserver policy, fallback filter, and fake-IP mode
 
 ---
 
 ## Known-broken patterns
 
-The following produce hard errors at load time (not silent failures):
+The following are unsupported or intentionally rejected:
 
 - **`quic://` nameservers** — hard error; replace with `tls://` or `https://`.
-- **Hysteria2 / TUIC proxies** — hard error (`type: hysteria2` / `type: tuic`); no alternative in M1.
-- **`fake-ip` DNS mode** — supported in full; see §fake-ip mode.
-- **VMess proxies** — hard error; use `type: vless` instead.
+- **TUIC / WireGuard / SSH / ShadowsocksR proxies** — hard error; no default-build adapter.
+- **AnyTLS proxies in the default app build** — hard error unless the binary is
+  built with the opt-in `anytls` feature wiring.
+- **Snell v1/v2** — hard error; use Snell v3/v4/v5.
 - **`vless` with `flow: xtls-rprx-direct`** — hard error; use `xtls-rprx-vision`.
-
-*(Additional patterns filled in after M1 soak testing against real subscriptions.)*
+- **External dashboard mounting** (`external-ui`, `external-ui-name`,
+  `external-ui-url`) — not implemented yet; the built-in `/ui` dashboard is
+  served from the binary.
 
 ---
 
@@ -627,5 +632,5 @@ The following produce hard errors at load time (not silent failures):
 
 - File issues at the project issue tracker.
 - Check `docs/roadmap.md` for the status of features you need.
-- For features not in M1, note the milestone (M1.x, M2) and subscribe to the
+- For features not yet shipped, note the milestone and subscribe to the
   tracking issue.
