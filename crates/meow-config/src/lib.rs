@@ -25,6 +25,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+pub(crate) async fn spawn_blocking_with_current_dispatcher<F, R>(
+    f: F,
+) -> Result<R, tokio::task::JoinError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    tokio::task::spawn_blocking(move || tracing::dispatcher::with_default(&dispatch, f)).await
+}
+
 pub struct Config {
     pub general: GeneralConfig,
     pub dns: DnsConfig,
@@ -360,7 +371,7 @@ fn rebuild_from_raw_impl(
 async fn open_selector_store_async(
     path: PathBuf,
 ) -> Result<Arc<meow_proxy::SelectorStore>, anyhow::Error> {
-    tokio::task::spawn_blocking(move || meow_proxy::SelectorStore::open(path))
+    spawn_blocking_with_current_dispatcher(move || meow_proxy::SelectorStore::open(path))
         .await
         .map_err(|e| anyhow::anyhow!("selector store open task failed: {e}"))
 }
@@ -369,7 +380,7 @@ async fn build_parser_context_with_geo_async(
     raw: raw::RawConfig,
     geo: GeoDataConfig,
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
-    tokio::task::spawn_blocking(move || build_parser_context_with_geo(&raw, &geo))
+    spawn_blocking_with_current_dispatcher(move || build_parser_context_with_geo(&raw, &geo))
         .await
         .map_err(|e| anyhow::anyhow!("parser context build task failed: {e}"))?
 }
@@ -382,7 +393,7 @@ async fn rebuild_from_raw_impl_async(
     selector_store: Option<Arc<meow_proxy::SelectorStore>>,
     ctx: meow_rules::ParserContext,
 ) -> Result<RebuildResult, anyhow::Error> {
-    tokio::task::spawn_blocking(move || {
+    spawn_blocking_with_current_dispatcher(move || {
         rebuild_from_raw_impl(
             &raw,
             cache_dir.as_deref(),
@@ -402,7 +413,7 @@ async fn load_rule_providers_async(
     ctx: meow_rules::ParserContext,
     download_proxy: Option<Arc<dyn Proxy>>,
 ) -> Result<HashMap<String, Arc<rule_provider::RuleProvider>>, anyhow::Error> {
-    tokio::task::spawn_blocking(move || {
+    spawn_blocking_with_current_dispatcher(move || {
         rule_provider::load_providers(
             &raw_providers,
             cache_dir.as_deref(),

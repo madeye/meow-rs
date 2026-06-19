@@ -97,7 +97,7 @@ impl RuleProvider {
         let bytes = fetch_http_async(&self.vehicle, self.download_proxy.as_ref()).await?;
         let behavior = self.behavior;
         let ctx_clone = ctx.clone();
-        let boxed: Box<dyn RuleSet> = tokio::task::spawn_blocking(move || {
+        let boxed: Box<dyn RuleSet> = crate::spawn_blocking_with_current_dispatcher(move || {
             parse_bytes_to_ruleset(&bytes, behavior, &ctx_clone)
         })
         .await

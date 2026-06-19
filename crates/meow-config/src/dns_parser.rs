@@ -82,7 +82,7 @@ pub async fn parse_dns(
         let raw_filter = dns.fallback_filter.clone();
         let mmdb_path = mmdb_path.map(std::path::Path::to_path_buf);
         Some(
-            tokio::task::spawn_blocking(move || {
+            crate::spawn_blocking_with_current_dispatcher(move || {
                 build_fallback_filter(raw_filter.as_ref(), mmdb_path.as_deref())
             })
             .await
