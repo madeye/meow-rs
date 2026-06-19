@@ -10,11 +10,9 @@ use meow_common::{Metadata, Rule, RuleMatchHelper, RuleType};
 use crate::geosite::GeositeDB;
 
 pub struct GeoSiteRule {
-    /// Lower-cased category name (any `@suffix` stripped at parse time).
+    /// Lower-cased category name, including any `@attribute` suffix.
     category: String,
     /// Raw payload preserved for diagnostics / API introspection.
-    /// This may still contain the `@suffix` even though the suffix is
-    /// ignored for matching — matches upstream `Payload()` behavior.
     payload_raw: String,
     adapter: String,
     /// Shared DB loaded once at startup. `None` when the DB file was not
@@ -25,16 +23,10 @@ pub struct GeoSiteRule {
 
 impl GeoSiteRule {
     /// Construct a rule. `payload` may contain an `@suffix` (e.g.
-    /// `"cn@!cn"`); the suffix is stripped for matching but warn-once is
-    /// expected to have been emitted by the parser (not by this function —
-    /// constructing a rule directly from code is a test-only path).
+    /// `"microsoft@cn"`); the suffix is preserved and interpreted by
+    /// [`GeositeDB::lookup`].
     pub fn new(payload: &str, adapter: &str, db: Option<Arc<GeositeDB>>, no_resolve: bool) -> Self {
-        let category = payload
-            .split('@')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
+        let category = payload.trim().to_ascii_lowercase();
         Self {
             category,
             payload_raw: payload.to_string(),
@@ -180,15 +172,18 @@ mod tests {
         assert!(!r_no_resolve.should_resolve_ip());
     }
 
-    /// @suffix is stripped from the stored category for matching, but
-    /// preserved in the `payload()` output (matches upstream Payload()).
+    /// @suffix is preserved for matching and payload output.
     #[test]
-    fn at_suffix_stripped_for_matching() {
-        let db = db_with(&[("cn", &["baidu.com"])]);
-        let r = GeoSiteRule::new("cn@!cn", "DIRECT", Some(db), false);
-        assert_eq!(r.category(), "cn");
-        assert_eq!(r.payload(), "cn@!cn");
-        assert!(r.match_metadata(&meta_host("baidu.com"), &helper()));
+    fn at_suffix_preserved_for_matching() {
+        let db = db_with(&[
+            ("microsoft", &["global.example"]),
+            ("microsoft@cn", &["cn.example"]),
+        ]);
+        let r = GeoSiteRule::new("microsoft@cn", "DIRECT", Some(db), false);
+        assert_eq!(r.category(), "microsoft@cn");
+        assert_eq!(r.payload(), "microsoft@cn");
+        assert!(r.match_metadata(&meta_host("cn.example"), &helper()));
+        assert!(!r.match_metadata(&meta_host("global.example"), &helper()));
     }
 
     /// Uses sniff_host when set, same as other domain rules.

@@ -709,13 +709,18 @@ impl PortRange {
 
 fn compile_port_matcher(payload: &str) -> Option<PortMatcher> {
     let mut ranges = Vec::new();
-    for part in payload.split(',') {
+    for part in payload.split([',', '/']) {
         let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
         if let Some((start, end)) = part.split_once('-') {
-            ranges.push(PortRange::Range(
-                start.trim().parse().ok()?,
-                end.trim().parse().ok()?,
-            ));
+            let start = start.trim().parse().ok()?;
+            let end = end.trim().parse().ok()?;
+            if start > end {
+                return None;
+            }
+            ranges.push(PortRange::Range(start, end));
         } else {
             ranges.push(PortRange::Single(part.parse().ok()?));
         }
@@ -723,22 +728,13 @@ fn compile_port_matcher(payload: &str) -> Option<PortMatcher> {
     match ranges.as_slice() {
         [PortRange::Single(value)] => Some(PortMatcher::Single(*value)),
         [PortRange::Range(lo, hi)] => Some(PortMatcher::Range(*lo, *hi)),
+        [] => None,
         _ => Some(PortMatcher::Multiple(ranges)),
     }
 }
 
 fn compile_in_port(payload: &str) -> Option<RuleOp> {
-    let matcher = if let Some((lo, hi)) = payload.split_once('-') {
-        let lo: u16 = lo.trim().parse().ok()?;
-        let hi: u16 = hi.trim().parse().ok()?;
-        if lo > hi {
-            return None;
-        }
-        PortMatcher::Range(lo, hi)
-    } else {
-        PortMatcher::Single(payload.trim().parse().ok()?)
-    };
-    Some(RuleOp::InPort(matcher))
+    compile_port_matcher(payload).map(RuleOp::InPort)
 }
 
 fn compile_network(payload: &str) -> Option<RuleOp> {
@@ -839,10 +835,22 @@ mod tests {
     use crate::match_engine::{self, DomainIndex as LegacyDomainIndex};
     use meow_common::{Metadata, Rule};
     use meow_rules::{
-        domain::DomainRule, domain_keyword::DomainKeywordRule, domain_regex::DomainRegexRule,
-        domain_suffix::DomainSuffixRule, domain_wildcard::DomainWildcardRule,
-        final_rule::FinalRule, ipcidr::IpCidrRule, logic::OrRule, port::PortRule,
+        domain::DomainRule,
+        domain_keyword::DomainKeywordRule,
+        domain_regex::DomainRegexRule,
+        domain_suffix::DomainSuffixRule,
+        domain_wildcard::DomainWildcardRule,
+        final_rule::FinalRule,
+        geosite::GeositeDB,
+        geosite_rule::GeoSiteRule,
+        in_port::InPortRule,
+        ipcidr::IpCidrRule,
+        logic::OrRule,
+        port::PortRule,
+        rule_set::{build_rule_set, RuleSet, RuleSetBehavior},
+        rule_set_rule::RuleSetRule,
         sub_rule::SubRuleRule,
+        ParserContext,
     };
     use std::net::IpAddr;
     use std::sync::{
@@ -929,6 +937,127 @@ mod tests {
             .expect("earlier port rule must match");
         assert_eq!(result.adapter_name, "Direct");
         assert_eq!(result.rule_type, RuleType::DstPort);
+    }
+
+    #[test]
+    fn lowered_dst_port_slash_list_matches() {
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(
+            PortRule::new("80/8080/443/8443", "PortProxy", false).unwrap(),
+        )];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(set.slots()[0].is_lowered());
+
+        let meta = Metadata {
+            host: "example.com".into(),
+            dst_port: 8080,
+            ..Default::default()
+        };
+        let result = set
+            .match_rules(&meta, &rules)
+            .expect("port list must match");
+        assert_eq!(result.adapter_name, "PortProxy");
+        assert_eq!(result.rule_type, RuleType::DstPort);
+    }
+
+    #[test]
+    fn lowered_in_port_slash_list_matches() {
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(
+            InPortRule::new("80/8080/443/8443", "InboundProxy").unwrap(),
+        )];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(set.slots()[0].is_lowered());
+
+        let meta = Metadata {
+            host: "example.com".into(),
+            in_port: 8443,
+            ..Default::default()
+        };
+        let result = set
+            .match_rules(&meta, &rules)
+            .expect("in-port list must match");
+        assert_eq!(result.adapter_name, "InboundProxy");
+        assert_eq!(result.rule_type, RuleType::InPort);
+    }
+
+    #[test]
+    fn geosite_attribute_rule_fallback_matches_under_ir() {
+        let mut db = GeositeDB::empty();
+        db.insert("microsoft", "global.example");
+        db.insert("microsoft@cn", "cn.example");
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(GeoSiteRule::new(
+            "microsoft@cn",
+            "Direct",
+            Some(Arc::new(db)),
+            false,
+        ))];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.slots()[0].is_lowered());
+
+        let meta = Metadata {
+            host: "cn.example".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set
+            .match_rules(&meta, &rules)
+            .expect("geosite attr fallback must match");
+        assert_eq!(result.adapter_name, "Direct");
+        assert_eq!(result.rule_type, RuleType::GeoSite);
+    }
+
+    #[test]
+    fn geoip_rule_fallback_matches_under_ir() {
+        let match_count = Arc::new(AtomicUsize::new(0));
+        let counts = Arc::new(CallCounts::default());
+        let rules: Vec<Box<dyn Rule>> = vec![Box::new(CountingRule::new(
+            RuleType::GeoIp,
+            "GeoProxy",
+            "CN",
+            true,
+            Arc::clone(&match_count),
+            counts,
+        ))];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.slots()[0].is_lowered());
+
+        let meta = Metadata {
+            dst_ip: Some("203.0.113.9".parse::<IpAddr>().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set
+            .match_rules(&meta, &rules)
+            .expect("geoip fallback must match");
+        assert_eq!(result.adapter_name, "GeoProxy");
+        assert_eq!(result.rule_type, RuleType::GeoIp);
+        assert_eq!(match_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn rule_set_rule_fallback_matches_under_ir() {
+        let entries = vec!["example.com".to_string()];
+        let set_box = build_rule_set(RuleSetBehavior::Domain, &entries, &ParserContext::default());
+        let rule_set: Arc<dyn RuleSet> = Arc::from(set_box);
+        let rules: Vec<Box<dyn Rule>> =
+            vec![Box::new(RuleSetRule::new("cn", rule_set, "Direct", false))];
+
+        let compiled = CompiledRuleSet::build(&rules);
+        assert!(!compiled.slots()[0].is_lowered());
+
+        let meta = Metadata {
+            host: "example.com".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = compiled
+            .match_rules(&meta, &rules)
+            .expect("rule-set fallback must match");
+        assert_eq!(result.adapter_name, "Direct");
+        assert_eq!(result.rule_type, RuleType::RuleSet);
     }
 
     #[test]

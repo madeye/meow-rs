@@ -2,7 +2,7 @@ use axum::http::{Request, StatusCode};
 use dashmap::DashMap;
 use http_body_util::BodyExt;
 use meow_api::routes::{create_router, AppState};
-use meow_common::DnsMode;
+use meow_common::{DnsMode, Proxy};
 use meow_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
 use meow_dns::Resolver;
 use meow_trie::DomainTrie;
@@ -48,6 +48,38 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.yaml").to_str().unwrap().to_string();
     // Leak the tempdir so it persists for the test — fine for tests
+    std::mem::forget(dir);
+
+    Arc::new(AppState {
+        tunnel,
+        secret: None,
+        config_path,
+        raw_config: Arc::new(RwLock::new(raw)),
+        log_tx: test_log_tx(),
+        proxy_providers: Arc::new(DashMap::new()),
+        rule_providers: Arc::new(RwLock::new(HashMap::new())),
+        listeners: vec![],
+    })
+}
+
+fn test_state_with_route(raw: RawConfig, named: Vec<(&str, Arc<dyn Proxy>)>) -> Arc<AppState> {
+    let resolver = Arc::new(Resolver::new(
+        vec!["8.8.8.8:53".parse().unwrap()],
+        vec![],
+        DnsMode::Normal,
+        DomainTrie::new(),
+        true,
+    ));
+    let tunnel = Tunnel::new(resolver);
+
+    let mut proxies = std::collections::HashMap::new();
+    for (name, proxy) in named {
+        proxies.insert(smol_str::SmolStr::from(name), proxy);
+    }
+    tunnel.update_proxies(proxies);
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.yaml").to_str().unwrap().to_string();
     std::mem::forget(dir);
 
     Arc::new(AppState {
@@ -617,6 +649,53 @@ async fn get_proxy_groups_with_data() {
     assert_eq!(groups[0]["proxies"].as_array().unwrap().len(), 2);
     // Selector should have a current selection
     assert!(groups[0]["now"].is_string());
+}
+
+#[tokio::test]
+async fn get_proxy_groups_expands_provider_backed_runtime_members() {
+    let mut raw = test_raw_config();
+    raw.proxy_groups = Some(vec![RawProxyGroup {
+        name: "AUTO".into(),
+        group_type: "url-test".into(),
+        proxies: None,
+        use_providers: Some(vec!["default".into()]),
+        ..Default::default()
+    }]);
+
+    let node_a = delay_support::TestAdapter::new("node-a", delay_support::DialBehavior::InstantOk)
+        .into_proxy();
+    let node_b = delay_support::TestAdapter::new("node-b", delay_support::DialBehavior::InstantOk)
+        .into_proxy();
+    let slot: meow_common::ProviderSlot = Arc::new(RwLock::new(vec![node_a, node_b]));
+    let auto: Arc<dyn Proxy> = Arc::new(meow_proxy::UrlTestGroup::new_with_providers(
+        "AUTO",
+        Vec::new(),
+        150,
+        vec![slot],
+    ));
+    let state = test_state_with_route(raw, vec![("AUTO", auto)]);
+    let app = create_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::get("/api/proxy-groups")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let groups = json.as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["name"], "AUTO");
+    assert_eq!(groups[0]["type"], "url-test");
+    assert_eq!(groups[0]["now"], "node-a");
+    let proxies = groups[0]["proxies"].as_array().unwrap();
+    assert_eq!(proxies.len(), 2);
+    assert_eq!(proxies[0], "node-a");
+    assert_eq!(proxies[1], "node-b");
 }
 
 #[tokio::test]

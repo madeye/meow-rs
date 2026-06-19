@@ -108,7 +108,8 @@ pub struct ApiConfig {
 }
 
 pub async fn load_config(path: &str) -> Result<Config, anyhow::Error> {
-    let bytes = std::fs::read(path)
+    let bytes = tokio::fs::read(path)
+        .await
         .map_err(|e| anyhow::anyhow!("failed to read config file {path}: {e}"))?;
     // Strip an optional UTF-8 BOM, which YAML 1.2 permits but some
     // editors (especially on Windows) leave behind.
@@ -156,6 +157,20 @@ pub fn save_raw_config(path: &str, raw: &raw::RawConfig) -> Result<(), anyhow::E
         let _ = std::fs::rename(path, &bak_path);
     }
     std::fs::rename(&tmp_path, path)?;
+    info!("Config saved to {}", path);
+    Ok(())
+}
+
+/// Async counterpart to [`save_raw_config`] for Tokio request/background paths.
+pub async fn save_raw_config_async(path: &str, raw: &raw::RawConfig) -> Result<(), anyhow::Error> {
+    let yaml = serde_yaml::to_string(raw)?;
+    let tmp_path = format!("{path}.tmp");
+    let bak_path = format!("{path}.bak");
+    tokio::fs::write(&tmp_path, yaml).await?;
+    if tokio::fs::metadata(path).await.is_ok() {
+        let _ = tokio::fs::rename(path, &bak_path).await;
+    }
+    tokio::fs::rename(&tmp_path, path).await?;
     info!("Config saved to {}", path);
     Ok(())
 }
@@ -342,6 +357,63 @@ fn rebuild_from_raw_impl(
     Ok((proxies, rules))
 }
 
+async fn open_selector_store_async(
+    path: PathBuf,
+) -> Result<Arc<meow_proxy::SelectorStore>, anyhow::Error> {
+    tokio::task::spawn_blocking(move || meow_proxy::SelectorStore::open(path))
+        .await
+        .map_err(|e| anyhow::anyhow!("selector store open task failed: {e}"))
+}
+
+async fn build_parser_context_with_geo_async(
+    raw: raw::RawConfig,
+    geo: GeoDataConfig,
+) -> Result<meow_rules::ParserContext, anyhow::Error> {
+    tokio::task::spawn_blocking(move || build_parser_context_with_geo(&raw, &geo))
+        .await
+        .map_err(|e| anyhow::anyhow!("parser context build task failed: {e}"))?
+}
+
+async fn rebuild_from_raw_impl_async(
+    raw: raw::RawConfig,
+    cache_dir: Option<PathBuf>,
+    resolver: Option<Arc<Resolver>>,
+    providers: HashMap<String, Arc<ProxyProvider>>,
+    selector_store: Option<Arc<meow_proxy::SelectorStore>>,
+    ctx: meow_rules::ParserContext,
+) -> Result<RebuildResult, anyhow::Error> {
+    tokio::task::spawn_blocking(move || {
+        rebuild_from_raw_impl(
+            &raw,
+            cache_dir.as_deref(),
+            resolver,
+            &providers,
+            selector_store.as_ref(),
+            Some(&ctx),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("config rebuild task failed: {e}"))?
+}
+
+async fn load_rule_providers_async(
+    raw_providers: HashMap<String, raw::RawRuleProvider>,
+    cache_dir: Option<PathBuf>,
+    ctx: meow_rules::ParserContext,
+    download_proxy: Option<Arc<dyn Proxy>>,
+) -> Result<HashMap<String, Arc<rule_provider::RuleProvider>>, anyhow::Error> {
+    tokio::task::spawn_blocking(move || {
+        rule_provider::load_providers(
+            &raw_providers,
+            cache_dir.as_deref(),
+            &ctx,
+            download_proxy.as_ref(),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("rule-provider load task failed: {e}"))
+}
+
 fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::Error> {
     // Deprecated alias: tproxy_sni (pre-spec) synthesises a minimal config.
     let has_tproxy_sni = raw.tproxy_sni.unwrap_or(false);
@@ -469,7 +541,8 @@ async fn ensure_geodata(raw: &raw::RawConfig, geo: &GeoDataConfig) {
 
     let needs_geoip = lines.iter().any(|l| line_is_geoip_rule(l));
     let needs_asn = lines.iter().any(|l| line_is_asn_rule(l));
-    let needs_geosite = lines.iter().any(|l| line_is_geosite_rule(l));
+    let needs_geosite =
+        lines.iter().any(|l| line_is_geosite_rule(l)) || dns_policy_uses_geosite(raw);
 
     if !needs_geoip && !needs_asn && !needs_geosite {
         return;
@@ -588,14 +661,24 @@ fn build_parser_context_at(
         None => None,
     };
 
-    let geosite_trigger = lines.iter().any(|l| line_is_geosite_rule(l));
+    let geosite_trigger =
+        lines.iter().any(|l| line_is_geosite_rule(l)) || dns_policy_uses_geosite(raw);
     let geosite = if geosite_trigger {
-        let allowed = collect_geosite_categories(lines);
-        meow_rules::geosite::discover_and_load_at(
+        let mut allowed = collect_geosite_categories(lines);
+        allowed.extend(collect_dns_policy_geosite_categories(raw));
+        info!(
+            "Loading geosite database for {} referenced categories",
+            allowed.len()
+        );
+        let loaded = meow_rules::geosite::discover_and_load_at(
             geosite_explicit,
             geosite_candidates,
             Some(&allowed),
-        )
+        );
+        if loaded.is_some() {
+            info!("Loaded geosite database");
+        }
+        loaded
     } else {
         None
     };
@@ -604,7 +687,6 @@ fn build_parser_context_at(
         geoip,
         asn,
         geosite,
-        ..Default::default()
     })
 }
 
@@ -669,7 +751,8 @@ fn collect_geosite_categories(lines: &[String]) -> std::collections::HashSet<Str
     use std::sync::OnceLock;
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)\bGEOSITE\s*,\s*([A-Za-z0-9_-]+)").expect("compile GEOSITE scan regex")
+        Regex::new(r"(?i)\bGEOSITE\s*,\s*([A-Za-z0-9_!\-]+)(?:@[A-Za-z0-9_!\-]+)*")
+            .expect("compile GEOSITE scan regex")
     });
     let mut out = std::collections::HashSet::new();
     for line in lines {
@@ -679,6 +762,48 @@ fn collect_geosite_categories(lines: &[String]) -> std::collections::HashSet<Str
         }
         for cap in re.captures_iter(line) {
             out.insert(cap[1].to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+fn dns_policy_uses_geosite(raw: &raw::RawConfig) -> bool {
+    raw.dns
+        .as_ref()
+        .and_then(|dns| dns.nameserver_policy.as_ref())
+        .is_some_and(|policy| {
+            policy
+                .keys()
+                .any(|key| key.trim().to_ascii_lowercase().starts_with("geosite:"))
+        })
+}
+
+fn collect_dns_policy_geosite_categories(
+    raw: &raw::RawConfig,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Some(policy) = raw
+        .dns
+        .as_ref()
+        .and_then(|dns| dns.nameserver_policy.as_ref())
+    else {
+        return out;
+    };
+    for key in policy.keys() {
+        let trimmed = key.trim();
+        if !trimmed.to_ascii_lowercase().starts_with("geosite:") {
+            continue;
+        }
+        for category in trimmed["geosite:".len()..].split(',') {
+            let category = category
+                .trim()
+                .split('@')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !category.is_empty() {
+                out.insert(category);
+            }
         }
     }
     out
@@ -987,8 +1112,11 @@ async fn build_config(
     //      depends on the placeholder built in step 1.
     // Open the persistent selector store (one JSON file in cache_dir).
     // Missing/unreadable files yield an empty store — no fatal errors.
-    let selector_store =
-        cache_dir.map(|d| meow_proxy::SelectorStore::open(d.join("selector-cache.json")));
+    let cache_dir_buf = cache_dir.map(Path::to_path_buf);
+    let selector_store = match cache_dir_buf.as_ref() {
+        Some(d) => Some(open_selector_store_async(d.join("selector-cache.json")).await?),
+        None => None,
+    };
 
     // Ensure geodata files exist — download any that are missing and needed
     // by the config's rules. This must happen before building the parser
@@ -996,36 +1124,50 @@ async fn build_config(
     ensure_geodata(&raw, &geodata).await;
 
     // Build the parser context once and share across all passes.
-    let ctx = build_parser_context_with_geo(&raw, &geodata)?;
+    let ctx = build_parser_context_with_geo_async(raw.clone(), geodata.clone()).await?;
 
-    let (proxies, _) = rebuild_from_raw_impl(
-        &raw,
-        cache_dir,
+    let (proxies, _) = rebuild_from_raw_impl_async(
+        raw.clone(),
+        cache_dir_buf.clone(),
         None,
-        &proxy_providers,
-        selector_store.as_ref(),
-        Some(&ctx),
-    )?;
+        proxy_providers.clone(),
+        selector_store.clone(),
+        ctx.clone(),
+    )
+    .await?;
 
     // DNS — pass the explicit mmdb path so fallback-filter GeoIP uses the
     // same path as the rule engine, plus the proxy registry from step 1
     // so #PROXY-tagged nameservers can resolve their referenced adapter.
-    let dns_config =
-        dns_parser::parse_dns(&raw, geodata.mmdb_path.as_deref(), cache_dir, &proxies).await?;
-
-    let (proxies, rules) = rebuild_from_raw_impl(
+    let dns_config = dns_parser::parse_dns(
         &raw,
+        geodata.mmdb_path.as_deref(),
         cache_dir,
+        &proxies,
+        ctx.geosite.clone(),
+    )
+    .await?;
+
+    let (proxies, rules) = rebuild_from_raw_impl_async(
+        raw.clone(),
+        cache_dir_buf.clone(),
         Some(Arc::clone(&dns_config.resolver)),
-        &proxy_providers,
-        selector_store.as_ref(),
-        Some(&ctx),
-    )?;
+        proxy_providers.clone(),
+        selector_store.clone(),
+        ctx.clone(),
+    )
+    .await?;
 
     let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
     let rule_providers = match raw.rule_providers.as_ref() {
         Some(map) if !map.is_empty() => {
-            rule_provider::load_providers(map, cache_dir, &ctx, download_proxy.as_ref())
+            load_rule_providers_async(
+                map.clone(),
+                cache_dir_buf.clone(),
+                ctx.clone(),
+                download_proxy,
+            )
+            .await?
         }
         _ => HashMap::new(),
     };

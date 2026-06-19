@@ -8,8 +8,7 @@
 //!   enum Type { Plain = 0; Regex = 1; Domain = 2; Full = 3; }
 //!   Type type = 1;
 //!   string value = 2;
-//!   // Attribute (field 3) is parsed and discarded — attribute filtering
-//!   // is not implemented (Class B per ADR-0002 §GEOSITE @-suffix).
+//!   repeated Attribute attribute = 3;
 //! }
 //! message GeoSite { string country_code = 1; repeated Domain domain = 2; }
 //! message GeoSiteList { repeated GeoSite entry = 1; }
@@ -40,6 +39,8 @@ const FIELD_GEOSITE_COUNTRY_CODE: u32 = 1;
 const FIELD_GEOSITE_DOMAIN: u32 = 2;
 const FIELD_DOMAIN_TYPE: u32 = 1;
 const FIELD_DOMAIN_VALUE: u32 = 2;
+const FIELD_DOMAIN_ATTRIBUTE: u32 = 3;
+const FIELD_ATTRIBUTE_KEY: u32 = 1;
 
 /// `Domain.Type` enum values.
 const DOMAIN_TYPE_PLAIN: u64 = 0;
@@ -265,29 +266,49 @@ fn parse_geosite_entry<'a>(
         }
     }
 
-    let trie = categories.entry(country.clone()).or_default();
-    let regexes = regex_patterns.entry(country.clone()).or_default();
-    let keywords = keyword_patterns.entry(country.clone()).or_default();
-    let mut count = counts.get(&country).copied().unwrap_or(0);
     for domain_bytes in deferred_domains {
-        if let Some(()) = apply_domain_entry(domain_bytes, trie, regexes, keywords, skipped)? {
-            count += 1;
+        let Some(entry) = parse_domain_entry(domain_bytes, skipped)? else {
+            continue;
+        };
+        if insert_domain_entry(
+            &entry,
+            categories.entry(country.clone()).or_default(),
+            regex_patterns.entry(country.clone()).or_default(),
+            keyword_patterns.entry(country.clone()).or_default(),
+            skipped,
+        ) {
+            *counts.entry(country.clone()).or_insert(0) += 1;
+        }
+        for attr in &entry.attrs {
+            let attr_country = format!("{country}@{attr}");
+            if insert_domain_entry(
+                &entry,
+                categories.entry(attr_country.clone()).or_default(),
+                regex_patterns.entry(attr_country.clone()).or_default(),
+                keyword_patterns.entry(attr_country.clone()).or_default(),
+                skipped,
+            ) {
+                *counts.entry(attr_country).or_insert(0) += 1;
+            }
         }
     }
-    counts.insert(country, count);
     Ok(())
 }
 
-fn apply_domain_entry(
+struct ParsedDomainEntry {
+    dom_type: u64,
+    value: String,
+    attrs: Vec<String>,
+}
+
+fn parse_domain_entry(
     data: &[u8],
-    trie: &mut DomainTrie<()>,
-    regexes: &mut Vec<String>,
-    keywords: &mut Vec<String>,
     skipped: &mut SkipStats,
-) -> Result<Option<()>, DatError> {
+) -> Result<Option<ParsedDomainEntry>, DatError> {
     let mut r = PbReader::new(data);
     let mut dom_type: u64 = DOMAIN_TYPE_DOMAIN;
     let mut value: Option<String> = None;
+    let mut attrs = Vec::new();
     let mut saw_type = false;
 
     while !r.is_at_end() {
@@ -303,6 +324,12 @@ fn apply_domain_entry(
                     .map_err(|_| DatError::InvalidUtf8(r.pos))?
                     .to_ascii_lowercase();
                 value = Some(s);
+            }
+            (FIELD_DOMAIN_ATTRIBUTE, WIRE_LEN_DELIM) => {
+                let bytes = r.read_length_delimited()?;
+                if let Some(key) = parse_attribute_key(bytes)? {
+                    attrs.push(key);
+                }
             }
             (_, w) => r.skip_field(w)?,
         }
@@ -321,37 +348,64 @@ fn apply_domain_entry(
         return Ok(None);
     }
 
-    match dom_type {
+    Ok(Some(ParsedDomainEntry {
+        dom_type,
+        value,
+        attrs,
+    }))
+}
+
+fn parse_attribute_key(data: &[u8]) -> Result<Option<String>, DatError> {
+    let mut r = PbReader::new(data);
+    let mut key = None;
+    while !r.is_at_end() {
+        let (field, wire) = r.read_tag()?;
+        match (field, wire) {
+            (FIELD_ATTRIBUTE_KEY, WIRE_LEN_DELIM) => {
+                let bytes = r.read_length_delimited()?;
+                let s = std::str::from_utf8(bytes)
+                    .map_err(|_| DatError::InvalidUtf8(r.pos))?
+                    .trim()
+                    .to_ascii_lowercase();
+                if !s.is_empty() {
+                    key = Some(s);
+                }
+            }
+            (_, w) => r.skip_field(w)?,
+        }
+    }
+    Ok(key)
+}
+
+fn insert_domain_entry(
+    entry: &ParsedDomainEntry,
+    trie: &mut DomainTrie<()>,
+    regexes: &mut Vec<String>,
+    keywords: &mut Vec<String>,
+    skipped: &mut SkipStats,
+) -> bool {
+    let value = entry.value.clone();
+    match entry.dom_type {
         DOMAIN_TYPE_PLAIN => {
             keywords.push(value);
-            Ok(Some(()))
+            true
         }
         DOMAIN_TYPE_REGEX => {
             if regex::Regex::new(&value).is_ok() {
                 regexes.push(value);
-                Ok(Some(()))
+                true
             } else {
                 skipped.bad_regex += 1;
-                Ok(None)
+                false
             }
         }
         DOMAIN_TYPE_DOMAIN => {
             let pat = format!("+.{value}");
             let _ = trie.insert(&value, ());
-            if trie.insert(&pat, ()) {
-                Ok(Some(()))
-            } else {
-                Ok(None)
-            }
+            trie.insert(&pat, ())
         }
-        DOMAIN_TYPE_FULL => {
-            if trie.insert(&value, ()) {
-                Ok(Some(()))
-            } else {
-                Ok(None)
-            }
-        }
-        _ => Ok(None),
+        DOMAIN_TYPE_FULL => trie.insert(&value, ()),
+        _ => false,
     }
 }
 
@@ -383,6 +437,17 @@ mod tests {
 
     /// Build a minimal Domain submessage.
     fn build_domain(ty: u64, value: &str) -> Vec<u8> {
+        build_domain_with_attrs(ty, value, &[])
+    }
+
+    fn build_attribute(key: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_tag(&mut out, FIELD_ATTRIBUTE_KEY, WIRE_LEN_DELIM);
+        write_len_delim(&mut out, key.as_bytes());
+        out
+    }
+
+    fn build_domain_with_attrs(ty: u64, value: &str, attrs: &[&str]) -> Vec<u8> {
         let mut out = Vec::new();
         if ty != DOMAIN_TYPE_PLAIN {
             write_tag(&mut out, FIELD_DOMAIN_TYPE, WIRE_VARINT);
@@ -390,6 +455,11 @@ mod tests {
         }
         write_tag(&mut out, FIELD_DOMAIN_VALUE, WIRE_LEN_DELIM);
         write_len_delim(&mut out, value.as_bytes());
+        for attr in attrs {
+            let attr = build_attribute(attr);
+            write_tag(&mut out, FIELD_DOMAIN_ATTRIBUTE, WIRE_LEN_DELIM);
+            write_len_delim(&mut out, &attr);
+        }
         out
     }
 
@@ -450,6 +520,31 @@ mod tests {
         assert!(db.lookup("mixed", "has-keyword-in-it.com"));
         assert!(db.lookup("mixed", "drop-something-regex"));
         assert!(!db.lookup("mixed", "nomatch.org"));
+    }
+
+    #[test]
+    fn parse_attribute_filtered_entries() {
+        let tagged = build_domain_with_attrs(DOMAIN_TYPE_DOMAIN, "cn.example", &["cn", "ms"]);
+        let untagged = build_domain(DOMAIN_TYPE_DOMAIN, "global.example");
+        let mut site = Vec::new();
+        write_tag(&mut site, FIELD_GEOSITE_COUNTRY_CODE, WIRE_LEN_DELIM);
+        write_len_delim(&mut site, b"microsoft");
+        for dom in [tagged, untagged] {
+            write_tag(&mut site, FIELD_GEOSITE_DOMAIN, WIRE_LEN_DELIM);
+            write_len_delim(&mut site, &dom);
+        }
+
+        let mut bytes = Vec::new();
+        write_tag(&mut bytes, FIELD_GEOSITELIST_ENTRY, WIRE_LEN_DELIM);
+        write_len_delim(&mut bytes, &site);
+
+        let db = from_dat_bytes(&bytes, None).expect("ok");
+        assert!(db.lookup("microsoft", "cn.example"));
+        assert!(db.lookup("microsoft", "global.example"));
+        assert!(db.lookup("microsoft@cn", "cn.example"));
+        assert!(db.lookup("microsoft@cn@ms", "cn.example"));
+        assert!(!db.lookup("microsoft@cn", "global.example"));
+        assert!(!db.lookup("microsoft@jp", "cn.example"));
     }
 
     #[test]

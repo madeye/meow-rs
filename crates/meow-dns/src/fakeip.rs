@@ -174,30 +174,25 @@ impl FileStore {
     /// warn — we never refuse to start because of a bad snapshot.
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
-        let snapshot = if path.exists() {
-            match fs::read(&path) {
-                Ok(bytes) => {
-                    serde_json::from_slice::<PersistedSnapshot>(&bytes).unwrap_or_else(|e| {
-                        warn!(
-                            "fakeip: corrupt snapshot {} ({}); starting fresh",
-                            path.display(),
-                            e
-                        );
-                        PersistedSnapshot::default()
-                    })
-                }
-                Err(e) => {
-                    warn!(
-                        "fakeip: cannot read {} ({}); starting fresh",
-                        path.display(),
-                        e
-                    );
-                    PersistedSnapshot::default()
-                }
-            }
-        } else {
-            PersistedSnapshot::default()
-        };
+        let snapshot = load_snapshot(&path);
+        Ok(Self::from_snapshot(path, snapshot))
+    }
+
+    /// Async opener for Tokio config-load paths. Snapshot read and JSON parse
+    /// run on the blocking pool because this store keeps a sync API for tests
+    /// and non-Tokio callers.
+    pub async fn open_async(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let path = path.into();
+        let snapshot = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || load_snapshot(&path)
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("fakeip snapshot load task failed: {e}")))?;
+        Ok(Self::from_snapshot(path, snapshot))
+    }
+
+    fn from_snapshot(path: PathBuf, snapshot: PersistedSnapshot) -> Self {
         let reverse = snapshot
             .entries
             .iter()
@@ -215,14 +210,14 @@ impl FileStore {
             Arc::clone(&notify),
         );
 
-        Ok(Self {
+        Self {
             path,
             state,
             reverse: Mutex::new(reverse),
             dirty,
             notify,
             flush_task: Some(flush_task),
-        })
+        }
     }
 
     fn spawn_flush_task(
@@ -245,7 +240,12 @@ impl FileStore {
                         let s = state.lock();
                         serialise(&s)
                     };
-                    persist_to_file(&path, &snap);
+                    let path = path.clone();
+                    if let Err(e) =
+                        tokio::task::spawn_blocking(move || persist_to_file(&path, &snap)).await
+                    {
+                        warn!("fakeip: persist task failed: {}", e);
+                    }
                 }
             }
         })
@@ -281,6 +281,30 @@ impl Drop for FileStore {
         // torn.
         if let Some(handle) = self.flush_task.take() {
             handle.abort();
+        }
+    }
+}
+
+fn load_snapshot(path: &Path) -> PersistedSnapshot {
+    if !path.exists() {
+        return PersistedSnapshot::default();
+    }
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice::<PersistedSnapshot>(&bytes).unwrap_or_else(|e| {
+            warn!(
+                "fakeip: corrupt snapshot {} ({}); starting fresh",
+                path.display(),
+                e
+            );
+            PersistedSnapshot::default()
+        }),
+        Err(e) => {
+            warn!(
+                "fakeip: cannot read {} ({}); starting fresh",
+                path.display(),
+                e
+            );
+            PersistedSnapshot::default()
         }
     }
 }

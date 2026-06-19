@@ -1,6 +1,8 @@
 use std::fmt;
 use std::net::IpAddr;
 
+use hickory_proto::op::ResponseCode;
+
 /// A parsed nameserver URL in one of the supported transport forms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -23,6 +25,10 @@ pub enum NameServerUrl {
         port: u16,
         path: String,
         sni: String,
+    },
+    RCode {
+        code: ResponseCode,
+        label: String,
     },
 }
 
@@ -56,6 +62,7 @@ impl fmt::Display for NameServerUrl {
             } => {
                 write!(f, "https://{addr}:{port}{path}#{sni}")
             }
+            NameServerUrl::RCode { label, .. } => write!(f, "rcode://{label}"),
         }
     }
 }
@@ -126,6 +133,7 @@ impl NameServerUrl {
             | NameServerUrl::Tcp { addr, .. }
             | NameServerUrl::Tls { addr, .. }
             | NameServerUrl::Https { addr, .. } => addr,
+            NameServerUrl::RCode { .. } => return None,
         };
         match addr {
             HostOrIp::Host(h) => Some(h.as_str()),
@@ -135,7 +143,10 @@ impl NameServerUrl {
 
     /// Returns true if this is a plain (non-encrypted) nameserver.
     pub fn is_plain(&self) -> bool {
-        matches!(self, NameServerUrl::Udp { .. } | NameServerUrl::Tcp { .. })
+        matches!(
+            self,
+            NameServerUrl::Udp { .. } | NameServerUrl::Tcp { .. } | NameServerUrl::RCode { .. }
+        )
     }
 
     /// Parse a nameserver string into a `NameServerUrl`.
@@ -174,6 +185,9 @@ impl NameServerUrl {
         if let Some(rest) = s_no_frag.strip_prefix("tcp://") {
             let (addr, port) = parse_host_port(rest, 53)?;
             return Ok(NameServerUrl::Tcp { addr, port });
+        }
+        if let Some(rest) = s_no_frag.strip_prefix("rcode://") {
+            return parse_rcode(rest);
         }
         if s_no_frag.starts_with("quic://") {
             return Err(NameServerParseError::QuicNotSupported);
@@ -243,6 +257,23 @@ impl NameServerUrl {
     fn parse_https(_rest: &str, _fragment: Option<&str>) -> Result<Self, NameServerParseError> {
         Err(NameServerParseError::EncryptedFeatureDisabled)
     }
+}
+
+fn parse_rcode(s: &str) -> Result<NameServerUrl, NameServerParseError> {
+    let label = s.trim();
+    let code = match label {
+        "success" => ResponseCode::NoError,
+        "format_error" => ResponseCode::FormErr,
+        "server_failure" => ResponseCode::ServFail,
+        "name_error" => ResponseCode::NXDomain,
+        "not_implemented" => ResponseCode::NotImp,
+        "refused" => ResponseCode::Refused,
+        _ => return Err(NameServerParseError::UnsupportedRCode(label.to_string())),
+    };
+    Ok(NameServerUrl::RCode {
+        code,
+        label: label.to_string(),
+    })
 }
 
 /// Parse `host:port` or `[ipv6]:port` or bare `host`, returning `(HostOrIp, port)`.
@@ -328,6 +359,8 @@ pub enum NameServerParseError {
         "encrypted DNS (tls:// / https://) requires the 'encrypted' Cargo feature to be enabled"
     )]
     EncryptedFeatureDisabled,
+    #[error("unsupported rcode nameserver type '{0}'")]
+    UnsupportedRCode(String),
 }
 
 #[cfg(test)]
@@ -583,6 +616,26 @@ mod tests {
         assert!(matches!(err, NameServerParseError::UnsupportedScheme(ref s) if s == "sdns"));
     }
 
+    #[test]
+    fn parse_rcode_success() {
+        let url = NameServerUrl::parse("rcode://success").unwrap();
+        assert_eq!(
+            url,
+            NameServerUrl::RCode {
+                code: ResponseCode::NoError,
+                label: "success".to_string(),
+            }
+        );
+        assert_eq!(url.to_string(), "rcode://success");
+        assert_eq!(url.needs_bootstrap(), None);
+    }
+
+    #[test]
+    fn parse_rcode_unknown_errors() {
+        let err = NameServerUrl::parse("rcode://unknown").unwrap_err();
+        assert!(matches!(err, NameServerParseError::UnsupportedRCode(ref s) if s == "unknown"));
+    }
+
     // A19
     #[test]
     fn parse_empty_string_errors() {
@@ -663,6 +716,7 @@ mod tests {
             NameServerParseError::UnsupportedScheme(_) => "unsupported",
             NameServerParseError::InvalidHost(_) => "invalid host",
             NameServerParseError::InvalidPort(_) => "invalid port",
+            NameServerParseError::UnsupportedRCode(_) => "rcode",
             _ => "other",
         };
     }

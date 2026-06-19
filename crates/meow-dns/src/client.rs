@@ -5,7 +5,7 @@
 //! `protect()` before the socket is used. This is the reason the project
 //! ships its own DNS client instead of relying on `hickory-resolver`.
 
-use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use std::future::Future;
@@ -129,6 +129,9 @@ enum Transport {
         path: Arc<str>,
         tls: Arc<rustls::ClientConfig>,
     },
+    RCode {
+        code: ResponseCode,
+    },
 }
 
 impl DnsClient {
@@ -145,6 +148,15 @@ impl DnsClient {
     pub fn tcp(addr: SocketAddr) -> Self {
         Self {
             transport: Transport::Tcp { addr },
+            timeout: DEFAULT_QUERY_TIMEOUT,
+            proxy: None,
+        }
+    }
+
+    /// Synthetic DNS response with a fixed response code and no answers.
+    pub fn rcode(code: ResponseCode) -> Self {
+        Self {
+            transport: Transport::RCode { code },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
         }
@@ -209,7 +221,16 @@ impl DnsClient {
         let parsed: Name = name
             .parse()
             .map_err(|_| ClientError::Protocol("invalid query name"))?;
-        msg.add_query(Query::query(parsed, record_type));
+        let query = Query::query(parsed, record_type);
+        if let Transport::RCode { code } = &self.transport {
+            let mut resp = Message::new(id, MessageType::Response, OpCode::Query);
+            resp.metadata.recursion_desired = true;
+            resp.metadata.recursion_available = true;
+            resp.metadata.response_code = *code;
+            resp.add_query(query);
+            return Ok(resp);
+        }
+        msg.add_query(query);
         let wire = msg.to_bytes()?;
         let resp_bytes = tokio::time::timeout(self.timeout, self.exchange(&wire))
             .await
@@ -256,6 +277,11 @@ impl DnsClient {
         if let Some(proxy) = self.proxy.as_ref() {
             let addr = match &self.transport {
                 Transport::Udp { addr } | Transport::Tcp { addr } => *addr,
+                Transport::RCode { .. } => {
+                    return Err(ClientError::Protocol(
+                        "rcode transport should not perform network exchange",
+                    ));
+                }
                 #[cfg(feature = "encrypted")]
                 Transport::Dot { .. } | Transport::Doh { .. } => {
                     // DoT/DoH-over-proxy needs TLS layered on a Box<dyn
@@ -276,6 +302,9 @@ impl DnsClient {
         match &self.transport {
             Transport::Udp { addr } => udp_exchange(*addr, wire).await,
             Transport::Tcp { addr } => tcp_exchange(*addr, wire).await,
+            Transport::RCode { .. } => Err(ClientError::Protocol(
+                "rcode transport should not perform network exchange",
+            )),
             #[cfg(feature = "encrypted")]
             Transport::Dot { addr, sni, tls } => {
                 dot_exchange(*addr, sni, Arc::clone(tls), wire).await
@@ -496,5 +525,14 @@ mod tests {
             .with_timeout(Duration::from_millis(200));
         let r = client.query("example.test", RecordType::A).await;
         assert!(matches!(r, Err(ClientError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn rcode_client_returns_noerror_empty_without_network() {
+        let client = DnsClient::rcode(ResponseCode::NoError);
+        let resp = client.query("example.test", RecordType::A).await.unwrap();
+        assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
+        assert!(resp.answers.is_empty());
+        assert_eq!(resp.queries.len(), 1);
     }
 }

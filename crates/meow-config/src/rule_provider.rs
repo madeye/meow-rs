@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use meow_common::adapter::Proxy;
 use meow_rules::{
-    build_rule_set, build_rule_set_from_mrs, is_mrs_bytes, ParserContext, RuleSet, RuleSetBehavior,
-    RuleSetFormat,
+    build_rule_set, build_rule_set_from_mrs_with_behavior, is_mrs_bytes, ParserContext, RuleSet,
+    RuleSetBehavior, RuleSetFormat,
 };
 use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -258,10 +258,11 @@ fn load_http(
         .as_deref()
         .ok_or_else(|| anyhow!("http provider '{name}' requires a 'url'"))?;
     let cache_path = resolve_path(cfg, cache_dir, name);
-    let bytes = fetch_http_blocking_with_cache(url, cache_path.as_deref(), download_proxy)?;
     let explicit_format = parse_explicit_format(cfg)?;
-    let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
     let interval = cfg.interval.unwrap_or(0);
+    let bytes =
+        fetch_http_blocking_with_cache(url, cache_path.as_deref(), download_proxy, interval > 0)?;
+    let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
     Ok(make_provider(
         name,
         ProviderType::Http,
@@ -326,7 +327,8 @@ fn parse_bytes_to_ruleset_with_format(
 ) -> Result<Box<dyn RuleSet>> {
     let use_mrs = explicit_format == Some(RuleSetFormat::Mrs) || is_mrs_bytes(bytes);
     if use_mrs {
-        return build_rule_set_from_mrs(bytes, ctx).map_err(|e| anyhow!("mrs parse error: {e}"));
+        return build_rule_set_from_mrs_with_behavior(bytes, ctx, Some(behavior))
+            .map_err(|e| anyhow!("mrs parse error: {e}"));
     }
     let text = std::str::from_utf8(bytes).context("payload is not valid UTF-8")?;
     let entries = match explicit_format.unwrap_or(RuleSetFormat::Yaml) {
@@ -386,7 +388,18 @@ fn fetch_http_blocking_with_cache(
     url: &str,
     cache_path: Option<&Path>,
     proxy: Option<&Arc<dyn Proxy>>,
+    prefer_cache: bool,
 ) -> Result<Vec<u8>> {
+    if prefer_cache {
+        if let Some(path) = cache_path {
+            if path.exists() {
+                debug!("rule-provider cache hit: {}", path.display());
+                return std::fs::read(path)
+                    .with_context(|| format!("reading cached provider {}", path.display()));
+            }
+        }
+    }
+
     match fetch_http_blocking(url, proxy) {
         Ok(bytes) => {
             if let Some(path) = cache_path {

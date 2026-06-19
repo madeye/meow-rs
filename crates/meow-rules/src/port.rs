@@ -15,8 +15,11 @@ enum PortRange {
 impl PortRule {
     pub fn new(ports: &str, adapter: &str, is_src: bool) -> Result<Self, String> {
         let mut ranges = Vec::new();
-        for part in ports.split(',') {
+        for part in ports.split([',', '/']) {
             let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
             if let Some((start, end)) = part.split_once('-') {
                 let start: u16 = start
                     .trim()
@@ -26,11 +29,19 @@ impl PortRule {
                     .trim()
                     .parse()
                     .map_err(|e| format!("invalid port: {e}"))?;
+                if start > end {
+                    return Err(format!(
+                        "invalid port range {start}-{end}: start must be <= end"
+                    ));
+                }
                 ranges.push(PortRange::Range(start, end));
             } else {
                 let port: u16 = part.parse().map_err(|e| format!("invalid port: {e}"))?;
                 ranges.push(PortRange::Single(port));
             }
+        }
+        if ranges.is_empty() {
+            return Err("invalid port: empty range list".to_string());
         }
         Ok(Self {
             ranges,

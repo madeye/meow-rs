@@ -49,29 +49,46 @@ pub async fn run_loop(raw_config: Arc<RwLock<RawConfig>>, tunnel: Tunnel, config
                     // held across `parking_lot::RwLock`.
                     meow_config::ech_dns::preresolve_ech(&mut fetched.proxies).await;
 
-                    let mut raw = raw_config.write();
+                    let snapshot = {
+                        let mut raw = raw_config.write();
 
-                    if let Some(ref mut subs) = raw.subscriptions {
-                        if let Some(sub) = subs.iter_mut().find(|s| s.name == name) {
-                            sub.last_updated = Some(now);
+                        if let Some(ref mut subs) = raw.subscriptions {
+                            if let Some(sub) = subs.iter_mut().find(|s| s.name == name) {
+                                sub.last_updated = Some(now);
+                            }
                         }
-                    }
 
-                    raw.proxies = Some(fetched.proxies);
-                    raw.proxy_groups = Some(fetched.proxy_groups);
-                    raw.rules = Some(fetched.rules);
+                        raw.proxies = Some(fetched.proxies);
+                        raw.proxy_groups = Some(fetched.proxy_groups);
+                        raw.rules = Some(fetched.rules);
 
-                    match meow_config::rebuild_from_raw_with_resolver(
-                        &raw,
-                        Some(Arc::clone(tunnel.resolver())),
-                    ) {
-                        Ok((new_proxies, new_rules)) => {
+                        raw.clone()
+                    };
+
+                    let resolver = Arc::clone(tunnel.resolver());
+                    let rebuild = tokio::task::spawn_blocking({
+                        let snapshot = snapshot.clone();
+                        move || {
+                            meow_config::rebuild_from_raw_with_resolver(&snapshot, Some(resolver))
+                        }
+                    })
+                    .await;
+
+                    match rebuild {
+                        Ok(Ok((new_proxies, new_rules))) => {
                             tunnel.update_proxies(new_proxies);
                             tunnel.update_rules(new_rules);
                             info!("Subscription '{}' refreshed successfully", name);
-                            let _ = meow_config::save_raw_config(&config_path, &raw);
+                            let _ =
+                                meow_config::save_raw_config_async(&config_path, &snapshot).await;
                         }
-                        Err(e) => error!("Failed to rebuild after refreshing '{}': {}", name, e),
+                        Ok(Err(e)) => {
+                            error!("Failed to rebuild after refreshing '{}': {}", name, e);
+                        }
+                        Err(e) => error!(
+                            "Failed to join rebuild task after refreshing '{}': {}",
+                            name, e
+                        ),
                     }
                 }
                 Err(e) => error!("Failed to refresh subscription '{}': {}", name, e),

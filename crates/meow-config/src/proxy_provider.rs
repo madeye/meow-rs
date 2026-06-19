@@ -109,7 +109,7 @@ impl ProxyProvider {
 
     async fn fetch_content(&self) -> Result<String, String> {
         match &self.vehicle {
-            Vehicle::File(path) => std::fs::read_to_string(path).map_err(|e| {
+            Vehicle::File(path) => tokio::fs::read_to_string(path).await.map_err(|e| {
                 format!(
                     "proxy-provider '{}': failed to read {:?}: {}",
                     self.name, path, e
@@ -136,14 +136,14 @@ impl ProxyProvider {
                             Ok(text) => {
                                 // Cache to disk for offline fallback
                                 if let Some(parent) = cache_path.parent() {
-                                    let _ = std::fs::create_dir_all(parent);
+                                    let _ = tokio::fs::create_dir_all(parent).await;
                                 }
-                                let _ = std::fs::write(cache_path, &text);
+                                let _ = tokio::fs::write(cache_path, &text).await;
                                 Ok(text)
                             }
                             Err(e) => {
                                 warn!(provider = %self.name, error = %e, "HTTP body read failed, trying cache");
-                                read_cache(cache_path, &self.name)
+                                read_cache(cache_path, &self.name).await
                             }
                         }
                     }
@@ -153,11 +153,11 @@ impl ProxyProvider {
                             status = %resp.status(),
                             "HTTP provider returned non-2xx, trying cache"
                         );
-                        read_cache(cache_path, &self.name)
+                        read_cache(cache_path, &self.name).await
                     }
                     Err(e) => {
                         warn!(provider = %self.name, error = %e, "HTTP provider fetch failed, trying cache");
-                        read_cache(cache_path, &self.name)
+                        read_cache(cache_path, &self.name).await
                     }
                 }
             }
@@ -275,8 +275,9 @@ fn compile_opt_regex(
     }
 }
 
-fn read_cache(path: &Path, name: &str) -> Result<String, String> {
-    std::fs::read_to_string(path)
+async fn read_cache(path: &Path, name: &str) -> Result<String, String> {
+    tokio::fs::read_to_string(path)
+        .await
         .map_err(|e| format!("proxy-provider '{name}': no cache at {path:?}: {e}"))
 }
 

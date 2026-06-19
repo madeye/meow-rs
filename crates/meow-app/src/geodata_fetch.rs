@@ -114,13 +114,22 @@ pub async fn run_on_startup(
     }
 
     let raw = raw_config.read().clone();
-    match meow_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(&resolver))) {
-        Ok((_proxies, new_rules)) => {
+    let rebuild = tokio::task::spawn_blocking({
+        let resolver = Arc::clone(&resolver);
+        move || meow_config::rebuild_from_raw_with_resolver(&raw, Some(resolver))
+    })
+    .await;
+    match rebuild {
+        Ok(Ok((_proxies, new_rules))) => {
             tunnel.update_rules(new_rules);
             info!("geodata startup-fetch: rules reloaded with downloaded DBs");
         }
-        Err(e) => warn!(
+        Ok(Err(e)) => warn!(
             "geodata startup-fetch: rule rebuild failed after download: {:#}",
+            e
+        ),
+        Err(e) => warn!(
+            "geodata startup-fetch: rule rebuild task failed after download: {}",
             e
         ),
     }
@@ -188,14 +197,25 @@ pub async fn auto_update_loop(
         }
 
         let raw = raw_config.read().clone();
-        match meow_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(&resolver))) {
-            Ok((_proxies, new_rules)) => {
+        let rebuild = tokio::task::spawn_blocking({
+            let resolver = Arc::clone(&resolver);
+            move || meow_config::rebuild_from_raw_with_resolver(&raw, Some(resolver))
+        })
+        .await;
+        match rebuild {
+            Ok(Ok((_proxies, new_rules))) => {
                 tunnel.update_rules(new_rules);
                 info!("geodata auto-update: rules reloaded with updated DBs");
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 warn!(
                     "geodata auto-update: rule rebuild failed after DB download: {:#}",
+                    e
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "geodata auto-update: rule rebuild task failed after DB download: {}",
                     e
                 );
             }

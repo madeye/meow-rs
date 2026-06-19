@@ -51,10 +51,18 @@ pub struct PolicyEntry {
     pub nameservers: Vec<Arc<DnsClient>>,
 }
 
+pub type NameserverPolicyMatcher = Arc<dyn Fn(&str) -> bool + Send + Sync + 'static>;
+
+struct MatcherPolicyEntry {
+    matcher: NameserverPolicyMatcher,
+    entry: PolicyEntry,
+}
+
 /// Per-domain nameserver routing: exact matches and `+.` wildcard prefixes.
 pub struct NameserverPolicy {
     exact: HashMap<String, PolicyEntry>,
     wildcard: DomainTrie<PolicyEntry>,
+    matchers: Vec<MatcherPolicyEntry>,
 }
 
 impl Default for NameserverPolicy {
@@ -68,6 +76,7 @@ impl NameserverPolicy {
         Self {
             exact: HashMap::new(),
             wildcard: DomainTrie::new(),
+            matchers: Vec::new(),
         }
     }
 
@@ -87,11 +96,21 @@ impl NameserverPolicy {
         self.wildcard.insert(pattern, entry);
     }
 
+    pub fn insert_matcher(&mut self, matcher: NameserverPolicyMatcher, entry: PolicyEntry) {
+        self.matchers.push(MatcherPolicyEntry { matcher, entry });
+    }
+
     pub fn lookup(&self, domain: &str) -> Option<&PolicyEntry> {
         if let Some(e) = self.exact.get(domain) {
             return Some(e);
         }
-        self.wildcard.search(domain)
+        if let Some(e) = self.wildcard.search(domain) {
+            return Some(e);
+        }
+        self.matchers
+            .iter()
+            .find(|entry| (entry.matcher)(domain))
+            .map(|entry| &entry.entry)
     }
 }
 
@@ -216,6 +235,9 @@ fn url_to_plain_socketaddr(url: &NameServerUrl) -> SocketAddr {
             };
             SocketAddr::new(ip, 53)
         }
+        NameServerUrl::RCode { .. } => {
+            unreachable!("rcode default-nameserver does not have a socket address")
+        }
     }
 }
 
@@ -229,11 +251,11 @@ fn url_to_plain_socketaddr(url: &NameServerUrl) -> SocketAddr {
 /// unconfigured environment. This mirrors mihomo's behaviour and the helper of
 /// the same name in `meow-config::ech_dns`; the logic is duplicated rather than
 /// shared because `meow-config` depends on `meow-dns`, not the reverse.
-fn system_nameservers() -> Vec<SocketAddr> {
+async fn system_nameservers() -> Vec<SocketAddr> {
     let mut out = Vec::new();
     #[cfg(unix)]
     {
-        if let Ok(contents) = std::fs::read_to_string("/etc/resolv.conf") {
+        if let Ok(contents) = tokio::fs::read_to_string("/etc/resolv.conf").await {
             for line in contents.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -538,7 +560,7 @@ impl Resolver {
             // is configured, use it. When absent, fall back to the system
             // resolvers (mihomo reads /etc/resolv.conf here rather than erroring).
             let bootstrap_clients: Vec<Arc<DnsClient>> = if default_ns.is_empty() {
-                let system = system_nameservers();
+                let system = system_nameservers().await;
                 tracing::warn!(
                     "default-nameserver not configured; bootstrapping '{}' via system DNS ({} server(s) from /etc/resolv.conf or hardcoded fallback)",
                     first_encrypted_with_hostname.as_deref().unwrap_or("?"),
@@ -552,10 +574,12 @@ impl Resolver {
                 default_ns
                     .iter()
                     .map(|ns| {
-                        let addr = url_to_plain_socketaddr(ns);
                         let c = match ns {
-                            NameServerUrl::Tcp { .. } => DnsClient::tcp(addr),
-                            _ => DnsClient::udp(addr),
+                            NameServerUrl::RCode { code, .. } => DnsClient::rcode(*code),
+                            NameServerUrl::Tcp { .. } => {
+                                DnsClient::tcp(url_to_plain_socketaddr(ns))
+                            }
+                            _ => DnsClient::udp(url_to_plain_socketaddr(ns)),
                         };
                         Arc::new(c.with_timeout(Duration::from_secs(3)))
                     })
@@ -642,6 +666,14 @@ impl Resolver {
             | NameServerUrl::Https { addr, port, .. } => {
                 SocketAddr::new(host_or_ip_to_addr(addr, resolved), *port)
             }
+            NameServerUrl::RCode { code, .. } => {
+                let client = DnsClient::rcode(*code);
+                let client = match proxy {
+                    Some(p) => client.with_proxy(p),
+                    None => client,
+                };
+                return Arc::new(client);
+            }
         };
         let client = match url {
             NameServerUrl::Udp { .. } => DnsClient::udp(socket_addr),
@@ -673,6 +705,9 @@ impl Resolver {
                         Cargo feature; rebuild with --features encrypted"
                     )
                 }
+            }
+            NameServerUrl::RCode { .. } => {
+                unreachable!("rcode nameservers return before socket client construction")
             }
         };
         let client = match proxy {
@@ -1406,9 +1441,9 @@ mod tests {
 
     // system_nameservers always yields at least one bootstrap address (resolv.conf
     // entries on Unix, or the hardcoded public-resolver fallback otherwise).
-    #[test]
-    fn system_nameservers_never_empty() {
-        let ns = system_nameservers();
+    #[tokio::test]
+    async fn system_nameservers_never_empty() {
+        let ns = system_nameservers().await;
         assert!(!ns.is_empty(), "system_nameservers must never be empty");
         assert!(
             ns.iter().all(|a| a.port() == 53),
@@ -1518,5 +1553,16 @@ mod tests {
             "root domain must match (+. includes root)"
         );
         assert!(pol.lookup("other.example").is_none(), "non-match must miss");
+    }
+
+    #[test]
+    fn nameserver_policy_matcher_matches_domain() {
+        let entry = PolicyEntry {
+            nameservers: vec![],
+        };
+        let mut pol = NameserverPolicy::new();
+        pol.insert_matcher(Arc::new(|domain| domain.ends_with(".cn")), entry);
+        assert!(pol.lookup("example.cn").is_some());
+        assert!(pol.lookup("example.com").is_none());
     }
 }

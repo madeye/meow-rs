@@ -43,9 +43,12 @@
 //! confirm the parser reverses its own encoder.
 
 use std::io::{Cursor, Read};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub const MRS_MAGIC: [u8; 4] = *b"MRS!";
 pub const MRS_VERSION: u8 = 1;
+pub const UPSTREAM_MRS_MAGIC: [u8; 4] = *b"MRS\x01";
+pub const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
 pub const TYPE_DOMAIN: u8 = 0;
 pub const TYPE_IPCIDR: u8 = 1;
@@ -59,6 +62,10 @@ pub enum MrsError {
     UnsupportedVersion(u8),
     #[error("mrs: unsupported type {0}")]
     UnsupportedType(u8),
+    #[error("mrs: invalid behavior {0}")]
+    InvalidBehavior(u8),
+    #[error("mrs: invalid reserved length {0}")]
+    InvalidReservedLength(i64),
     #[error("mrs: truncated {what} at offset {offset}: need {need} bytes, have {have}")]
     Truncated {
         what: &'static str,
@@ -70,6 +77,12 @@ pub enum MrsError {
     Zstd(#[from] std::io::Error),
     #[error("mrs: invalid UTF-8 in {0}: {1}")]
     Utf8(&'static str, std::string::FromUtf8Error),
+    #[error("mrs: invalid domain-set version {0}")]
+    InvalidDomainSetVersion(u8),
+    #[error("mrs: invalid ip-cidr-set version {0}")]
+    InvalidIpCidrSetVersion(u8),
+    #[error("mrs: invalid length for {0}: {1}")]
+    InvalidLength(&'static str, i64),
 }
 
 /// Parsed mrs header.
@@ -121,6 +134,275 @@ pub fn decompress_payload(compressed: &[u8]) -> Result<Vec<u8>, MrsError> {
     let mut decoder = zstd::stream::Decoder::new(Cursor::new(compressed))?;
     decoder.read_to_end(&mut out)?;
     Ok(out)
+}
+
+/// Parsed current upstream mihomo rule-provider `.mrs` payload.
+///
+/// Upstream stores the whole file as one zstd frame. The decompressed stream is:
+///
+/// ```text
+/// magic    [4]byte = "MRS\x01"
+/// behavior u8      = 0 domain, 1 ipcidr
+/// count    i64-be
+/// extraLen i64-be  = reserved bytes to skip
+/// body     behavior-specific binary set
+/// ```
+pub struct UpstreamRuleSetPayload {
+    pub behavior: u8,
+    pub count: usize,
+    pub entries: Vec<String>,
+}
+
+pub fn parse_upstream_ruleset_mrs(bytes: &[u8]) -> Result<UpstreamRuleSetPayload, MrsError> {
+    let decompressed = decompress_payload(bytes)?;
+    let mut r = ByteReader::new(&decompressed);
+    let magic = r.read_array::<4>("upstream_magic")?;
+    if magic != UPSTREAM_MRS_MAGIC {
+        return Err(MrsError::WrongFormat);
+    }
+
+    let behavior = r.read_u8("behavior")?;
+    let count = r.read_i64_be("count")?;
+    if count < 0 {
+        return Err(MrsError::InvalidLength("count", count));
+    }
+
+    let extra_len = r.read_i64_be("extra_len")?;
+    if extra_len < 0 {
+        return Err(MrsError::InvalidReservedLength(extra_len));
+    }
+    let _ = r.read_slice("extra", extra_len as usize)?;
+
+    let body = r.remaining_slice();
+    let entries = match behavior {
+        TYPE_DOMAIN => parse_upstream_domain_set(body)?,
+        TYPE_IPCIDR => parse_upstream_ipcidr_set(body)?,
+        other => return Err(MrsError::InvalidBehavior(other)),
+    };
+
+    Ok(UpstreamRuleSetPayload {
+        behavior,
+        count: count as usize,
+        entries,
+    })
+}
+
+fn parse_upstream_domain_set(data: &[u8]) -> Result<Vec<String>, MrsError> {
+    let mut r = ByteReader::new(data);
+    let version = r.read_u8("domain_set_version")?;
+    if version != 1 {
+        return Err(MrsError::InvalidDomainSetVersion(version));
+    }
+    let leaves = read_u64_vec(&mut r, "domain_set_leaves")?;
+    let label_bitmap = read_u64_vec(&mut r, "domain_set_label_bitmap")?;
+    let labels_len = r.read_i64_be("domain_set_labels_len")?;
+    if labels_len < 1 {
+        return Err(MrsError::InvalidLength("domain_set_labels_len", labels_len));
+    }
+    let labels = r.read_slice("domain_set_labels", labels_len as usize)?;
+
+    let traversal = DomainSetTraversal {
+        leaves: &leaves,
+        label_bitmap: &label_bitmap,
+        label_index: DomainSetIndex::new(&label_bitmap),
+        labels,
+    };
+    let mut reversed = Vec::new();
+    let mut current = Vec::new();
+    traversal.traverse(0, 0, &mut current, &mut reversed);
+
+    Ok(reversed
+        .into_iter()
+        .filter_map(|bytes| String::from_utf8(bytes.into_iter().rev().collect()).ok())
+        .collect())
+}
+
+fn read_u64_vec(r: &mut ByteReader<'_>, what: &'static str) -> Result<Vec<u64>, MrsError> {
+    let len = r.read_i64_be(what)?;
+    if len < 1 {
+        return Err(MrsError::InvalidLength(what, len));
+    }
+    let mut out = Vec::with_capacity(len as usize);
+    for _ in 0..len {
+        out.push(r.read_u64_be(what)?);
+    }
+    Ok(out)
+}
+
+struct DomainSetTraversal<'a> {
+    leaves: &'a [u64],
+    label_bitmap: &'a [u64],
+    label_index: DomainSetIndex,
+    labels: &'a [u8],
+}
+
+impl DomainSetTraversal<'_> {
+    fn traverse(
+        &self,
+        node_id: usize,
+        bm_idx: usize,
+        current: &mut Vec<u8>,
+        out: &mut Vec<Vec<u8>>,
+    ) {
+        if get_bit(self.leaves, node_id) {
+            out.push(current.clone());
+        }
+
+        let mut idx = bm_idx;
+        loop {
+            if get_bit(self.label_bitmap, idx) {
+                return;
+            }
+
+            let label_idx = idx.saturating_sub(node_id);
+            let Some(&label) = self.labels.get(label_idx) else {
+                return;
+            };
+            let next_node_id = self.label_index.count_zeros(self.label_bitmap, idx + 1);
+            let Some(prev_terminator) = self.label_index.select_one(next_node_id.saturating_sub(1))
+            else {
+                return;
+            };
+            let next_bm_idx = prev_terminator + 1;
+
+            current.push(label);
+            self.traverse(next_node_id, next_bm_idx, current, out);
+            current.pop();
+            idx += 1;
+        }
+    }
+}
+
+struct DomainSetIndex {
+    rank_ones_by_word: Vec<usize>,
+    select_ones: Vec<usize>,
+}
+
+impl DomainSetIndex {
+    fn new(bits: &[u64]) -> Self {
+        let mut rank_ones_by_word = Vec::with_capacity(bits.len() + 1);
+        let mut select_ones = Vec::new();
+        let mut seen_ones = 0usize;
+        for (word_idx, word) in bits.iter().copied().enumerate() {
+            rank_ones_by_word.push(seen_ones);
+            let mut remaining = word;
+            while remaining != 0 {
+                let bit = remaining.trailing_zeros() as usize;
+                select_ones.push(word_idx * 64 + bit);
+                remaining &= remaining - 1;
+            }
+            seen_ones += word.count_ones() as usize;
+        }
+        rank_ones_by_word.push(seen_ones);
+        Self {
+            rank_ones_by_word,
+            select_ones,
+        }
+    }
+
+    fn count_zeros(&self, bits: &[u64], upto: usize) -> usize {
+        let total_bits = bits.len().saturating_mul(64);
+        let upto = upto.min(total_bits);
+        let word = upto / 64;
+        let bit = upto % 64;
+        let mut ones = self.rank_ones_by_word.get(word).copied().unwrap_or(0);
+        if bit > 0 {
+            if let Some(value) = bits.get(word) {
+                let mask = (1u64 << bit) - 1;
+                ones += (value & mask).count_ones() as usize;
+            }
+        }
+        upto - ones
+    }
+
+    fn select_one(&self, nth: usize) -> Option<usize> {
+        self.select_ones.get(nth).copied()
+    }
+}
+
+fn get_bit(bits: &[u64], idx: usize) -> bool {
+    bits.get(idx / 64)
+        .is_some_and(|word| (word & (1u64 << (idx % 64))) != 0)
+}
+
+fn parse_upstream_ipcidr_set(data: &[u8]) -> Result<Vec<String>, MrsError> {
+    let mut r = ByteReader::new(data);
+    let version = r.read_u8("ipcidr_set_version")?;
+    if version != 1 {
+        return Err(MrsError::InvalidIpCidrSetVersion(version));
+    }
+    let len = r.read_i64_be("ipcidr_set_ranges_len")?;
+    if len < 1 {
+        return Err(MrsError::InvalidLength("ipcidr_set_ranges_len", len));
+    }
+    let mut out = Vec::new();
+    for _ in 0..len {
+        let from = r.read_array::<16>("ipcidr_from")?;
+        let to = r.read_array::<16>("ipcidr_to")?;
+        let from = IpAddr::from(Ipv6Addr::from(from));
+        let to = IpAddr::from(Ipv6Addr::from(to));
+        push_range_prefixes(from, to, &mut out);
+    }
+    Ok(out)
+}
+
+fn push_range_prefixes(from: IpAddr, to: IpAddr, out: &mut Vec<String>) {
+    match (from, to) {
+        (IpAddr::V4(a), IpAddr::V4(b)) => push_v4_range(a, b, out),
+        (IpAddr::V6(a), IpAddr::V6(b))
+            if a.to_ipv4_mapped().is_some() && b.to_ipv4_mapped().is_some() =>
+        {
+            push_v4_range(
+                a.to_ipv4_mapped().unwrap(),
+                b.to_ipv4_mapped().unwrap(),
+                out,
+            );
+        }
+        (IpAddr::V6(a), IpAddr::V6(b)) => push_v6_range(a, b, out),
+        _ => {}
+    }
+}
+
+fn push_v4_range(from: Ipv4Addr, to: Ipv4Addr, out: &mut Vec<String>) {
+    let mut start = u32::from(from);
+    let end = u32::from(to);
+    if start == 0 && end == u32::MAX {
+        out.push("0.0.0.0/0".to_string());
+        return;
+    }
+    while start <= end {
+        let max_size = start.trailing_zeros();
+        let remaining = u64::from(end) - u64::from(start) + 1;
+        let block_bits = max_size.min(63 - remaining.leading_zeros());
+        let prefix = 32 - block_bits;
+        out.push(format!("{}/{}", Ipv4Addr::from(start), prefix));
+        let step = 1u32 << block_bits;
+        if remaining == u64::from(step) {
+            break;
+        }
+        start = start.saturating_add(step);
+    }
+}
+
+fn push_v6_range(from: Ipv6Addr, to: Ipv6Addr, out: &mut Vec<String>) {
+    let mut start = u128::from(from);
+    let end = u128::from(to);
+    if start == 0 && end == u128::MAX {
+        out.push("::/0".to_string());
+        return;
+    }
+    while start <= end {
+        let max_size = start.trailing_zeros();
+        let remaining = end - start + 1;
+        let block_bits = max_size.min(127 - remaining.leading_zeros());
+        let prefix = 128 - block_bits;
+        out.push(format!("{}/{}", Ipv6Addr::from(start), prefix));
+        let step = 1u128 << block_bits;
+        if end - start + 1 == step {
+            break;
+        }
+        start = start.saturating_add(step);
+    }
 }
 
 /// A parsed geosite DB: category name → list of domains.
@@ -240,6 +522,10 @@ impl<'a> ByteReader<'a> {
         Self { data, pos: 0 }
     }
 
+    fn remaining_slice(&self) -> &'a [u8] {
+        &self.data[self.pos..]
+    }
+
     fn need(&self, what: &'static str, n: usize) -> Result<(), MrsError> {
         if self.pos + n > self.data.len() {
             return Err(MrsError::Truncated {
@@ -259,6 +545,13 @@ impl<'a> ByteReader<'a> {
         Ok(v)
     }
 
+    fn read_u8(&mut self, what: &'static str) -> Result<u8, MrsError> {
+        self.need(what, 1)?;
+        let v = self.data[self.pos];
+        self.pos += 1;
+        Ok(v)
+    }
+
     fn read_u32_be(&mut self, what: &'static str) -> Result<u32, MrsError> {
         self.need(what, 4)?;
         let v = u32::from_be_bytes([
@@ -269,6 +562,46 @@ impl<'a> ByteReader<'a> {
         ]);
         self.pos += 4;
         Ok(v)
+    }
+
+    fn read_u64_be(&mut self, what: &'static str) -> Result<u64, MrsError> {
+        self.need(what, 8)?;
+        let v = u64::from_be_bytes([
+            self.data[self.pos],
+            self.data[self.pos + 1],
+            self.data[self.pos + 2],
+            self.data[self.pos + 3],
+            self.data[self.pos + 4],
+            self.data[self.pos + 5],
+            self.data[self.pos + 6],
+            self.data[self.pos + 7],
+        ]);
+        self.pos += 8;
+        Ok(v)
+    }
+
+    fn read_i64_be(&mut self, what: &'static str) -> Result<i64, MrsError> {
+        self.need(what, 8)?;
+        let v = i64::from_be_bytes([
+            self.data[self.pos],
+            self.data[self.pos + 1],
+            self.data[self.pos + 2],
+            self.data[self.pos + 3],
+            self.data[self.pos + 4],
+            self.data[self.pos + 5],
+            self.data[self.pos + 6],
+            self.data[self.pos + 7],
+        ]);
+        self.pos += 8;
+        Ok(v)
+    }
+
+    fn read_array<const N: usize>(&mut self, what: &'static str) -> Result<[u8; N], MrsError> {
+        self.need(what, N)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.data[self.pos..self.pos + N]);
+        self.pos += N;
+        Ok(out)
     }
 
     fn read_slice(&mut self, what: &'static str, n: usize) -> Result<&'a [u8], MrsError> {
@@ -282,6 +615,7 @@ impl<'a> ByteReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     fn sample() -> GeositePayload {
         GeositePayload {
@@ -293,6 +627,85 @@ mod tests {
                 ("ads".to_string(), vec!["ad.example.com".to_string()]),
             ],
         }
+    }
+
+    fn set_bit(bits: &mut Vec<u64>, idx: usize, value: bool) {
+        let word = idx / 64;
+        if bits.len() <= word {
+            bits.resize(word + 1, 0);
+        }
+        if value {
+            bits[word] |= 1u64 << (idx % 64);
+        }
+    }
+
+    fn write_i64(out: &mut Vec<u8>, value: i64) {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn write_u64(out: &mut Vec<u8>, value: u64) {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn encode_domain_set(entries: &[&str]) -> Vec<u8> {
+        let mut keys: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|entry| entry.as_bytes().iter().rev().copied().collect())
+            .collect();
+        keys.sort();
+
+        let mut leaves = Vec::new();
+        let mut label_bitmap = Vec::new();
+        let mut labels = Vec::new();
+        let mut label_idx = 0usize;
+        let mut queue = vec![(0usize, keys.len(), 0usize)];
+
+        let mut idx = 0usize;
+        while idx < queue.len() {
+            let (mut start, end, col) = queue[idx];
+            if col == keys[start].len() {
+                start += 1;
+                set_bit(&mut leaves, idx, true);
+            }
+            let mut j = start;
+            while j < end {
+                let from = j;
+                while j < end && keys[j][col] == keys[from][col] {
+                    j += 1;
+                }
+                queue.push((from, j, col + 1));
+                labels.push(keys[from][col]);
+                set_bit(&mut label_bitmap, label_idx, false);
+                label_idx += 1;
+            }
+            set_bit(&mut label_bitmap, label_idx, true);
+            label_idx += 1;
+            idx += 1;
+        }
+
+        let mut out = Vec::new();
+        out.push(1);
+        write_i64(&mut out, leaves.len() as i64);
+        for word in leaves {
+            write_u64(&mut out, word);
+        }
+        write_i64(&mut out, label_bitmap.len() as i64);
+        for word in label_bitmap {
+            write_u64(&mut out, word);
+        }
+        write_i64(&mut out, labels.len() as i64);
+        out.extend_from_slice(&labels);
+        out
+    }
+
+    fn encode_upstream_mrs(behavior: u8, count: usize, body: &[u8]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        inner.extend_from_slice(&UPSTREAM_MRS_MAGIC);
+        inner.push(behavior);
+        write_i64(&mut inner, count as i64);
+        write_i64(&mut inner, 0);
+        inner.extend_from_slice(body);
+        zstd::encode_all(Cursor::new(inner), 0).unwrap()
     }
 
     #[test]
@@ -360,5 +773,29 @@ mod tests {
         let decompressed = decompress_payload(compressed).unwrap();
         let parsed = parse_geosite_payload(&decompressed, None).unwrap();
         assert!(parsed.categories.is_empty());
+    }
+
+    #[test]
+    fn upstream_ruleset_mrs_domain_parses() {
+        let body = encode_domain_set(&["example.com", "+.foo.com"]);
+        let bytes = encode_upstream_mrs(TYPE_DOMAIN, 2, &body);
+        let parsed = parse_upstream_ruleset_mrs(&bytes).unwrap();
+        assert_eq!(parsed.behavior, TYPE_DOMAIN);
+        assert_eq!(parsed.count, 2);
+        assert!(parsed.entries.iter().any(|e| e == "example.com"));
+        assert!(parsed.entries.iter().any(|e| e == "+.foo.com"));
+    }
+
+    #[test]
+    fn upstream_ruleset_mrs_ipcidr_parses() {
+        let mut body = Vec::new();
+        body.push(1);
+        write_i64(&mut body, 1);
+        body.extend_from_slice(&Ipv4Addr::new(192, 168, 0, 0).to_ipv6_mapped().octets());
+        body.extend_from_slice(&Ipv4Addr::new(192, 168, 0, 255).to_ipv6_mapped().octets());
+        let bytes = encode_upstream_mrs(TYPE_IPCIDR, 1, &body);
+        let parsed = parse_upstream_ruleset_mrs(&bytes).unwrap();
+        assert_eq!(parsed.behavior, TYPE_IPCIDR);
+        assert_eq!(parsed.entries, vec!["192.168.0.0/24"]);
     }
 }

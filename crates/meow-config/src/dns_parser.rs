@@ -2,13 +2,14 @@ use crate::raw::{HostsValue, RawConfig};
 use crate::DnsConfig;
 use meow_common::DnsMode;
 use meow_dns::fakeip::{FileStore, MemoryStore, Pool, Skipper, SkipperMode, Store};
-use meow_dns::resolver::{FallbackFilter, NameserverPolicy, PolicyEntry};
+use meow_dns::resolver::{FallbackFilter, NameserverPolicy, NameserverPolicyMatcher, PolicyEntry};
 use meow_dns::upstream::{NameServerEntry, NameServerUrl};
-use meow_dns::{HostOrIp, Resolver};
+use meow_dns::{DnsClient, HostOrIp, Resolver};
 use meow_trie::DomainTrie;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::warn;
 
 /// Upstream Go mihomo default for v4 fake-IP CIDR. Used when
@@ -20,6 +21,7 @@ pub async fn parse_dns(
     mmdb_path: Option<&std::path::Path>,
     cache_dir: Option<&std::path::Path>,
     proxy_registry: &HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>>,
+    geosite: Option<Arc<meow_rules::geosite::GeositeDB>>,
 ) -> Result<DnsConfig, anyhow::Error> {
     let dns = match &raw.dns {
         Some(dns) if dns.enable.unwrap_or(false) => dns,
@@ -58,7 +60,7 @@ pub async fn parse_dns(
     let mut hosts = build_hosts_trie(raw.hosts.as_ref())?;
 
     if use_hosts && use_system_hosts {
-        merge_system_hosts(&mut hosts);
+        merge_system_hosts(&mut hosts).await;
     }
 
     // Build nameserver-policy if configured.
@@ -66,7 +68,8 @@ pub async fn parse_dns(
         if nsp_map.is_empty() {
             None
         } else {
-            Some(build_nameserver_policy(nsp_map)?)
+            let bootstrap_clients = build_policy_bootstrap_clients(&default_ns_urls, &main_urls);
+            Some(build_nameserver_policy(nsp_map, geosite.as_ref(), &bootstrap_clients).await?)
         }
     } else {
         None
@@ -76,10 +79,15 @@ pub async fn parse_dns(
     let fallback_filter = if fallback_urls.is_empty() {
         None
     } else {
-        Some(build_fallback_filter(
-            dns.fallback_filter.as_ref(),
-            mmdb_path,
-        ))
+        let raw_filter = dns.fallback_filter.clone();
+        let mmdb_path = mmdb_path.map(std::path::Path::to_path_buf);
+        Some(
+            tokio::task::spawn_blocking(move || {
+                build_fallback_filter(raw_filter.as_ref(), mmdb_path.as_deref())
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("fallback-filter build task failed: {e}"))?,
+        )
     };
 
     let mut resolver = Resolver::new_with_bootstrap_with_proxies(
@@ -101,7 +109,7 @@ pub async fn parse_dns(
     // silently fall back to the upstream resolver, which is a user-surprising
     // privacy regression.
     if mode == DnsMode::FakeIp {
-        install_fakeip(&mut resolver, dns, cache_dir)?;
+        install_fakeip(&mut resolver, dns, cache_dir).await?;
     }
 
     Ok(DnsConfig {
@@ -110,7 +118,7 @@ pub async fn parse_dns(
     })
 }
 
-fn install_fakeip(
+async fn install_fakeip(
     resolver: &mut Resolver,
     dns: &crate::raw::RawDns,
     cache_dir: Option<&std::path::Path>,
@@ -137,7 +145,7 @@ fn install_fakeip(
             ipnet::IpNet::V4(_) => "v4",
             ipnet::IpNet::V6(_) => "v6",
         });
-        let p = FileStore::open(&path).map_err(|e| {
+        let p = FileStore::open_async(path.clone()).await.map_err(|e| {
             let disp = path.display();
             anyhow::anyhow!("cannot open fakeip store {disp}: {e}")
         })?;
@@ -196,87 +204,271 @@ fn parse_nameserver_urls(servers: &[String]) -> Result<Vec<NameServerUrl>, anyho
 
 /// Build a `NameserverPolicy` from the raw YAML map.
 ///
-/// Unknown-prefix patterns (e.g. `geosite:`, `rule-set:`) → warn-once and skip.
-/// Class B per ADR-0002: NOT a hard error (too many real configs use these).
+/// `geosite:` patterns are compiled into matchers when a geosite DB is loaded.
+/// Unsupported prefixes (currently `rule-set:`) warn once and skip.
 ///
 /// An entry with no valid nameservers after skipping → hard error.
 /// Class A per ADR-0002: DNS leakage risk for internal/corporate domains.
-fn build_nameserver_policy(
+async fn build_nameserver_policy(
     map: &HashMap<String, crate::raw::RawNspValue>,
+    geosite: Option<&Arc<meow_rules::geosite::GeositeDB>>,
+    bootstrap_clients: &[Arc<DnsClient>],
 ) -> Result<NameserverPolicy, anyhow::Error> {
     let mut policy = NameserverPolicy::new();
-    let mut warned_prefix = false;
-    let empty_resolved = HashMap::new();
+    let mut warned_unsupported_prefix = false;
+    let mut warned_missing_geosite = false;
 
     for (key, value) in map {
-        // Patterns with ':' (geosite:, rule-set:) are unsupported in M1.
-        if key.contains(':') {
-            if !warned_prefix {
-                warn!(
-                    "nameserver-policy: patterns with ':' prefix (e.g. 'geosite:', 'rule-set:') \
-                    are not supported in M1 and will be skipped (Class B per ADR-0002)"
-                );
-                warned_prefix = true;
+        let mut patterns = Vec::new();
+        for expanded_key in expand_policy_keys(key) {
+            let key_lower = expanded_key.to_ascii_lowercase();
+            if let Some(category) = key_lower.strip_prefix("geosite:") {
+                let category = category.trim();
+                if category.is_empty() {
+                    continue;
+                }
+                let Some(db) = geosite else {
+                    if !warned_missing_geosite {
+                        warn!(
+                            "nameserver-policy: geosite: patterns require a loaded geosite DB; \
+                            skipping geosite policy entries"
+                        );
+                        warned_missing_geosite = true;
+                    }
+                    continue;
+                };
+                let category = category.to_string();
+                let db = Arc::clone(db);
+                patterns.push(PolicyPattern::Matcher(Arc::new(move |domain| {
+                    db.lookup(&category, domain)
+                })));
+                continue;
             }
+
+            if key_lower.starts_with("rule-set:") || key_lower.contains(':') {
+                if !warned_unsupported_prefix {
+                    warn!(
+                        "nameserver-policy: unsupported prefixed patterns such as 'rule-set:' \
+                        will be skipped"
+                    );
+                    warned_unsupported_prefix = true;
+                }
+                continue;
+            }
+
+            if key_lower.starts_with("+.") {
+                patterns.push(PolicyPattern::Wildcard(key_lower));
+            } else if !key_lower.is_empty() {
+                patterns.push(PolicyPattern::Exact(key_lower));
+            }
+        }
+
+        if patterns.is_empty() {
             continue;
         }
 
-        let url_strs = value.as_urls();
-        let mut resolvers = Vec::new();
-        for url_str in &url_strs {
-            match NameServerUrl::parse(url_str) {
-                Ok(url) => {
-                    // Warn if the URL has a hostname (needs bootstrap that we skip in M1).
-                    if let Some(host) = needs_hostname_bootstrap(&url) {
-                        warn!(
-                            "nameserver-policy entry '{}': URL '{}' uses hostname '{}' which \
-                            cannot be bootstrapped for policy entries in M1; \
-                            configure IP literals for policy entries",
-                            key, url_str, host
-                        );
-                    }
-                    let resolver = Resolver::build_single_resolver(&url, &empty_resolved);
-                    resolvers.push(resolver);
-                }
-                Err(e) => {
-                    warn!(
-                        "nameserver-policy entry '{}': skipping invalid URL '{}': {}",
-                        key, url_str, e
-                    );
-                }
-            }
-        }
-
-        if resolvers.is_empty() {
-            return Err(anyhow::anyhow!(
-                "nameserver-policy entry '{key}' has no valid nameservers after skipping \
-                unsupported entries (Class A per ADR-0002 — DNS leakage risk for \
-                internal/corporate domains)"
-            ));
-        }
+        let resolvers = build_policy_resolvers(key, value, bootstrap_clients).await?;
 
         let entry = PolicyEntry {
             nameservers: resolvers,
         };
-        if key.starts_with("+.") {
-            policy.insert_wildcard(key, entry);
-        } else {
-            policy.insert_exact(key.clone(), entry);
+        for pattern in patterns {
+            match pattern {
+                PolicyPattern::Exact(domain) => policy.insert_exact(domain, entry.clone()),
+                PolicyPattern::Wildcard(pattern) => policy.insert_wildcard(&pattern, entry.clone()),
+                PolicyPattern::Matcher(matcher) => policy.insert_matcher(matcher, entry.clone()),
+            }
         }
     }
 
     Ok(policy)
 }
 
-/// Returns the hostname that would need bootstrap resolution, if any.
-fn needs_hostname_bootstrap(url: &NameServerUrl) -> Option<&str> {
-    let (NameServerUrl::Tls { addr, .. } | NameServerUrl::Https { addr, .. }) = url else {
-        return None;
-    };
-    match addr {
-        HostOrIp::Host(h) => Some(h.as_str()),
-        HostOrIp::Ip(_) => None,
+enum PolicyPattern {
+    Exact(String),
+    Wildcard(String),
+    Matcher(NameserverPolicyMatcher),
+}
+
+fn expand_policy_keys(key: &str) -> Vec<String> {
+    let key = key.trim();
+    let lower = key.to_ascii_lowercase();
+    if lower.starts_with("geosite:") {
+        return key["geosite:".len()..]
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| format!("geosite:{part}"))
+            .collect();
     }
+    if lower.starts_with("rule-set:") {
+        return key["rule-set:".len()..]
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(|part| format!("rule-set:{part}"))
+            .collect();
+    }
+    key.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn build_policy_bootstrap_clients(
+    default_ns: &[NameServerEntry],
+    main_urls: &[NameServerEntry],
+) -> Vec<Arc<DnsClient>> {
+    let source = if default_ns.is_empty() {
+        main_urls
+    } else {
+        default_ns
+    };
+    let empty_resolved = HashMap::new();
+    source
+        .iter()
+        .filter(|entry| entry.proxy.is_none())
+        .filter(|entry| entry.url.needs_bootstrap().is_none())
+        .filter(|entry| !matches!(entry.url, NameServerUrl::RCode { .. }))
+        .map(|entry| Resolver::build_single_resolver(&entry.url, &empty_resolved))
+        .collect()
+}
+
+async fn build_policy_resolvers(
+    key: &str,
+    value: &crate::raw::RawNspValue,
+    bootstrap_clients: &[Arc<DnsClient>],
+) -> Result<Vec<Arc<meow_dns::DnsClient>>, anyhow::Error> {
+    let url_strs = value.as_urls();
+    let empty_resolved = HashMap::new();
+    let mut resolvers = Vec::new();
+    for url_str in &url_strs {
+        match NameServerUrl::parse(url_str) {
+            Ok(url) => {
+                let Some(url) =
+                    resolve_policy_hostname_url(url, key, url_str, bootstrap_clients).await
+                else {
+                    continue;
+                };
+                let resolver = Resolver::build_single_resolver(&url, &empty_resolved);
+                resolvers.push(resolver);
+            }
+            Err(e) => {
+                warn!(
+                    "nameserver-policy entry '{}': skipping invalid URL '{}': {}",
+                    key, url_str, e
+                );
+            }
+        }
+    }
+
+    if resolvers.is_empty() {
+        return Err(anyhow::anyhow!(
+            "nameserver-policy entry '{key}' has no valid nameservers after skipping \
+            unsupported entries (Class A per ADR-0002 — DNS leakage risk for \
+            internal/corporate domains)"
+        ));
+    }
+
+    Ok(resolvers)
+}
+
+async fn resolve_policy_hostname_url(
+    url: NameServerUrl,
+    key: &str,
+    url_str: &str,
+    bootstrap_clients: &[Arc<DnsClient>],
+) -> Option<NameServerUrl> {
+    match url {
+        NameServerUrl::Udp {
+            addr: HostOrIp::Host(host),
+            port,
+        } => resolve_policy_host(key, url_str, &host, bootstrap_clients)
+            .await
+            .map(|ip| NameServerUrl::Udp {
+                addr: HostOrIp::Ip(ip),
+                port,
+            }),
+        NameServerUrl::Tcp {
+            addr: HostOrIp::Host(host),
+            port,
+        } => resolve_policy_host(key, url_str, &host, bootstrap_clients)
+            .await
+            .map(|ip| NameServerUrl::Tcp {
+                addr: HostOrIp::Ip(ip),
+                port,
+            }),
+        NameServerUrl::Tls {
+            addr: HostOrIp::Host(host),
+            port,
+            sni,
+        } => resolve_policy_host(key, url_str, &host, bootstrap_clients)
+            .await
+            .map(|ip| NameServerUrl::Tls {
+                addr: HostOrIp::Ip(ip),
+                port,
+                sni,
+            }),
+        NameServerUrl::Https {
+            addr: HostOrIp::Host(host),
+            port,
+            path,
+            sni,
+        } => resolve_policy_host(key, url_str, &host, bootstrap_clients)
+            .await
+            .map(|ip| NameServerUrl::Https {
+                addr: HostOrIp::Ip(ip),
+                port,
+                path,
+                sni,
+            }),
+        other => Some(other),
+    }
+}
+
+async fn resolve_policy_host(
+    key: &str,
+    url_str: &str,
+    host: &str,
+    bootstrap_clients: &[Arc<DnsClient>],
+) -> Option<IpAddr> {
+    if bootstrap_clients.is_empty() {
+        warn!(
+            "nameserver-policy entry '{}': URL '{}' uses hostname '{}' but no IP-literal \
+            nameserver/default-nameserver is available for policy bootstrap; skipping",
+            key, url_str, host
+        );
+        return None;
+    }
+
+    for client in bootstrap_clients {
+        match tokio::time::timeout(Duration::from_secs(3), client.lookup_ip(host)).await {
+            Ok(Ok((ips, _ttl))) => {
+                if let Some(ip) = ips.into_iter().next() {
+                    return Some(ip);
+                }
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "nameserver-policy entry '{}': bootstrap lookup for '{}' via '{}' failed: {}",
+                    key, host, url_str, e
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "nameserver-policy entry '{}': bootstrap lookup for '{}' timed out; \
+                    trying next bootstrap nameserver",
+                    key, host
+                );
+            }
+        }
+    }
+    warn!(
+        "nameserver-policy entry '{}': URL '{}' hostname '{}' resolved to no addresses; skipping",
+        key, url_str, host
+    );
+    None
 }
 
 /// Build a `FallbackFilter` from the raw config.
@@ -397,10 +589,10 @@ fn build_hosts_trie(
 
 /// Merge `/etc/hosts` entries into the trie at lower priority than config entries.
 /// No-op on non-Unix platforms (warn logged).
-fn merge_system_hosts(trie: &mut DomainTrie<Vec<IpAddr>>) {
+async fn merge_system_hosts(trie: &mut DomainTrie<Vec<IpAddr>>) {
     #[cfg(unix)]
     {
-        let entries = parse_system_hosts();
+        let entries = parse_system_hosts().await;
         for (domain, ips) in entries {
             if trie.search(&domain).is_none() {
                 trie.insert(&domain, ips);
@@ -417,10 +609,9 @@ fn merge_system_hosts(trie: &mut DomainTrie<Vec<IpAddr>>) {
 }
 
 /// Parse `/etc/hosts` and return (domain, ips) pairs.
-/// Startup-only sync I/O — never called from the DNS query path.
 #[cfg(unix)]
-fn parse_system_hosts() -> Vec<(String, Vec<IpAddr>)> {
-    let content = match std::fs::read_to_string("/etc/hosts") {
+async fn parse_system_hosts() -> Vec<(String, Vec<IpAddr>)> {
+    let content = match tokio::fs::read_to_string("/etc/hosts").await {
         Ok(c) => c,
         Err(e) => {
             warn!("use-system-hosts: cannot read /etc/hosts: {}", e);
@@ -578,17 +769,16 @@ mod tests {
         );
     }
 
-    // geosite: prefix → warn-once and skip (Class B per ADR-0002).
-    // Upstream: supports geosite: in nameserver-policy. NOT supported in M1 — deferred.
-    #[test]
-    fn parse_nameserver_policy_geosite_prefix_warns() {
+    // geosite: prefix without a loaded DB → warn-once and skip.
+    #[tokio::test]
+    async fn parse_nameserver_policy_geosite_prefix_without_db_skips() {
         use crate::raw::RawNspValue;
         let mut map = HashMap::new();
         map.insert(
             "geosite:cn".to_string(),
-            RawNspValue::One("8.8.8.8".to_string()),
+            RawNspValue::One("rcode://success".to_string()),
         );
-        let result = build_nameserver_policy(&map);
+        let result = build_nameserver_policy(&map, None, &[]).await;
         assert!(result.is_ok(), "geosite: prefix must not hard-error");
         let pol = result.unwrap();
         assert!(
@@ -597,10 +787,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn parse_nameserver_policy_geosite_prefix_matches_loaded_db() {
+        use crate::raw::RawNspValue;
+        let mut db = meow_rules::geosite::GeositeDB::empty();
+        db.insert("cn", "example.cn");
+        db.insert("private", "lan");
+        let db = Arc::new(db);
+
+        let mut map = HashMap::new();
+        map.insert(
+            "geosite:cn,private".to_string(),
+            RawNspValue::One("rcode://success".to_string()),
+        );
+        let pol = build_nameserver_policy(&map, Some(&db), &[]).await.unwrap();
+        assert!(pol.lookup("example.cn").is_some());
+        assert!(pol.lookup("lan").is_some());
+        assert!(pol.lookup("example.com").is_none());
+    }
+
     // All URLs invalid after skip → hard error (Class A per ADR-0002).
     // Upstream: panics. NOT a panic — hard parse error.
-    #[test]
-    fn parse_nameserver_policy_all_invalid_urls_errors() {
+    #[tokio::test]
+    async fn parse_nameserver_policy_all_invalid_urls_errors() {
         use crate::raw::RawNspValue;
         let mut map = HashMap::new();
         // quic:// is explicitly rejected by the URL parser (QuicNotSupported error).
@@ -608,7 +817,7 @@ mod tests {
             "corp.example".to_string(),
             RawNspValue::Many(vec!["quic://bad.example".to_string()]),
         );
-        let result = build_nameserver_policy(&map);
+        let result = build_nameserver_policy(&map, None, &[]).await;
         assert!(
             result.is_err(),
             "policy entry with no valid servers must be a hard error"
@@ -616,15 +825,15 @@ mod tests {
     }
 
     // Wildcard policy entry matches subdomain and root.
-    #[test]
-    fn parse_nameserver_policy_wildcard_inserted() {
+    #[tokio::test]
+    async fn parse_nameserver_policy_wildcard_inserted() {
         use crate::raw::RawNspValue;
         let mut map = HashMap::new();
         map.insert(
             "+.corp.internal".to_string(),
             RawNspValue::One("192.168.1.53".to_string()),
         );
-        let pol = build_nameserver_policy(&map).unwrap();
+        let pol = build_nameserver_policy(&map, None, &[]).await.unwrap();
         assert!(pol.lookup("foo.corp.internal").is_some());
         assert!(pol.lookup("corp.internal").is_some());
         assert!(pol.lookup("other.example").is_none());

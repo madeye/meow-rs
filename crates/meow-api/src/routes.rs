@@ -8,7 +8,7 @@ use axum::{
     Router,
 };
 use dashmap::DashMap;
-use meow_common::TunnelMode;
+use meow_common::{Proxy, TunnelMode};
 use meow_config::{
     proxy_provider::ProxyProvider,
     raw::{RawConfig, RawProxyGroup, RawSubscription},
@@ -24,7 +24,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::task::JoinSet;
 use tower_http::cors::CorsLayer;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::log_stream::{parse_log_level, LogMessage};
 use crate::ui;
@@ -319,21 +319,22 @@ async fn update_proxy(
     Path(group_name): Path<String>,
     Json(body): Json<UpdateProxyRequest>,
 ) -> StatusCode {
-    use meow_proxy::SelectorGroup;
     let route = state.tunnel.route_snapshot();
-    if let Some(proxy) = route.proxies.get(group_name.as_str()) {
-        if let Some(selector) = proxy
-            .as_any()
-            .and_then(|a| a.downcast_ref::<SelectorGroup>())
-        {
-            if selector.select(&body.name) {
-                info!("Selector '{}' switched to '{}'", group_name, body.name);
-                return StatusCode::NO_CONTENT;
-            }
-            return StatusCode::BAD_REQUEST;
+    let Some(proxy) = route.proxies.get(group_name.as_str()).cloned() else {
+        return StatusCode::NOT_FOUND;
+    };
+    match select_proxy_member_async(proxy, body.name.clone()).await {
+        Ok(Some(true)) => {
+            info!("Selector '{}' switched to '{}'", group_name, body.name);
+            StatusCode::NO_CONTENT
+        }
+        Ok(Some(false)) => StatusCode::BAD_REQUEST,
+        Ok(None) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            warn!("Selector '{}' update task failed: {}", group_name, e);
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
-    StatusCode::NOT_FOUND
 }
 
 #[derive(Serialize)]
@@ -524,7 +525,8 @@ async fn save_config(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let raw = state.raw_config.read().clone();
-    meow_config::save_raw_config(&state.config_path, &raw)
+    meow_config::save_raw_config_async(&state.config_path, &raw)
+        .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(serde_json::json!({"message": "config saved"})))
 }
@@ -542,12 +544,38 @@ async fn apply_raw_to_tunnel(
     if let Some(ps) = raw.proxies.as_mut() {
         meow_config::ech_dns::preresolve_ech(ps).await;
     }
-    let (proxies, rules) =
-        meow_config::rebuild_from_raw_with_resolver(&raw, Some(Arc::clone(tunnel.resolver())))
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let (proxies, rules) = rebuild_from_raw_with_resolver_async(raw, Arc::clone(tunnel.resolver()))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     tunnel.update_proxies(proxies);
     tunnel.update_rules(rules);
     Ok(())
+}
+
+async fn rebuild_from_raw_with_resolver_async(
+    raw: RawConfig,
+    resolver: Arc<meow_dns::Resolver>,
+) -> Result<meow_config::RebuildResult, String> {
+    tokio::task::spawn_blocking(move || {
+        meow_config::rebuild_from_raw_with_resolver(&raw, Some(resolver))
+    })
+    .await
+    .map_err(|e| format!("config rebuild task failed: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+async fn select_proxy_member_async(
+    proxy: Arc<dyn Proxy>,
+    member: String,
+) -> Result<Option<bool>, tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || {
+        use meow_proxy::SelectorGroup;
+        proxy
+            .as_any()
+            .and_then(|a| a.downcast_ref::<SelectorGroup>())
+            .map(|selector| selector.select(&member))
+    })
+    .await
 }
 
 // ── Subscriptions ────────────────────────────────────────────────────
@@ -636,7 +664,8 @@ async fn add_subscription(
     apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
 
     // Auto-save so subscription data is cached on disk
-    let _ = meow_config::save_raw_config(&state.config_path, &state.raw_config.read());
+    let raw = state.raw_config.read().clone();
+    let _ = meow_config::save_raw_config_async(&state.config_path, &raw).await;
 
     Ok(Json(serde_json::json!({
         "message": "subscription added",
@@ -669,7 +698,8 @@ async fn delete_subscription(
         raw.clone()
     };
     apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
-    let _ = meow_config::save_raw_config(&state.config_path, &state.raw_config.read());
+    let raw = state.raw_config.read().clone();
+    let _ = meow_config::save_raw_config_async(&state.config_path, &raw).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -717,7 +747,8 @@ async fn refresh_subscription(
     apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
 
     // Auto-save so subscription data is cached on disk
-    let _ = meow_config::save_raw_config(&state.config_path, &state.raw_config.read());
+    let raw = state.raw_config.read().clone();
+    let _ = meow_config::save_raw_config_async(&state.config_path, &raw).await;
 
     Ok(Json(serde_json::json!({
         "message": "subscription refreshed",
@@ -748,17 +779,15 @@ async fn get_proxy_groups(State(state): State<Arc<AppState>>) -> Json<Vec<ProxyG
     let result: Vec<ProxyGroupInfo> = groups
         .iter()
         .map(|g| {
-            use meow_proxy::SelectorGroup;
-            let now = tunnel_proxies
-                .get(g.name.as_str())
-                .and_then(|p| p.as_any())
-                .and_then(|a| a.downcast_ref::<SelectorGroup>())
-                .and_then(meow_proxy::SelectorGroup::selected_proxy)
-                .map(|p| p.name().to_string());
+            let runtime = tunnel_proxies.get(g.name.as_str());
+            let now = runtime.and_then(|p| p.current());
+            let proxies = runtime
+                .and_then(|p| p.members())
+                .unwrap_or_else(|| g.proxies.clone().unwrap_or_default());
             ProxyGroupInfo {
                 name: g.name.clone(),
                 group_type: g.group_type.clone(),
-                proxies: g.proxies.clone().unwrap_or_default(),
+                proxies,
                 now,
                 url: g.url.clone(),
                 interval: g.interval,
@@ -870,21 +899,22 @@ async fn select_proxy_in_group(
     Path(group_name): Path<String>,
     Json(body): Json<SelectProxyRequest>,
 ) -> StatusCode {
-    use meow_proxy::SelectorGroup;
     let route = state.tunnel.route_snapshot();
-    if let Some(proxy) = route.proxies.get(group_name.as_str()) {
-        if let Some(selector) = proxy
-            .as_any()
-            .and_then(|a| a.downcast_ref::<SelectorGroup>())
-        {
-            if selector.select(&body.name) {
-                info!("Selector '{}' switched to '{}'", group_name, body.name);
-                return StatusCode::NO_CONTENT;
-            }
-            return StatusCode::BAD_REQUEST;
+    let Some(proxy) = route.proxies.get(group_name.as_str()).cloned() else {
+        return StatusCode::NOT_FOUND;
+    };
+    match select_proxy_member_async(proxy, body.name.clone()).await {
+        Ok(Some(true)) => {
+            info!("Selector '{}' switched to '{}'", group_name, body.name);
+            StatusCode::NO_CONTENT
+        }
+        Ok(Some(false)) => StatusCode::BAD_REQUEST,
+        Ok(None) => StatusCode::NOT_FOUND,
+        Err(e) => {
+            warn!("Selector '{}' update task failed: {}", group_name, e);
+            StatusCode::INTERNAL_SERVER_ERROR
         }
     }
-    StatusCode::NOT_FOUND
 }
 
 // ── Rules CRUD ───────────────────────────────────────────────────────
@@ -1213,24 +1243,23 @@ async fn put_configs(
 
     // Semantic rebuild (proxy/rule parsing)
     let resolver = Arc::clone(state.tunnel.resolver());
-    let (proxies, rules) =
-        match meow_config::rebuild_from_raw_with_resolver(&raw_config, Some(resolver)) {
-            Ok(r) => r,
-            Err(e) => {
-                if force {
-                    tracing::error!("config reload forced despite validation error: {e}");
-                    (Default::default(), Vec::new())
-                } else {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(
-                            serde_json::json!({"message": format!("config validation error: {e}")}),
-                        ),
-                    )
-                        .into_response();
-                }
+    let (proxies, rules) = match rebuild_from_raw_with_resolver_async(raw_config.clone(), resolver)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if force {
+                tracing::error!("config reload forced despite validation error: {e}");
+                (Default::default(), Vec::new())
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"message": format!("config validation error: {e}")})),
+                )
+                    .into_response();
             }
-        };
+        }
+    };
 
     // Cold reload: close all connections with structured log (Class A divergence from upstream)
     let stats = state.tunnel.statistics();
@@ -1342,7 +1371,7 @@ async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
 
     // meow_memory_rss_bytes — gauge
     let memory_rss = Gauge::<i64, AtomicI64>::default();
-    memory_rss.set(read_rss_bytes() as i64);
+    memory_rss.set(read_rss_bytes().await as i64);
     registry.register(
         "meow_memory_rss_bytes",
         "Current process RSS in bytes",
@@ -1443,8 +1472,8 @@ fn subscribe_memory_feed() -> broadcast::Receiver<Arc<str>> {
                     break;
                 }
             }
-            let inuse = read_rss_bytes();
-            let oslimit = read_os_memory_limit();
+            let inuse = read_rss_bytes().await;
+            let oslimit = read_os_memory_limit().await;
             let msg: Arc<str> = Arc::from(format!("{{\"inuse\":{inuse},\"oslimit\":{oslimit}}}"));
             let _ = tx.send(msg);
         }
@@ -1473,18 +1502,22 @@ async fn get_memory(State(_state): State<Arc<AppState>>, ws: WebSocketUpgrade) -
     })
 }
 
-fn read_rss_bytes() -> u64 {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-    let pid = Pid::from_u32(std::process::id());
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
-    sys.process(pid).map_or(0, sysinfo::Process::memory)
+async fn read_rss_bytes() -> u64 {
+    tokio::task::spawn_blocking(|| {
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+        let pid = Pid::from_u32(std::process::id());
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
+        sys.process(pid).map_or(0, sysinfo::Process::memory)
+    })
+    .await
+    .unwrap_or(0)
 }
 
-fn read_os_memory_limit() -> u64 {
+async fn read_os_memory_limit() -> u64 {
     #[cfg(target_os = "linux")]
     {
-        read_os_memory_limit_linux()
+        read_os_memory_limit_linux().await
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1493,9 +1526,9 @@ fn read_os_memory_limit() -> u64 {
 }
 
 #[cfg(target_os = "linux")]
-fn read_os_memory_limit_linux() -> u64 {
+async fn read_os_memory_limit_linux() -> u64 {
     // Try cgroup v2 memory limit first, fall back to rlimit.
-    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+    if let Ok(s) = tokio::fs::read_to_string("/sys/fs/cgroup/memory.max").await {
         if let Ok(n) = s.trim().parse::<u64>() {
             return n;
         }

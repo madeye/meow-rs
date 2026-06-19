@@ -97,7 +97,9 @@ pub fn build_rule_set(
 
 /// Return `true` if `bytes` starts with the MRS magic `"MRS!"`.
 pub fn is_mrs_bytes(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && bytes[..4] == crate::mrs_parser::MRS_MAGIC
+    bytes.len() >= 4
+        && (bytes[..4] == crate::mrs_parser::MRS_MAGIC
+            || bytes[..4] == crate::mrs_parser::ZSTD_MAGIC)
 }
 
 /// Parse an MRS binary payload and return the appropriate `RuleSet`.
@@ -106,10 +108,48 @@ pub fn build_rule_set_from_mrs(
     bytes: &[u8],
     ctx: &ParserContext,
 ) -> Result<Box<dyn RuleSet>, String> {
+    build_rule_set_from_mrs_with_behavior(bytes, ctx, None)
+}
+
+/// Parse an MRS binary payload and optionally validate it against the
+/// configured provider behavior.
+pub fn build_rule_set_from_mrs_with_behavior(
+    bytes: &[u8],
+    ctx: &ParserContext,
+    expected: Option<RuleSetBehavior>,
+) -> Result<Box<dyn RuleSet>, String> {
     use crate::mrs_parser::{
-        decompress_payload, parse_header, TYPE_CLASSICAL, TYPE_DOMAIN, TYPE_IPCIDR,
+        decompress_payload, parse_header, parse_upstream_ruleset_mrs, TYPE_CLASSICAL, TYPE_DOMAIN,
+        TYPE_IPCIDR, ZSTD_MAGIC,
     };
+    if bytes.len() >= 4 && bytes[..4] == ZSTD_MAGIC {
+        let payload = parse_upstream_ruleset_mrs(bytes).map_err(|e| e.to_string())?;
+        let actual = behavior_from_type_tag(payload.behavior)?;
+        if let Some(expected) = expected {
+            if expected != actual {
+                return Err(format!(
+                    "mrs: behavior mismatch: config says {expected}, file says {actual}"
+                ));
+            }
+        }
+        return match actual {
+            RuleSetBehavior::Domain => Ok(Box::new(DomainRuleSet::from_entries(&payload.entries))),
+            RuleSetBehavior::IpCidr => Ok(Box::new(IpCidrRuleSet::from_entries(&payload.entries))),
+            RuleSetBehavior::Classical => {
+                Err("mrs: upstream format does not support classical behavior".to_string())
+            }
+        };
+    }
+
     let (hdr, compressed) = parse_header(bytes).map_err(|e| e.to_string())?;
+    let actual = behavior_from_type_tag(hdr.type_tag)?;
+    if let Some(expected) = expected {
+        if expected != actual {
+            return Err(format!(
+                "mrs: behavior mismatch: config says {expected}, file says {actual}"
+            ));
+        }
+    }
     let payload = decompress_payload(compressed).map_err(|e| e.to_string())?;
     match hdr.type_tag {
         TYPE_DOMAIN => {
@@ -124,6 +164,16 @@ pub fn build_rule_set_from_mrs(
             let entries = parse_string_list_payload(&payload)?;
             Ok(Box::new(ClassicalRuleSet::from_entries(&entries, ctx)))
         }
+        other => Err(format!("mrs: unsupported type tag {other}")),
+    }
+}
+
+fn behavior_from_type_tag(type_tag: u8) -> Result<RuleSetBehavior, String> {
+    use crate::mrs_parser::{TYPE_CLASSICAL, TYPE_DOMAIN, TYPE_IPCIDR};
+    match type_tag {
+        TYPE_DOMAIN => Ok(RuleSetBehavior::Domain),
+        TYPE_IPCIDR => Ok(RuleSetBehavior::IpCidr),
+        TYPE_CLASSICAL => Ok(RuleSetBehavior::Classical),
         other => Err(format!("mrs: unsupported type tag {other}")),
     }
 }

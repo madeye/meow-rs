@@ -71,6 +71,17 @@ impl GeositeDB {
     /// True iff `domain` is in the named category. Category match is
     /// case-insensitive. Unknown categories return `false` (no error).
     pub fn lookup(&self, category: &str, domain: &str) -> bool {
+        let (base, attrs) = split_category_attrs(category);
+        if !attrs.is_empty() {
+            return attrs.iter().all(|attr| {
+                let attr_category = format!("{base}@{attr}");
+                self.lookup_one(&attr_category, domain)
+            });
+        }
+        self.lookup_one(base, domain)
+    }
+
+    fn lookup_one(&self, category: &str, domain: &str) -> bool {
         let Some(cat) = self.category_key(category) else {
             return false;
         };
@@ -210,6 +221,17 @@ impl GeositeDB {
         let bytes = std::fs::read(path)?;
         Self::from_bytes(&bytes, allowed)
     }
+}
+
+fn split_category_attrs(category: &str) -> (&str, Vec<String>) {
+    let mut parts = category.trim().split('@');
+    let base = parts.next().unwrap_or("").trim();
+    let attrs = parts
+        .map(str::trim)
+        .filter(|attr| !attr.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    (base, attrs)
 }
 
 /// Meow home directory for geosite discovery.
@@ -380,6 +402,18 @@ mod tests {
         db.insert("CN", "Example.COM");
         assert!(db.lookup("cn", "example.com"));
         assert!(db.lookup("CN", "EXAMPLE.COM"));
+    }
+
+    #[test]
+    fn lookup_attribute_category_requires_attribute_bucket() {
+        let mut db = GeositeDB::empty();
+        db.insert("microsoft", "global.example");
+        db.insert("microsoft@cn", "cn.example");
+        db.insert("microsoft@ms", "cn.example");
+        assert!(db.lookup("microsoft", "global.example"));
+        assert!(db.lookup("microsoft@cn", "cn.example"));
+        assert!(db.lookup("microsoft@cn@ms", "cn.example"));
+        assert!(!db.lookup("microsoft@cn", "global.example"));
     }
 
     #[test]

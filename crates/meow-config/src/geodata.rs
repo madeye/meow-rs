@@ -133,12 +133,12 @@ pub async fn download_and_replace(
     };
 
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
+        tokio::fs::create_dir_all(parent).await?;
     }
-    std::fs::write(&tmp, &bytes)?;
+    tokio::fs::write(&tmp, &bytes).await?;
 
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = tokio::fs::rename(&tmp, dest).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
         return Err(anyhow!(
             "atomic rename {} → {}: {}",
             tmp.display(),

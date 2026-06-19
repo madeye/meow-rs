@@ -99,11 +99,11 @@ const _: fn() = || {
 /// Unix: parse `/etc/resolv.conf` `nameserver` lines.  Other platforms (or a
 /// missing / unreadable resolv.conf) fall back to a short list of well-known
 /// public resolvers so ECH lookups still succeed in unconfigured environments.
-fn system_nameservers() -> Vec<SocketAddr> {
+async fn system_nameservers() -> Vec<SocketAddr> {
     let mut out = Vec::new();
     #[cfg(unix)]
     {
-        if let Ok(contents) = std::fs::read_to_string("/etc/resolv.conf") {
+        if let Ok(contents) = tokio::fs::read_to_string("/etc/resolv.conf").await {
             for line in contents.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -128,7 +128,7 @@ fn system_nameservers() -> Vec<SocketAddr> {
 }
 
 pub(crate) async fn fetch_ech_from_dns(name: &str) -> Result<Vec<u8>, String> {
-    let nameservers = system_nameservers();
+    let nameservers = system_nameservers().await;
     let mut clients: Vec<Arc<DnsClient>> = nameservers
         .iter()
         .map(|addr| Arc::new(DnsClient::udp(*addr).with_timeout(Duration::from_secs(5))))

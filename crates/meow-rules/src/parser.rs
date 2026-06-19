@@ -54,18 +54,6 @@ pub struct ParserContext {
     /// which conditionally load the DB still parse cleanly. A warn is
     /// emitted by the loader's discovery path, not here.
     pub geosite: Option<Arc<GeositeDB>>,
-    /// Internal state for warn-once on `GEOSITE,<category>@<suffix>` —
-    /// tracks whether the `@`-suffix deprecation warn has fired for this
-    /// parse context.
-    ///
-    /// Shared via `Arc<AtomicBool>` so that `ParserContext` remains `Clone`
-    /// and can be passed to rule-provider inner parsers without resetting.
-    /// Marked `#[doc(hidden)]` because it is an implementation detail of
-    /// `warn_once_at_suffix`; callers should construct `ParserContext` via
-    /// `..Default::default()` or struct update syntax and should not set
-    /// this field directly.
-    #[doc(hidden)]
-    pub geosite_at_suffix_warned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl std::fmt::Debug for ParserContext {
@@ -81,18 +69,6 @@ impl std::fmt::Debug for ParserContext {
 impl ParserContext {
     pub fn empty() -> Self {
         Self::default()
-    }
-
-    fn warn_once_at_suffix(&self, category_raw: &str) {
-        use std::sync::atomic::Ordering;
-        if self.geosite_at_suffix_warned.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        tracing::warn!(
-            rule = %category_raw,
-            "GEOSITE '@' attribute suffix parsed but filtering is not implemented; \
-             the suffix is stripped and the full category is used (Class B per ADR-0002)"
-        );
     }
 }
 
@@ -169,9 +145,6 @@ pub fn parse_rule(line: &str, ctx: &ParserContext) -> Result<Box<dyn Rule>, Stri
             Ok(Box::new(SrcGeoIpRule::new(payload, adapter, ranges)))
         }
         "GEOSITE" => {
-            if payload.contains('@') {
-                ctx.warn_once_at_suffix(payload);
-            }
             let category = payload.split('@').next().unwrap_or("").trim();
             if category.is_empty() {
                 return Err("GEOSITE rule requires a category name".to_string());

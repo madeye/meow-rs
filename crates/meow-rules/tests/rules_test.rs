@@ -282,6 +282,16 @@ fn port_multiple() {
 }
 
 #[test]
+fn port_slash_multiple() {
+    let r = PortRule::new("80/8080/443/8443", "Proxy", false).unwrap();
+    assert!(r.match_metadata(&meta("", 80), &helper()));
+    assert!(r.match_metadata(&meta("", 8080), &helper()));
+    assert!(r.match_metadata(&meta("", 443), &helper()));
+    assert!(r.match_metadata(&meta("", 8443), &helper()));
+    assert!(!r.match_metadata(&meta("", 22), &helper()));
+}
+
+#[test]
 fn port_mixed_single_and_range() {
     let r = PortRule::new("22,80,8000-9000", "Proxy", false).unwrap();
     assert!(r.match_metadata(&meta("", 22), &helper()));
@@ -585,6 +595,15 @@ fn parse_dst_port() {
     assert_eq!(r.rule_type(), RuleType::DstPort);
     assert!(r.match_metadata(&meta("", 443), &helper()));
     assert!(!r.match_metadata(&meta("", 80), &helper()));
+}
+
+#[test]
+fn parse_dst_port_slash_list() {
+    let r = parse_rule("DST-PORT,80/8080/443/8443,Proxy").unwrap();
+    assert_eq!(r.rule_type(), RuleType::DstPort);
+    assert!(r.match_metadata(&meta("", 8080), &helper()));
+    assert!(r.match_metadata(&meta("", 8443), &helper()));
+    assert!(!r.match_metadata(&meta("", 53), &helper()));
 }
 
 #[test]
@@ -937,9 +956,7 @@ fn parse_geosite_with_fixture_db_matches() {
 }
 
 #[test]
-fn parse_geosite_at_suffix_stripped_and_rule_still_matches() {
-    // Class B divergence (spec §Divergences #2) — @-attribute filtering
-    // deferred; suffix stripped and full category used.
+fn parse_geosite_at_suffix_filters_attribute_category() {
     // upstream: rules/geosite.go — @-attribute filters the category.
     use meow_rules::geosite::GeositeDB;
     use meow_rules::parse_rule as parse_rule_raw;
@@ -947,14 +964,15 @@ fn parse_geosite_at_suffix_stripped_and_rule_still_matches() {
     use std::sync::Arc;
 
     let mut db = GeositeDB::empty();
-    db.insert("cn", "baidu.com");
+    db.insert("microsoft", "global.example");
+    db.insert("microsoft@cn", "cn.example");
     let ctx = ParserContext {
         geosite: Some(Arc::new(db)),
         ..Default::default()
     };
-    let r = parse_rule_raw("GEOSITE,cn@!cn,DIRECT", &ctx).unwrap();
-    // Full category used after suffix strip.
-    assert!(r.match_metadata(&meta("baidu.com", 443), &helper()));
+    let r = parse_rule_raw("GEOSITE,microsoft@cn,DIRECT", &ctx).unwrap();
+    assert!(r.match_metadata(&meta("cn.example", 443), &helper()));
+    assert!(!r.match_metadata(&meta("global.example", 443), &helper()));
 }
 
 #[test]
