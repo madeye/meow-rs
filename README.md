@@ -9,9 +9,11 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 - **Trojan** -- TLS 1.2/1.3 via rustls, SNI, optional skip-cert-verify
 - **Hysteria2** -- QUIC-based TCP and UDP relay, Salamander obfs, port hopping, down bandwidth auth hint, SNI, skip-cert-verify, and certificate pinning
 - **VLESS** -- Plain VLESS and XTLS-Vision splice; TLS, WebSocket, gRPC, H2, HTTPUpgrade transports
+- **VMess** -- AEAD VMess outbound with TCP/WebSocket transports
 - **HTTP** -- HTTP CONNECT outbound proxy with optional TLS and basic auth
 - **SOCKS5** -- SOCKS5 outbound proxy with optional TLS and auth
 - **Snell** -- v3/v4/v5 TCP, UDP-over-TCP, optional HTTP/TLS obfs; v4/v5 connection reuse
+- **AnyTLS** -- Optional AnyTLS outbound (`anytls` feature)
 - **Direct** -- Direct connection to destination
 - **Reject** -- Drop connections (with configurable behavior)
 
@@ -34,18 +36,27 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 | DOMAIN-SUFFIX | `DOMAIN-SUFFIX,google.com,Proxy` | Domain and subdomains |
 | DOMAIN-KEYWORD | `DOMAIN-KEYWORD,google,Proxy` | Substring match |
 | DOMAIN-REGEX | `DOMAIN-REGEX,^ads?\.,Proxy` | Regex pattern |
+| DOMAIN-WILDCARD | `DOMAIN-WILDCARD,*.example.com,Proxy` | Wildcard domain pattern |
 | IP-CIDR | `IP-CIDR,10.0.0.0/8,DIRECT,no-resolve` | Destination IP range |
+| IP-SUFFIX | `IP-SUFFIX,0.0.0.1/8,Proxy` | Destination IP suffix bits |
 | SRC-IP-CIDR | `SRC-IP-CIDR,192.168.0.0/16,DIRECT` | Source IP range |
+| SRC-GEOIP | `SRC-GEOIP,CN,DIRECT` | Source GeoIP lookup |
+| IP-ASN | `IP-ASN,15169,Proxy` | Destination ASN lookup |
 | DST-PORT | `DST-PORT,80,443,8080,Proxy` | Destination port(s) |
 | SRC-PORT | `SRC-PORT,1234,DIRECT` | Source port(s) |
 | NETWORK | `NETWORK,udp,Proxy` | TCP or UDP |
 | PROCESS-NAME | `PROCESS-NAME,curl,DIRECT` | Process name |
 | PROCESS-PATH | `PROCESS-PATH,/usr/bin/curl,DIRECT` | Process path |
 | GEOIP | `GEOIP,CN,DIRECT,no-resolve` | MaxMind GeoIP lookup |
-| SRC-GEOIP | `SRC-GEOIP,CN,DIRECT` | Source GeoIP lookup |
+| GEOSITE | `GEOSITE,cn,DIRECT` | MetaCubeX `.mrs` geosite database |
+| RULE-SET | `RULE-SET,ads,REJECT` | Rule provider lookup |
 | DSCP | `DSCP,46,Proxy` | IP DSCP field |
 | IN-PORT | `IN-PORT,7890,Proxy` | Inbound listener port |
+| IN-NAME | `IN-NAME,mixed,Proxy` | Inbound listener name |
+| IN-TYPE | `IN-TYPE,SOCKS5,Proxy` | Inbound listener protocol |
+| IN-USER | `IN-USER,alice,Proxy` | Authenticated inbound user |
 | UID | `UID,1000,DIRECT` | Process UID (Linux) |
+| SUB-RULE | `SUB-RULE,LOCAL-BYPASS` | Named rule subset |
 | MATCH | `MATCH,Proxy` | Catch-all fallback |
 
 Logic composition rules (AND, OR, NOT) are also supported for combining conditions.
@@ -94,14 +105,28 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 | `/version` | GET | Version info |
 | `/proxies` | GET | List all proxies |
 | `/proxies/{name}` | GET/PUT | Get or switch proxy |
+| `/proxies/{name}/delay` | GET | Run an on-demand delay probe |
+| `/group/{name}/delay` | GET | Run a group delay probe |
 | `/rules` | GET/POST/PUT | List, replace, or update rules |
 | `/rules/{index}` | DELETE | Delete rule at index |
 | `/rules/reorder` | POST | Reorder rules |
 | `/connections` | GET | Active connections with traffic stats |
+| `/connections` | DELETE | Close all active connections |
 | `/connections/{id}` | DELETE | Close a connection |
-| `/configs` | GET/PATCH | Get config (incl. ports) or update mode |
+| `/configs` | GET/PATCH/PUT | Get config, patch mode, or reload config |
 | `/traffic` | GET | Upload/download statistics |
-| `/dns/query` | POST | Direct DNS query |
+| `/logs` | GET (WS) | Runtime log stream |
+| `/memory` | GET (WS) | Runtime memory stream |
+| `/metrics` | GET | Prometheus metrics |
+| `/dns/query` | GET/POST | Direct DNS query |
+| `/cache/dns/flush` | POST | Flush DNS cache |
+| `/cache/fakeip/flush` | POST | Flush fake-IP mappings |
+| `/listeners` | GET | List configured named listeners |
+| `/providers/proxies` | GET | List proxy providers |
+| `/providers/proxies/{name}` | GET/PUT | Get or refresh a proxy provider |
+| `/providers/proxies/{name}/healthcheck` | GET | Run provider health check |
+| `/providers/rules` | GET | List rule providers |
+| `/providers/rules/{name}` | GET/PUT | Get or refresh a rule provider |
 | `/api/config/save` | POST | Save running config to disk |
 | `/api/subscriptions` | GET/POST | List or add subscriptions |
 | `/api/subscriptions/{name}` | DELETE | Delete subscription |
@@ -136,18 +161,16 @@ Single-run results from `bash bench.sh`; numbers will vary with host load. For t
 
 ## Architecture
 
-```
-Listeners (HTTP/SOCKS5/Mixed/TProxy)
-        |
-        v
-    Tunnel (routing engine)  <-->  DNS Resolver (Normal/Snooping)
-        |
-    Rule Matching Engine
-        |
-        v
-  Proxy Adapters / Groups  --->  Remote Server
-
-  REST API Server (Axum)   --->  Runtime control + Web UI
+```mermaid
+flowchart TD
+    inbound["Inbound listeners<br/>Mixed / HTTP / SOCKS5 / TProxy"] --> tunnel["Tunnel<br/>routing, relay, connection stats"]
+    api["REST API + Web UI<br/>Axum"] --> tunnel
+    api --> runtime["Runtime state<br/>config, subscriptions, proxy groups, rules"]
+    runtime --> tunnel
+    tunnel <--> dns["DNS resolver<br/>cache, fake-IP, policy, snooping"]
+    tunnel --> rules["Rule engine<br/>linear / indexed / IR matchers"]
+    rules --> outbounds["Proxy adapters and groups<br/>SS, Trojan, VLESS, VMess, Snell, Hysteria2, Direct, Reject"]
+    outbounds --> remote["Remote server / DIRECT"]
 ```
 
 11 workspace crates with clear separation of concerns:

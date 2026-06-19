@@ -4,9 +4,16 @@ Authored by: architect
 Date: 2026-04-11
 Upstream reference: https://github.com/MetaCubeX/mihomo (Alpha branch)
 
+> **Archived planning snapshot.** This document captures the 2026-04-11 M1
+> planning baseline. Many rows below have since landed or changed. Use
+> [README.md](../README.md), [docs/migration-from-go-mihomo.md](migration-from-go-mihomo.md),
+> [docs/roadmap.md](roadmap.md), and [docs/ci-status.md](ci-status.md) for
+> current operator-facing status. Do not treat the "Gap" labels below as a
+> current feature matrix without re-checking the code.
+
 ## Scope
 
-This document compares the current `meow-rs` implementation against the upstream Go `mihomo` (Clash Meta) kernel, enumerating features that exist upstream but are missing, partial, or divergent in this port.
+This document compared the 2026-04-11 `meow-rs` implementation against the upstream Go `mihomo` (Clash Meta) kernel, enumerating features that existed upstream but were missing, partial, or divergent in this port at that time.
 
 ### Explicitly excluded (non-goals)
 
