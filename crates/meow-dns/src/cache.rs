@@ -47,6 +47,18 @@ struct ReverseEntry {
 // the forward cap so reverse pressure tracks forward pressure.
 const REVERSE_CAP_MULTIPLIER: usize = 4;
 
+/// Minimum lifetime for reverse (IP → host) entries, decoupled from the DNS
+/// TTL. The forward cache must honor the real (possibly short, clamped to 10s)
+/// TTL so clients re-resolve on schedule, but the reverse mapping has to
+/// outlive the DNS answer long enough for the inbound TCP/UDP connection that
+/// uses the resolved IP to still recover its hostname for rule matching
+/// (normal / Mapping mode). A short-TTL name (e.g. a 10s CDN record) would
+/// otherwise lose its IP → host mapping before the connection is even
+/// established, silently degrading to IP-only rule matching. 600s is a
+/// conservative floor that comfortably covers connection setup without pinning
+/// stale CDN-shared IPs indefinitely (LRU + this floor still bound growth).
+const REVERSE_TTL_FLOOR: Duration = Duration::from_secs(600);
+
 /// Number of LRU shards. Power-of-two so the modulo lowers to a mask. Each
 /// shard owns 1/SHARDS of the total capacity. 16 is enough to flatten the
 /// lock-contention curve under W4 load on a typical 8–16 core host.
@@ -122,7 +134,12 @@ impl DnsCache {
     /// Insert a resolved-domain record. Takes the IP list by reference to
     /// avoid forcing the caller to clone — the cache owns its own copy.
     pub fn put(&self, domain: &str, ips: &[IpAddr], ttl: Duration) {
-        let expire_at = Instant::now() + ttl;
+        let now = Instant::now();
+        let expire_at = now + ttl;
+        // Reverse entries get a longer floor so the IP → host mapping survives
+        // until the inbound connection that uses the IP can recover its host
+        // for rule matching, even when the DNS TTL is short (10s clamp).
+        let reverse_expire_at = now + ttl.max(REVERSE_TTL_FLOOR);
         let key: Arc<str> = if domain.bytes().any(|b| b.is_ascii_uppercase()) {
             Arc::from(domain.to_ascii_lowercase().as_str())
         } else {
@@ -139,7 +156,7 @@ impl DnsCache {
                 ip,
                 ReverseEntry {
                     domain: Arc::clone(&key),
-                    expire_at,
+                    expire_at: reverse_expire_at,
                 },
             );
         }
@@ -182,6 +199,21 @@ impl DnsCache {
 
     pub fn reverse_len(&self) -> usize {
         self.reverse.iter().map(|s| s.lock().len()).sum()
+    }
+
+    /// Insert a reverse entry with an explicit expiry. Test-only: lets unit
+    /// tests exercise the expire-on-read eviction path without sleeping for
+    /// `REVERSE_TTL_FLOOR`, which the production `put` now enforces.
+    #[cfg(test)]
+    fn put_reverse_with_expiry(&self, ip: IpAddr, domain: &str, expire_at: Instant) {
+        let mut reverse = self.reverse[shard_ip(ip)].lock();
+        reverse.put(
+            ip,
+            ReverseEntry {
+                domain: Arc::from(domain),
+                expire_at,
+            },
+        );
     }
 }
 
@@ -255,11 +287,43 @@ mod tests {
 
     #[test]
     fn reverse_lookup_on_expired_entry_evicts() {
+        // Reverse entries now use REVERSE_TTL_FLOOR, so a short DNS TTL no
+        // longer expires them quickly. Drive the expire-on-read eviction path
+        // directly with an already-past expiry via the test-only helper.
         let c = DnsCache::new(64);
-        c.put("x.example", &[ipv4(10, 0, 0, 1)], Duration::from_millis(1));
-        std::thread::sleep(Duration::from_millis(10));
-        assert!(c.reverse_lookup(ipv4(10, 0, 0, 1)).is_none());
+        let ip = ipv4(10, 0, 0, 1);
+        let past = Instant::now() - Duration::from_secs(1);
+        c.put_reverse_with_expiry(ip, "x.example", past);
+        assert_eq!(c.reverse_len(), 1, "entry should be present before read");
+        assert!(c.reverse_lookup(ip).is_none());
         assert_eq!(c.reverse_len(), 0);
+    }
+
+    #[test]
+    fn reverse_entry_outlives_short_forward_ttl() {
+        // Load-bearing correctness fix for normal/Mapping mode: a short DNS
+        // TTL must NOT take the IP → host reverse mapping with it. The forward
+        // entry honors the real TTL (expires here), but reverse_lookup must
+        // still succeed because the reverse entry uses REVERSE_TTL_FLOOR.
+        let c = DnsCache::new(64);
+        let ip = ipv4(203, 0, 113, 7);
+        c.put("short.example", &[ip], Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(20));
+        // Forward entry has expired with the real TTL...
+        assert!(
+            c.get("short.example").is_none(),
+            "forward entry must honor the real short TTL"
+        );
+        // ...but the reverse mapping survives (well within REVERSE_TTL_FLOOR).
+        assert!(
+            REVERSE_TTL_FLOOR >= Duration::from_secs(600),
+            "floor regressed below documented 600s"
+        );
+        assert_eq!(
+            c.reverse_lookup(ip).as_deref(),
+            Some("short.example"),
+            "reverse mapping must outlive the short forward TTL"
+        );
     }
 
     #[test]

@@ -174,14 +174,22 @@ fn test_reverse_lookup_overwrite_same_ip() {
 }
 
 #[test]
-fn test_reverse_lookup_expiry() {
+fn test_reverse_lookup_survives_short_forward_ttl() {
+    // Reverse (IP -> host) entries are decoupled from the DNS TTL via
+    // REVERSE_TTL_FLOOR (600s): a short-TTL record's forward entry expires on
+    // schedule, but the reverse mapping must outlive it so an inbound
+    // connection to that IP can still recover its hostname for rule matching
+    // in normal / Mapping (redir-host) mode.
     let cache = DnsCache::new(100);
     let ip = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
 
-    cache.put("expired.com", &[ip], Duration::from_secs(0));
-    std::thread::sleep(Duration::from_millis(10));
+    cache.put("short-ttl.com", &[ip], Duration::from_millis(5));
+    std::thread::sleep(Duration::from_millis(20));
 
-    assert!(cache.reverse_lookup(ip).is_none());
+    // Forward entry honors the real (now-expired) TTL...
+    assert!(cache.get("short-ttl.com").is_none());
+    // ...but the reverse mapping survives, well within REVERSE_TTL_FLOOR.
+    assert_eq!(cache.reverse_lookup(ip), Some("short-ttl.com".into()));
 }
 
 #[test]
