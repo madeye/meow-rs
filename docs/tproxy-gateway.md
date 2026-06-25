@@ -172,6 +172,13 @@ can switch with a one-line `enhanced-mode` change and a restart.
 
 ## Step 2 — gateway nftables rules
 
+> **Shortcut:** [`scripts/tproxy-gateway-linux.sh`](../scripts/tproxy-gateway-linux.sh)
+> generates and loads exactly the table below and enables forwarding —
+> `sudo scripts/tproxy-gateway-linux.sh up` (autodetects interface/IP; `down` to
+> remove, `status` to inspect). macOS has an experimental pf equivalent,
+> [`scripts/tproxy-gateway-macos.sh`](../scripts/tproxy-gateway-macos.sh). The
+> manual rules below are the reference the scripts implement.
+
 meow creates the `output`-chain table for its own traffic. Add this table for
 **forwarded** LAN traffic. Save as `/etc/meow/gateway.nft`:
 
