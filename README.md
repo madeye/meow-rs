@@ -83,6 +83,8 @@ Intercept all local TCP traffic at the kernel firewall level without per-app pro
 - **RAII firewall guard**: Rules automatically cleaned up on shutdown (SIGINT/SIGTERM)
 - Configurable via `tproxy-port`, `routing-mark`, and `tproxy-sni` in YAML
 
+The built-in firewall transparently proxies the **host's own** traffic. To build a **LAN gateway** that forwards and proxies *other* devices' traffic, see [docs/tproxy-gateway.md](docs/tproxy-gateway.md).
+
 ### Web Dashboard
 
 Built-in web UI served at `http://<api-addr>/ui` with:
