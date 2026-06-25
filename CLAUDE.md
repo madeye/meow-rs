@@ -80,6 +80,10 @@ The workspace has 12 crates (see also [ADR-0009](docs/adr/0009-cleanup-scope.md)
 
 `meow-app/src/main.rs` → parse CLI args → `meow_config::load_config()` → create `Tunnel` → spawn health checks for fallback/url-test groups → spawn DNS server, API server, listeners (Mixed/SOCKS/HTTP/TProxy) as tokio tasks → await SIGINT/SIGTERM.
 
+### Transparent-proxy gateway
+
+The built-in TProxy listener firewall (`meow-listener/src/tproxy/firewall.rs`) is `output`-chain/REDIRECT-based and only covers the **host's own** traffic — it is *not* a forwarding LAN gateway. To proxy *other* devices' traffic you add prerouting rules + a DNS hijack yourself. Helper scripts automate this: `scripts/tproxy-gateway-linux.sh` (nftables) and `scripts/tproxy-gateway-macos.sh` (pf, experimental). Full setup, DNS-mode (fake-ip vs redir-host) trade-offs, and systemd wiring are in [docs/tproxy-gateway.md](docs/tproxy-gateway.md). Note: the top-level `tproxy-port` hard-binds `127.0.0.1`; a gateway must declare the listener via `listeners:` with a non-loopback `listen`.
+
 ### Key Patterns
 
 - **`ProxyAdapter` trait** (`meow-common/src/adapter.rs`) — all proxy protocols implement this async trait for TCP connect and UDP relay
