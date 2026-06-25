@@ -264,11 +264,31 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/sbin/sysctl -w net.ipv4.ip_forward=1
 ExecStartPre=/sbin/sysctl -w net.ipv6.conf.all.forwarding=1
+ExecStartPre=/etc/meow/wait-tproxy.sh
 ExecStart=/usr/sbin/nft -f /etc/meow/gateway.nft
 ExecStop=/usr/sbin/nft delete table inet meow_gateway
 
 [Install]
 WantedBy=multi-user.target
+```
+
+The `wait-tproxy.sh` `ExecStartPre` closes a boot-time race: `meow-gateway`
+otherwise loads the prerouting `REDIRECT` a second or two **before** meow has
+bound the listener, so freshly-forwarded connections briefly hit a closed port.
+The script blocks until the port is listening (then proceeds regardless, so the
+redirect still loads fail-closed if meow is slow). Save as
+`/etc/meow/wait-tproxy.sh` (`chmod +x`):
+
+```sh
+#!/bin/sh
+# Block until meow has bound the tproxy listener (:7893) before the gateway
+# redirect rules load. Cap at 30s, then proceed anyway (fail-closed).
+for i in $(seq 1 150); do
+    ss -lnt | grep -q ":7893" && exit 0
+    sleep 0.2
+done
+echo "meow-gateway: :7893 not listening after 30s; loading rules anyway"
+exit 0
 ```
 
 ```bash
