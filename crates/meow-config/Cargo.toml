@@ -17,6 +17,11 @@ snell = ["meow-proxy/snell"]
 boring-tls = ["meow-transport/boring-tls"]
 ech = ["meow-transport/ech"]
 ech-tls-tunnel = ["ss", "meow-proxy/ech-tls-tunnel"]
+# Auto-download + unzip a third-party dashboard from `external-ui-url` (issue
+# #223). Off by default: pulls in the `zip` crate, which grows the binary
+# against the ADR-0007 size caps. Even when enabled, the code path is
+# force-disabled on iOS/Android targets (see `src/lib.rs`).
+external-ui-download = ["dep:zip"]
 
 [dependencies]
 meow-common = { workspace = true }
@@ -44,6 +49,9 @@ rustls = { workspace = true }
 webpki-roots = { workspace = true }
 url = "2"
 httparse = "1"
+# Optional: only compiled when the `external-ui-download` feature is enabled.
+# `deflate` is the only codec GitHub release zips use; skip the heavier ones.
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

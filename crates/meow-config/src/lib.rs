@@ -1,6 +1,13 @@
 pub mod auth;
 pub mod dns_parser;
 pub mod ech_dns;
+// Force-disabled on iOS/Android: mobile apps embed their own UI and must not
+// ship the unzip/download path regardless of the feature flag (issue #223).
+#[cfg(all(
+    feature = "external-ui-download",
+    not(any(target_os = "ios", target_os = "android"))
+))]
+pub mod external_ui;
 pub mod geodata;
 pub mod internal_http;
 pub mod proxy_parser;

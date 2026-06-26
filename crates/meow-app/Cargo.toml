@@ -7,6 +7,10 @@ rust-version.workspace = true
 [features]
 default = ["full", "boring-tls"]
 boring-tls = ["meow-config/boring-tls"]
+# Auto-download a third-party dashboard from `external-ui-url` (issue #223).
+# Off by default — adds the `zip` dependency (ADR-0007 binary-size caps).
+# Force-disabled at compile time on iOS/Android even if enabled.
+external-ui-download = ["meow-config/external-ui-download"]
 # Heap profiling via dhat crate — swaps global allocator; never enable in production.
 dhat-heap = ["dhat"]
 
