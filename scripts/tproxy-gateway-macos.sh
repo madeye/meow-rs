@@ -25,7 +25,9 @@
 #       --no-dns          do not hijack LAN :53 to meow
 set -euo pipefail
 
-ANCHOR="com.meow.gateway"
+# Nested under com.apple/ so the default /etc/pf.conf `rdr-anchor "com.apple/*"`
+# actually evaluates the rules — a sibling anchor loads but is never referenced.
+ANCHOR="com.apple/com.meow.gateway"
 IFACE=""
 TPROXY_PORT="7893"
 DNS_PORT="1053"
@@ -103,6 +105,7 @@ echo "     127.0.0.1:${DNS_PORT} (or 0.0.0.0:${DNS_PORT})."
 echo "  2. Point LAN clients' default route (and DNS) at this host."
 echo "  3. Tear down with: sudo $0 down"
 echo
-echo "If the anchor's rules don't take effect, your main /etc/pf.conf may need a"
-echo "  rdr-anchor \"${ANCHOR}\"  and  anchor \"${ANCHOR}\"  reference (pf evaluates"
-echo "anchors only when the active ruleset calls them)."
+echo "Requires pf enabled with the default /etc/pf.conf (which has"
+echo "  rdr-anchor \"com.apple/*\"). The anchor is nested under com.apple/ so those"
+echo "rules are evaluated; if you run a custom pf ruleset, add a"
+echo "  rdr-anchor \"${ANCHOR}\"  reference yourself."
