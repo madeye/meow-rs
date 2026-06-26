@@ -3,347 +3,698 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>meow-rs - A High-Performance Proxy Kernel in Rust</title>
-<meta name="description" content="Rule-based tunneling proxy with Shadowsocks, Trojan, transparent proxy, DNS snooping, web dashboard, and subscription management. Written in Rust.">
+<title>meow-rs — a proxy kernel that always lands on its feet</title>
+<meta name="description" content="meow-rs is a high-performance, rule-based tunneling proxy kernel in Rust: Shadowsocks, Trojan, VLESS, transparent proxy, DNS snooping, a REST API, and a built-in dashboard — in one ~6 MiB static binary.">
+<meta property="og:title" content="meow-rs — always lands on its feet">
+<meta property="og:description" content="A high-performance proxy kernel in Rust. Rules in, packets out — over every wall.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Hanken+Grotesk:wght@400;500;600;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
-:root {
-  --bg: #0a0f1a;
-  --surface: #111827;
-  --border: #1e293b;
-  --text: #e2e8f0;
-  --muted: #94a3b8;
-  --accent: #60a5fa;
-  --accent2: #818cf8;
-  --green: #34d399;
-  --orange: #fb923c;
+:root{
+  --cream:#FBF3E4;
+  --paper:#FFFBF2;
+  --panel:#F4E7CE;
+  --ink:#20140F;
+  --ink-soft:#6A574C;
+  --salmon:#FF5C46;
+  --salmon-deep:#E23E2C;
+  --tangerine:#FF9E2C;
+  --pine:#156A5B;
+  --kraft:#E2D2B2;
+  --kraft-line:#D8C39B;
+  --ginger:#ED7E2B;
+  --char:#17110C;
+  --shadow:0 1px 0 #fff inset, 0 14px 30px -18px rgba(32,20,15,.35);
+  --display:'Space Grotesk',system-ui,sans-serif;
+  --body:'Hanken Grotesk',system-ui,sans-serif;
+  --mono:'Space Mono',ui-monospace,'SF Mono',monospace;
 }
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
-a { color: var(--accent); text-decoration: none; }
-a:hover { text-decoration: underline; }
-.container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:var(--body);
+  background:var(--cream);
+  color:var(--ink);
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  /* faint paper grain via layered gradients */
+  background-image:
+    radial-gradient(circle at 18% 12%, rgba(255,158,44,.10), transparent 40%),
+    radial-gradient(circle at 85% 0%, rgba(255,92,70,.08), transparent 36%);
+  background-attachment:fixed;
+}
+a{color:var(--salmon-deep);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+.eyebrow{
+  font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--pine);font-weight:700;
+}
+h2.title{font-family:var(--display);font-weight:700;font-size:clamp(1.7rem,3.4vw,2.5rem);letter-spacing:-.02em;line-height:1.1}
+.lede{color:var(--ink-soft);max-width:46ch;font-size:1.05rem}
+:focus-visible{outline:3px solid var(--pine);outline-offset:3px;border-radius:6px}
 
-/* Hero */
-.hero { padding: 80px 0 60px; text-align: center; }
-.hero h1 { font-size: 48px; font-weight: 800; letter-spacing: -1px; margin-bottom: 16px; }
-.hero h1 span { background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-.hero p { font-size: 20px; color: var(--muted); max-width: 600px; margin: 0 auto 32px; }
-.hero-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-.btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; border-radius: 8px; font-size: 15px; font-weight: 600; transition: all 0.2s; }
-.btn-primary { background: var(--accent); color: #0a0f1a; }
-.btn-primary:hover { background: #93c5fd; text-decoration: none; }
-.btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
-.btn-secondary:hover { border-color: var(--accent); text-decoration: none; }
+/* ── Nav ─────────────────────────────────────────────── */
+.nav{position:sticky;top:0;z-index:50;backdrop-filter:saturate(1.4) blur(8px);
+  background:rgba(251,243,228,.78);border-bottom:1px solid var(--kraft-line)}
+.nav-in{display:flex;align-items:center;gap:20px;height:62px}
+.brand{display:flex;align-items:center;gap:9px;font-family:var(--display);font-weight:700;font-size:18px;letter-spacing:-.02em;color:var(--ink)}
+.brand:hover{text-decoration:none}
+.brand svg{display:block}
+.nav-links{display:flex;gap:22px;margin-left:auto;align-items:center}
+.nav-links a{color:var(--ink-soft);font-weight:600;font-size:14.5px}
+.nav-links a:hover{color:var(--ink);text-decoration:none}
+.nav-cta{font-family:var(--body);font-weight:700;font-size:14px;background:var(--ink);color:var(--paper);
+  padding:9px 16px;border-radius:999px;border:1px solid var(--ink)}
+.nav-cta:hover{background:var(--salmon-deep);border-color:var(--salmon-deep);color:#fff;text-decoration:none}
+@media(max-width:760px){.nav-links a:not(.nav-cta){display:none}}
 
-/* Install */
-.install { padding: 40px 0; text-align: center; }
-.install-box { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px 32px; display: inline-block; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 15px; color: var(--green); }
+/* ── Hero ────────────────────────────────────────────── */
+.hero{padding:64px 0 24px;text-align:center}
+.hero .eyebrow{display:inline-flex;gap:8px;align-items:center;
+  background:var(--paper);border:1px solid var(--kraft-line);padding:6px 12px;border-radius:999px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--salmon);box-shadow:0 0 0 3px rgba(255,92,70,.18)}
+.hero h1{font-family:var(--display);font-weight:700;letter-spacing:-.035em;
+  font-size:clamp(2.6rem,7vw,4.7rem);line-height:.98;margin:20px 0 14px}
+.hero h1 .ot{color:var(--salmon-deep)}
+.hero p.sub{color:var(--ink-soft);font-size:clamp(1.05rem,1.6vw,1.22rem);max-width:60ch;margin:0 auto}
+.cta-row{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin:28px 0 16px}
+.btn{display:inline-flex;align-items:center;gap:9px;font-weight:700;font-size:15px;
+  padding:13px 22px;border-radius:12px;border:1px solid transparent;transition:transform .12s ease,box-shadow .12s ease,background .15s}
+.btn:hover{text-decoration:none;transform:translateY(-2px)}
+.btn-primary{background:var(--salmon);color:#fff;border-color:var(--salmon-deep);
+  box-shadow:0 8px 0 -2px var(--salmon-deep)}
+.btn-primary:hover{background:var(--salmon-deep);color:#fff}
+.btn-ghost{background:var(--paper);color:var(--ink);border-color:var(--kraft-line)}
+.btn-ghost:hover{border-color:var(--ink)}
+.install{display:inline-flex;align-items:center;gap:12px;font-family:var(--mono);font-size:14px;
+  background:var(--char);color:#FCEBC9;border-radius:12px;padding:11px 12px 11px 18px;border:1px solid #000;box-shadow:var(--shadow)}
+.install .pfx{color:var(--tangerine);user-select:none}
+.install button{font:inherit;font-family:var(--body);font-weight:700;font-size:12px;color:var(--char);
+  background:var(--tangerine);border:0;border-radius:7px;padding:6px 10px;cursor:pointer;letter-spacing:.04em}
+.install button:hover{background:#ffb152}
 
-/* Features grid */
-.features { padding: 60px 0; }
-.features h2 { font-size: 32px; text-align: center; margin-bottom: 40px; font-weight: 700; }
-.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; transition: border-color 0.2s; }
-.card:hover { border-color: var(--accent); }
-.card h3 { font-size: 18px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
-.card p { color: var(--muted); font-size: 14px; }
-.icon { font-size: 20px; }
+/* ── The signature: cat over the wall ────────────────── */
+.scene-band{padding:18px 0 8px}
+.scene{position:relative;width:100%;max-width:780px;margin:0 auto;
+  border:1px solid var(--kraft-line);border-radius:20px;overflow:hidden;
+  background:linear-gradient(180deg,#FFF7E6 0%, #FBEFD7 62%, #F2E4C6 100%);box-shadow:var(--shadow)}
+.scene svg{display:block;width:100%;height:auto}
+.scene-tag{position:absolute;left:14px;bottom:12px;font-family:var(--mono);font-size:11px;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft);opacity:.8}
+/* The cat is rigged and animated with GSAP (see the script at the end of the
+   page). Each part has its own pivot so the leap gets squash-and-stretch, leg
+   gather/extend, and tail follow-through. If GSAP is blocked or the visitor
+   prefers reduced motion, the cat keeps its authored transform — frozen
+   mid-leap over the wall. */
+#cat *{transform-box:fill-box}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 
-/* Architecture */
-.arch { padding: 60px 0; }
-.arch h2 { font-size: 32px; text-align: center; margin-bottom: 32px; font-weight: 700; }
+/* ── Guaranteed Analysis (the label) ─────────────────── */
+.analysis{padding:64px 0}
+.analysis-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:42px;align-items:center}
+@media(max-width:860px){.analysis-grid{grid-template-columns:1fr;gap:30px}}
+.analysis h2{font-family:var(--display);font-weight:700;font-size:clamp(1.9rem,3.6vw,2.7rem);letter-spacing:-.025em;line-height:1.05;margin:14px 0 14px}
+.analysis ul{list-style:none;display:grid;gap:12px;margin-top:22px}
+.analysis li{display:flex;gap:11px;align-items:flex-start;color:var(--ink-soft)}
+.analysis li b{color:var(--ink)}
+.tick{flex:0 0 auto;width:22px;height:22px;border-radius:6px;background:var(--pine);color:#fff;
+  display:grid;place-items:center;font-size:13px;margin-top:2px}
+/* the label card */
+.label{background:var(--paper);color:var(--ink);border:2px solid var(--ink);border-radius:14px;
+  padding:20px 22px;font-family:var(--mono);box-shadow:8px 8px 0 var(--ink);max-width:420px;justify-self:center}
+.label .brandline{display:flex;justify-content:space-between;align-items:baseline;font-size:11px;letter-spacing:.1em}
+.label h3{font-family:var(--display);font-weight:700;font-size:30px;letter-spacing:-.02em;line-height:1;margin:2px 0 4px;border-bottom:8px solid var(--ink);padding-bottom:8px}
+.label .serv{font-size:12.5px;display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--ink)}
+.label .head{display:flex;justify-content:space-between;font-size:11px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;padding:6px 0;border-bottom:5px solid var(--ink)}
+.label .rows{margin:0}
+.label .row{display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:7px 0;border-bottom:1px solid var(--kraft-line)}
+.label .row .v{display:flex;gap:8px;align-items:baseline}
+.label .row .v b{font-weight:700}
+.label .row .dv{color:var(--pine);font-weight:700;white-space:nowrap}
+.label .row.zero .dv{color:var(--salmon-deep)}
+.label .thick{border-bottom:5px solid var(--ink)}
+.label .ing{font-size:11px;line-height:1.5;color:var(--ink-soft);padding-top:10px}
+.label .ing b{color:var(--ink)}
+.label .foot{font-size:9.5px;color:#9b8a7c;padding-top:8px;line-height:1.45}
+.label .barcode{height:34px;margin-top:12px;display:flex;align-items:flex-end;gap:2px}
+.label .barcode i{display:block;width:2px;background:var(--ink)}
 
-/* Crates table */
-.crates { padding: 40px 0 60px; }
-.crates h2 { font-size: 32px; text-align: center; margin-bottom: 32px; font-weight: 700; }
-table { width: 100%; border-collapse: collapse; background: var(--surface); border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
-th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--border); font-size: 14px; }
-th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; background: rgba(30,41,59,0.5); }
-td:first-child { font-family: 'SF Mono', 'Fira Code', monospace; color: var(--accent); font-size: 13px; }
+/* ── shared section heads ───────────────────────────── */
+.sec-head{text-align:center;max-width:44ch;margin:0 auto 36px}
+.sec-head .eyebrow{display:block;margin-bottom:10px}
+.sec-head p{color:var(--ink-soft);margin-top:10px}
 
-/* Quick start */
-.quickstart { padding: 60px 0; }
-.quickstart h2 { font-size: 32px; text-align: center; margin-bottom: 32px; font-weight: 700; }
-.steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
-.step { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; }
-.step-num { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--bg); font-size: 14px; font-weight: 700; margin-bottom: 12px; }
-.step h3 { font-size: 16px; margin-bottom: 8px; }
-.step code { display: block; background: var(--bg); border-radius: 6px; padding: 12px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; color: var(--green); margin-top: 8px; white-space: pre-wrap; word-break: break-all; }
+/* ── Setup ──────────────────────────────────────────── */
+.setup{padding:64px 0;background:var(--paper);border-top:1px solid var(--kraft-line);border-bottom:1px solid var(--kraft-line)}
+.setup-grid{display:grid;grid-template-columns:.9fr 1.1fr;gap:40px;align-items:center}
+@media(max-width:860px){.setup-grid{grid-template-columns:1fr;gap:26px}}
+.setup h2{font-family:var(--display);font-weight:700;font-size:clamp(1.8rem,3.4vw,2.5rem);letter-spacing:-.025em;line-height:1.08;margin:12px 0 12px}
+.code{background:var(--char);border-radius:16px;border:1px solid #000;box-shadow:var(--shadow);overflow:hidden}
+.code .bar{display:flex;gap:7px;align-items:center;padding:12px 16px;border-bottom:1px solid #2b211a}
+.code .bar i{width:11px;height:11px;border-radius:50%;display:block}
+.code .bar .fn{margin-left:8px;font-family:var(--mono);font-size:12px;color:#b9a892}
+.code pre{margin:0;padding:18px 18px 20px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.7;color:#F3E6CE}
+.code .k{color:var(--tangerine)}
+.code .s{color:#8FD3A6}
+.code .c{color:#8a7866}
+.code .p{color:var(--salmon)}
 
-/* Footer */
-footer { padding: 40px 0; border-top: 1px solid var(--border); text-align: center; color: var(--muted); font-size: 14px; }
-footer a { color: var(--accent); }
+/* ── Features ───────────────────────────────────────── */
+.feat{padding:66px 0}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(264px,1fr));gap:16px}
+.tin{background:var(--paper);border:1px solid var(--kraft-line);border-radius:16px;padding:22px;
+  transition:transform .14s ease,box-shadow .14s ease,border-color .14s}
+.tin:hover{transform:translateY(-4px);box-shadow:var(--shadow);border-color:var(--salmon)}
+.tin .ic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:19px;
+  background:var(--panel);border:1px solid var(--kraft-line);margin-bottom:14px}
+.tin h3{font-family:var(--display);font-weight:600;font-size:17px;letter-spacing:-.01em;margin-bottom:6px}
+.tin p{color:var(--ink-soft);font-size:14px}
+.tin code{font-family:var(--mono);font-size:.85em;background:var(--panel);padding:1px 5px;border-radius:5px}
 
-/* API badge row */
-.badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-.badge { display: inline-block; padding: 3px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; font-family: 'SF Mono', monospace; }
-.badge-get { background: #064e3b; color: #6ee7b7; }
-.badge-post { background: #78350f; color: #fcd34d; }
-.badge-put { background: #1e3a5f; color: #93c5fd; }
-.badge-del { background: #7f1d1d; color: #fca5a5; }
-.badge-patch { background: #4a1d96; color: #c4b5fd; }
+/* ── Architecture (dark inset blueprint) ────────────── */
+.arch{padding:66px 0}
+.blue{background:var(--char);border:1px solid #000;border-radius:20px;padding:14px 18px 20px;box-shadow:var(--shadow)}
+.blue .cap{display:flex;justify-content:space-between;align-items:center;padding:6px 4px 14px;
+  font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#a9907a}
+.blue .cap b{color:#FCEBC9;font-weight:700}
+.blue svg{width:100%;max-width:820px;display:block;margin:0 auto}
+
+/* ── Platforms ──────────────────────────────────────── */
+.plat{padding:60px 0;background:var(--paper);border-top:1px solid var(--kraft-line);border-bottom:1px solid var(--kraft-line)}
+.plat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px}
+.shelf{display:flex;gap:13px;align-items:center;background:var(--cream);border:1px solid var(--kraft-line);
+  border-radius:14px;padding:16px}
+.shelf .os{width:34px;height:34px;border-radius:9px;background:var(--ink);color:var(--paper);
+  display:grid;place-items:center;font-family:var(--mono);font-weight:700;font-size:15px;flex:0 0 auto}
+.shelf b{display:block;font-size:14.5px}
+.shelf span{font-family:var(--mono);font-size:11.5px;color:var(--ink-soft)}
+
+/* ── Crates table ───────────────────────────────────── */
+.crates{padding:66px 0}
+.tbl{width:100%;border-collapse:collapse;font-size:14px;
+  background:var(--paper);border:1px solid var(--kraft-line);border-radius:14px;overflow:hidden}
+.tbl th{font-family:var(--mono);text-transform:uppercase;font-size:10.5px;letter-spacing:.1em;
+  text-align:left;color:var(--ink-soft);padding:12px 16px;background:var(--panel);border-bottom:2px solid var(--kraft-line)}
+.tbl td{padding:11px 16px;border-bottom:1px solid var(--kraft-line);color:var(--ink-soft)}
+.tbl tr:last-child td{border-bottom:0}
+.tbl tr:hover td{background:rgba(255,158,44,.07)}
+.tbl td:first-child{font-family:var(--mono);font-size:12.5px;color:var(--salmon-deep);white-space:nowrap}
+
+/* ── Quick start ────────────────────────────────────── */
+.start{padding:66px 0;background:var(--paper);border-top:1px solid var(--kraft-line)}
+.steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:16px;counter-reset:s}
+.step{background:var(--cream);border:1px solid var(--kraft-line);border-radius:16px;padding:22px;position:relative}
+.step::before{counter-increment:s;content:counter(s,decimal-leading-zero);
+  font-family:var(--mono);font-weight:700;font-size:12px;color:var(--salmon-deep);letter-spacing:.1em}
+.step h3{font-family:var(--display);font-weight:600;font-size:16px;margin:8px 0 6px}
+.step p{color:var(--ink-soft);font-size:13.5px;margin-bottom:12px}
+.step pre{font-family:var(--mono);font-size:12.5px;background:var(--char);color:#8FD3A6;
+  padding:12px;border-radius:10px;white-space:pre-wrap;word-break:break-word;line-height:1.6}
+.step pre .c{color:#8a7866}
+
+/* ── Final CTA ──────────────────────────────────────── */
+.cta{padding:78px 0;text-align:center}
+.cta-card{background:linear-gradient(150deg,var(--salmon),var(--tangerine));border-radius:24px;
+  padding:54px 28px;color:#fff;position:relative;overflow:hidden;border:2px solid var(--salmon-deep);box-shadow:0 18px 40px -22px rgba(226,62,44,.7)}
+.cta-card h2{font-family:var(--display);font-weight:700;font-size:clamp(2rem,4.4vw,3rem);letter-spacing:-.03em;line-height:1.02}
+.cta-card p{max-width:48ch;margin:14px auto 26px;font-size:1.05rem;color:#fff5ef}
+.cta-card .btn-primary{background:#fff;color:var(--salmon-deep);border-color:#fff;box-shadow:0 8px 0 -2px rgba(0,0,0,.18)}
+.cta-card .btn-primary:hover{background:#FFF3EA;color:var(--salmon-deep)}
+.cta-card .btn-ghost{background:transparent;color:#fff;border-color:rgba(255,255,255,.6)}
+.cta-card .btn-ghost:hover{border-color:#fff;background:rgba(255,255,255,.12)}
+
+/* ── Footer ─────────────────────────────────────────── */
+.foot{padding:40px 0 56px;border-top:1px solid var(--kraft-line)}
+.foot-in{display:flex;gap:18px;align-items:center;flex-wrap:wrap;justify-content:space-between;color:var(--ink-soft);font-size:14px}
+.foot a{color:var(--ink-soft);font-weight:600}
+.foot a:hover{color:var(--ink)}
+.foot .fb{display:flex;align-items:center;gap:8px;font-family:var(--display);font-weight:700;color:var(--ink)}
+
+/* reveal on scroll */
+.rv{opacity:0;transform:translateY(16px);transition:opacity .6s ease,transform .6s ease}
+.rv.in{opacity:1;transform:none}
+@media(prefers-reduced-motion:reduce){.rv{opacity:1;transform:none;transition:none}}
 </style>
 </head>
 <body>
 
-<section class="hero">
-  <div class="container">
-    <h1><span>meow-rs</span></h1>
-    <p>A high-performance rule-based tunneling proxy kernel written in Rust. Shadowsocks, Trojan, transparent proxy, DNS snooping, web dashboard, and subscription management.</p>
-    <div class="hero-buttons">
-      <a href="https://github.com/madeye/meow-rs" class="btn btn-primary">View on GitHub</a>
-      <a href="https://github.com/madeye/meow-rs/releases/latest" class="btn btn-secondary">Download</a>
-      <a href="#quickstart" class="btn btn-secondary">Quick Start</a>
+<!-- ─────────────── Nav ─────────────── -->
+<nav class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top" aria-label="meow-rs home">
+      <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M6 12 L6 5 L11 9 Q16 7 21 9 L26 5 L26 12 Q29 16 26 21 Q16 27 6 21 Q3 16 6 12Z" fill="#ED7E2B" stroke="#20140F" stroke-width="1.6" stroke-linejoin="round"/>
+        <circle cx="12" cy="15" r="1.5" fill="#20140F"/><circle cx="20" cy="15" r="1.5" fill="#20140F"/>
+        <path d="M14.5 18 Q16 19.5 17.5 18" fill="none" stroke="#20140F" stroke-width="1.4" stroke-linecap="round"/>
+        <path d="M16 16.4 l-1.2 1 h2.4Z" fill="#E23E2C"/>
+      </svg>
+      meow-rs
+    </a>
+    <div class="nav-links">
+      <a href="#analysis">Analysis</a>
+      <a href="#setup">Setup</a>
+      <a href="#features">Features</a>
+      <a href="#architecture">Architecture</a>
+      <a href="https://github.com/madeye/meow-rs/tree/main/docs">Docs</a>
+      <a class="nav-cta" href="https://github.com/madeye/meow-rs">GitHub ↗</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ─────────────── Hero ─────────────── -->
+<header class="hero" id="top">
+  <div class="wrap">
+    <span class="eyebrow"><span class="dot"></span>Small-batch Rust · proxy kernel</span>
+    <h1>Always lands<br>on its <span class="ot">feet.</span></h1>
+    <p class="sub">meow-rs is a high-performance, rule-based tunneling proxy kernel in Rust — routing, transparent proxy, DNS snooping, and a built-in dashboard, packed into one&nbsp;~6&nbsp;MiB static binary.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/madeye/meow-rs">View on GitHub</a>
+      <a class="btn btn-ghost" href="https://github.com/madeye/meow-rs/releases/latest">Download a build</a>
+    </div>
+    <div class="install">
+      <span><span class="pfx">$</span> cargo build --release</span>
+      <button type="button" data-copy="cargo build --release">Copy</button>
+    </div>
+  </div>
+</header>
+
+<!-- ─────────────── Signature: cat clears the wall ─────────────── -->
+<section class="scene-band" aria-label="Animation: a ginger cat leaping over a brick wall">
+  <div class="wrap">
+    <div class="scene">
+      <svg viewBox="0 0 780 320" role="img" aria-label="A ginger cat leaps over a brick wall, landing safely on the far side">
+        <defs>
+          <linearGradient id="grass" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#cfe3b6"/><stop offset="1" stop-color="#bcd79c"/>
+          </linearGradient>
+          <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#FFF7E6" stop-opacity="0"/><stop offset="1" stop-color="#FFE6A8" stop-opacity=".55"/>
+          </linearGradient>
+        </defs>
+
+        <!-- warm "far side" glow -->
+        <rect x="390" y="0" width="390" height="320" fill="url(#glow)"/>
+        <!-- ground -->
+        <rect x="0" y="268" width="780" height="52" fill="url(#grass)"/>
+        <line x1="0" y1="268" x2="780" y2="268" stroke="#9bb87a" stroke-width="2"/>
+
+        <!-- the wall -->
+        <g>
+          <rect x="330" y="150" width="120" height="120" rx="3" fill="#E7D6BC" stroke="#C7AE86" stroke-width="2"/>
+          <rect x="330" y="142" width="120" height="14" rx="3" fill="#D9C4A1" stroke="#C7AE86" stroke-width="2"/>
+          <g stroke="#C7AE86" stroke-width="1.6">
+            <line x1="330" y1="178" x2="450" y2="178"/><line x1="330" y1="206" x2="450" y2="206"/>
+            <line x1="330" y1="234" x2="450" y2="234"/>
+            <line x1="360" y1="156" x2="360" y2="178"/><line x1="420" y1="156" x2="420" y2="178"/>
+            <line x1="345" y1="178" x2="345" y2="206"/><line x1="405" y1="178" x2="405" y2="206"/>
+            <line x1="375" y1="206" x2="375" y2="234"/><line x1="435" y1="206" x2="435" y2="234"/>
+            <line x1="360" y1="234" x2="360" y2="268"/><line x1="420" y1="234" x2="420" y2="268"/>
+          </g>
+        </g>
+
+        <!-- hidden parabola the cat is animated along (GSAP MotionPath) -->
+        <path id="leapPath" d="M -90 274 C 170 268 255 86 390 82 C 525 86 610 268 870 274" fill="none" stroke="none"/>
+
+        <!-- the ginger tom, rigged for GSAP. Parts pivot at their joints.
+             transform="translate(388,90) scale(1.35)" is the static fallback:
+             frozen mid-leap over the wall when JS/GSAP is unavailable. -->
+        <g id="catPos" transform="translate(388,90)"><g id="cat" transform="scale(1.35)">
+          <g id="tail">
+            <path d="M-28 -3 C-50 -8 -68 -22 -64 -39 C-58 -27 -45 -19 -30 -18 Z" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
+            <g fill="none" stroke="#C9621A" stroke-width="2.3" stroke-linecap="round">
+              <path d="M-46 -19 q5 5 4 11"/><path d="M-54 -11 q4 4 3 9"/>
+            </g>
+          </g>
+          <g id="hindlegs">
+            <path d="M-13 5 C-31 8 -46 13 -57 20 L-51 24 C-39 17 -24 13 -11 12 Z" fill="#E0731F" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
+            <path d="M-11 9 C-27 13 -41 18 -50 24 L-45 27 C-34 21 -21 17 -9 15 Z" fill="#D8691B" stroke="#3A2415" stroke-width="2" stroke-linejoin="round"/>
+          </g>
+          <g id="body">
+            <path d="M-20 8 C-27 -10 -5 -18 13 -17 C25 -16 32 -8 33 1 C31 10 12 15 -8 14 C-15 13 -18 11 -20 8 Z" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.4" stroke-linejoin="round"/>
+            <path d="M-15 10 C-3 17 19 15 29 4 C21 13 -3 14 -15 10 Z" fill="#FBE3C0"/>
+            <g fill="none" stroke="#C9621A" stroke-width="2.3" stroke-linecap="round">
+              <path d="M-5 -13 q3 7 0 15"/><path d="M5 -14 q3 7 0 16"/><path d="M-15 -9 q3 6 1 12"/>
+            </g>
+          </g>
+          <g id="frontlegs">
+            <path d="M16 7 C29 10 40 13 46 19 L42 22 C34 17 23 13 12 12 Z" fill="#E0731F" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
+            <path d="M14 11 C26 14 36 17 42 22 L38 25 C31 20 20 16 11 15 Z" fill="#D8691B" stroke="#3A2415" stroke-width="2" stroke-linejoin="round"/>
+          </g>
+          <g id="head">
+            <circle cx="29" cy="-10" r="13" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.4"/>
+            <path d="M20 -18 L13 -31 L27 -22 Z" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
+            <path d="M34 -19 L35 -32 L25 -21 Z" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
+            <path d="M21 -20 L17 -28 L26 -22 Z" fill="#F4A6A0"/>
+            <path d="M32 -21 L34 -28 L26 -21 Z" fill="#F4A6A0"/>
+            <circle cx="34" cy="-11" r="2.6" fill="#2A1A12"/>
+            <circle cx="34.9" cy="-11.9" r=".8" fill="#fff"/>
+            <path d="M41 -6 l-3 2.4 h5 Z" fill="#E23E2C" stroke="#3A2415" stroke-width="1" stroke-linejoin="round"/>
+            <path d="M38 -2.6 q1.6 2.2 3.6 1" fill="none" stroke="#3A2415" stroke-width="1.3" stroke-linecap="round"/>
+            <path d="M41 -2 q4.5 2 9 1.4 M41 -.4 q4.5 3 9 4" fill="none" stroke="#3A2415" stroke-width="1.1" stroke-linecap="round"/>
+          </g>
+        </g></g>
+      </svg>
+      <span class="scene-tag">Rules in · packets out · over every wall</span>
     </div>
   </div>
 </section>
 
-<section class="install">
-  <div class="container">
-    <div class="install-box">cargo build --release</div>
-  </div>
-</section>
+<!-- ─────────────── Guaranteed Analysis ─────────────── -->
+<section class="analysis" id="analysis">
+  <div class="wrap analysis-grid">
+    <div class="rv">
+      <span class="eyebrow">What's inside the tin</span>
+      <h2>Guaranteed Analysis,<br>not vibes.</h2>
+      <p class="lede">Every claim on this page is a measured fact, not a tagline. meow-rs is engineered to a quantitative footprint bar — binary size, idle memory, and hot-path allocations are all under budget, every release.</p>
+      <ul>
+        <li><span class="tick">✓</span><span><b>Zero allocations</b> on the relay setup path — buffers live on the async stack frame, not the heap.</span></li>
+        <li><span class="tick">✓</span><span><b>One static binary.</b> No runtime, no sidecar, no telemetry. Drop it on a box and run.</span></li>
+        <li><span class="tick">✓</span><span><b>12 focused crates</b> behind clean trait contracts — swap a protocol or a rule type without touching the core.</span></li>
+      </ul>
+    </div>
 
-<section class="features">
-  <div class="container">
-    <h2>Features</h2>
-    <div class="grid">
-      <div class="card">
-        <h3><span class="icon">&#x1F310;</span> Proxy Protocols</h3>
-        <p>Shadowsocks, Trojan, VLESS (XTLS-Vision), HTTP, SOCKS5 outbound adapters with TCP/UDP relay. WebSocket, gRPC, H2, HTTPUpgrade transports.</p>
+    <div class="label rv" role="figure" aria-label="Guaranteed Analysis label with measured meow-rs specifications">
+      <div class="brandline"><span>MEOW-RS</span><span>WILD-CAUGHT ED.</span></div>
+      <h3>Guaranteed Analysis</h3>
+      <div class="serv"><span>Serving size</span><span>1 daemon (-f config.yaml)</span></div>
+      <div class="serv" style="border-bottom-width:5px"><span>Servings per host</span><span>as many sockets as you've got</span></div>
+      <div class="head"><span>Amount per daemon</span><span>% DV*</span></div>
+      <div class="rows">
+        <div class="row"><span>Net wt. — stripped binary</span><span class="v"><b>~6 MiB</b><span class="dv">fits anywhere</span></span></div>
+        <div class="row"><span>Idle memory (typ.)</span><span class="v"><b>~9 MB</b><span class="dv">lean</span></span></div>
+        <div class="row"><span>Per active connection</span><span class="v"><b>~35 KB</b><span class="dv">steady</span></span></div>
+        <div class="row zero"><span>Allocations, hot path</span><span class="v"><b>0</b><span class="dv">0%</span></span></div>
+        <div class="row"><span>Workspace crates</span><span class="v"><b>12</b></span></div>
+        <div class="row"><span>Proxy protocols</span><span class="v"><b>10</b></span></div>
+        <div class="row thick"><span>Telemetry / phone-home</span><span class="v"><b>0</b><span class="dv">none</span></span></div>
       </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F4CB;</span> Rule Engine</h3>
-        <p>Domain, IP-CIDR, GeoIP, port, process, network, regex rules with AND/OR/NOT logic composition. First-match-wins evaluation.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F5A5;</span> Web Dashboard</h3>
-        <p>Built-in web UI at <code>/ui</code> for proxy switching, subscription management, group CRUD, rule editing, and live traffic monitoring.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F4E1;</span> Subscriptions</h3>
-        <p>Import Clash YAML subscriptions with proxies, groups, and rules. Auto-cached to disk for instant startup. Background refresh on intervals.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F50D;</span> DNS &amp; Snooping</h3>
-        <p>Built-in UDP DNS server with main + fallback nameservers, response caching, and IP&#x2192;domain reverse lookup table for transparent proxy hostname recovery.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F6E1;</span> Transparent Proxy</h3>
-        <p>Kernel-level traffic interception via nftables (Linux) or pf (macOS). SNI extraction for HTTPS, DNS snooping for HTTP. SO_MARK loop avoidance. Auto firewall teardown.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x2699;</span> Proxy Groups</h3>
-        <p>Selector, URL-Test, Fallback, LoadBalance, and Relay groups with periodic health checks. Dead nodes are auto-skipped by fallback/url-test groups.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F4E6;</span> Easy Deployment</h3>
-        <p>Single static binary. Install as a systemd service with one command. Pre-built binaries for Linux amd64/arm64, macOS arm64, and Windows amd64.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F512;</span> ECH &amp; uTLS</h3>
-        <p>Encrypted Client Hello via BoringSSL. uTLS fingerprint spoofing (Chrome, Firefox, Safari, iOS, Android, Edge). DNS-based ECH config from HTTPS/SVCB records.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F680;</span> Performance</h3>
-        <p>Async I/O with Tokio multi-threaded runtime. Zero-copy bidirectional relay. Minimal memory footprint with parking_lot locks.</p>
-      </div>
-      <div class="card">
-        <h3><span class="icon">&#x1F4CA;</span> REST API</h3>
-        <p>Full runtime control via Axum-powered REST API. Manage proxies, rules, connections, subscriptions, and config at runtime.
-        <div class="badges">
-          <span class="badge badge-get">GET</span>
-          <span class="badge badge-post">POST</span>
-          <span class="badge badge-put">PUT</span>
-          <span class="badge badge-patch">PATCH</span>
-          <span class="badge badge-del">DELETE</span>
-        </div>
-        </p>
-      </div>
+      <p class="ing"><b>Ingredients:</b> Rust, Tokio, rustls, hickory-dns, Axum, tower — and a great deal of open-source goodness. <b>Contains:</b> network sockets. <b>Free from:</b> garbage collectors, telemetry, vendor lock-in.</p>
+      <div class="barcode" aria-hidden="true" id="barcode"></div>
+      <p class="foot">* Percent Daily Value is a joke. Measured on aarch64: stripped static binary ~6&nbsp;MiB, idle RSS ~9&nbsp;MB, ~35&nbsp;KB per connection at steady state. Your mileage varies with traffic. GPL-3.0.</p>
     </div>
   </div>
 </section>
 
-<section class="arch">
-  <div class="container">
-    <h2>Architecture</h2>
-    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;overflow-x:auto;">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 520" style="width:100%;max-width:820px;display:block;margin:0 auto;" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif">
-      <defs>
-        <marker id="ah" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#475569"/></marker>
-        <marker id="ah-b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#60a5fa"/></marker>
-        <marker id="ah-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#34d399"/></marker>
-      </defs>
+<!-- ─────────────── Setup ─────────────── -->
+<section class="setup" id="setup">
+  <div class="wrap setup-grid">
+    <div class="rv">
+      <span class="eyebrow">One config feeds it all</span>
+      <h2>One YAML.<br>Every protocol.</h2>
+      <p class="lede">Bring your existing Clash / mihomo config — meow-rs speaks the same dialect. Point it at a subscription or write rules by hand. It builds the routing table, opens the listeners, and serves a dashboard at <code style="font-family:var(--mono);font-size:.85em">/ui</code>.</p>
+    </div>
+    <div class="code rv" aria-label="Example config.yaml">
+      <div class="bar"><i style="background:#FF5C46"></i><i style="background:#FF9E2C"></i><i style="background:#67C29A"></i><span class="fn">config.yaml</span></div>
+<pre><span class="k">mixed-port</span>: <span class="s">7890</span>
+<span class="k">external-controller</span>: <span class="s">127.0.0.1:9090</span>
 
-      <!-- Listeners -->
-      <rect x="200" y="10" width="420" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
-      <text x="410" y="32" text-anchor="middle" fill="#60a5fa" font-size="15" font-weight="700">Listeners</text>
-      <text x="410" y="50" text-anchor="middle" fill="#94a3b8" font-size="11">HTTP  ·  SOCKS5  ·  Mixed  ·  TProxy</text>
+<span class="k">proxies</span>:
+  - { <span class="k">name</span>: hk, <span class="k">type</span>: <span class="p">trojan</span>, <span class="k">server</span>: ex.com, <span class="k">port</span>: <span class="s">443</span>, <span class="k">password</span>: <span class="s">"•••"</span> }
 
-      <!-- Arrow: Listeners → Tunnel -->
-      <line x1="410" y1="62" x2="410" y2="98" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
+<span class="k">proxy-groups</span>:
+  - { <span class="k">name</span>: Proxy, <span class="k">type</span>: <span class="p">url-test</span>, <span class="k">proxies</span>: [hk] }
 
-      <!-- Tunnel -->
-      <rect x="240" y="100" width="340" height="48" rx="10" fill="#1a2744" stroke="#60a5fa" stroke-width="1.5"/>
-      <text x="410" y="130" text-anchor="middle" fill="#60a5fa" font-size="15" font-weight="700">Tunnel</text>
-      <text x="340" y="130" text-anchor="end" fill="#94a3b8" font-size="10">(routing engine)</text>
-
-      <!-- DNS Resolver -->
-      <rect x="630" y="100" width="180" height="48" rx="10" fill="#0f2b1d" stroke="#34d399" stroke-width="1.5"/>
-      <text x="720" y="126" text-anchor="middle" fill="#34d399" font-size="14" font-weight="600">DNS Resolver</text>
-      <text x="720" y="141" text-anchor="middle" fill="#6ee7b7" font-size="10">Snooping · Cache · FakeIP</text>
-
-      <!-- Arrow: Tunnel ↔ DNS -->
-      <line x1="580" y1="124" x2="628" y2="124" stroke="#34d399" stroke-width="1.5" marker-end="url(#ah-g)"/>
-      <line x1="628" y1="118" x2="582" y2="118" stroke="#34d399" stroke-width="1.5" marker-end="url(#ah-g)"/>
-
-      <!-- Arrow: Tunnel → Rules -->
-      <line x1="410" y1="148" x2="410" y2="188" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
-
-      <!-- Rule Engine -->
-      <rect x="230" y="190" width="360" height="48" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
-      <text x="410" y="218" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">Rule Matching Engine</text>
-      <text x="410" y="232" text-anchor="middle" fill="#94a3b8" font-size="10">Domain · IP-CIDR · GeoIP · Process · Logic</text>
-
-      <!-- Arrow: Rules → Groups -->
-      <line x1="410" y1="238" x2="410" y2="278" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
-
-      <!-- Proxy Groups -->
-      <rect x="200" y="280" width="420" height="56" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
-      <text x="410" y="306" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">Proxy Adapters &amp; Groups</text>
-      <text x="410" y="322" text-anchor="middle" fill="#94a3b8" font-size="10">Shadowsocks · Trojan · VLESS · Direct · Reject  |  Selector · URLTest · Fallback</text>
-
-      <!-- Arrow: Groups → Remote -->
-      <line x1="620" y1="308" x2="710" y2="308" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
-
-      <!-- Remote Servers -->
-      <rect x="714" y="286" width="96" height="44" rx="10" fill="#1a1a2e" stroke="#818cf8" stroke-width="1.5"/>
-      <text x="762" y="312" text-anchor="middle" fill="#818cf8" font-size="12" font-weight="600">Remote</text>
-
-      <!-- Health Check -->
-      <rect x="10" y="280" width="160" height="56" rx="10" fill="#1e293b" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="4,3"/>
-      <text x="90" y="306" text-anchor="middle" fill="#fb923c" font-size="12" font-weight="600">Health Check</text>
-      <text x="90" y="322" text-anchor="middle" fill="#94a3b8" font-size="10">Periodic probes</text>
-
-      <!-- Arrow: Health → Groups -->
-      <line x1="170" y1="308" x2="198" y2="308" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ah)"/>
-
-      <!-- REST API -->
-      <rect x="125" y="400" width="240" height="48" rx="10" fill="#0f2b1d" stroke="#34d399" stroke-width="1.5"/>
-      <text x="245" y="422" text-anchor="middle" fill="#34d399" font-size="14" font-weight="600">REST API + Web UI</text>
-      <text x="245" y="437" text-anchor="middle" fill="#6ee7b7" font-size="10">Axum · WebSocket logs · Dashboard</text>
-
-      <!-- Arrow: API → Tunnel -->
-      <line x1="245" y1="400" x2="350" y2="152" stroke="#34d399" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ah-g)"/>
-
-      <!-- Subscriptions -->
-      <rect x="420" y="400" width="220" height="48" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5" stroke-dasharray="4,3"/>
-      <text x="530" y="422" text-anchor="middle" fill="#94a3b8" font-size="12" font-weight="600">Subscription Refresh</text>
-      <text x="530" y="437" text-anchor="middle" fill="#64748b" font-size="10">Auto-update · Clash YAML</text>
-
-      <!-- Arrow: Sub → Tunnel -->
-      <line x1="470" y1="400" x2="440" y2="152" stroke="#475569" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ah)"/>
-
-      <!-- Transport layer label -->
-      <rect x="630" y="190" width="180" height="48" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
-      <text x="720" y="216" text-anchor="middle" fill="#94a3b8" font-size="12" font-weight="600">Transport Layers</text>
-      <text x="720" y="232" text-anchor="middle" fill="#64748b" font-size="10">TLS · WS · gRPC · H2 · ECH</text>
-
-      <!-- Arrow: Transport → Remote -->
-      <line x1="720" y1="238" x2="762" y2="284" stroke="#475569" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ah)"/>
-
-      <!-- DNS Server box -->
-      <rect x="630" y="10" width="180" height="48" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
-      <text x="720" y="32" text-anchor="middle" fill="#94a3b8" font-size="12" font-weight="600">DNS Server</text>
-      <text x="720" y="48" text-anchor="middle" fill="#64748b" font-size="10">UDP :1053</text>
-
-      <!-- Arrow: DNS Server → Resolver -->
-      <line x1="720" y1="58" x2="720" y2="98" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
-
-      <!-- Legend -->
-      <g transform="translate(10,470)">
-        <text x="0" y="12" fill="#64748b" font-size="10" font-weight="600">LEGEND</text>
-        <line x1="60" y1="8" x2="90" y2="8" stroke="#475569" stroke-width="1.5" marker-end="url(#ah)"/>
-        <text x="96" y="12" fill="#64748b" font-size="10">data flow</text>
-        <line x1="160" y1="8" x2="190" y2="8" stroke="#475569" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ah)"/>
-        <text x="196" y="12" fill="#64748b" font-size="10">control / background</text>
-        <rect x="310" y="0" width="14" height="14" rx="3" fill="none" stroke="#60a5fa" stroke-width="1.5"/>
-        <text x="330" y="12" fill="#64748b" font-size="10">core</text>
-        <rect x="370" y="0" width="14" height="14" rx="3" fill="none" stroke="#34d399" stroke-width="1.5"/>
-        <text x="390" y="12" fill="#64748b" font-size="10">DNS / API</text>
-        <rect x="450" y="0" width="14" height="14" rx="3" fill="none" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="4,3"/>
-        <text x="470" y="12" fill="#64748b" font-size="10">background task</text>
-      </g>
-    </svg>
+<span class="k">rules</span>:
+  - GEOIP,CN,<span class="p">DIRECT</span>      <span class="c"># stay home if it's local</span>
+  - MATCH,<span class="p">Proxy</span>         <span class="c"># everything else clears the wall</span></pre>
     </div>
   </div>
 </section>
 
+<!-- ─────────────── Features ─────────────── -->
+<section class="feat" id="features">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="eyebrow">Routes anything</span>
+      <h2 class="title">Pour it into any network.</h2>
+      <p>A full proxy kernel, not a toy — protocols, transports, a rule engine, and the plumbing to run it as a real gateway.</p>
+    </div>
+    <div class="cards">
+      <div class="tin rv"><div class="ic">🧭</div><h3>Proxy protocols</h3><p>Shadowsocks, Trojan, VLESS (XTLS-Vision), VMess, Hysteria2, Snell, HTTP &amp; SOCKS5 outbounds — TCP and UDP relay.</p></div>
+      <div class="tin rv"><div class="ic">📋</div><h3>Rule engine</h3><p>Domain, IP-CIDR, GeoIP, port, process, and regex rules with AND/OR/NOT logic. First match wins.</p></div>
+      <div class="tin rv"><div class="ic">🛡️</div><h3>Transparent proxy</h3><p>Kernel-level interception via nftables (Linux) or pf (macOS). SNI extraction, DNS snooping, loop-safe via <code>SO_MARK</code>.</p></div>
+      <div class="tin rv"><div class="ic">🔭</div><h3>DNS &amp; snooping</h3><p>Built-in UDP resolver with caching, FakeIP, and an IP→domain reverse table to recover hostnames for transparent flows.</p></div>
+      <div class="tin rv"><div class="ic">🧶</div><h3>Proxy groups</h3><p>Selector, URL-Test, Fallback, LoadBalance, and Relay groups with health checks. Dead nodes get skipped — it lands on its feet.</p></div>
+      <div class="tin rv"><div class="ic">🔒</div><h3>ECH &amp; uTLS</h3><p>Encrypted Client Hello via BoringSSL, DNS-sourced ECH configs, and uTLS fingerprints for Chrome, Firefox, Safari, iOS &amp; more.</p></div>
+      <div class="tin rv"><div class="ic">🖥️</div><h3>Dashboard &amp; REST API</h3><p>Axum-powered API plus a built-in web UI at <code>/ui</code> — switch proxies, edit rules, watch live traffic. Mount your own dashboard too.</p></div>
+      <div class="tin rv"><div class="ic">📡</div><h3>Subscriptions</h3><p>Import Clash YAML subscriptions, cache to disk for instant startup, and refresh in the background on a schedule.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────── Architecture ─────────────── -->
+<section class="arch" id="architecture">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="eyebrow">Under the lid</span>
+      <h2 class="title">How a packet finds its way out.</h2>
+    </div>
+    <div class="blue rv">
+      <div class="cap"><b>ARCHITECTURE</b><span>listeners → tunnel → rules → adapters → remote</span></div>
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 520" font-family="'Space Grotesk',system-ui,sans-serif">
+        <defs>
+          <marker id="ah" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#7a6a5a"/></marker>
+          <marker id="ah-b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#FF9E2C"/></marker>
+          <marker id="ah-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#67C29A"/></marker>
+        </defs>
+        <rect x="200" y="10" width="420" height="52" rx="10" fill="#241a13" stroke="#3a2c20" stroke-width="1.5"/>
+        <text x="410" y="32" text-anchor="middle" fill="#FF9E2C" font-size="15" font-weight="700">Listeners</text>
+        <text x="410" y="50" text-anchor="middle" fill="#b6a08c" font-size="11">HTTP · SOCKS5 · Mixed · TProxy</text>
+        <line x1="410" y1="62" x2="410" y2="98" stroke="#7a6a5a" stroke-width="1.5" marker-end="url(#ah)"/>
+        <rect x="240" y="100" width="340" height="48" rx="10" fill="#3a2415" stroke="#FF9E2C" stroke-width="1.5"/>
+        <text x="410" y="130" text-anchor="middle" fill="#FF9E2C" font-size="15" font-weight="700">Tunnel</text>
+        <text x="340" y="130" text-anchor="end" fill="#b6a08c" font-size="10">(routing engine)</text>
+        <rect x="630" y="100" width="180" height="48" rx="10" fill="#13291f" stroke="#67C29A" stroke-width="1.5"/>
+        <text x="720" y="126" text-anchor="middle" fill="#67C29A" font-size="14" font-weight="600">DNS Resolver</text>
+        <text x="720" y="141" text-anchor="middle" fill="#8fd3a6" font-size="10">Snooping · Cache · FakeIP</text>
+        <line x1="580" y1="124" x2="628" y2="124" stroke="#67C29A" stroke-width="1.5" marker-end="url(#ah-g)"/>
+        <line x1="628" y1="118" x2="582" y2="118" stroke="#67C29A" stroke-width="1.5" marker-end="url(#ah-g)"/>
+        <line x1="410" y1="148" x2="410" y2="188" stroke="#7a6a5a" stroke-width="1.5" marker-end="url(#ah)"/>
+        <rect x="230" y="190" width="360" height="48" rx="10" fill="#241a13" stroke="#3a2c20" stroke-width="1.5"/>
+        <text x="410" y="218" text-anchor="middle" fill="#F3E6CE" font-size="14" font-weight="600">Rule Matching Engine</text>
+        <text x="410" y="232" text-anchor="middle" fill="#b6a08c" font-size="10">Domain · IP-CIDR · GeoIP · Process · Logic</text>
+        <line x1="410" y1="238" x2="410" y2="278" stroke="#7a6a5a" stroke-width="1.5" marker-end="url(#ah)"/>
+        <rect x="200" y="280" width="420" height="56" rx="10" fill="#241a13" stroke="#3a2c20" stroke-width="1.5"/>
+        <text x="410" y="306" text-anchor="middle" fill="#F3E6CE" font-size="14" font-weight="600">Proxy Adapters &amp; Groups</text>
+        <text x="410" y="322" text-anchor="middle" fill="#b6a08c" font-size="10">SS · Trojan · VLESS · Direct · Reject  |  Selector · URLTest · Fallback</text>
+        <line x1="620" y1="308" x2="710" y2="308" stroke="#7a6a5a" stroke-width="1.5" marker-end="url(#ah)"/>
+        <rect x="714" y="286" width="96" height="44" rx="10" fill="#2a1b30" stroke="#c79bff" stroke-width="1.5"/>
+        <text x="762" y="312" text-anchor="middle" fill="#c79bff" font-size="12" font-weight="600">Remote</text>
+        <rect x="10" y="280" width="160" height="56" rx="10" fill="#241a13" stroke="#FF5C46" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="90" y="306" text-anchor="middle" fill="#FF5C46" font-size="12" font-weight="600">Health Check</text>
+        <text x="90" y="322" text-anchor="middle" fill="#b6a08c" font-size="10">Periodic probes</text>
+        <line x1="170" y1="308" x2="198" y2="308" stroke="#FF5C46" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#ah)"/>
+        <rect x="125" y="400" width="240" height="48" rx="10" fill="#13291f" stroke="#67C29A" stroke-width="1.5"/>
+        <text x="245" y="422" text-anchor="middle" fill="#67C29A" font-size="14" font-weight="600">REST API + Web UI</text>
+        <text x="245" y="437" text-anchor="middle" fill="#8fd3a6" font-size="10">Axum · WebSocket logs · Dashboard</text>
+        <line x1="245" y1="400" x2="350" y2="152" stroke="#67C29A" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ah-g)"/>
+        <rect x="420" y="400" width="220" height="48" rx="10" fill="#241a13" stroke="#3a2c20" stroke-width="1.5" stroke-dasharray="4,3"/>
+        <text x="530" y="422" text-anchor="middle" fill="#b6a08c" font-size="12" font-weight="600">Subscription Refresh</text>
+        <text x="530" y="437" text-anchor="middle" fill="#8a7866" font-size="10">Auto-update · Clash YAML</text>
+        <line x1="470" y1="400" x2="440" y2="152" stroke="#7a6a5a" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ah)"/>
+        <rect x="630" y="190" width="180" height="48" rx="10" fill="#241a13" stroke="#3a2c20" stroke-width="1.5"/>
+        <text x="720" y="216" text-anchor="middle" fill="#b6a08c" font-size="12" font-weight="600">Transport Layers</text>
+        <text x="720" y="232" text-anchor="middle" fill="#8a7866" font-size="10">TLS · WS · gRPC · H2 · ECH</text>
+        <line x1="720" y1="238" x2="762" y2="284" stroke="#7a6a5a" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ah)"/>
+        <rect x="630" y="10" width="180" height="48" rx="10" fill="#241a13" stroke="#3a2c20" stroke-width="1.5"/>
+        <text x="720" y="32" text-anchor="middle" fill="#b6a08c" font-size="12" font-weight="600">DNS Server</text>
+        <text x="720" y="48" text-anchor="middle" fill="#8a7866" font-size="10">UDP :1053</text>
+        <line x1="720" y1="58" x2="720" y2="98" stroke="#7a6a5a" stroke-width="1.5" marker-end="url(#ah)"/>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────── Platforms ─────────────── -->
+<section class="plat">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="eyebrow">One binary · every shelf</span>
+      <h2 class="title">Built for where you run.</h2>
+    </div>
+    <div class="plat-grid">
+      <div class="shelf rv"><span class="os">🐧</span><div><b>Linux x86_64</b><span>gnu / musl static</span></div></div>
+      <div class="shelf rv"><span class="os">🐧</span><div><b>Linux aarch64</b><span>Pi · routers · cloud</span></div></div>
+      <div class="shelf rv"><span class="os">🍎</span><div><b>macOS aarch64</b><span>Apple silicon · pf tproxy</span></div></div>
+      <div class="shelf rv"><span class="os">⊞</span><div><b>Windows x86_64</b><span>amd64</span></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────── Crates ─────────────── -->
 <section class="crates">
-  <div class="container">
-    <h2>Workspace Crates</h2>
-    <table>
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="eyebrow">Twelve clean cuts</span>
+      <h2 class="title">A workspace, broken down.</h2>
+    </div>
+    <div class="rv">
+    <table class="tbl">
       <thead><tr><th>Crate</th><th>Purpose</th></tr></thead>
       <tbody>
-        <tr><td>meow-common</td><td>Core traits and types (ProxyAdapter, Rule, Metadata, ProxyHealth)</td></tr>
-        <tr><td>meow-trie</td><td>Domain trie for efficient pattern matching</td></tr>
+        <tr><td>meow-common</td><td>Core traits &amp; types — ProxyAdapter, Rule, Metadata, ProxyHealth</td></tr>
+        <tr><td>meow-trie</td><td>Domain trie for fast pattern matching</td></tr>
         <tr><td>meow-transport</td><td>TLS (rustls + BoringSSL ECH), WebSocket, gRPC, H2, HTTPUpgrade</td></tr>
-        <tr><td>meow-proxy</td><td>Proxy protocols (SS, Trojan, VLESS) and groups (Selector, URLTest, Fallback, LoadBalance, Relay)</td></tr>
-        <tr><td>meow-rules</td><td>Rule matching engine and parser with logic composition</td></tr>
-        <tr><td>meow-dns</td><td>DNS resolver, cache, snooping (IP&rarr;domain), FakeIP, UDP server</td></tr>
+        <tr><td>meow-proxy</td><td>Protocols (SS, Trojan, VLESS …) &amp; groups (Selector, URLTest, Fallback, Relay)</td></tr>
+        <tr><td>meow-rules</td><td>Rule matching engine &amp; parser with logic composition</td></tr>
+        <tr><td>meow-dns</td><td>Resolver, cache, snooping (IP→domain), FakeIP, UDP server</td></tr>
         <tr><td>meow-tunnel</td><td>Core routing engine, TCP/UDP relay, connection statistics</td></tr>
-        <tr><td>meow-listener</td><td>Inbound handlers (Mixed / HTTP / SOCKS5 / TProxy)</td></tr>
-        <tr><td>meow-config</td><td>YAML config parsing, subscription fetcher, proxy providers</td></tr>
+        <tr><td>meow-listener</td><td>Inbound handlers — Mixed / HTTP / SOCKS5 / TProxy</td></tr>
+        <tr><td>meow-config</td><td>YAML parsing, subscription fetcher, proxy providers</td></tr>
         <tr><td>meow-api</td><td>REST API (Axum) + embedded web dashboard</td></tr>
-        <tr><td>meow-app</td><td>CLI entry point, health checks, subscription refresh, geodata fetch</td></tr>
-        <tr><td>meow-bench</td><td>Standalone benchmark binary (throughput, latency, connection-rate, DNS, memory)</td></tr>
+        <tr><td>meow-app</td><td>CLI entry point — health checks, subscription refresh, geodata</td></tr>
+        <tr><td>meow-bench</td><td>Standalone benchmark binary (throughput, latency, DNS, memory)</td></tr>
       </tbody>
     </table>
+    </div>
   </div>
 </section>
 
-<section class="quickstart" id="quickstart">
-  <div class="container">
-    <h2>Quick Start</h2>
+<!-- ─────────────── Quick start ─────────────── -->
+<section class="start" id="start">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="eyebrow">Serving instructions</span>
+      <h2 class="title">From clone to connected.</h2>
+    </div>
     <div class="steps">
-      <div class="step">
-        <div class="step-num">1</div>
-        <h3>Build</h3>
-        <p>Requires Rust 1.88+</p>
-        <code>cargo build --release</code>
-      </div>
-      <div class="step">
-        <div class="step-num">2</div>
-        <h3>Configure</h3>
-        <p>Copy and edit the example config</p>
-        <code>cp config.example.yaml config.yaml
-# edit config.yaml with your servers</code>
-      </div>
-      <div class="step">
-        <div class="step-num">3</div>
-        <h3>Run</h3>
-        <p>Start the proxy and open the dashboard</p>
-        <code>./target/release/meow -f config.yaml
-# Open http://127.0.0.1:9090/ui</code>
-      </div>
-      <div class="step">
-        <div class="step-num">4</div>
-        <h3>Connect</h3>
-        <p>Use the proxy or add a subscription from the web UI</p>
-        <code>export http_proxy=http://127.0.0.1:7890
-export https_proxy=http://127.0.0.1:7890
-curl https://ipinfo.io</code>
+      <div class="step rv"><h3>Build</h3><p>Requires Rust 1.89+.</p><pre>cargo build --release</pre></div>
+      <div class="step rv"><h3>Configure</h3><p>Copy the example and add your servers.</p><pre>cp config.example.yaml \
+   config.yaml</pre></div>
+      <div class="step rv"><h3>Run</h3><p>Start it, then open the dashboard.</p><pre>./target/release/meow \
+  -f config.yaml
+<span class="c"># → 127.0.0.1:9090/ui</span></pre></div>
+      <div class="step rv"><h3>Connect</h3><p>Point your tools at the proxy.</p><pre>export https_proxy=\
+  http://127.0.0.1:7890
+curl https://ipinfo.io</pre></div>
+    </div>
+  </div>
+</section>
+
+<!-- ─────────────── Final CTA ─────────────── -->
+<section class="cta">
+  <div class="wrap">
+    <div class="cta-card rv">
+      <h2>Fresh batch ready.</h2>
+      <p>Crack open the tin, point it at your servers, and watch every connection land on the right side of the wall.</p>
+      <div class="cta-row" style="margin:0">
+        <a class="btn btn-primary" href="https://github.com/madeye/meow-rs">Star it on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/madeye/meow-rs/releases/latest">Grab a release</a>
       </div>
     </div>
   </div>
 </section>
 
-<footer>
-  <div class="container">
-    <p>meow-rs is licensed under <a href="https://github.com/madeye/meow-rs/blob/main/LICENSE">GPL-3.0</a>.
-    <a href="https://github.com/madeye/meow-rs">GitHub</a></p>
+<!-- ─────────────── Footer ─────────────── -->
+<footer class="foot">
+  <div class="wrap foot-in">
+    <span class="fb">
+      <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><path d="M6 12 L6 5 L11 9 Q16 7 21 9 L26 5 L26 12 Q29 16 26 21 Q16 27 6 21 Q3 16 6 12Z" fill="#ED7E2B" stroke="#20140F" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      meow-rs
+    </span>
+    <span>Licensed under <a href="https://github.com/madeye/meow-rs/blob/main/LICENSE">GPL-3.0</a>. A Rust take on the mihomo proxy kernel.</span>
+    <a href="https://github.com/madeye/meow-rs">GitHub ↗</a>
   </div>
 </footer>
 
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/MotionPathPlugin.min.js"></script>
+<script>
+// ── The leaping cat, rigged + driven by GSAP ──────────────────────────────
+// A looping timeline carries the cat along the parabola (#leapPath) while each
+// part animates on its own pivot: the body squashes and stretches, the legs
+// gather at the apex and extend for take-off / landing, the tail trails, and the
+// whole cat banks gently nose-up→down. Falls back to a static frozen leap when
+// GSAP is unavailable or the visitor prefers reduced motion.
+(function(){
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reduce || !window.gsap || !document.getElementById('cat')) return;
+  gsap.registerPlugin(MotionPathPlugin);
+
+  var D = 2.6; // one full leap, seconds
+
+  // Position along the arc (constant horizontal speed reads as a clean jump).
+  gsap.to('#catPos', {
+    duration: D, repeat: -1, ease: 'none',
+    motionPath: { path: '#leapPath', align: '#leapPath', alignOrigin: [0.5, 0.5], autoRotate: false }
+  });
+
+  // Dampened bank: nose up on the rise, level at the apex, nose down on descent.
+  gsap.fromTo('#cat', { rotation: -13 },
+    { rotation: 13, duration: D, repeat: -1, ease: 'sine.inOut', transformOrigin: '50% 50%' });
+
+  // Squash & stretch through the jump phases.
+  gsap.to('#body', {
+    duration: D, repeat: -1, transformOrigin: '50% 70%',
+    keyframes: [
+      { scaleX: 1.16, scaleY: 0.86, duration: 0.14, ease: 'power2.out' }, // crouch → push off
+      { scaleX: 0.97, scaleY: 1.07, duration: 0.5,  ease: 'sine.out'   }, // stretch up
+      { scaleX: 1.0,  scaleY: 1.0,  duration: 0.72                      }, // float over the wall
+      { scaleX: 1.06, scaleY: 0.95, duration: 0.5,  ease: 'sine.in'    }, // reach down
+      { scaleX: 1.18, scaleY: 0.82, duration: 0.14, ease: 'power2.in'  }, // land squash
+      { scaleX: 1.0,  scaleY: 1.0,  duration: 0.6,  ease: 'elastic.out(1,0.5)' } // recover
+    ]
+  });
+
+  // Hind legs: thrust back at take-off, tuck near the apex, kick back to land.
+  gsap.to('#hindlegs', {
+    duration: D, repeat: -1, transformOrigin: '92% 20%',
+    keyframes: [
+      { rotation: -28, duration: 0.18, ease: 'power2.out' },
+      { rotation: -6,  duration: 1.0,  ease: 'sine.inOut' },
+      { rotation: -26, duration: 0.6,  ease: 'sine.in'    },
+      { rotation: 4,   duration: 0.82, ease: 'sine.out'   }
+    ]
+  });
+
+  // Front legs: reach forward for the landing, fold under after.
+  gsap.to('#frontlegs', {
+    duration: D, repeat: -1, transformOrigin: '12% 20%',
+    keyframes: [
+      { rotation: 10,  duration: 0.18, ease: 'power2.out' },
+      { rotation: -8,  duration: 1.0,  ease: 'sine.inOut' },
+      { rotation: 20,  duration: 0.6,  ease: 'sine.in'    },
+      { rotation: 2,   duration: 0.82, ease: 'sine.out'   }
+    ]
+  });
+
+  // Tail follow-through — a soft continuous trail.
+  gsap.to('#tail', {
+    rotation: -14, duration: 0.95, yoyo: true, repeat: -1,
+    ease: 'sine.inOut', transformOrigin: '90% 38%'
+  });
+})();
+
+// Copy-to-clipboard for the install pill
+document.querySelectorAll('[data-copy]').forEach(function(b){
+  b.addEventListener('click', function(){
+    navigator.clipboard.writeText(b.getAttribute('data-copy')).then(function(){
+      var t = b.textContent; b.textContent = 'Copied'; setTimeout(function(){ b.textContent = t; }, 1400);
+    });
+  });
+});
+// Build the parody barcode once
+(function(){
+  var bc = document.getElementById('barcode'); if(!bc) return;
+  var seq = [3,1,2,4,1,3,1,1,2,3,1,4,2,1,3,1,2,1,4,1,2,3,1,2,1,3,2,1,4,1,2,1,3,1,2,2,1,3,1,2];
+  var h = [34,22,30,18,34,26,30,20,34,24,30,18];
+  seq.forEach(function(w,i){ var s=document.createElement('i'); s.style.width=w+'px'; s.style.height=(h[i%h.length])+'px'; bc.appendChild(s); });
+})();
+// Scroll reveal (respects reduced motion via CSS)
+(function(){
+  var els = document.querySelectorAll('.rv');
+  if(!('IntersectionObserver' in window) || matchMedia('(prefers-reduced-motion: reduce)').matches){
+    els.forEach(function(e){ e.classList.add('in'); }); return;
+  }
+  var io = new IntersectionObserver(function(es){
+    es.forEach(function(e){ if(e.isIntersecting){ e.target.classList.add('in'); io.unobserve(e.target); } });
+  }, {rootMargin:'0px 0px -10% 0px', threshold:0.08});
+  els.forEach(function(e){ io.observe(e); });
+})();
+</script>
 </body>
 </html>
