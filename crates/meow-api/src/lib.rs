@@ -11,9 +11,10 @@ use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{info, warn};
 
 pub struct ApiServer {
     tunnel: Tunnel,
@@ -25,6 +26,7 @@ pub struct ApiServer {
     proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>>,
     rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
     listeners: Vec<NamedListener>,
+    external_ui: Option<PathBuf>,
 }
 
 impl ApiServer {
@@ -39,6 +41,7 @@ impl ApiServer {
         proxy_providers: Arc<DashMap<String, Arc<ProxyProvider>>>,
         rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
         listeners: Vec<NamedListener>,
+        external_ui: Option<PathBuf>,
     ) -> Self {
         Self {
             tunnel,
@@ -50,6 +53,7 @@ impl ApiServer {
             proxy_providers,
             rule_providers,
             listeners,
+            external_ui,
         }
     }
 
@@ -63,6 +67,7 @@ impl ApiServer {
             proxy_providers: Arc::clone(&self.proxy_providers),
             rule_providers: Arc::clone(&self.rule_providers),
             listeners: self.listeners.clone(),
+            external_ui: self.resolve_external_ui(),
         });
 
         let app = routes::create_router(state);
@@ -72,5 +77,22 @@ impl ApiServer {
         info!("Web UI available at http://{}/ui", self.listen_addr);
         axum::serve(listener, app).await?;
         Ok(())
+    }
+
+    /// Validate the configured external-UI directory. Returns the path only when
+    /// it exists as a directory; otherwise logs a warning and falls back to the
+    /// built-in panel (issue #223).
+    fn resolve_external_ui(&self) -> Option<PathBuf> {
+        let dir = self.external_ui.as_ref()?;
+        if dir.is_dir() {
+            info!("Serving external Web UI from {}", dir.display());
+            Some(dir.clone())
+        } else {
+            warn!(
+                "external-ui directory {} not found; serving the built-in panel instead",
+                dir.display()
+            );
+            None
+        }
     }
 }

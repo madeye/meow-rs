@@ -59,6 +59,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         proxy_providers: Arc::new(DashMap::new()),
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
+        external_ui: None,
     })
 }
 
@@ -91,6 +92,7 @@ fn test_state_with_route(raw: RawConfig, named: Vec<(&str, Arc<dyn Proxy>)>) -> 
         proxy_providers: Arc::new(DashMap::new()),
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
+        external_ui: None,
     })
 }
 
@@ -125,6 +127,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         proxy_providers: Arc::new(DashMap::new()),
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
+        external_ui: None,
     })
 }
 
@@ -169,6 +172,65 @@ async fn ui_wildcard_serves_same_html() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains("<!DOCTYPE html>"));
+}
+
+// issue #223: when `external-ui` is configured, `/ui` serves the static
+// directory instead of the built-in panel.
+#[tokio::test]
+async fn external_ui_serves_static_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("index.html"),
+        "<html><body>third-party dashboard</body></html>",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("app.js"), "console.log('hi')").unwrap();
+
+    let resolver = Arc::new(Resolver::new(
+        vec!["8.8.8.8:53".parse().unwrap()],
+        vec![],
+        DnsMode::Normal,
+        DomainTrie::new(),
+        true,
+    ));
+    let tunnel = Tunnel::new(resolver);
+    let raw = test_raw_config();
+    let (proxies, rules) = meow_config::rebuild_from_raw(&raw).unwrap();
+    tunnel.update_proxies(proxies);
+    tunnel.update_rules(rules);
+    let state = Arc::new(AppState {
+        tunnel,
+        secret: None,
+        config_path: String::new(),
+        raw_config: Arc::new(RwLock::new(raw)),
+        log_tx: test_log_tx(),
+        proxy_providers: Arc::new(DashMap::new()),
+        rule_providers: Arc::new(RwLock::new(HashMap::new())),
+        listeners: vec![],
+        external_ui: Some(dir.path().to_path_buf()),
+    });
+    let app = create_router(state);
+
+    // `/ui` resolves index.html in the directory.
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/ui").body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains("third-party dashboard"));
+
+    // A nested asset is served from the directory.
+    let resp = app
+        .oneshot(
+            Request::get("/ui/app.js")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(body_string(resp).await.contains("console.log"));
 }
 
 // ── Existing endpoint tests ──────────────────────────────────────
@@ -1605,6 +1667,7 @@ mod delay_support {
             proxy_providers: Arc::new(DashMap::new()),
             rule_providers: Arc::new(RwLock::new(HashMap::new())),
             listeners: vec![],
+            external_ui: None,
         })
     }
 
@@ -1656,6 +1719,7 @@ mod delay_support {
             proxy_providers: Arc::new(DashMap::new()),
             rule_providers: Arc::new(RwLock::new(HashMap::new())),
             listeners: vec![],
+            external_ui: None,
         })
     }
 }
@@ -2493,6 +2557,7 @@ fn test_state_with_hosts_entry() -> Arc<AppState> {
         proxy_providers: Arc::new(DashMap::new()),
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
+        external_ui: None,
     })
 }
 
@@ -2664,10 +2729,13 @@ async fn get_connections_entry_has_camel_case_shape() {
     assert_eq!(conn["upload"], 0);
     assert_eq!(conn["download"], 0);
     assert!(conn["start"].is_string());
-    assert!(
-        conn.get("metadata").is_none(),
-        "metadata stays serde-skipped"
-    );
+    // issue #241: metadata is now serialised (mihomo-compatible) so panels can
+    // render `host:port` as the connection title instead of the rule type.
+    let metadata = conn.get("metadata").expect("metadata is serialised");
+    assert_eq!(metadata["host"], "example.com");
+    assert_eq!(metadata["destinationPort"], 80);
+    assert_eq!(metadata["network"], "tcp");
+    assert_eq!(metadata["type"], "Http");
     assert!(
         conn.get("rule_payload").is_none(),
         "snake_case key must not appear"

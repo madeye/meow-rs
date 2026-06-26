@@ -622,9 +622,15 @@ The following are unsupported or intentionally rejected:
   built with the opt-in `anytls` feature wiring.
 - **Snell v1/v2** — hard error; use Snell v3/v4/v5.
 - **`vless` with `flow: xtls-rprx-direct`** — hard error; use `xtls-rprx-vision`.
-- **External dashboard mounting** (`external-ui`, `external-ui-name`,
-  `external-ui-url`) — not implemented yet; the built-in `/ui` dashboard is
-  served from the binary.
+- **External dashboard auto-download** (`external-ui-url`) — not performed.
+  `external-ui` / `external-ui-name` *are* supported: point them at a directory
+  of static files and it is served at `/ui` in place of the built-in dashboard.
+  You must download/extract the dashboard yourself; the zip is not fetched
+  automatically (avoids an unzip dependency against the binary-size caps).
+- **`dialer-proxy` UDP** — the per-outbound `dialer-proxy` field is supported for
+  TCP on every outbound (chained dialing through any proxy/group, with cycle
+  detection). UDP is not routed through the dialer; such associations are
+  refused rather than leaking the real source path.
 
 ---
 

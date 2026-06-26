@@ -47,6 +47,7 @@ pub mod vless_adapter;
 pub mod vmess;
 
 pub use direct::DirectAdapter;
+pub use group::dialer_proxy::DialerProxyAdapter;
 pub use group::fallback::FallbackGroup;
 pub use group::load_balance::{LbStrategy, LoadBalanceGroup};
 pub use group::relay::RelayGroup;

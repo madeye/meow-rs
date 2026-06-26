@@ -241,7 +241,7 @@ Upstream config keys documented at https://wiki.metacubex.one/. Checking `crates
 
 ### Supported
 
-`port`, `socks-port`, `mixed-port`, `allow-lan`, `bind-address`, `mode`, `log-level`, `ipv6`, `external-controller`, `secret`, `dns`, `proxies`, `proxy-groups`, `rules`, `rule-providers`, `tproxy-port`, `tproxy-sni`, `routing-mark`, and the custom `subscriptions`.
+`port`, `socks-port`, `mixed-port`, `allow-lan`, `bind-address`, `mode`, `log-level`, `ipv6`, `external-controller`, `secret`, `external-ui` / `external-ui-name` (serves a static third-party dashboard at `/ui`; `external-ui-url` is parsed but auto-download is not performed), `dns`, `proxies`, `proxy-groups`, `rules`, `rule-providers`, `tproxy-port`, `tproxy-sni`, `routing-mark`, and the custom `subscriptions`. Per-outbound `dialer-proxy` (chained dialing via any proxy/group, TCP) is supported on every outbound type.
 
 ### Missing top-level keys (gaps)
 
@@ -264,7 +264,7 @@ Upstream config keys documented at https://wiki.metacubex.one/. Checking `crates
 | `find-process-mode` | `off` / `strict` / `always` |
 | `tcp-concurrent` | Happy Eyeballs fast-open |
 | `unified-delay` | Delay histogram normalization |
-| `external-ui` / `external-ui-name` / `external-ui-url` | Dashboard auto-download |
+| `external-ui-url` auto-download | `external-ui` / `external-ui-name` serve a static dir; the zip auto-download is not implemented (avoids an unzip dependency vs. ADR-0007 size caps) |
 | `listeners` | Upstream's generic named-listener list (replaces per-port shortcuts) |
 | `sub-rules` | Named rule subsets referenced from main rules |
 | `proxy-providers` | External proxy lists (http/file) |

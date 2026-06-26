@@ -20,7 +20,7 @@ use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[cfg(target_os = "linux")]
 const SERVICE_NAME: &str = "meow";
@@ -509,6 +509,18 @@ async fn run(
 
     // Start REST API if configured
     if let Some(api_addr) = config.api.external_controller {
+        // external-ui-url has no auto-download (would require an unzip
+        // dependency that conflicts with ADR-0007 size caps); hint the user to
+        // populate the directory manually. See issue #223.
+        if let (Some(url), Some(dir)) = (&config.api.external_ui_url, &config.api.external_ui) {
+            if !dir.is_dir() {
+                warn!(
+                    "external-ui-url ({url}) is set but auto-download is unsupported; \
+                     download and extract the UI into {} manually",
+                    dir.display()
+                );
+            }
+        }
         let api_server = ApiServer::new(
             tunnel.clone(),
             api_addr,
@@ -519,6 +531,7 @@ async fn run(
             Arc::clone(&proxy_providers),
             Arc::clone(&rule_providers),
             config.listeners.named.clone(),
+            config.api.external_ui.clone(),
         );
         tokio::spawn(async move {
             if let Err(e) = api_server.run().await {

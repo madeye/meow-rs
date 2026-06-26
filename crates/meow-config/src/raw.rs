@@ -90,6 +90,17 @@ pub struct RawConfig {
     pub log_level: Option<String>,
     pub ipv6: Option<bool>,
     pub external_controller: Option<String>,
+    /// Path to a directory of static files for a third-party web dashboard
+    /// (e.g. metacubexd, yacd). When set, it is served at `/ui` instead of the
+    /// built-in panel (issue #223, mihomo-compatible).
+    pub external_ui: Option<String>,
+    /// Optional sub-directory under `external-ui` that actually holds the UI
+    /// files. Mirrors mihomo's `external-ui-name`; the served directory is
+    /// `external-ui/external-ui-name` when set.
+    pub external_ui_name: Option<String>,
+    /// URL the UI archive can be downloaded from. Recorded for compatibility;
+    /// auto-download is not performed (see issue #223 notes).
+    pub external_ui_url: Option<String>,
     pub secret: Option<String>,
     pub dns: Option<RawDns>,
     pub proxies: Option<Vec<HashMap<String, serde_yaml::Value>>>,

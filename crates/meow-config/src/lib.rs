@@ -116,6 +116,13 @@ pub struct ListenerConfig {
 pub struct ApiConfig {
     pub external_controller: Option<SocketAddr>,
     pub secret: Option<String>,
+    /// Resolved directory of static files for a third-party web UI, served at
+    /// `/ui` in place of the built-in panel. `None` keeps the built-in panel.
+    /// Already joined with `external-ui-name` when that was set (issue #223).
+    pub external_ui: Option<PathBuf>,
+    /// Download URL recorded from `external-ui-url`; auto-download is not
+    /// performed, but it is surfaced in a warning when the directory is absent.
+    pub external_ui_url: Option<String>,
 }
 
 pub async fn load_config(path: &str) -> Result<Config, anyhow::Error> {
@@ -215,6 +222,87 @@ pub fn rebuild_from_raw_with_cache_dir(
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
     rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None, None)
+}
+
+/// Apply per-outbound `dialer-proxy` wrappers in place (issue #210).
+///
+/// For every proxy that declares `dialer-proxy: <name>`, its registry entry is
+/// replaced by a [`meow_proxy::DialerProxyAdapter`] that dials the inner
+/// outbound through `<name>`. Nested dialer-proxies are wrapped deepest-first so
+/// each layer sees its dialer's final (already-wrapped) form, and dialer-proxy
+/// cycles are detected and skipped with a warning (the outbound then dials
+/// directly).
+///
+/// Note: this rewrites the registry entry, so direct rule references
+/// (`…,<proxy>`) and dialers that are groups both work. A proxy that is also a
+/// static member of a group keeps the dialer for direct references but not when
+/// reached via that group, because group members are resolved eagerly before
+/// this pass.
+fn apply_dialer_proxies(
+    proxies: &mut HashMap<SmolStr, Arc<dyn Proxy>>,
+    raw_proxies: &[HashMap<String, serde_yaml::Value>],
+) {
+    // Collect proxy -> dialer edges from the raw config.
+    let mut pending: Vec<(SmolStr, SmolStr)> = Vec::new();
+    for raw_proxy in raw_proxies {
+        let Some(name) = raw_proxy.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(dialer) = raw_proxy
+            .get("dialer-proxy")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if dialer == name {
+            warn!("proxy '{name}': dialer-proxy points to itself; dialing directly");
+            continue;
+        }
+        pending.push((SmolStr::from(name), SmolStr::from(dialer)));
+    }
+    if pending.is_empty() {
+        return;
+    }
+
+    // Names that declared a dialer-proxy — used to defer an edge until its
+    // dialer has reached its final wrapped form (nested dialer-proxies).
+    let needs_wrap: std::collections::HashSet<SmolStr> =
+        pending.iter().map(|(n, _)| n.clone()).collect();
+    let mut resolved: std::collections::HashSet<SmolStr> = std::collections::HashSet::new();
+
+    loop {
+        let mut progressed = false;
+        let mut deferred = Vec::new();
+        for (name, dialer) in std::mem::take(&mut pending) {
+            // Defer until the dialer is in its final form (either it never
+            // needed wrapping, or it has already been resolved this pass).
+            if needs_wrap.contains(&dialer) && !resolved.contains(&dialer) {
+                deferred.push((name, dialer));
+                continue;
+            }
+            progressed = true;
+            let Some(dialer_proxy) = proxies.get(&dialer).cloned() else {
+                warn!("proxy '{name}': dialer-proxy '{dialer}' not found; dialing directly");
+                resolved.insert(name);
+                continue;
+            };
+            // The inner outbound may have failed to parse earlier; skip if so.
+            if let Some(inner) = proxies.get(&name).cloned() {
+                let wrapped: Arc<dyn Proxy> =
+                    Arc::new(meow_proxy::DialerProxyAdapter::new(inner, dialer_proxy));
+                proxies.insert(name.clone(), wrapped);
+            }
+            resolved.insert(name);
+        }
+        pending = deferred;
+        if pending.is_empty() || !progressed {
+            break;
+        }
+    }
+    for (name, dialer) in pending {
+        warn!("proxy '{name}': dialer-proxy cycle involving '{dialer}' detected; dialing directly");
+    }
 }
 
 fn rebuild_from_raw_impl(
@@ -317,6 +405,10 @@ fn rebuild_from_raw_impl(
         }
         remaining = still_remaining;
     }
+
+    // Apply per-outbound `dialer-proxy` wrappers (issue #210). Runs after both
+    // leaf proxies and groups are built so a dialer may reference either.
+    apply_dialer_proxies(&mut proxies, raw.proxies.as_deref().unwrap_or(&[]));
 
     let owned_ctx;
     let ctx = match shared_ctx {
@@ -1206,12 +1298,30 @@ async fn build_config(
     };
 
     // API config
+    let external_ui = raw
+        .external_ui
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|base| {
+            let mut dir = PathBuf::from(base);
+            // mihomo nests the actual files under `external-ui-name` when present.
+            if let Some(name) = raw.external_ui_name.as_deref().filter(|s| !s.is_empty()) {
+                dir.push(name);
+            }
+            dir
+        });
     let api = ApiConfig {
         external_controller: raw
             .external_controller
             .as_deref()
             .and_then(|s| s.parse().ok()),
         secret: raw.secret.clone(),
+        external_ui,
+        external_ui_url: raw
+            .external_ui_url
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(String::from),
     };
 
     // Sniffer config — also handles deprecated `tproxy_sni` alias.
@@ -1246,6 +1356,103 @@ async fn build_config(
         raw,
         geodata,
     })
+}
+
+#[cfg(test)]
+mod dialer_proxy_tests {
+    use super::*;
+
+    fn simple_proxy(name: &str) -> Arc<dyn Proxy> {
+        // A bare DIRECT adapter is enough; we only assert on registry identity.
+        let direct = meow_proxy::DirectAdapter::new();
+        let _ = name; // name comes from the map key, not the adapter
+        Arc::new(proxy_parser::WrappedProxy::new(Box::new(direct)))
+    }
+
+    fn raw_proxy(name: &str, dialer: Option<&str>) -> HashMap<String, serde_yaml::Value> {
+        let mut m = HashMap::new();
+        m.insert(
+            "name".to_string(),
+            serde_yaml::Value::String(name.to_string()),
+        );
+        if let Some(d) = dialer {
+            m.insert(
+                "dialer-proxy".to_string(),
+                serde_yaml::Value::String(d.to_string()),
+            );
+        }
+        m
+    }
+
+    fn registry(names: &[&str]) -> HashMap<SmolStr, Arc<dyn Proxy>> {
+        names
+            .iter()
+            .map(|n| (SmolStr::from(*n), simple_proxy(n)))
+            .collect()
+    }
+
+    /// True when the registry entry for `name` was replaced (wrapped) relative
+    /// to `before`.
+    fn was_wrapped(
+        before: &HashMap<SmolStr, Arc<dyn Proxy>>,
+        after: &HashMap<SmolStr, Arc<dyn Proxy>>,
+        name: &str,
+    ) -> bool {
+        let b = before.get(name).expect("present before");
+        let a = after.get(name).expect("present after");
+        !Arc::ptr_eq(b, a)
+    }
+
+    #[test]
+    fn wraps_proxy_with_dialer() {
+        let mut proxies = registry(&["A", "fast"]);
+        let before = proxies.clone();
+        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("fast"))]);
+        assert!(was_wrapped(&before, &proxies, "A"));
+        assert!(!was_wrapped(&before, &proxies, "fast"));
+    }
+
+    #[test]
+    fn self_reference_is_skipped() {
+        let mut proxies = registry(&["A"]);
+        let before = proxies.clone();
+        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("A"))]);
+        assert!(!was_wrapped(&before, &proxies, "A"));
+    }
+
+    #[test]
+    fn missing_dialer_is_skipped() {
+        let mut proxies = registry(&["A"]);
+        let before = proxies.clone();
+        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("ghost"))]);
+        assert!(!was_wrapped(&before, &proxies, "A"));
+    }
+
+    #[test]
+    fn cycle_is_detected_and_skipped() {
+        let mut proxies = registry(&["A", "B"]);
+        let before = proxies.clone();
+        apply_dialer_proxies(
+            &mut proxies,
+            &[raw_proxy("A", Some("B")), raw_proxy("B", Some("A"))],
+        );
+        assert!(!was_wrapped(&before, &proxies, "A"));
+        assert!(!was_wrapped(&before, &proxies, "B"));
+    }
+
+    #[test]
+    fn nested_chain_wraps_deepest_first() {
+        // A -> B -> C: A and B are wrapped, C (no dialer-proxy) is untouched.
+        let mut proxies = registry(&["A", "B", "C"]);
+        let before = proxies.clone();
+        apply_dialer_proxies(
+            &mut proxies,
+            &[raw_proxy("A", Some("B")), raw_proxy("B", Some("C"))],
+        );
+        assert!(was_wrapped(&before, &proxies, "A"));
+        assert!(was_wrapped(&before, &proxies, "B"));
+        assert!(!was_wrapped(&before, &proxies, "C"));
+    }
 }
 
 #[cfg(test)]

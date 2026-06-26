@@ -10,9 +10,10 @@
 //     for the rule-match record.
 //   chains: Vec<String> (24 B struct, heap elems) → Vec<Arc<str>> (24 B struct,
 //     ref-counted elems — no per-element allocation for proxy names)
-// Public JSON shape is unchanged: Uuid serialises as hyphenated string via the
-// `serde` feature; SmolStr / Arc<str> / Vec<Arc<str>> all serialise as
-// string/array. Arc<Metadata> is serde-skipped so the wrapper type is invisible.
+// Public JSON shape: Uuid serialises as hyphenated string via the `serde`
+// feature; SmolStr / Arc<str> / Vec<Arc<str>> all serialise as string/array.
+// Arc<Metadata> serialises transparently as the inner `Metadata` under the
+// mihomo-compatible `metadata` key (issue #241).
 // Breaking change permitted by ADR-0009.
 
 use dashmap::DashMap;
@@ -58,7 +59,11 @@ pub struct ConnectionInfo {
     /// 16 B inline UUID; serialises as `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"`.
     pub id: Uuid,
     /// 8 B thin-ptr; refcount drop on close instead of 272 B drop chain.
-    #[serde(skip)]
+    /// Serialised as the mihomo-compatible `metadata` object (host, IPs, ports,
+    /// network, type, …) so panels can show `host:port` as the connection title
+    /// (issue #241). The `Arc` wrapper is transparent to serde — it serialises
+    /// the inner `Metadata`. Struct size is unchanged (still an 8 B thin-ptr);
+    /// only the `/connections` JSON payload grows.
     pub metadata: Arc<Metadata>,
     pub upload: i64,
     pub download: i64,

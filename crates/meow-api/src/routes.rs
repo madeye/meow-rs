@@ -41,6 +41,9 @@ pub struct AppState {
     pub rule_providers: Arc<RwLock<HashMap<String, Arc<RuleProvider>>>>,
     /// Snapshot of active named listeners (read-only, startup-time only in M1).
     pub listeners: Vec<NamedListener>,
+    /// Validated directory for a third-party web UI. When `Some`, it is served
+    /// at `/ui`; when `None`, the built-in panel is served (issue #223).
+    pub external_ui: Option<std::path::PathBuf>,
 }
 
 impl AppState {
@@ -214,14 +217,24 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     // Web UI is intentionally unauthenticated so dashboards can load and then
     // present a token prompt; this matches upstream mihomo behaviour.
-    let ui = Router::new()
-        .route("/ui", get(ui::serve_ui))
-        .route("/ui/{*rest}", get(ui::serve_ui));
+    //
+    // When `external-ui` is configured (issue #223) the static directory is
+    // served at `/ui` via tower-http's `ServeDir`; otherwise the built-in
+    // single-page panel is served.
+    let router = api.merge(ws_routes);
+    let router = if let Some(dir) = state.external_ui.clone() {
+        // `ServeDir` resolves `index.html` for the directory root and serves
+        // any nested asset; `nest_service("/ui", …)` strips the `/ui` prefix so
+        // both `/ui` and `/ui/<asset>` resolve. Dashboards (metacubexd, yacd)
+        // use hash routing, so no server-side SPA fallback is required.
+        router.nest_service("/ui", tower_http::services::ServeDir::new(dir))
+    } else {
+        router
+            .route("/ui", get(ui::serve_ui))
+            .route("/ui/{*rest}", get(ui::serve_ui))
+    };
 
-    api.merge(ws_routes)
-        .merge(ui)
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+    router.layer(CorsLayer::permissive()).with_state(state)
 }
 
 // ── Basic endpoints ──────────────────────────────────────────────────
