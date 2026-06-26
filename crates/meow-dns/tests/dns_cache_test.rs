@@ -88,6 +88,30 @@ fn test_cache_clear() {
 }
 
 #[test]
+fn test_cache_snapshot_includes_source_and_ttl() {
+    let cache = DnsCache::new(100);
+    let ips = vec![
+        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4)),
+    ];
+
+    cache.put_with_source(
+        "dns.google",
+        &ips,
+        Duration::from_secs(300),
+        Some("8.8.8.8"),
+    );
+
+    let entries = cache.snapshot();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "dns.google");
+    assert_eq!(entries[0].ips, ips);
+    assert_eq!(entries[0].source.as_deref(), Some("8.8.8.8"));
+    assert!(entries[0].ttl <= Duration::from_secs(300));
+    assert!(entries[0].ttl > Duration::from_secs(0));
+}
+
+#[test]
 fn test_cache_lru_eviction_under_pressure() {
     // PR-D switched the cache to a sharded LRU (16 shards). Cap is the
     // total across all shards; per-shard floor is 8. Insert enough entries
