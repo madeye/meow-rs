@@ -10,7 +10,10 @@ rules without any per-device proxy configuration.
 
 If you only want to transparently proxy traffic originating **on the meow host
 itself** (not forward other devices), most of this is unnecessary — set
-`tproxy-port` and meow's built-in firewall handles it. Read
+`tproxy-port` and meow's built-in firewall handles it. The
+[`scripts/tproxy-local-linux.sh`](../scripts/tproxy-local-linux.sh) /
+[`scripts/tproxy-local-macos.sh`](../scripts/tproxy-local-macos.sh) wrappers run
+meow that way (`up`/`down`/`status`) and confirm the auto-created firewall. Read
 [How meow's transparent proxy works](#how-meows-transparent-proxy-works) and
 [DNS mode](#dns-mode-fake-ip-vs-redir-host), then stop.
 
