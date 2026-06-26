@@ -57,22 +57,30 @@ struct PlatformGuard {
 
 /// Build the pf anchor ruleset that the macOS code path feeds to `pfctl`.
 ///
-/// Order matters — pf is first-match-wins. Loop-avoidance bypasses come
-/// before the catch-all redirect.
+/// Order matters, but NOT as first-match-wins: `pfctl` requires rules grouped
+/// by category — options, normalization, queueing, **translation** (`rdr`),
+/// then **filtering** (`pass`/`block`) — and rejects a file that interleaves
+/// them ("Rules must be in order…"). So the `rdr` translation rule must come
+/// first, followed by the `pass` filter bypasses. (Translation and filtering
+/// are evaluated in separate passes regardless of file order, so the relative
+/// position of `rdr` vs `pass` does not change matching — only validity.)
 ///
 /// Extracted as a pure function so the macOS-specific syntax can be unit
 /// tested without invoking `pfctl(8)`.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn build_pf_ruleset(uid: u32, listen_port: u16, bypass_ips: &[IpAddr]) -> String {
-    let mut rules = format!("pass out quick on lo0 proto tcp from any to any user {uid}\n");
+    // Translation first: redirect lo0 TCP to the local tproxy listener.
+    let mut rules =
+        format!("rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {listen_port}\n");
+    // Then filtering bypasses (our own uid, loopback, upstream proxy servers).
+    let _ = writeln!(
+        rules,
+        "pass out quick on lo0 proto tcp from any to any user {uid}"
+    );
     rules.push_str("pass out quick on lo0 proto tcp from any to 127.0.0.0/8\n");
     for ip in bypass_ips {
         let _ = writeln!(rules, "pass out quick on lo0 proto tcp from any to {ip}");
     }
-    let _ = writeln!(
-        rules,
-        "rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {listen_port}"
-    );
     rules
 }
 
@@ -83,7 +91,12 @@ impl PlatformGuard {
         _routing_mark: Option<u32>,
         bypass_ips: &[IpAddr],
     ) -> io::Result<Self> {
-        let anchor = "com.meow.tproxy".to_string();
+        // Nest under `com.apple/` so the default `/etc/pf.conf`'s
+        // `rdr-anchor "com.apple/*"` actually evaluates our rules. A sibling
+        // anchor (e.g. `com.meow.tproxy`) loads fine but is never referenced by
+        // the active ruleset, so its `rdr` never takes effect (verified: a
+        // sibling anchor does not intercept; a `com.apple/*` child does).
+        let anchor = "com.apple/com.meow.tproxy".to_string();
         let uid = unsafe { libc::getuid() };
 
         let rules = build_pf_ruleset(uid, listen_port, bypass_ips);
@@ -360,13 +373,15 @@ mod tests {
     }
 
     #[test]
-    fn pf_uid_bypass_appears_before_redirect() {
-        // pf is first-match-wins. If `rdr` lands before the UID-bypass our
-        // own outbound traffic (DIRECT) gets pulled back into the tunnel.
+    fn pf_rdr_precedes_filter_rules() {
+        // pfctl rejects a ruleset that places filtering (`pass`) before
+        // translation (`rdr`) — "Rules must be in order: …, translation,
+        // filtering". The `rdr` must therefore come first, or the anchor fails
+        // to load and the tproxy listener never starts (regression guard).
         let rs = build_pf_ruleset(501, 7893, &[]);
-        let uid_pos = rs.find("user 501").unwrap();
         let rdr_pos = rs.find("rdr pass").unwrap();
-        assert!(uid_pos < rdr_pos, "UID bypass must precede rdr:\n{rs}");
+        let uid_pos = rs.find("user 501").unwrap();
+        assert!(rdr_pos < uid_pos, "rdr must precede filter rules:\n{rs}");
     }
 
     #[test]
