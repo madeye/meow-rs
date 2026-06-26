@@ -136,15 +136,22 @@ impl SnellAdapter {
             .await
             .map_err(MeowError::Io)?;
         let _ = tcp.set_nodelay(true);
+        let inner: Box<dyn TransportStream> = Box::new(tcp);
+        Ok(self.wrap_stream(inner))
+    }
+
+    /// Apply Snell's optional simple-obfs layer and AEAD codec to any already
+    /// connected byte stream.
+    fn wrap_stream(&self, inner: Box<dyn TransportStream>) -> PoolStream {
         let inner: Box<dyn TransportStream> = match &self.obfs {
-            SnellObfs::None => Box::new(tcp),
-            SnellObfs::Http { host } => Box::new(HttpObfs::new(tcp, host.clone(), self.port)),
-            SnellObfs::Tls { server } => Box::new(TlsObfs::new(tcp, server.clone())),
+            SnellObfs::None => inner,
+            SnellObfs::Http { host } => Box::new(HttpObfs::new(inner, host.clone(), self.port)),
+            SnellObfs::Tls { server } => Box::new(TlsObfs::new(inner, server.clone())),
         };
-        Ok(match self.version {
+        match self.version {
             SnellVersion::V3 => Snell::new_v3(inner, Arc::clone(&self.psk)),
             SnellVersion::V4 | SnellVersion::V5 => Snell::new(inner, Arc::clone(&self.psk)),
-        })
+        }
     }
 
     /// Number of idle connections currently parked in the reuse pool.
@@ -226,6 +233,25 @@ impl ProxyAdapter for SnellAdapter {
             self.pool.as_ref().map(Arc::clone),
             1,
         )))
+    }
+
+    async fn connect_over(
+        &self,
+        stream: Box<dyn ProxyConn>,
+        metadata: &Metadata,
+    ) -> Result<Box<dyn ProxyConn>> {
+        let (host, port) = Self::extract_dest(metadata)?;
+        debug!(
+            "snell connecting to {}:{} via {} over existing stream",
+            host, port, self.addr_str
+        );
+
+        let inner: Box<dyn TransportStream> = Box::new(stream);
+        let mut snell = self.wrap_stream(inner);
+        write_header(&mut snell, &host, port, false)
+            .await
+            .map_err(MeowError::Io)?;
+        Ok(Box::new(PooledConn::new(snell, None, 1)))
     }
 
     async fn dial_udp(&self, _metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
@@ -344,5 +370,104 @@ impl Drop for PooledConn {
                 pool.put(snell, uses);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::time::Duration;
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+
+    use super::super::protocol::{COMMAND_CONNECT, HEADER_VERSION, RESPONSE_TUNNEL};
+    use super::super::v3::V3Conn;
+
+    struct TestProxyConn(DuplexStream);
+
+    impl AsyncRead for TestProxyConn {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for TestProxyConn {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Pin::new(&mut self.0).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_flush(cx)
+        }
+
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.0).poll_shutdown(cx)
+        }
+    }
+
+    impl ProxyConn for TestProxyConn {}
+
+    async fn within<T>(fut: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), fut)
+            .await
+            .expect("test future timed out")
+    }
+
+    #[tokio::test]
+    async fn connect_over_writes_v3_connect_header_on_existing_stream() {
+        let adapter = SnellAdapter::new(
+            "snell",
+            "unused.invalid",
+            8443,
+            "test-psk",
+            SnellObfs::None,
+            SnellVersion::V3,
+            false,
+            false,
+        )
+        .unwrap();
+        let metadata = Metadata {
+            host: "example.com".into(),
+            dst_port: 443,
+            ..Metadata::default()
+        };
+        let (client, server) = tokio::io::duplex(1 << 16);
+
+        let client_fut = adapter.connect_over(Box::new(TestProxyConn(client)), &metadata);
+        let server_fut = async {
+            let mut server = V3Conn::new(server, Arc::from(b"test-psk".as_slice()));
+
+            let mut got = [0u8; 17];
+            server.read_exact(&mut got).await.unwrap();
+            let mut expected = vec![HEADER_VERSION, COMMAND_CONNECT, 0, 11];
+            expected.extend_from_slice(b"example.com");
+            expected.extend_from_slice(&443u16.to_be_bytes());
+            assert_eq!(&got[..], &expected[..]);
+
+            server.write_all(&[RESPONSE_TUNNEL]).await.unwrap();
+            server.write_all(b"ok").await.unwrap();
+            server.flush().await.unwrap();
+        };
+
+        let (conn, ()) = within(async { tokio::join!(client_fut, server_fut) }).await;
+        let mut conn = conn.unwrap();
+        let mut body = [0u8; 2];
+        within(conn.read_exact(&mut body)).await.unwrap();
+        assert_eq!(&body, b"ok");
     }
 }
