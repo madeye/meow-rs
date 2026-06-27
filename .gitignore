@@ -15,3 +15,9 @@ dh_out.json
 *.un~
 .claude/scheduled_tasks.lock
 .antigravitycli/
+
+# VitePress docs build output (generated into docs/ by CI; see website/)
+/docs/guide/
+website/node_modules
+website/.vitepress/cache
+website/.vitepress/dist
