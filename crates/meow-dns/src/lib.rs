@@ -6,7 +6,7 @@ pub mod resolver;
 pub mod server;
 pub mod upstream;
 
-pub use cache::DnsCache;
+pub use cache::{DnsCache, DnsCacheSnapshotEntry};
 pub use client::{set_socket_factory, ClientError, DnsClient, SocketFactory};
 pub use fakeip::{FileStore, MemoryStore, Pool, PoolError, Skipper, SkipperMode, Store};
 pub use host_resolver_hook::ResolverHostHook;

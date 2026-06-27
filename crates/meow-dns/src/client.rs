@@ -210,6 +210,38 @@ impl DnsClient {
         self
     }
 
+    /// Human-readable upstream identifier for API/UI surfaces.
+    pub fn upstream_label(&self) -> String {
+        let mut label = match &self.transport {
+            Transport::Udp { addr } | Transport::Tcp { addr } => socket_label(*addr, 53),
+            Transport::RCode { code } => format!("rcode:{code:?}"),
+            #[cfg(feature = "encrypted")]
+            Transport::Dot { addr, sni, .. } => {
+                if sni.is_empty() {
+                    socket_label(*addr, 853)
+                } else {
+                    sni.to_string()
+                }
+            }
+            #[cfg(feature = "encrypted")]
+            Transport::Doh {
+                addr, sni, path, ..
+            } => {
+                if sni.is_empty() {
+                    socket_label(*addr, 443)
+                } else if path.as_ref() == "/dns-query" {
+                    sni.to_string()
+                } else {
+                    format!("{sni}{path}")
+                }
+            }
+        };
+        if self.proxy.is_some() {
+            label.push_str("#PROXY");
+        }
+        label
+    }
+
     /// Send a query for `(name, record_type)` and return the parsed response
     /// `Message`. ID is randomised internally and the response's ID is not
     /// checked against the request — DoT/DoH/UDP-connected guarantee a 1:1
@@ -317,6 +349,14 @@ impl DnsClient {
                 tls,
             } => doh_exchange(*addr, sni, path, Arc::clone(tls), wire).await,
         }
+    }
+}
+
+fn socket_label(addr: SocketAddr, default_port: u16) -> String {
+    if addr.port() == default_port {
+        addr.ip().to_string()
+    } else {
+        addr.to_string()
     }
 }
 
