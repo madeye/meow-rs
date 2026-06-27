@@ -3,6 +3,8 @@ name = "meow-transport"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 license.workspace = true
 description = "Reusable composable stream-transport layers (TLS, WS, gRPC, H2, HTTPUpgrade) for meow-rs"
 

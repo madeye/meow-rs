@@ -35,6 +35,8 @@ version = "0.15.0"
 edition = "2021"
 rust-version = "1.89"
 license = "GPL-3.0"
+repository = "https://github.com/madeye/meow-rs"
+homepage = "https://madeye.github.io/meow-rs/"
 
 [workspace.lints.clippy]
 uninlined_format_args = "warn"
@@ -77,12 +79,11 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Networking
-# Pinned to the madeye fork. Carries the `SocketProtector` registry +
-# `connect_tcp` / `bind_udp` helpers (Android protect hook), plus the
-# fd/stream-leak fix for issue #201 item 4 (madeye/anytls-rs#1: orphaned
-# client sessions, unclosed client streams, and the server outbound-socket
-# leak), now merged to the fork's main.
-anytls-rs = { git = "https://github.com/madeye/anytls-rs.git", rev = "e6134889d3abbfaa2cb7439969dbda2ef6930611" }
+# crates.io release of the madeye fork. 0.5.4 carries the `SocketProtector`
+# registry + `connect_tcp` / `bind_udp` helpers (Android protect hook) and the
+# fd/stream-leak fix for issue #201 item 4 (madeye/anytls-rs#1). A registry
+# version (not a git rev) is required to publish meow-proxy to crates.io.
+anytls-rs = { version = "0.5.4" }
 shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "stream-cipher"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
@@ -211,13 +212,13 @@ proptest = "1"
 # Workspace crates
 # default-features = false on feature-gated crates so each consumer controls
 # which optional protocols/listeners are compiled (M2.E feature-flag infra).
-meow-common = { path = "crates/meow-common" }
-meow-trie = { path = "crates/meow-trie" }
-meow-dns = { path = "crates/meow-dns", default-features = false }
-meow-rules = { path = "crates/meow-rules" }
-meow-transport = { path = "crates/meow-transport" }
-meow-proxy = { path = "crates/meow-proxy", default-features = false }
-meow-tunnel = { path = "crates/meow-tunnel" }
-meow-listener = { path = "crates/meow-listener", default-features = false }
-meow-api = { path = "crates/meow-api" }
-meow-config = { path = "crates/meow-config", default-features = false }
+meow-common = { path = "crates/meow-common", version = "0.15.0" }
+meow-trie = { path = "crates/meow-trie", version = "0.15.0" }
+meow-dns = { path = "crates/meow-dns", version = "0.15.0", default-features = false }
+meow-rules = { path = "crates/meow-rules", version = "0.15.0" }
+meow-transport = { path = "crates/meow-transport", version = "0.15.0" }
+meow-proxy = { path = "crates/meow-proxy", version = "0.15.0", default-features = false }
+meow-tunnel = { path = "crates/meow-tunnel", version = "0.15.0" }
+meow-listener = { path = "crates/meow-listener", version = "0.15.0", default-features = false }
+meow-api = { path = "crates/meow-api", version = "0.15.0" }
+meow-config = { path = "crates/meow-config", version = "0.15.0", default-features = false }

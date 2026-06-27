@@ -3,6 +3,10 @@ name = "meow-proxy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Proxy protocol implementations (Shadowsocks, Trojan, VLESS, ...) and groups for the meow-rs proxy kernel."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [features]
 default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess", "snell", "hysteria2"]

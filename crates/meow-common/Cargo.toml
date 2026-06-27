@@ -3,6 +3,10 @@ name = "meow-common"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Core traits and types (ProxyAdapter, Rule, Metadata) for the meow-rs proxy kernel."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 tokio = { workspace = true }

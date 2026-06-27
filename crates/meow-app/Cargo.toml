@@ -3,6 +3,12 @@ name = "meow-app"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "A high-performance, rule-based tunneling proxy kernel in Rust, compatible with mihomo (Clash.Meta)."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["proxy", "clash", "mihomo", "vpn", "networking"]
+categories = ["network-programming", "command-line-utilities"]
 
 [features]
 default = ["full", "boring-tls"]

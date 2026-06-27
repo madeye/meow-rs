@@ -3,6 +3,10 @@ name = "meow-rules"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Rule matching engine and parser (domain, IP-CIDR, GeoIP, process, logic) for the meow-rs proxy kernel."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 meow-common = { workspace = true }

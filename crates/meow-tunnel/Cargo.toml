@@ -3,6 +3,10 @@ name = "meow-tunnel"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Core routing engine (TCP/UDP relay, rule dispatch, connection statistics) for the meow-rs proxy kernel."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 meow-common = { workspace = true }

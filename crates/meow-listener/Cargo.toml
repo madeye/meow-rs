@@ -3,6 +3,10 @@ name = "meow-listener"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Inbound protocol listeners (Mixed/HTTP/SOCKS5/TProxy) for the meow-rs proxy kernel."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [features]
 default = ["listener-http", "listener-socks5", "listener-mixed", "listener-tproxy"]
