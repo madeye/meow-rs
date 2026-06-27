@@ -1,0 +1,146 @@
+/**
+ * meow-rs docs theme — tuned to match the landing page (docs/index.html):
+ * warm cream paper, salmon/ginger accents, pine green ticks, Space Grotesk
+ * display + Space Mono code. Dark mode keeps the kraft/char palette.
+ */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Hanken+Grotesk:wght@400;500;600;800&family=Space+Mono:wght@400;700&display=swap');
+
+:root {
+  /* Brand palette (from the landing page) */
+  --meow-cream: #fbf3e4;
+  --meow-paper: #fffbf2;
+  --meow-panel: #f4e7ce;
+  --meow-ink: #20140f;
+  --meow-ink-soft: #6a574c;
+  --meow-salmon: #ff5c46;
+  --meow-salmon-deep: #e23e2c;
+  --meow-tangerine: #ff9e2c;
+  --meow-pine: #156a5b;
+  --meow-kraft-line: #d8c39b;
+  --meow-ginger: #ed7e2b;
+
+  /* Fonts */
+  --vp-font-family-base: 'Hanken Grotesk', system-ui, -apple-system, sans-serif;
+  --vp-font-family-mono: 'Space Mono', ui-monospace, 'SF Mono', monospace;
+
+  /* Brand mapping */
+  --vp-c-brand-1: var(--meow-salmon-deep);
+  --vp-c-brand-2: var(--meow-salmon);
+  --vp-c-brand-3: var(--meow-ginger);
+  --vp-c-brand-soft: rgba(255, 158, 44, 0.14);
+
+  --vp-c-bg: var(--meow-cream);
+  --vp-c-bg-alt: var(--meow-paper);
+  --vp-c-bg-soft: var(--meow-panel);
+  --vp-c-bg-elv: var(--meow-paper);
+
+  --vp-c-text-1: var(--meow-ink);
+  --vp-c-text-2: var(--meow-ink-soft);
+  --vp-c-divider: var(--meow-kraft-line);
+  --vp-c-border: var(--meow-kraft-line);
+  --vp-c-gutter: var(--meow-kraft-line);
+}
+
+/* Headings use the display face */
+.vp-doc h1,
+.vp-doc h2,
+.vp-doc h3,
+.VPHero .name,
+.VPHero .text,
+.VPFeature .title {
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+/* Section rule under h2, like the label divider on the landing page */
+.vp-doc h2 {
+  border-top: 1px solid var(--meow-kraft-line);
+  padding-top: 22px;
+  margin-top: 40px;
+}
+
+/* Hero button: the squishy salmon pill from the landing page */
+.VPButton.brand {
+  background-color: var(--meow-salmon);
+  border-color: var(--meow-salmon-deep);
+  color: #fff;
+  box-shadow: 0 6px 0 -2px var(--meow-salmon-deep);
+}
+.VPButton.brand:hover {
+  background-color: var(--meow-salmon-deep);
+  border-color: var(--meow-salmon-deep);
+}
+
+/* Home hero name gradient -> ginger/salmon */
+.VPHero .name .clip {
+  background: linear-gradient(120deg, var(--meow-salmon-deep), var(--meow-tangerine));
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+/* Inline code chips, like the landing page */
+.vp-doc :not(pre) > code {
+  background-color: var(--meow-panel);
+  color: var(--meow-salmon-deep);
+  border: 1px solid var(--meow-kraft-line);
+  font-size: 0.84em;
+}
+
+/* Feature cards on the home page */
+.VPFeature {
+  border-color: var(--meow-kraft-line);
+  background: var(--meow-paper);
+  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s;
+}
+.VPFeature:hover {
+  transform: translateY(-3px);
+  border-color: var(--meow-salmon);
+  box-shadow: 0 14px 30px -18px rgba(32, 20, 15, 0.35);
+}
+
+/* Tables: kraft header like the crates table */
+.vp-doc th {
+  font-family: var(--vp-font-family-mono);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  background: var(--meow-panel);
+}
+.vp-doc tr:nth-child(2n) {
+  background: rgba(255, 158, 44, 0.05);
+}
+
+/* Custom containers (tip/warning) lean on the brand greens/salmons */
+.custom-block.tip {
+  border-color: var(--meow-pine);
+  background: rgba(21, 106, 91, 0.08);
+}
+.custom-block.warning {
+  border-color: var(--meow-tangerine);
+}
+.custom-block.danger {
+  border-color: var(--meow-salmon-deep);
+}
+
+/* ── Dark mode: kraft + char ─────────────────────────────────────── */
+.dark {
+  --vp-c-bg: #17110c;
+  --vp-c-bg-alt: #1d150f;
+  --vp-c-bg-soft: #241a13;
+  --vp-c-bg-elv: #241a13;
+  --vp-c-text-1: #f3e6ce;
+  --vp-c-text-2: #c9b49b;
+  --vp-c-divider: #3a2c20;
+  --vp-c-border: #3a2c20;
+  --vp-c-brand-1: var(--meow-tangerine);
+  --vp-c-brand-2: var(--meow-salmon);
+  --vp-c-brand-3: var(--meow-ginger);
+}
+.dark .vp-doc :not(pre) > code {
+  background-color: #241a13;
+  color: var(--meow-tangerine);
+  border-color: #3a2c20;
+}
+.dark .VPFeature {
+  background: #1d150f;
+}

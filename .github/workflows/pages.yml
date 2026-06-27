@@ -3,7 +3,7 @@ name: Deploy GitHub Pages
 on:
   push:
     branches: [main]
-    paths: [docs/**, README.md]
+    paths: [docs/**, website/**, README.md]
   workflow_dispatch:
 
 permissions:
@@ -24,6 +24,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: website/package.json
+
+      # Build the VitePress documentation SPA into docs/guide/ so it ships
+      # alongside the hand-built landing page (docs/index.html).
+      - name: Build docs site
+        working-directory: website
+        run: |
+          npm install --no-audit --no-fund
+          npm run docs:build
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

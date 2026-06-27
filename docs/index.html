@@ -99,17 +99,14 @@ h2.title{font-family:var(--display);font-weight:700;font-size:clamp(1.7rem,3.4vw
 /* ── The signature: cat over the wall ────────────────── */
 .scene-band{padding:18px 0 8px}
 .scene{position:relative;width:100%;max-width:780px;margin:0 auto;
-  border:1px solid var(--kraft-line);border-radius:20px;overflow:hidden;
-  background:linear-gradient(180deg,#FFF7E6 0%, #FBEFD7 62%, #F2E4C6 100%);box-shadow:var(--shadow)}
-.scene svg{display:block;width:100%;height:auto}
+  border:4px solid var(--ink);border-radius:8px;overflow:hidden;
+  background:#FFECC6;box-shadow:8px 8px 0 var(--ink)}
+.scene svg,.scene video{display:block;width:100%;height:auto}
+.scene svg{shape-rendering:crispEdges}
+.scene video{aspect-ratio:16/9;background:#FFECC6}
 .scene-tag{position:absolute;left:14px;bottom:12px;font-family:var(--mono);font-size:11px;
-  letter-spacing:.12em;text-transform:uppercase;color:var(--ink-soft);opacity:.8}
-/* The cat is rigged and animated with GSAP (see the script at the end of the
-   page). Each part has its own pivot so the leap gets squash-and-stretch, leg
-   gather/extend, and tail follow-through. If GSAP is blocked or the visitor
-   prefers reduced motion, the cat keeps its authored transform — frozen
-   mid-leap over the wall. */
-#cat *{transform-box:fill-box}
+  letter-spacing:.12em;text-transform:uppercase;color:#5E493B;opacity:.9;text-shadow:1px 1px 0 #FFECC6;pointer-events:none}
+@media(max-width:520px){.scene-tag{display:none}}
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
 
 /* ── Guaranteed Analysis (the label) ─────────────────── */
@@ -259,7 +256,7 @@ h2.title{font-family:var(--display);font-weight:700;font-size:clamp(1.7rem,3.4vw
       <a href="#setup">Setup</a>
       <a href="#features">Features</a>
       <a href="#architecture">Architecture</a>
-      <a href="https://github.com/madeye/meow-rs/tree/main/docs">Docs</a>
+      <a href="./guide/">Docs</a>
       <a class="nav-cta" href="https://github.com/madeye/meow-rs">GitHub ↗</a>
     </div>
   </div>
@@ -272,7 +269,8 @@ h2.title{font-family:var(--display);font-weight:700;font-size:clamp(1.7rem,3.4vw
     <h1>Always lands<br>on its <span class="ot">feet.</span></h1>
     <p class="sub">meow-rs is a high-performance, rule-based tunneling proxy kernel in Rust — routing, transparent proxy, DNS snooping, and a built-in dashboard, packed into one&nbsp;~6&nbsp;MiB static binary.</p>
     <div class="cta-row">
-      <a class="btn btn-primary" href="https://github.com/madeye/meow-rs">View on GitHub</a>
+      <a class="btn btn-primary" href="./guide/">Read the docs</a>
+      <a class="btn btn-ghost" href="https://github.com/madeye/meow-rs">View on GitHub</a>
       <a class="btn btn-ghost" href="https://github.com/madeye/meow-rs/releases/latest">Download a build</a>
     </div>
     <div class="install">
@@ -286,78 +284,12 @@ h2.title{font-family:var(--display);font-weight:700;font-size:clamp(1.7rem,3.4vw
 <section class="scene-band" aria-label="Animation: a ginger cat leaping over a brick wall">
   <div class="wrap">
     <div class="scene">
-      <svg viewBox="0 0 780 320" role="img" aria-label="A ginger cat leaps over a brick wall, landing safely on the far side">
-        <defs>
-          <linearGradient id="grass" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#cfe3b6"/><stop offset="1" stop-color="#bcd79c"/>
-          </linearGradient>
-          <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0" stop-color="#FFF7E6" stop-opacity="0"/><stop offset="1" stop-color="#FFE6A8" stop-opacity=".55"/>
-          </linearGradient>
-        </defs>
-
-        <!-- warm "far side" glow -->
-        <rect x="390" y="0" width="390" height="320" fill="url(#glow)"/>
-        <!-- ground -->
-        <rect x="0" y="268" width="780" height="52" fill="url(#grass)"/>
-        <line x1="0" y1="268" x2="780" y2="268" stroke="#9bb87a" stroke-width="2"/>
-
-        <!-- the wall -->
-        <g>
-          <rect x="330" y="150" width="120" height="120" rx="3" fill="#E7D6BC" stroke="#C7AE86" stroke-width="2"/>
-          <rect x="330" y="142" width="120" height="14" rx="3" fill="#D9C4A1" stroke="#C7AE86" stroke-width="2"/>
-          <g stroke="#C7AE86" stroke-width="1.6">
-            <line x1="330" y1="178" x2="450" y2="178"/><line x1="330" y1="206" x2="450" y2="206"/>
-            <line x1="330" y1="234" x2="450" y2="234"/>
-            <line x1="360" y1="156" x2="360" y2="178"/><line x1="420" y1="156" x2="420" y2="178"/>
-            <line x1="345" y1="178" x2="345" y2="206"/><line x1="405" y1="178" x2="405" y2="206"/>
-            <line x1="375" y1="206" x2="375" y2="234"/><line x1="435" y1="206" x2="435" y2="234"/>
-            <line x1="360" y1="234" x2="360" y2="268"/><line x1="420" y1="234" x2="420" y2="268"/>
-          </g>
-        </g>
-
-        <!-- hidden parabola the cat is animated along (GSAP MotionPath) -->
-        <path id="leapPath" d="M -90 274 C 170 268 255 86 390 82 C 525 86 610 268 870 274" fill="none" stroke="none"/>
-
-        <!-- the ginger tom, rigged for GSAP. Parts pivot at their joints.
-             transform="translate(388,90) scale(1.35)" is the static fallback:
-             frozen mid-leap over the wall when JS/GSAP is unavailable. -->
-        <g id="catPos" transform="translate(388,90)"><g id="cat" transform="scale(1.35)">
-          <g id="tail">
-            <path d="M-28 -3 C-50 -8 -68 -22 -64 -39 C-58 -27 -45 -19 -30 -18 Z" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
-            <g fill="none" stroke="#C9621A" stroke-width="2.3" stroke-linecap="round">
-              <path d="M-46 -19 q5 5 4 11"/><path d="M-54 -11 q4 4 3 9"/>
-            </g>
-          </g>
-          <g id="hindlegs">
-            <path d="M-13 5 C-31 8 -46 13 -57 20 L-51 24 C-39 17 -24 13 -11 12 Z" fill="#E0731F" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
-            <path d="M-11 9 C-27 13 -41 18 -50 24 L-45 27 C-34 21 -21 17 -9 15 Z" fill="#D8691B" stroke="#3A2415" stroke-width="2" stroke-linejoin="round"/>
-          </g>
-          <g id="body">
-            <path d="M-20 8 C-27 -10 -5 -18 13 -17 C25 -16 32 -8 33 1 C31 10 12 15 -8 14 C-15 13 -18 11 -20 8 Z" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.4" stroke-linejoin="round"/>
-            <path d="M-15 10 C-3 17 19 15 29 4 C21 13 -3 14 -15 10 Z" fill="#FBE3C0"/>
-            <g fill="none" stroke="#C9621A" stroke-width="2.3" stroke-linecap="round">
-              <path d="M-5 -13 q3 7 0 15"/><path d="M5 -14 q3 7 0 16"/><path d="M-15 -9 q3 6 1 12"/>
-            </g>
-          </g>
-          <g id="frontlegs">
-            <path d="M16 7 C29 10 40 13 46 19 L42 22 C34 17 23 13 12 12 Z" fill="#E0731F" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
-            <path d="M14 11 C26 14 36 17 42 22 L38 25 C31 20 20 16 11 15 Z" fill="#D8691B" stroke="#3A2415" stroke-width="2" stroke-linejoin="round"/>
-          </g>
-          <g id="head">
-            <circle cx="29" cy="-10" r="13" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.4"/>
-            <path d="M20 -18 L13 -31 L27 -22 Z" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
-            <path d="M34 -19 L35 -32 L25 -21 Z" fill="#ED7E2B" stroke="#3A2415" stroke-width="2.2" stroke-linejoin="round"/>
-            <path d="M21 -20 L17 -28 L26 -22 Z" fill="#F4A6A0"/>
-            <path d="M32 -21 L34 -28 L26 -21 Z" fill="#F4A6A0"/>
-            <circle cx="34" cy="-11" r="2.6" fill="#2A1A12"/>
-            <circle cx="34.9" cy="-11.9" r=".8" fill="#fff"/>
-            <path d="M41 -6 l-3 2.4 h5 Z" fill="#E23E2C" stroke="#3A2415" stroke-width="1" stroke-linejoin="round"/>
-            <path d="M38 -2.6 q1.6 2.2 3.6 1" fill="none" stroke="#3A2415" stroke-width="1.3" stroke-linecap="round"/>
-            <path d="M41 -2 q4.5 2 9 1.4 M41 -.4 q4.5 3 9 4" fill="none" stroke="#3A2415" stroke-width="1.1" stroke-linecap="round"/>
-          </g>
-        </g></g>
-      </svg>
+      <video
+        class="hero-video"
+        src="a_ginger_cat_jump_over_walls.mp4"
+        autoplay loop muted playsinline preload="auto"
+        aria-label="A ginger cat jumps over a brick wall and lands safely"
+      ></video>
       <span class="scene-tag">Rules in · packets out · over every wall</span>
     </div>
   </div>
@@ -582,7 +514,8 @@ curl https://ipinfo.io</pre></div>
       <h2>Fresh batch ready.</h2>
       <p>Crack open the tin, point it at your servers, and watch every connection land on the right side of the wall.</p>
       <div class="cta-row" style="margin:0">
-        <a class="btn btn-primary" href="https://github.com/madeye/meow-rs">Star it on GitHub</a>
+        <a class="btn btn-primary" href="./guide/">Read the docs</a>
+        <a class="btn btn-ghost" href="https://github.com/madeye/meow-rs">Star it on GitHub</a>
         <a class="btn btn-ghost" href="https://github.com/madeye/meow-rs/releases/latest">Grab a release</a>
       </div>
     </div>
@@ -601,72 +534,15 @@ curl https://ipinfo.io</pre></div>
   </div>
 </footer>
 
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/MotionPathPlugin.min.js"></script>
 <script>
-// ── The leaping cat, rigged + driven by GSAP ──────────────────────────────
-// A looping timeline carries the cat along the parabola (#leapPath) while each
-// part animates on its own pivot: the body squashes and stretches, the legs
-// gather at the apex and extend for take-off / landing, the tail trails, and the
-// whole cat banks gently nose-up→down. Falls back to a static frozen leap when
-// GSAP is unavailable or the visitor prefers reduced motion.
+// ── Hero video ────────────────────────────────────────────────────────────
+// Autoplays, loops and stays muted by default. Visitors who prefer reduced
+// motion get a still first frame instead of the looping clip.
 (function(){
-  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (reduce || !window.gsap || !document.getElementById('cat')) return;
-  gsap.registerPlugin(MotionPathPlugin);
-
-  var D = 2.6; // one full leap, seconds
-
-  // Position along the arc (constant horizontal speed reads as a clean jump).
-  gsap.to('#catPos', {
-    duration: D, repeat: -1, ease: 'none',
-    motionPath: { path: '#leapPath', align: '#leapPath', alignOrigin: [0.5, 0.5], autoRotate: false }
-  });
-
-  // Dampened bank: nose up on the rise, level at the apex, nose down on descent.
-  gsap.fromTo('#cat', { rotation: -13 },
-    { rotation: 13, duration: D, repeat: -1, ease: 'sine.inOut', transformOrigin: '50% 50%' });
-
-  // Squash & stretch through the jump phases.
-  gsap.to('#body', {
-    duration: D, repeat: -1, transformOrigin: '50% 70%',
-    keyframes: [
-      { scaleX: 1.16, scaleY: 0.86, duration: 0.14, ease: 'power2.out' }, // crouch → push off
-      { scaleX: 0.97, scaleY: 1.07, duration: 0.5,  ease: 'sine.out'   }, // stretch up
-      { scaleX: 1.0,  scaleY: 1.0,  duration: 0.72                      }, // float over the wall
-      { scaleX: 1.06, scaleY: 0.95, duration: 0.5,  ease: 'sine.in'    }, // reach down
-      { scaleX: 1.18, scaleY: 0.82, duration: 0.14, ease: 'power2.in'  }, // land squash
-      { scaleX: 1.0,  scaleY: 1.0,  duration: 0.6,  ease: 'elastic.out(1,0.5)' } // recover
-    ]
-  });
-
-  // Hind legs: thrust back at take-off, tuck near the apex, kick back to land.
-  gsap.to('#hindlegs', {
-    duration: D, repeat: -1, transformOrigin: '92% 20%',
-    keyframes: [
-      { rotation: -28, duration: 0.18, ease: 'power2.out' },
-      { rotation: -6,  duration: 1.0,  ease: 'sine.inOut' },
-      { rotation: -26, duration: 0.6,  ease: 'sine.in'    },
-      { rotation: 4,   duration: 0.82, ease: 'sine.out'   }
-    ]
-  });
-
-  // Front legs: reach forward for the landing, fold under after.
-  gsap.to('#frontlegs', {
-    duration: D, repeat: -1, transformOrigin: '12% 20%',
-    keyframes: [
-      { rotation: 10,  duration: 0.18, ease: 'power2.out' },
-      { rotation: -8,  duration: 1.0,  ease: 'sine.inOut' },
-      { rotation: 20,  duration: 0.6,  ease: 'sine.in'    },
-      { rotation: 2,   duration: 0.82, ease: 'sine.out'   }
-    ]
-  });
-
-  // Tail follow-through — a soft continuous trail.
-  gsap.to('#tail', {
-    rotation: -14, duration: 0.95, yoyo: true, repeat: -1,
-    ease: 'sine.inOut', transformOrigin: '90% 38%'
-  });
+  var v = document.querySelector('.hero-video'); if(!v) return;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches){
+    v.removeAttribute('autoplay'); v.pause();
+  }
 })();
 
 // Copy-to-clipboard for the install pill
