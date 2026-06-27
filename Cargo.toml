@@ -31,7 +31,7 @@ debug = 1
 opt-level = 1
 
 [workspace.package]
-version = "0.15.0"
+version = "0.15.1"
 edition = "2021"
 rust-version = "1.89"
 license = "GPL-3.0"
@@ -212,13 +212,13 @@ proptest = "1"
 # Workspace crates
 # default-features = false on feature-gated crates so each consumer controls
 # which optional protocols/listeners are compiled (M2.E feature-flag infra).
-meow-common = { path = "crates/meow-common", version = "0.15.0" }
-meow-trie = { path = "crates/meow-trie", version = "0.15.0" }
-meow-dns = { path = "crates/meow-dns", version = "0.15.0", default-features = false }
-meow-rules = { path = "crates/meow-rules", version = "0.15.0" }
-meow-transport = { path = "crates/meow-transport", version = "0.15.0" }
-meow-proxy = { path = "crates/meow-proxy", version = "0.15.0", default-features = false }
-meow-tunnel = { path = "crates/meow-tunnel", version = "0.15.0" }
-meow-listener = { path = "crates/meow-listener", version = "0.15.0", default-features = false }
-meow-api = { path = "crates/meow-api", version = "0.15.0" }
-meow-config = { path = "crates/meow-config", version = "0.15.0", default-features = false }
+meow-common = { path = "crates/meow-common", version = "0.15.1" }
+meow-trie = { path = "crates/meow-trie", version = "0.15.1" }
+meow-dns = { path = "crates/meow-dns", version = "0.15.1", default-features = false }
+meow-rules = { path = "crates/meow-rules", version = "0.15.1" }
+meow-transport = { path = "crates/meow-transport", version = "0.15.1" }
+meow-proxy = { path = "crates/meow-proxy", version = "0.15.1", default-features = false }
+meow-tunnel = { path = "crates/meow-tunnel", version = "0.15.1" }
+meow-listener = { path = "crates/meow-listener", version = "0.15.1", default-features = false }
+meow-api = { path = "crates/meow-api", version = "0.15.1" }
+meow-config = { path = "crates/meow-config", version = "0.15.1", default-features = false }
