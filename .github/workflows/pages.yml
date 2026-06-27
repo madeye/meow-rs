@@ -1,5 +1,14 @@
 name: Deploy GitHub Pages
 
+# IMPORTANT: the repository's Pages source must be set to "GitHub Actions"
+# (Settings -> Pages -> Build and deployment -> Source: GitHub Actions).
+# The documentation SPA lives in docs/guide/, which is build-only and
+# gitignored -- it exists solely in this workflow's uploaded artifact and is
+# never committed. If Pages is instead set to "Deploy from a branch" (e.g.
+# main /docs), the committed landing page (docs/index.html) still serves at
+# the site root, but /meow-rs/guide/ 404s because docs/guide/ is absent from
+# the branch. Keep the source on "GitHub Actions" so the built guide ships.
+
 on:
   push:
     branches: [main]
