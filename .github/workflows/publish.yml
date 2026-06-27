@@ -1,0 +1,95 @@
+name: Publish to crates.io
+
+# Publishes all 11 workspace crates to crates.io in dependency order.
+#
+# Triggers:
+#   - push a tag `vX.Y.Z`  -> real publish (tag must match the workspace version)
+#   - workflow_dispatch    -> dry-run by default; untick "dry-run" to publish
+#
+# Requires the repository secret CARGO_REGISTRY_TOKEN (a crates.io API token
+# with publish-update + publish-new scope). See docs/RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run (package + verify only, no upload)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # BoringSSL (boring-tls, on by default for meow-config / meow-app) needs cmake.
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Verify tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          echo "tag=$tag workspace version=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag v$tag does not match workspace version $ver"
+            exit 1
+          fi
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          # Dry-run for manual runs unless explicitly disabled; always real on a tag.
+          args=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry-run }}" = "true" ]; then
+            args="--dry-run"
+            echo "Running in DRY-RUN mode (no uploads)."
+          fi
+
+          # Dependency-safe order (includes dev-dependency edges, e.g. meow-tunnel
+          # dev-depends on meow-config, so config precedes tunnel). meow-bench is
+          # intentionally not published.
+          crates=(
+            meow-common meow-trie meow-transport
+            meow-rules meow-dns meow-proxy
+            meow-config meow-tunnel meow-listener meow-api
+            meow-app
+          )
+
+          for c in "${crates[@]}"; do
+            echo "::group::publish $c"
+            if out=$(cargo publish -p "$c" $args 2>&1); then
+              echo "$out"
+            else
+              echo "$out"
+              # Idempotent: tolerate a version already on the registry so a
+              # re-run can resume after a partial release.
+              if echo "$out" | grep -qiE "already (exists|uploaded)|is already uploaded"; then
+                echo "$c already published at this version — continuing."
+              else
+                echo "::error::failed to publish $c"
+                exit 1
+              fi
+            fi
+            echo "::endgroup::"
+          done
+          echo "Done."
