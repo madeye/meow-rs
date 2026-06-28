@@ -35,6 +35,7 @@ pub type IpList = SmallVec<[IpAddr; 2]>;
 struct CacheEntry {
     ips: Box<[IpAddr]>,
     expire_at: Instant,
+    source: Option<Arc<str>>,
 }
 
 struct ReverseEntry {
@@ -71,6 +72,14 @@ pub struct DnsCache {
     /// Bounded per-shard LRU — entries past capacity are evicted in
     /// least-recently-used order.
     reverse: [Mutex<LruCache<IpAddr, ReverseEntry>>; SHARDS],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsCacheSnapshotEntry {
+    pub name: String,
+    pub ips: Vec<IpAddr>,
+    pub ttl: Duration,
+    pub source: Option<String>,
 }
 
 /// FNV-1a 32-bit hash over the bytes of `s`. Inline so it can be used on
@@ -134,6 +143,18 @@ impl DnsCache {
     /// Insert a resolved-domain record. Takes the IP list by reference to
     /// avoid forcing the caller to clone — the cache owns its own copy.
     pub fn put(&self, domain: &str, ips: &[IpAddr], ttl: Duration) {
+        self.put_with_source(domain, ips, ttl, None);
+    }
+
+    /// Insert a resolved-domain record and remember the upstream that supplied
+    /// it for DNS results panels.
+    pub fn put_with_source(
+        &self,
+        domain: &str,
+        ips: &[IpAddr],
+        ttl: Duration,
+        source: Option<&str>,
+    ) {
         let now = Instant::now();
         let expire_at = now + ttl;
         // Reverse entries get a longer floor so the IP → host mapping survives
@@ -164,6 +185,7 @@ impl DnsCache {
         let entry = CacheEntry {
             ips: ips.into(),
             expire_at,
+            source: source.map(Arc::from),
         };
         self.cache[shard_str(domain)].lock().put(key, entry);
     }
@@ -199,6 +221,30 @@ impl DnsCache {
 
     pub fn reverse_len(&self) -> usize {
         self.reverse.iter().map(|s| s.lock().len()).sum()
+    }
+
+    pub fn snapshot(&self) -> Vec<DnsCacheSnapshotEntry> {
+        let now = Instant::now();
+        let mut entries = Vec::new();
+        for shard in &self.cache {
+            let mut cache = shard.lock();
+            let expired: Vec<Arc<str>> = cache
+                .iter()
+                .filter(|(_, entry)| entry.expire_at <= now)
+                .map(|(name, _)| Arc::clone(name))
+                .collect();
+            for name in expired {
+                cache.pop(name.as_ref());
+            }
+            entries.extend(cache.iter().map(|(name, entry)| DnsCacheSnapshotEntry {
+                name: name.to_string(),
+                ips: entry.ips.to_vec(),
+                ttl: entry.expire_at.saturating_duration_since(now),
+                source: entry.source.as_ref().map(std::string::ToString::to_string),
+            }));
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
     }
 
     /// Insert a reverse entry with an explicit expiry. Test-only: lets unit

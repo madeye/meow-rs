@@ -164,6 +164,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/metrics", get(get_metrics))
         .route("/traffic", get(get_traffic))
+        .route("/dns/results", get(get_dns_results))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
         .route("/cache/fakeip/flush", post(flush_fakeip_cache))
@@ -483,6 +484,41 @@ struct DnsQueryRequest {
     name: String,
     #[serde(rename = "type")]
     qtype: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DnsResultsQuery {
+    search: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct DnsResultEntry {
+    name: String,
+    ips: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from_server: Option<String>,
+    ttl: u64,
+}
+
+async fn get_dns_results(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<DnsResultsQuery>,
+) -> Json<Vec<DnsResultEntry>> {
+    let limit = params.limit.unwrap_or(256).min(1024);
+    let results = state
+        .tunnel
+        .resolver()
+        .dns_results(params.search.as_deref(), limit)
+        .into_iter()
+        .map(|entry| DnsResultEntry {
+            name: entry.name,
+            ips: entry.ips.into_iter().map(|ip| ip.to_string()).collect(),
+            from_server: entry.source,
+            ttl: entry.ttl.as_secs(),
+        })
+        .collect();
+    Json(results)
 }
 
 async fn dns_query(
