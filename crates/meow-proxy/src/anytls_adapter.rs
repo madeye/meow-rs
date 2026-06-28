@@ -10,11 +10,13 @@
 
 use std::io;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anytls_rs::client::Client as AnytlsClient;
 use anytls_rs::padding::PaddingFactory;
+use anytls_rs::protocol::{Command, Frame};
 use anytls_rs::session::{Session, Stream as AnytlsStream};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -151,6 +153,7 @@ struct AnytlsConn {
     stream_id: u32,
     pending_read: Mutex<Option<PendingRead>>,
     pending_write: Mutex<Option<PendingWrite>>,
+    fin_sent: AtomicBool,
 }
 
 impl AnytlsConn {
@@ -162,7 +165,35 @@ impl AnytlsConn {
             stream_id,
             pending_read: Mutex::new(None),
             pending_write: Mutex::new(None),
+            fin_sent: AtomicBool::new(false),
         }
+    }
+
+    /// Best-effort FIN for just this stream, idempotent across `poll_shutdown`
+    /// and `Drop`. Emits a `Fin` control frame so the server releases the
+    /// proxied target connection and evicts the per-stream map entry (issue
+    /// #201 item 4). The session is pooled and multiplexes other streams, so
+    /// this must never close the session itself.
+    ///
+    /// The registry `anytls-rs` exposes only an async session writer (the
+    /// git fork's synchronous `Stream::close()` is not published), so the frame
+    /// is sent fire-and-forget on the current runtime. If no runtime is active
+    /// (e.g. dropped outside tokio), the FIN is skipped — the connection is
+    /// being torn down regardless.
+    fn fin_stream(&self) {
+        if self.fin_sent.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let session = Arc::clone(&self.session);
+        let stream_id = self.stream_id;
+        handle.spawn(async move {
+            let _ = session
+                .write_control_frame(Frame::control(Command::Fin, stream_id))
+                .await;
+        });
     }
 }
 
@@ -255,8 +286,8 @@ impl AsyncWrite for AnytlsConn {
         // the server releases the proxied target connection and evicts the
         // stream from the session maps. Without this the server-side proxied
         // socket and the session's per-stream map entry leaked on every dial
-        // (issue #201 item 4). Idempotent and lock-free.
-        self.stream.close();
+        // (issue #201 item 4). Idempotent.
+        self.fin_stream();
         Poll::Ready(Ok(()))
     }
 }
@@ -266,8 +297,8 @@ impl Drop for AnytlsConn {
         // Belt-and-suspenders: the relay path that drops the boxed `ProxyConn`
         // without first calling `poll_shutdown` (e.g. on a copy error) must
         // still FIN the stream so the proxied connection and map entry are
-        // released. `close()` is idempotent with `poll_shutdown`.
-        self.stream.close();
+        // released. `fin_stream` is idempotent with `poll_shutdown`.
+        self.fin_stream();
     }
 }
 
