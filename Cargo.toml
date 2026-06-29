@@ -79,10 +79,15 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Networking
-# crates.io release of the madeye fork. 0.5.4 carries the `SocketProtector`
-# registry + `connect_tcp` / `bind_udp` helpers (Android protect hook) and the
-# fd/stream-leak fix for issue #201 item 4 (madeye/anytls-rs#1). A registry
-# version (not a git rev) is required to publish meow-proxy to crates.io.
+# Keep a registry version requirement so meow-proxy stays publishable to
+# crates.io (cargo publish rejects bare git deps). The `anytls` feature is
+# opt-in and off by default, so publish's verify build never compiles it.
+#
+# IMPORTANT: crates.io `anytls-rs@0.5.4` is jxo-me's UPSTREAM crate, which does
+# NOT have `Stream::close()`. meow's adapter calls `close()` (the fd/stream-leak
+# fix for #201 item 4, madeye/anytls-rs#1), which only exists in the madeye
+# fork. We therefore patch the registry crate to the fork commit that contains
+# `close()` via [patch.crates-io] at the bottom of this file (see issue #262).
 anytls-rs = { version = "0.5.4" }
 shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "stream-cipher"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
@@ -222,3 +227,17 @@ meow-tunnel = { path = "crates/meow-tunnel", version = "0.15.1" }
 meow-listener = { path = "crates/meow-listener", version = "0.15.1", default-features = false }
 meow-api = { path = "crates/meow-api", version = "0.15.1" }
 meow-config = { path = "crates/meow-config", version = "0.15.1", default-features = false }
+
+# --- anytls fork patch (issue #262) ---------------------------------------
+# crates.io `anytls-rs@0.5.4` is jxo-me's upstream and lacks `Stream::close()`;
+# meow's adapter requires the madeye fork, whose `close()` (madeye/anytls-rs#1)
+# merged AFTER the fork's own `v0.5.4` tag. Pin the exact merge commit so the
+# `anytls` feature builds. The patched crate is itself `anytls-rs@0.5.4`, so it
+# satisfies the `version = "0.5.4"` requirement above without a version bump.
+#
+# NOTE: [patch] is local to this workspace and is stripped on publish — it does
+# NOT propagate to downstream consumers who pull meow-proxy from crates.io with
+# `anytls` enabled. The permanent fix is to publish the fork under a distinct
+# name (e.g. `anytls-meow`) and depend on that. Tracked in #262.
+[patch.crates-io]
+anytls-rs = { git = "https://github.com/madeye/anytls-rs", rev = "e6134889d3abbfaa2cb7439969dbda2ef6930611" }
