@@ -1,6 +1,6 @@
 # Releasing meow-rs
 
-meow-rs ships as **11 crates** published together to [crates.io](https://crates.io)
+meow-rs ships as **12 crates** published together to [crates.io](https://crates.io)
 at a single workspace version. This is the checklist for cutting a release.
 
 > [!IMPORTANT]
@@ -16,7 +16,8 @@ at a single workspace version. This is the checklist for cutting a release.
 2. Add it to the repo as the **`CARGO_REGISTRY_TOKEN`** Actions secret
    (`Settings → Secrets and variables → Actions`). The
    [`publish.yml`](../.github/workflows/publish.yml) workflow reads it.
-3. Confirm you own all 11 crate names on crates.io (you do, as of `0.15.0`).
+3. Confirm you own all 12 crate names on crates.io (you own 11 as of `0.15.0`;
+   `meow-anytls` is new in this release and must be claimable under your account).
 
 ## The crates & publish order
 
@@ -26,9 +27,9 @@ dependencies — including **dev-dependencies**, which crates.io validates at pu
 time (e.g. `meow-tunnel` dev-depends on `meow-config`, so config goes first):
 
 ```
-meow-common  meow-trie  meow-transport      (leaves, no internal deps)
+meow-common  meow-trie  meow-anytls  meow-transport   (leaves, no internal deps)
 meow-rules   meow-dns                        (→ common, trie)
-meow-proxy                                   (→ common, dns, transport)
+meow-proxy                                   (→ common, dns, transport, anytls)
 meow-config                                  (→ common, trie, dns, rules, proxy)
 meow-tunnel                                  (→ …, + dev-dep on config)
 meow-listener  meow-api                      (→ tunnel, config)
@@ -60,7 +61,7 @@ meow-app                                     (→ everything)
    git push origin v0.15.1
    ```
    The tag push triggers [`publish.yml`](../.github/workflows/publish.yml), which
-   verifies the tag matches the workspace version and publishes all 11 crates in
+   verifies the tag matches the workspace version and publishes all 12 crates in
    order. (The workflow is idempotent — a re-run skips versions already on the
    registry, so a partial release can resume.)
 

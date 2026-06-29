@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/meow-common",
     "crates/meow-trie",
+    "crates/meow-anytls",
     "crates/meow-dns",
     "crates/meow-rules",
     "crates/meow-transport",
@@ -79,11 +80,11 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 # Networking
-# crates.io release of the madeye fork. 0.5.4 carries the `SocketProtector`
-# registry + `connect_tcp` / `bind_udp` helpers (Android protect hook) and the
-# fd/stream-leak fix for issue #201 item 4 (madeye/anytls-rs#1). A registry
-# version (not a git rev) is required to publish meow-proxy to crates.io.
-anytls-rs = { version = "0.5.4" }
+# anytls is vendored in-tree as `crates/meow-anytls` (lib name `anytls_rs`).
+# crates.io `anytls-rs@0.5.4` is jxo-me's upstream and lacks `Stream::close()`,
+# which meow's adapter requires (madeye/anytls-rs#1, #201 item 4); vendoring the
+# madeye fork removes the registry/git dependency entirely. See #262 and
+# crates/meow-anytls/README.md.
 shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "stream-cipher"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
@@ -214,6 +215,9 @@ proptest = "1"
 # which optional protocols/listeners are compiled (M2.E feature-flag infra).
 meow-common = { path = "crates/meow-common", version = "0.15.1" }
 meow-trie = { path = "crates/meow-trie", version = "0.15.1" }
+# Vendored anytls fork (lib name `anytls_rs`); optional, pulled in only by
+# meow-proxy's `anytls` feature.
+meow-anytls = { path = "crates/meow-anytls", version = "0.15.1" }
 meow-dns = { path = "crates/meow-dns", version = "0.15.1", default-features = false }
 meow-rules = { path = "crates/meow-rules", version = "0.15.1" }
 meow-transport = { path = "crates/meow-transport", version = "0.15.1" }

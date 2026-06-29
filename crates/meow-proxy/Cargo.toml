@@ -19,11 +19,11 @@ vless-vision = ["vless"]
 # optional http/tls obfs (reused from the SS simple-obfs module),
 # UDP-over-TCP, and an opt-in v4/v5 reuse pool (CommandConnectV2).
 snell = ["dep:argon2", "dep:aes-gcm"]
-# Opt-in anytls outbound (uses the `anytls-rs` crate). Adds ~one extra TLS
-# provider to the binary because the upstream crate pins default rustls
-# features — accept the bloat in exchange for not re-implementing the
-# wire protocol. Off by default.
-anytls = ["dep:anytls-rs"]
+# Opt-in anytls outbound (uses the vendored `meow-anytls` crate, lib name
+# `anytls_rs`). Adds ~one extra TLS provider to the binary because the vendored
+# crate keeps the fork's default rustls features — accept the bloat in exchange
+# for not re-implementing the wire protocol. Off by default.
+anytls = ["dep:meow-anytls"]
 # Hysteria2 outbound implemented in-tree on top of Quinn.
 hysteria2 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:blake2"]
 # Native client for the `ech-tls-tunnel` SIP003 plugin
@@ -36,7 +36,7 @@ meow-common = { workspace = true }
 meow-dns = { workspace = true }
 meow-transport = { workspace = true }
 tokio = { workspace = true }
-anytls-rs = { workspace = true, optional = true }
+meow-anytls = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }

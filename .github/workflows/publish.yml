@@ -1,6 +1,6 @@
 name: Publish to crates.io
 
-# Publishes all 11 workspace crates to crates.io in dependency order.
+# Publishes all 12 workspace crates to crates.io in dependency order.
 #
 # Triggers:
 #   - push a tag `vX.Y.Z`  -> real publish (tag must match the workspace version)
@@ -69,7 +69,7 @@ jobs:
           # dev-depends on meow-config, so config precedes tunnel). meow-bench is
           # intentionally not published.
           crates=(
-            meow-common meow-trie meow-transport
+            meow-common meow-trie meow-anytls meow-transport
             meow-rules meow-dns meow-proxy
             meow-config meow-tunnel meow-listener meow-api
             meow-app

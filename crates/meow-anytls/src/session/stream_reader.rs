@@ -1,0 +1,235 @@
+//! StreamReader - 独立的流读取器
+//!
+//! 负责从 Session 接收数据并提供给上层读取
+//! 与 Stream 的写入操作完全分离
+
+use bytes::Bytes;
+use std::io;
+use tokio::sync::mpsc;
+
+/// StreamReader 管理单个流的读取状态
+///
+/// 设计要点：
+/// 1. reader_rx 和 reader_buffer 在同一个结构内，无需额外的锁
+/// 2. 外部通过 &mut self 访问，保证互斥
+/// 3. 不持有 Stream 的引用，完全独立
+pub struct StreamReader {
+    /// 流 ID（用于日志）
+    id: u32,
+
+    /// 从 Session 接收数据的 channel
+    /// 注意：recv() 是 async 方法，需要 &mut self
+    reader_rx: mpsc::UnboundedReceiver<Bytes>,
+
+    /// 缓冲不完整的数据
+    /// 当 read buffer 小于接收到的数据时使用
+    reader_buffer: Vec<u8>,
+
+    /// EOF 标志
+    eof: bool,
+}
+
+impl StreamReader {
+    /// 创建新的 StreamReader
+    pub fn new(id: u32, reader_rx: mpsc::UnboundedReceiver<Bytes>) -> Self {
+        Self {
+            id,
+            reader_rx,
+            reader_buffer: Vec::new(),
+            eof: false,
+        }
+    }
+
+    /// 读取数据到 buffer
+    ///
+    /// 实现逻辑：
+    /// 1. 优先从 reader_buffer 读取
+    /// 2. buffer 为空时从 channel 接收
+    /// 3. 处理 EOF 情况
+    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // 1. 先检查 EOF
+        if self.eof && self.reader_buffer.is_empty() {
+            return Ok(0);
+        }
+
+        // 2. 从 buffer 读取（如果有数据）
+        if !self.reader_buffer.is_empty() {
+            let n = std::cmp::min(self.reader_buffer.len(), buf.len());
+            buf[..n].copy_from_slice(&self.reader_buffer[..n]);
+            self.reader_buffer.drain(..n);
+
+            tracing::trace!(
+                "[StreamReader] Read {} bytes from buffer (stream_id={}, buffer_remaining={})",
+                n,
+                self.id,
+                self.reader_buffer.len()
+            );
+
+            return Ok(n);
+        }
+
+        // 3. buffer 为空，从 channel 接收新数据
+        match self.reader_rx.recv().await {
+            Some(data) => {
+                let data_len = data.len();
+                tracing::debug!(
+                    "[StreamReader] Received {} bytes from channel (stream_id={})",
+                    data_len,
+                    self.id
+                );
+
+                // 直接填充到 buf
+                let n = std::cmp::min(data.len(), buf.len());
+                buf[..n].copy_from_slice(&data[..n]);
+
+                // 剩余数据放入 buffer
+                if n < data.len() {
+                    self.reader_buffer.extend_from_slice(&data[n..]);
+                    tracing::trace!(
+                        "[StreamReader] Stored {} bytes in buffer (stream_id={})",
+                        data.len() - n,
+                        self.id
+                    );
+                }
+
+                Ok(n)
+            }
+            None => {
+                // Channel 关闭，表示 EOF
+                tracing::debug!(
+                    "[StreamReader] Channel closed (EOF) for stream_id={}",
+                    self.id
+                );
+                self.eof = true;
+                Ok(0)
+            }
+        }
+    }
+
+    /// 获取流 ID
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// 检查是否到达 EOF
+    pub fn is_eof(&self) -> bool {
+        self.eof
+    }
+
+    /// 获取缓冲区大小（用于诊断）
+    pub fn buffer_len(&self) -> usize {
+        self.reader_buffer.len()
+    }
+
+    /// 精确读取指定数量的字节（辅助方法）
+    ///
+    /// 类似于 AsyncReadExt::read_exact，但使用我们自己的 read() 方法
+    pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let mut offset = 0;
+        let total = buf.len();
+
+        while offset < total {
+            let n = self.read(&mut buf[offset..]).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("Failed to read exact {} bytes, only read {}", total, offset),
+                ));
+            }
+            offset += n;
+        }
+
+        Ok(())
+    }
+}
+
+// StreamReader 不需要实现 Clone
+// 因为它包含 UnboundedReceiver（不可 Clone）
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_stream_reader_basic() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut reader = StreamReader::new(1, rx);
+
+        // 发送数据
+        tx.send(Bytes::from("hello")).unwrap();
+
+        // 读取数据
+        let mut buf = vec![0u8; 10];
+        let n = reader.read(&mut buf).await.unwrap();
+
+        assert_eq!(n, 5);
+        assert_eq!(&buf[..n], b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_stream_reader_buffering() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut reader = StreamReader::new(1, rx);
+
+        // 发送较大的数据
+        tx.send(Bytes::from("hello world")).unwrap();
+
+        // 分两次读取
+        let mut buf = vec![0u8; 5];
+
+        let n1 = reader.read(&mut buf).await.unwrap();
+        assert_eq!(n1, 5);
+        assert_eq!(&buf[..n1], b"hello");
+
+        let n2 = reader.read(&mut buf).await.unwrap();
+        assert_eq!(n2, 5);
+        assert_eq!(&buf[..n2], b" worl");
+
+        let n3 = reader.read(&mut buf).await.unwrap();
+        assert_eq!(n3, 1);
+        assert_eq!(&buf[..n3], b"d");
+    }
+
+    #[tokio::test]
+    async fn test_stream_reader_eof() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut reader = StreamReader::new(1, rx);
+
+        // 关闭 channel
+        drop(tx);
+
+        // 读取应该返回 0（EOF）
+        let mut buf = vec![0u8; 10];
+        let n = reader.read(&mut buf).await.unwrap();
+        assert_eq!(n, 0);
+        assert!(reader.is_eof());
+    }
+
+    #[tokio::test]
+    async fn test_stream_reader_multiple_chunks() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut reader = StreamReader::new(1, rx);
+
+        // 发送多个数据块
+        tx.send(Bytes::from("chunk1")).unwrap();
+        tx.send(Bytes::from("chunk2")).unwrap();
+        tx.send(Bytes::from("chunk3")).unwrap();
+
+        // 关闭 channel 以触发 EOF
+        drop(tx);
+
+        let mut buf = vec![0u8; 100];
+        let mut total = Vec::new();
+
+        // 读取所有数据
+        loop {
+            let n = reader.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            total.extend_from_slice(&buf[..n]);
+        }
+
+        assert_eq!(total, b"chunk1chunk2chunk3");
+    }
+}
