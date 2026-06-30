@@ -184,7 +184,19 @@ pub(crate) fn build_nft_ruleset(
 ) -> String {
     let mut bypass_rules = String::new();
     for ip in bypass_ips {
-        writeln!(bypass_rules, "    ip daddr {ip} accept").expect("write to String");
+        // In an `inet` table the L3 protocol must be selected explicitly:
+        // `ip daddr` only parses IPv4 literals and `ip6 daddr` only IPv6.
+        // Emitting `ip daddr <v6>` is a parse error that makes `nft -f -`
+        // reject the *entire* ruleset, so the tproxy listener fails to start
+        // whenever a proxy host resolves to an IPv6 address.
+        match ip {
+            IpAddr::V4(v4) => {
+                writeln!(bypass_rules, "    ip daddr {v4} accept").expect("write to String");
+            }
+            IpAddr::V6(v6) => {
+                writeln!(bypass_rules, "    ip6 daddr {v6} accept").expect("write to String");
+            }
+        }
     }
     let mark_rule = match routing_mark {
         Some(mark) => format!("    meta mark 0x{mark:x} accept\n"),
@@ -356,7 +368,13 @@ mod tests {
         ];
         let rs = build_nft_ruleset("t", 1, None, &bypass);
         assert!(rs.contains("ip daddr 1.2.3.4 accept"));
-        assert!(rs.contains("ip daddr 2001:db8::1 accept"));
+        // IPv6 bypass IPs must use `ip6 daddr` — `ip daddr <v6>` is a parse
+        // error that aborts the whole `nft -f -` load.
+        assert!(rs.contains("ip6 daddr 2001:db8::1 accept"));
+        assert!(
+            !rs.contains("ip daddr 2001:db8::1"),
+            "IPv6 address must not follow `ip daddr`:\n{rs}"
+        );
     }
 
     // ─── pf (macOS) ─────────────────────────────────────────────────────────
