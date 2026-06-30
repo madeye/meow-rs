@@ -10,6 +10,7 @@ use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
 use smallvec::smallvec;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tower::ServiceExt;
@@ -399,6 +400,49 @@ async fn get_traffic() {
     let json = body_json(resp).await;
     assert_eq!(json["up"], 0);
     assert_eq!(json["down"], 0);
+}
+
+#[tokio::test]
+async fn dns_results_returns_searchable_cache_entries() {
+    let state = test_state_default();
+    state.tunnel.resolver().preload_cache_with_source(
+        "dns.google",
+        &[
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 4, 4)),
+        ],
+        std::time::Duration::from_secs(300),
+        Some("8.8.8.8"),
+    );
+    state.tunnel.resolver().preload_cache_with_source(
+        "dns.alidns.com",
+        &[
+            IpAddr::V4(Ipv4Addr::new(223, 6, 6, 6)),
+            IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5)),
+        ],
+        std::time::Duration::from_secs(300),
+        Some("223.5.5.5"),
+    );
+
+    let app = create_router(state);
+    let resp = app
+        .oneshot(
+            Request::get("/dns/results?search=google&limit=10")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let entries = json.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "dns.google");
+    assert_eq!(entries[0]["ips"][0], "8.8.8.8");
+    assert_eq!(entries[0]["ips"][1], "8.8.4.4");
+    assert_eq!(entries[0]["from_server"], "8.8.8.8");
+    assert!(entries[0]["ttl"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test]

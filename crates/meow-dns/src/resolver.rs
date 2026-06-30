@@ -1,4 +1,4 @@
-use crate::cache::DnsCache;
+use crate::cache::{DnsCache, DnsCacheSnapshotEntry};
 use crate::client::DnsClient;
 use crate::fakeip::{Pool, Skipper};
 use crate::upstream::{HostOrIp, NameServerEntry, NameServerUrl};
@@ -289,11 +289,21 @@ async fn system_nameservers() -> Vec<SocketAddr> {
 #[derive(Debug, Clone, Copy)]
 struct LookupFailed;
 
-async fn query_pool(clients: &[Arc<DnsClient>], host: &str) -> Option<(Vec<IpAddr>, Duration)> {
+struct PoolLookupResult {
+    ips: Vec<IpAddr>,
+    ttl: Duration,
+    source: String,
+}
+
+async fn query_pool(clients: &[Arc<DnsClient>], host: &str) -> Option<PoolLookupResult> {
     match clients.len() {
         0 => None,
         1 => match clients[0].lookup_ip(host).await {
-            Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+            Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
+                ips,
+                ttl: clamp_ttl(ttl),
+                source: clients[0].upstream_label(),
+            }),
             _ => None,
         },
         2 => {
@@ -306,16 +316,32 @@ async fn query_pool(clients: &[Arc<DnsClient>], host: &str) -> Option<(Vec<IpAdd
             tokio::pin!(f2);
             tokio::select! {
                 r = &mut f1 => match r {
-                    Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+                    Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
+                        ips,
+                        ttl: clamp_ttl(ttl),
+                        source: clients[0].upstream_label(),
+                    }),
                     _ => match (&mut f2).await {
-                        Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+                        Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
+                            ips,
+                            ttl: clamp_ttl(ttl),
+                            source: clients[1].upstream_label(),
+                        }),
                         _ => None,
                     },
                 },
                 r = &mut f2 => match r {
-                    Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+                    Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
+                        ips,
+                        ttl: clamp_ttl(ttl),
+                        source: clients[1].upstream_label(),
+                    }),
                     _ => match (&mut f1).await {
-                        Ok((ips, ttl)) if !ips.is_empty() => Some((ips, clamp_ttl(ttl))),
+                        Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
+                            ips,
+                            ttl: clamp_ttl(ttl),
+                            source: clients[0].upstream_label(),
+                        }),
                         _ => None,
                     },
                 },
@@ -330,18 +356,23 @@ async fn query_pool(clients: &[Arc<DnsClient>], host: &str) -> Option<(Vec<IpAdd
             // an error String per failed attempt.
             let futs: Vec<_> = clients
                 .iter()
-                .map(|c| {
+                .enumerate()
+                .map(|(idx, c)| {
                     Box::pin(async move {
                         let (ips, ttl) = c.lookup_ip(host).await.map_err(|_| LookupFailed)?;
                         if ips.is_empty() {
                             return Err(LookupFailed);
                         }
-                        Ok((ips, clamp_ttl(ttl)))
+                        Ok((idx, ips, clamp_ttl(ttl)))
                     })
                 })
                 .collect();
             match futures::future::select_ok(futs).await {
-                Ok(((ips, ttl), _)) => Some((ips, ttl)),
+                Ok(((idx, ips, ttl), _)) => Some(PoolLookupResult {
+                    ips,
+                    ttl,
+                    source: clients[idx].upstream_label(),
+                }),
                 Err(_) => None,
             }
         }
@@ -590,8 +621,8 @@ impl Resolver {
             let mut map = HashMap::new();
             for host in &hostnames_needing_bootstrap {
                 match query_pool(&bootstrap_clients, host).await {
-                    Some((ips, _ttl)) if !ips.is_empty() => {
-                        map.insert(host.clone(), ips[0]);
+                    Some(result) if !result.ips.is_empty() => {
+                        map.insert(host.clone(), result.ips[0]);
                     }
                     _ => {
                         return Err(BootstrapError::CannotResolve {
@@ -856,28 +887,30 @@ impl Resolver {
         // Nameserver-policy lookup.
         if let Some(policy) = &self.policy {
             if let Some(entry) = policy.lookup(host) {
-                if let Some((ips, ttl)) = query_pool(&entry.nameservers, host).await {
+                if let Some(result) = query_pool(&entry.nameservers, host).await {
                     if let Some(ff) = &self.fallback_filter {
-                        if ff.ip_gated(&ips) {
+                        if ff.ip_gated(&result.ips) {
                             return self.try_fallback(host).await;
                         }
                     }
-                    self.cache.put(host, &ips, ttl);
-                    return Some(ips);
+                    self.cache
+                        .put_with_source(host, &result.ips, result.ttl, Some(&result.source));
+                    return Some(result.ips);
                 }
                 // Policy lookup failed: fall through to global nameservers.
             }
         }
 
         // Global nameservers (parallel, first-response wins).
-        if let Some((ips, ttl)) = query_pool(&self.main, host).await {
+        if let Some(result) = query_pool(&self.main, host).await {
             if let Some(ff) = &self.fallback_filter {
-                if ff.ip_gated(&ips) {
+                if ff.ip_gated(&result.ips) {
                     return self.try_fallback(host).await;
                 }
             }
-            self.cache.put(host, &ips, ttl);
-            return Some(ips);
+            self.cache
+                .put_with_source(host, &result.ips, result.ttl, Some(&result.source));
+            return Some(result.ips);
         }
 
         self.try_fallback(host).await
@@ -916,9 +949,10 @@ impl Resolver {
 
     async fn try_fallback(&self, host: &str) -> Option<Vec<IpAddr>> {
         let fallback = self.fallback.as_deref()?;
-        if let Some((ips, ttl)) = query_pool(fallback, host).await {
-            self.cache.put(host, &ips, ttl);
-            return Some(ips);
+        if let Some(result) = query_pool(fallback, host).await {
+            self.cache
+                .put_with_source(host, &result.ips, result.ttl, Some(&result.source));
+            return Some(result.ips);
         }
         None
     }
@@ -1017,6 +1051,28 @@ impl Resolver {
         self.cache.clear();
     }
 
+    pub fn dns_results(&self, search: Option<&str>, limit: usize) -> Vec<DnsCacheSnapshotEntry> {
+        let search = search
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_lowercase);
+        self.cache
+            .snapshot()
+            .into_iter()
+            .filter(|entry| {
+                search.as_ref().is_none_or(|needle| {
+                    entry.name.to_ascii_lowercase().contains(needle)
+                        || entry.ips.iter().any(|ip| ip.to_string().contains(needle))
+                        || entry
+                            .source
+                            .as_ref()
+                            .is_some_and(|source| source.to_ascii_lowercase().contains(needle))
+                })
+            })
+            .take(limit)
+            .collect()
+    }
+
     /// Seed the positive-resolution cache directly with a known mapping.
     ///
     /// Production lookups populate the cache from upstream queries; this is for
@@ -1024,6 +1080,18 @@ impl Resolver {
     /// the bound used by ordinary cached entries via `ttl`.
     pub fn preload_cache(&self, host: &str, ips: &[IpAddr], ttl: std::time::Duration) {
         self.cache.put(host, ips, ttl);
+    }
+
+    /// Seed the positive-resolution cache with a source label for API tests
+    /// and callers that already know the upstream answer source.
+    pub fn preload_cache_with_source(
+        &self,
+        host: &str,
+        ips: &[IpAddr],
+        ttl: std::time::Duration,
+        source: Option<&str>,
+    ) {
+        self.cache.put_with_source(host, ips, ttl, source);
     }
 }
 
