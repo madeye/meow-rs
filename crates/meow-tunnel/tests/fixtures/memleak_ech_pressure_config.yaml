@@ -69,11 +69,6 @@ geox-url:
   mmdb: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/country-lite.mmdb"
   asn: "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb"
 
-geodata:
-  mmdb-path: /Users/mlv/.config/meow/Country.mmdb
-  asn-path: /Users/mlv/.config/meow/GeoLite2-ASN.mmdb
-  geosite-path: /Users/mlv/.config/meow/geosite.dat
-
 find-process-mode: strict
 global-client-fingerprint: chrome
 
