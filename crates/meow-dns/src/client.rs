@@ -107,6 +107,7 @@ pub struct DnsClient {
     transport: Transport,
     timeout: Duration,
     proxy: Option<DnsProxy>,
+    label: Option<Arc<str>>,
 }
 
 enum Transport {
@@ -141,6 +142,7 @@ impl DnsClient {
             transport: Transport::Udp { addr },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            label: None,
         }
     }
 
@@ -150,6 +152,7 @@ impl DnsClient {
             transport: Transport::Tcp { addr },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            label: None,
         }
     }
 
@@ -159,6 +162,7 @@ impl DnsClient {
             transport: Transport::RCode { code },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            label: None,
         }
     }
 
@@ -173,6 +177,7 @@ impl DnsClient {
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            label: None,
         }
     }
 
@@ -188,6 +193,7 @@ impl DnsClient {
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
+            label: None,
         }
     }
 
@@ -210,29 +216,47 @@ impl DnsClient {
         self
     }
 
+    /// Override the API/UI label used to report this upstream in DNS results.
+    pub fn with_upstream_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(Arc::from(label.into()));
+        self
+    }
+
     /// Human-readable upstream identifier for API/UI surfaces.
     pub fn upstream_label(&self) -> String {
-        let mut label = match &self.transport {
-            Transport::Udp { addr } | Transport::Tcp { addr } => socket_label(*addr, 53),
-            Transport::RCode { code } => format!("rcode:{code:?}"),
-            #[cfg(feature = "encrypted")]
-            Transport::Dot { addr, sni, .. } => {
-                if sni.is_empty() {
-                    socket_label(*addr, 853)
-                } else {
-                    sni.to_string()
+        let mut label = if let Some(label) = &self.label {
+            label.to_string()
+        } else {
+            match &self.transport {
+                Transport::Udp { addr } | Transport::Tcp { addr } => socket_label(*addr, 53),
+                Transport::RCode { code } => format!("rcode:{code:?}"),
+                #[cfg(feature = "encrypted")]
+                Transport::Dot { addr, sni, .. } => {
+                    if sni.is_empty() {
+                        format!("tls://{}", socket_label(*addr, 853))
+                    } else if addr.port() == 853 {
+                        format!("tls://{sni}")
+                    } else {
+                        format!("tls://{sni}:{}", addr.port())
+                    }
                 }
-            }
-            #[cfg(feature = "encrypted")]
-            Transport::Doh {
-                addr, sni, path, ..
-            } => {
-                if sni.is_empty() {
-                    socket_label(*addr, 443)
-                } else if path.as_ref() == "/dns-query" {
-                    sni.to_string()
-                } else {
-                    format!("{sni}{path}")
+                #[cfg(feature = "encrypted")]
+                Transport::Doh {
+                    addr, sni, path, ..
+                } => {
+                    if sni.is_empty() {
+                        format!("https://{}", socket_label(*addr, 443))
+                    } else if path.as_ref() == "/dns-query" {
+                        if addr.port() == 443 {
+                            format!("https://{sni}")
+                        } else {
+                            format!("https://{sni}:{}", addr.port())
+                        }
+                    } else if addr.port() == 443 {
+                        format!("https://{sni}{path}")
+                    } else {
+                        format!("https://{sni}:{}{path}", addr.port())
+                    }
                 }
             }
         };
@@ -574,5 +598,26 @@ mod tests {
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
         assert!(resp.answers.is_empty());
         assert_eq!(resp.queries.len(), 1);
+    }
+
+    #[cfg(feature = "encrypted")]
+    #[test]
+    fn encrypted_upstream_labels_include_scheme() {
+        let dot = DnsClient::dot("8.8.8.8:853".parse().unwrap(), "dns.google");
+        assert_eq!(dot.upstream_label(), "tls://dns.google");
+
+        let doh = DnsClient::doh(
+            "1.1.1.1:443".parse().unwrap(),
+            "cloudflare-dns.com",
+            "/dns-query",
+        );
+        assert_eq!(doh.upstream_label(), "https://cloudflare-dns.com");
+    }
+
+    #[test]
+    fn explicit_upstream_label_overrides_default_label() {
+        let client = DnsClient::udp("8.8.8.8:53".parse().unwrap())
+            .with_upstream_label("tls://dns.google:853");
+        assert_eq!(client.upstream_label(), "tls://dns.google:853");
     }
 }
