@@ -295,6 +295,45 @@ struct PoolLookupResult {
     source: String,
 }
 
+fn encrypted_upstream_label(url: &NameServerUrl) -> Option<String> {
+    match url {
+        NameServerUrl::Tls { addr, port, sni } => {
+            let mut label = format!("tls://{}", authority_label(addr, *port, 853));
+            if sni != &addr.to_string() {
+                label.push('#');
+                label.push_str(sni);
+            }
+            Some(label)
+        }
+        NameServerUrl::Https {
+            addr,
+            port,
+            path,
+            sni,
+        } => {
+            let mut label = format!("https://{}{}", authority_label(addr, *port, 443), path);
+            if sni != &addr.to_string() {
+                label.push('#');
+                label.push_str(sni);
+            }
+            Some(label)
+        }
+        _ => None,
+    }
+}
+
+fn authority_label(addr: &HostOrIp, port: u16, default_port: u16) -> String {
+    let host = match addr {
+        HostOrIp::Ip(IpAddr::V6(ip)) => format!("[{ip}]"),
+        _ => addr.to_string(),
+    };
+    if port == default_port {
+        host
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 async fn query_pool(clients: &[Arc<DnsClient>], host: &str) -> Option<PoolLookupResult> {
     match clients.len() {
         0 => None,
@@ -706,6 +745,7 @@ impl Resolver {
                 return Arc::new(client);
             }
         };
+        let label = encrypted_upstream_label(url);
         let client = match url {
             NameServerUrl::Udp { .. } => DnsClient::udp(socket_addr),
             NameServerUrl::Tcp { .. } => DnsClient::tcp(socket_addr),
@@ -740,6 +780,10 @@ impl Resolver {
             NameServerUrl::RCode { .. } => {
                 unreachable!("rcode nameservers return before socket client construction")
             }
+        };
+        let client = match label {
+            Some(label) => client.with_upstream_label(label),
+            None => client,
         };
         let client = match proxy {
             Some(p) => client.with_proxy(p),
@@ -1099,6 +1143,43 @@ impl Resolver {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn build_single_resolver_preserves_configured_dot_label() {
+        let url = NameServerUrl::parse("tls://dns.google:853").unwrap();
+        let mut resolved = HashMap::new();
+        resolved.insert(
+            "dns.google".to_string(),
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        );
+
+        let client = Resolver::build_single_resolver(&url, &resolved);
+
+        assert_eq!(client.upstream_label(), "tls://dns.google");
+    }
+
+    #[test]
+    fn build_single_resolver_preserves_configured_dot_sni_label() {
+        let url = NameServerUrl::parse("tls://8.8.8.8:853#dns.google").unwrap();
+        let resolved = HashMap::new();
+
+        let client = Resolver::build_single_resolver(&url, &resolved);
+
+        assert_eq!(client.upstream_label(), "tls://8.8.8.8#dns.google");
+    }
+
+    #[test]
+    fn build_single_resolver_preserves_configured_doh_label() {
+        let url = NameServerUrl::parse("https://1.1.1.1/dns-query#cloudflare-dns.com").unwrap();
+        let resolved = HashMap::new();
+
+        let client = Resolver::build_single_resolver(&url, &resolved);
+
+        assert_eq!(
+            client.upstream_label(),
+            "https://1.1.1.1/dns-query#cloudflare-dns.com"
+        );
+    }
 
     #[tokio::test]
     async fn resolve_ip_uses_hosts_file() {
