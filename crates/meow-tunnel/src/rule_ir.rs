@@ -84,7 +84,10 @@ enum RuleOp {
     DomainKeyword(String),
     DomainRegex(Box<RegexMatcher>),
     DomainWildcard(Box<WildcardMatcher>),
-    IpCidr { net: IpNet, src: bool },
+    IpCidr {
+        net: IpNet,
+        src: bool,
+    },
     SrcPort(PortMatcher),
     DstPort(PortMatcher),
     InPort(PortMatcher),
@@ -97,6 +100,11 @@ enum RuleOp {
     InType(InTypeMask),
     InUser(String),
     Match,
+    /// A DOMAIN / DOMAIN-SUFFIX predicate fully owned by the domain index:
+    /// the trie's min-index search proves whether it matches, so scans skip
+    /// the slot without evaluating anything. The slot itself stays alive as
+    /// the match-result carrier for trie hits.
+    TrieOwned,
     Fallback,
 }
 
@@ -220,10 +228,22 @@ impl CompiledRuleSet {
         }
 
         let execution_plan = select_execution_plan(slots.len());
-        let domain_index = match execution_plan {
-            ExecutionPlan::LinearScan => DomainIndex::empty(),
-            ExecutionPlan::DomainIndexed => DomainIndex::build(rules),
-        };
+        let mut domain_index = DomainIndex::empty();
+        if execution_plan == ExecutionPlan::DomainIndexed {
+            // Build the index from live slots only, and hand fully-indexed
+            // patterns over to the trie: an owned slot is never evaluated
+            // during scans, because min-index search semantics guarantee a
+            // trie hit at T proves no owned slot before T matches, and a
+            // trie miss proves no owned slot matches at all.
+            for slot in &mut slots {
+                let owned = matches!(slot.op, RuleOp::Domain(_) | RuleOp::DomainSuffix(_))
+                    && domain_index.insert_rule(slot.rule_index, slot.rule_type, &slot.payload);
+                if owned {
+                    slot.op = RuleOp::TrieOwned;
+                }
+            }
+            domain_index.seal();
+        }
 
         Self {
             slots,
@@ -342,6 +362,9 @@ impl CompiledRuleSet {
     ) -> Option<CompiledMatchResult<'a>> {
         for slot in &self.slots[range] {
             match &slot.op {
+                // Owned by the domain index: the trie already proved this
+                // slot does not match anywhere a scan range is consulted.
+                RuleOp::TrieOwned => {}
                 RuleOp::Fallback => {
                     let rule = rules.get(slot.rule_index)?.as_ref();
                     match slot.target_plan {
@@ -560,7 +583,7 @@ fn matches_op(op: &RuleOp, input: &MatchInput<'_>) -> bool {
         RuleOp::InType(mask) => in_type_matches(*mask, input.metadata.conn_type),
         RuleOp::InUser(user) => input.metadata.in_user.as_deref() == Some(user.as_str()),
         RuleOp::Match => true,
-        RuleOp::Fallback => false,
+        RuleOp::TrieOwned | RuleOp::Fallback => false,
     }
 }
 
@@ -947,6 +970,232 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    /// Naive first-match-wins reference: the semantics every compilation
+    /// pass must preserve.
+    fn naive_match<'a>(
+        metadata: &Metadata,
+        rules: &'a [Box<dyn Rule>],
+    ) -> Option<(&'a str, RuleType, &'a str)> {
+        let helper = RuleMatchHelper;
+        rules.iter().find_map(|rule| {
+            rule.match_and_resolve(metadata, &helper)
+                .map(|adapter| (adapter, rule.rule_type(), rule.payload()))
+        })
+    }
+
+    fn filler_suffix_rules(count: usize) -> Vec<Box<dyn Rule>> {
+        (0..count)
+            .map(|i| {
+                Box::new(DomainSuffixRule::new(
+                    &format!("s{i}.example"),
+                    &format!("P{i}"),
+                )) as Box<dyn Rule>
+            })
+            .collect()
+    }
+
+    #[test]
+    fn indexed_plan_owns_domain_slots_and_matches_suffix_apex() {
+        let mut rules = filler_suffix_rules(70);
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+        assert!(
+            set.slots()
+                .iter()
+                .filter(|s| s.rule_type() == RuleType::DomainSuffix)
+                .all(CompiledRuleSlot::is_lowered),
+            "suffix slots must be trie-owned, not fallback",
+        );
+
+        for (host, expected) in [
+            ("s7.example", "P7"),   // apex self-match must hit via trie
+            ("x.s7.example", "P7"), // subdomain
+            ("a.b.s42.example", "P42"),
+            ("unrelated.test", "DIRECT"),
+        ] {
+            let meta = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host}");
+        }
+    }
+
+    #[test]
+    fn indexed_plan_min_index_beats_more_specific_pattern() {
+        let mut rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainSuffixRule::new("example.com", "Broad")),
+            Box::new(DomainRule::new("sub.example.com", "Specific")),
+        ];
+        rules.extend(filler_suffix_rules(65));
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+
+        let meta = Metadata {
+            host: "sub.example.com".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&meta, &rules).expect("must match");
+        assert_eq!(
+            result.adapter_name, "Broad",
+            "min-index trie semantics: earliest matching domain rule wins",
+        );
+    }
+
+    #[test]
+    fn indexed_plan_earlier_non_domain_rule_beats_trie_hit() {
+        let mut rules: Vec<Box<dyn Rule>> =
+            vec![Box::new(PortRule::new("443", "PortFirst", false).unwrap())];
+        rules.extend(filler_suffix_rules(70));
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+
+        let hit_443 = Metadata {
+            host: "s9.example".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&hit_443, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "PortFirst");
+
+        let hit_80 = Metadata {
+            host: "s9.example".into(),
+            dst_port: 80,
+            ..Default::default()
+        };
+        let result = set.match_rules(&hit_80, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "P9");
+    }
+
+    #[test]
+    fn indexed_plan_unindexable_domain_payload_stays_on_scan_path() {
+        // Non-ASCII payload: the trie's Unicode lowercasing diverges from
+        // the op's ASCII-insensitive compare, so the pattern must not be
+        // trie-owned — it stays a scanned slot and still matches literally.
+        let mut rules = filler_suffix_rules(70);
+        rules.push(Box::new(DomainRule::new("bücher.com", "Umlaut")));
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+
+        let meta = Metadata {
+            host: "bücher.com".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&meta, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "Umlaut");
+    }
+
+    #[test]
+    fn randomized_configs_match_naive_first_match_reference() {
+        // Deterministic LCG so failures reproduce; no external deps.
+        struct Lcg(u64);
+        impl Lcg {
+            fn next(&mut self) -> u64 {
+                self.0 = self
+                    .0
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                self.0 >> 33
+            }
+            fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+                items[(self.next() as usize) % items.len()]
+            }
+        }
+
+        let names = ["alpha", "beta", "gamma", "delta", "epsilon"];
+        let tlds = ["com", "net", "org"];
+        let subs = ["www", "api", "cdn"];
+        let adapters = ["A", "B", "C", "DIRECT"];
+        let ports = ["80", "443", "8080", "1000-2000"];
+
+        let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
+
+        for &size in &[1usize, 3, 30, 63, 64, 65, 80, 150] {
+            let mut rules: Vec<Box<dyn Rule>> = Vec::with_capacity(size + 1);
+            for _ in 0..size {
+                let host = format!("{}.{}", rng.pick(&names), rng.pick(&tlds));
+                let adapter = rng.pick(&adapters);
+                let rule: Box<dyn Rule> = match rng.next() % 7 {
+                    0 => Box::new(DomainRule::new(&host, adapter)),
+                    1 => Box::new(DomainRule::new(
+                        &format!("{}.{host}", rng.pick(&subs)),
+                        adapter,
+                    )),
+                    2 | 3 => Box::new(DomainSuffixRule::new(&host, adapter)),
+                    4 => Box::new(DomainKeywordRule::new(rng.pick(&names), adapter)),
+                    5 => Box::new(PortRule::new(rng.pick(&ports), adapter, false).unwrap()),
+                    _ => Box::new(
+                        IpCidrRule::new(
+                            &format!("10.{}.0.0/16", rng.next() % 4),
+                            adapter,
+                            false,
+                            true,
+                        )
+                        .unwrap(),
+                    ),
+                };
+                rules.push(rule);
+                // Occasionally drop in an early FINAL to exercise dead-rule
+                // elimination against the reference.
+                if rng.next().is_multiple_of(23) {
+                    rules.push(Box::new(FinalRule::new("EARLY-FINAL")));
+                }
+            }
+            rules.push(Box::new(FinalRule::new("DIRECT")));
+
+            let set = CompiledRuleSet::build(&rules);
+
+            for _ in 0..60 {
+                let host = match rng.next() % 4 {
+                    0 => format!("{}.{}", rng.pick(&names), rng.pick(&tlds)),
+                    1 => format!(
+                        "{}.{}.{}",
+                        rng.pick(&subs),
+                        rng.pick(&names),
+                        rng.pick(&tlds)
+                    ),
+                    2 => format!("x.y.{}.{}", rng.pick(&names), rng.pick(&tlds)),
+                    _ => "unmatched.invalid".to_string(),
+                };
+                let metadata = Metadata {
+                    host: host.into(),
+                    dst_port: rng.pick(&[80u16, 443, 8080, 1500, 9999]),
+                    dst_ip: match rng.next() % 3 {
+                        0 => None,
+                        _ => Some(
+                            format!("10.{}.{}.{}", rng.next() % 4, rng.next() % 256, 1)
+                                .parse::<IpAddr>()
+                                .unwrap(),
+                        ),
+                    },
+                    ..Default::default()
+                };
+
+                let expected = naive_match(&metadata, &rules);
+                let actual = set
+                    .match_rules(&metadata, &rules)
+                    .map(|m| (m.adapter_name, m.rule_type, m.rule_payload));
+                assert_eq!(
+                    actual, expected,
+                    "size={size} host={} port={} ip={:?}",
+                    metadata.host, metadata.dst_port, metadata.dst_ip,
+                );
+            }
+        }
+    }
 
     #[test]
     fn dead_rules_after_final_are_eliminated() {
