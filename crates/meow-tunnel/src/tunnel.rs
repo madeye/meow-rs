@@ -242,10 +242,14 @@ impl Tunnel {
     }
 
     pub fn update_rules(&self, rules: Vec<Box<dyn Rule>>) {
-        let needs_ip = rules.iter().any(|r| r.should_resolve_ip());
-        let needs_proc = rules.iter().any(|r| r.should_find_process());
         let new_index = DomainIndex::build(&rules);
         let compiled_rules = CompiledRuleSet::build(&rules);
+        // Take the enrichment flags from the compiled plan rather than the
+        // raw rule list: rules pruned by the IR clean-up passes (dead after
+        // MATCH, provable never-match) must not force per-connection DNS
+        // pre-resolution or process lookup.
+        let needs_ip = compiled_rules.needs_ip_resolution();
+        let needs_proc = compiled_rules.needs_process_lookup();
         // Build a new route table on top of the current proxies map. The
         // current proxies are cloned (Arc bumps for adapter handles, one
         // HashMap clone) — paid only on config-reload, not the hot path.

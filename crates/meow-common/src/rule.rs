@@ -129,6 +129,15 @@ pub trait Rule: Send + Sync {
         false
     }
 
+    /// True iff this rule can be proven at build time to never match any
+    /// metadata (e.g. a GEOSITE rule whose database was never loaded). The
+    /// answer must be constant for the lifetime of the rule object: the rule
+    /// IR compiler prunes such rules from its scan plan entirely, so a rule
+    /// whose matchability can change at runtime must return `false`.
+    fn never_matches(&self) -> bool {
+        false
+    }
+
     /// Match against metadata and, on match, return the routing target.
     ///
     /// Default: `Some(self.adapter())` when `match_metadata`
