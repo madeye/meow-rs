@@ -460,7 +460,7 @@ impl CompiledRuleSet {
         let helper = RuleMatchHelper;
         let input = MatchInput::new(metadata);
         if self.execution_plan == ExecutionPlan::LinearScan {
-            return match self.scan_range_ctl(0..self.slots.len(), &input, rules, &helper, true) {
+            return match self.scan_range_ctl::<true>(0..self.slots.len(), &input, rules, &helper) {
                 ScanOutcome::Matched(matched) => LazyMatchOutcome::Matched(matched),
                 ScanOutcome::Blocked { pos } => self.enrichment_needs(pos, &input),
                 ScanOutcome::Exhausted => LazyMatchOutcome::NoMatch,
@@ -484,7 +484,7 @@ impl CompiledRuleSet {
             None => (self.slots.len(), None),
         };
 
-        match self.scan_range_ctl(0..scan_end, &input, rules, &helper, true) {
+        match self.scan_range_ctl::<true>(0..scan_end, &input, rules, &helper) {
             ScanOutcome::Matched(matched) => return LazyMatchOutcome::Matched(matched),
             // A blocked slot before the trie hit may match and beat it, so
             // enrichment is needed even though a domain rule stands ready.
@@ -496,7 +496,7 @@ impl CompiledRuleSet {
             return LazyMatchOutcome::Matched(self.static_match(slot));
         }
 
-        match self.scan_range_ctl(scan_end..self.slots.len(), &input, rules, &helper, true) {
+        match self.scan_range_ctl::<true>(scan_end..self.slots.len(), &input, rules, &helper) {
             ScanOutcome::Matched(matched) => LazyMatchOutcome::Matched(matched),
             ScanOutcome::Blocked { pos } => self.enrichment_needs(pos, &input),
             ScanOutcome::Exhausted => LazyMatchOutcome::NoMatch,
@@ -568,23 +568,26 @@ impl CompiledRuleSet {
         rules: &'a [Box<dyn Rule>],
         helper: &RuleMatchHelper,
     ) -> Option<CompiledMatchResult<'a>> {
-        match self.scan_range_ctl(range, input, rules, helper, false) {
+        match self.scan_range_ctl::<false>(range, input, rules, helper) {
             ScanOutcome::Matched(matched) => Some(matched),
             ScanOutcome::Blocked { .. } | ScanOutcome::Exhausted => None,
         }
     }
 
-    fn scan_range_ctl<'a>(
+    /// `STOP_ON_DEMAND` is a const generic so the strict scan monomorphizes
+    /// to the original tight loop — no per-slot demand branch, no position
+    /// bookkeeping (measured: the runtime-bool version cost ~2.5x on a 10k
+    /// wildcard-rule miss scan).
+    fn scan_range_ctl<'a, const STOP_ON_DEMAND: bool>(
         &'a self,
         range: Range<usize>,
         input: &MatchInput<'_>,
         rules: &'a [Box<dyn Rule>],
         helper: &RuleMatchHelper,
-        stop_on_demand: bool,
     ) -> ScanOutcome<'a> {
         let start = range.start;
         for (offset, slot) in self.slots[range].iter().enumerate() {
-            if stop_on_demand && slot_blocked(slot, input) {
+            if STOP_ON_DEMAND && slot_blocked(slot, input) {
                 return ScanOutcome::Blocked {
                     pos: start + offset,
                 };
@@ -871,7 +874,14 @@ fn ip_ranges_contain(v4: &IpRange<Ipv4Net>, v6: &IpRange<Ipv6Net>, ip: Option<Ip
     }
 }
 
-fn matches_op(op: &RuleOp, input: &MatchInput<'_>, helper: &RuleMatchHelper) -> bool {
+/// Evaluate the state-carrying native ops (and logic trees, which recurse
+/// back into `matches_op`). Deliberately `#[inline(never)]`: these arms are
+/// fat (hash lookups, virtual calls, recursion), and folding them into
+/// `matches_op` pushed it past the inline threshold — the scan loop then
+/// paid an outlined call per slot even for one-comparison ops, measured as
+/// a 2.3x slowdown on a 10k-rule wildcard miss scan.
+#[inline(never)]
+fn matches_native_op(op: &RuleOp, input: &MatchInput<'_>, helper: &RuleMatchHelper) -> bool {
     match op {
         RuleOp::GeoSite(geosite) => {
             !input.host.is_empty()
@@ -900,6 +910,26 @@ fn matches_op(op: &RuleOp, input: &MatchInput<'_>, helper: &RuleMatchHelper) -> 
         RuleOp::AllOf(children) => children.iter().all(|op| matches_op(op, input, helper)),
         RuleOp::AnyOf(children) => children.iter().any(|op| matches_op(op, input, helper)),
         RuleOp::NotOp(child) => !matches_op(child, input, helper),
+        other => matches_op(other, input, helper),
+    }
+}
+
+/// `#[inline(always)]`: the workspace ships at `opt-level = "z"`, whose
+/// inline threshold rejects this function once it has a full opcode match —
+/// leaving the scan loop paying an outlined call per slot even for
+/// one-comparison predicates (measured 2.3x on a 10k wildcard-rule scan).
+/// The body is deliberately kept slim by routing every fat arm through
+/// `matches_native_op`.
+#[inline(always)]
+fn matches_op(op: &RuleOp, input: &MatchInput<'_>, helper: &RuleMatchHelper) -> bool {
+    match op {
+        RuleOp::GeoSite(_)
+        | RuleOp::RuleSetRef(_)
+        | RuleOp::IpRanges { .. }
+        | RuleOp::IpSuffix(_)
+        | RuleOp::AllOf(_)
+        | RuleOp::AnyOf(_)
+        | RuleOp::NotOp(_) => matches_native_op(op, input, helper),
         RuleOp::Domain(domain) => input.host.eq_ignore_ascii_case(domain),
         RuleOp::DomainSuffix(suffix) => domain_suffix_matches(input.host, suffix),
         RuleOp::DomainKeyword(keyword) => domain_keyword_matches(input.host, keyword),
@@ -991,6 +1021,7 @@ enum WildcardMatcher {
 }
 
 impl WildcardMatcher {
+    #[inline(always)]
     fn matches(&self, host: &str) -> bool {
         match self {
             Self::Glob(glob) => glob.matches(host),
@@ -1035,6 +1066,7 @@ impl GlobMatcher {
         Some(Self { pieces })
     }
 
+    #[inline(always)]
     fn matches(&self, host: &str) -> bool {
         let host = host.as_bytes();
         let pieces = &self.pieces;
