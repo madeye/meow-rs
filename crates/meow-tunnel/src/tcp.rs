@@ -58,11 +58,10 @@ pub async fn handle_tcp(
     // snooping-cache hostname fill-in).
     tunnel.pre_handle_metadata(&mut metadata);
 
-    // Pre-resolve metadata (host -> real IP if rules need it)
-    tunnel.pre_resolve(&mut metadata).await;
-
-    // Match rules to find the right proxy
-    let Some((proxy, rule_name, rule_payload)) = tunnel.resolve_proxy(&metadata) else {
+    // Match rules with lazy enrichment: DNS pre-resolution and process
+    // lookup run only if the scan reaches a rule that demands them.
+    let Some((proxy, rule_name, rule_payload)) = tunnel.resolve_proxy_lazy(&mut metadata).await
+    else {
         warn!("no matching rule for {}", metadata.remote_address());
         return;
     };

@@ -1,5 +1,5 @@
 use crate::match_engine::{self, DomainIndex};
-use crate::rule_ir::CompiledRuleSet;
+use crate::rule_ir::{CompiledMatchResult, CompiledRuleSet, LazyMatchOutcome};
 use crate::statistics::Statistics;
 use crate::udp::{self, NatTable};
 use arc_swap::ArcSwap;
@@ -166,42 +166,112 @@ impl TunnelInner {
                 let result = route
                     .compiled_rules
                     .match_rules(match_metadata, route.rules.as_ref());
-                match result {
-                    Some(m) => {
-                        let action = if m.adapter_name == "DIRECT" {
-                            "DIRECT"
-                        } else if m.adapter_name.starts_with("REJECT") {
-                            "REJECT"
-                        } else {
-                            "PROXY"
-                        };
-                        self.stats
-                            .rule_match
-                            .increment(m.rule_type.as_str(), action);
-                        let proxy = route.proxies.get(m.adapter_name).cloned().map_or_else(
-                            || {
-                                debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
-                                Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>
-                            },
-                            |p| p as Arc<dyn ProxyAdapter>,
-                        );
-                        // `rule_type.as_str()` is a `&'static str` — wrap it
-                        // inline without heap.
-                        Some((
-                            proxy,
-                            SmolStr::new_static(m.rule_type.as_str()),
-                            SmolStr::from(m.rule_payload),
-                        ))
-                    }
-                    None => {
-                        // No rule matched, use DIRECT
-                        Some((
-                            Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
-                            SmolStr::new_static("Final"),
-                            SmolStr::default(),
-                        ))
+                Some(self.materialize_rule_match(&route, result))
+            }
+        }
+    }
+
+    /// Rule-mode variant of [`Self::resolve_proxy`] with **lazy metadata
+    /// enrichment**: DNS pre-resolution and process lookup are performed
+    /// only when the rule scan actually reaches a slot that demands them —
+    /// a connection matched by an earlier rule (typically a domain rule)
+    /// pays for neither. Replaces the `pre_resolve` + `resolve_proxy` pair
+    /// on TCP paths; may populate `metadata.dst_ip` exactly like
+    /// `pre_resolve` did.
+    ///
+    /// UDP paths must keep calling `pre_resolve`: their NAT session key
+    /// requires a resolved `dst_ip` regardless of what the rules demand.
+    pub async fn resolve_proxy_lazy(
+        &self,
+        metadata: &mut Metadata,
+    ) -> Option<(Arc<dyn ProxyAdapter>, SmolStr, SmolStr)> {
+        let mode = *self.mode.read();
+        if mode != TunnelMode::Rule {
+            return self.resolve_proxy(metadata);
+        }
+
+        // `load_full` (refcount bump) instead of `load`: the enrichment arm
+        // holds the snapshot across an `.await`.
+        let route = self.route.load_full();
+        match route
+            .compiled_rules
+            .match_rules_lazy(metadata, route.rules.as_ref())
+        {
+            LazyMatchOutcome::Matched(m) => Some(self.materialize_rule_match(&route, Some(m))),
+            LazyMatchOutcome::NoMatch => Some(self.materialize_rule_match(&route, None)),
+            LazyMatchOutcome::NeedsEnrichment {
+                needs_ip,
+                needs_process,
+            } => {
+                // Process enrichment matches `resolve_proxy`: the enriched
+                // copy is used for matching only, so tracked connection
+                // metadata stays byte-identical to the eager path.
+                let mut enriched = if needs_process {
+                    match_engine::maybe_enrich_with_process(metadata)
+                } else {
+                    None
+                };
+                if needs_ip {
+                    // `needs_ip` already encodes the `pre_resolve` guards:
+                    // host present, dst_ip absent.
+                    if let Some(real_ip) = self.resolver.resolve_ip_real(&metadata.host).await {
+                        debug!("lazy resolve: {} -> {}", metadata.host, real_ip);
+                        metadata.dst_ip = Some(real_ip);
                     }
                 }
+                if let (Some(enriched), Some(ip)) = (enriched.as_mut(), metadata.dst_ip) {
+                    enriched.dst_ip = Some(ip);
+                }
+                let match_metadata = enriched.as_ref().unwrap_or(metadata);
+                let result = route
+                    .compiled_rules
+                    .match_rules(match_metadata, route.rules.as_ref());
+                Some(self.materialize_rule_match(&route, result))
+            }
+        }
+    }
+
+    /// Map a rule-match result to the public `(proxy, rule name, payload)`
+    /// tuple, recording match statistics; `None` falls through to DIRECT.
+    fn materialize_rule_match(
+        &self,
+        route: &RouteTable,
+        result: Option<CompiledMatchResult<'_>>,
+    ) -> (Arc<dyn ProxyAdapter>, SmolStr, SmolStr) {
+        match result {
+            Some(m) => {
+                let action = if m.adapter_name == "DIRECT" {
+                    "DIRECT"
+                } else if m.adapter_name.starts_with("REJECT") {
+                    "REJECT"
+                } else {
+                    "PROXY"
+                };
+                self.stats
+                    .rule_match
+                    .increment(m.rule_type.as_str(), action);
+                let proxy = route.proxies.get(m.adapter_name).cloned().map_or_else(
+                    || {
+                        debug!("proxy '{}' not found, using DIRECT", m.adapter_name);
+                        Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>
+                    },
+                    |p| p as Arc<dyn ProxyAdapter>,
+                );
+                // `rule_type.as_str()` is a `&'static str` — wrap it
+                // inline without heap.
+                (
+                    proxy,
+                    SmolStr::new_static(m.rule_type.as_str()),
+                    SmolStr::from(m.rule_payload),
+                )
+            }
+            None => {
+                // No rule matched, use DIRECT
+                (
+                    Arc::clone(&self.direct) as Arc<dyn ProxyAdapter>,
+                    SmolStr::new_static("Final"),
+                    SmolStr::default(),
+                )
             }
         }
     }

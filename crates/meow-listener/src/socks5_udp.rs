@@ -127,6 +127,9 @@ async fn handle_client_datagram(
 
     let inner = tunnel.inner();
     inner.pre_handle_metadata(&mut metadata);
+    // UDP keeps the eager pre_resolve (no lazy enrichment): the relay needs
+    // a resolved dst_ip for its session bookkeeping regardless of what the
+    // rules demand.
     inner.pre_resolve(&mut metadata).await;
 
     let Some(dst_ip) = metadata.dst_ip else {

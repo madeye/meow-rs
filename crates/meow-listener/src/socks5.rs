@@ -203,16 +203,18 @@ async fn handle_socks5_inner(
     let inner = tunnel.inner();
 
     // Fake-IP → host rewrite (no-op outside fake-IP mode aside from the
-    // snooping-cache hostname fill-in), then resolve host → real IP for any
-    // IP-based rules. Without this, a fake-IP TCP flow reaches `resolve_proxy`
-    // still carrying the 28.x/198.18.x placeholder, matches no DOMAIN/GEOSITE/
-    // GEOIP rule, and falls through to MATCH()/final — so domain rules are
-    // silently bypassed for TCP under fake-IP. Mirrors `handle_tcp`
-    // (meow-tunnel/src/tcp.rs) and the UDP ASSOCIATE path (socks5_udp.rs).
+    // snooping-cache hostname fill-in). Without this, a fake-IP TCP flow
+    // reaches rule matching still carrying the 28.x/198.18.x placeholder,
+    // matches no DOMAIN/GEOSITE/GEOIP rule, and falls through to
+    // MATCH()/final — so domain rules are silently bypassed for TCP under
+    // fake-IP. Mirrors `handle_tcp` (meow-tunnel/src/tcp.rs) and the UDP
+    // ASSOCIATE path (socks5_udp.rs).
     inner.pre_handle_metadata(&mut metadata);
-    inner.pre_resolve(&mut metadata).await;
 
-    let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
+    // Match rules with lazy enrichment: host → real-IP resolution happens
+    // inside only if the scan reaches an IP-based rule that demands it.
+    let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy_lazy(&mut metadata).await
+    else {
         return Err("no matching rule".into());
     };
 
