@@ -56,6 +56,14 @@ pub struct CompiledRuleSlot {
     adapter_index: usize,
     payload: SmolStr,
     target_plan: TargetPlan,
+    /// This predicate reads `metadata.dst_ip` resolved from the hostname
+    /// (the rule's `should_resolve_ip()`), so a lazy scan must stop here
+    /// when `dst_ip` is missing but resolvable.
+    demands_ip: bool,
+    /// This predicate reads process metadata (the rule's
+    /// `should_find_process()`); a lazy scan must stop here when process
+    /// info is missing but discoverable.
+    demands_process: bool,
     op: RuleOp,
 }
 
@@ -148,6 +156,49 @@ struct MatchInput<'a> {
     host: &'a str,
 }
 
+/// Control-flow result of one scan pass over a slot range.
+enum ScanOutcome<'a> {
+    Matched(CompiledMatchResult<'a>),
+    /// Slot at `pos` demands metadata the input does not carry yet
+    /// (demand-stop scans only).
+    Blocked {
+        pos: usize,
+    },
+    Exhausted,
+}
+
+/// Result of a demand-driven (lazy) match attempt.
+pub enum LazyMatchOutcome<'a> {
+    /// A rule matched before any slot demanded missing metadata.
+    Matched(CompiledMatchResult<'a>),
+    /// The scan reached a slot whose predicate needs metadata not yet
+    /// materialized. Enrich the reported fields, then re-run the strict
+    /// [`CompiledRuleSet::match_rules`]. At least one flag is `true`.
+    NeedsEnrichment { needs_ip: bool, needs_process: bool },
+    /// No rule matched (and no slot was blocked on missing metadata).
+    NoMatch,
+}
+
+/// The scan cannot evaluate this slot yet: its predicate demands a field
+/// that is missing from the metadata but can still be materialized.
+fn slot_blocked(slot: &CompiledRuleSlot, input: &MatchInput<'_>) -> bool {
+    (slot.demands_ip && ip_missing(input))
+        || (slot.demands_process && process_missing(input.metadata))
+}
+
+/// `dst_ip` is absent but resolvable: there is a hostname to resolve. With
+/// no hostname either, IP predicates simply never match (the strict engine
+/// behaves identically), so the scan must not stop.
+fn ip_missing(input: &MatchInput<'_>) -> bool {
+    input.metadata.dst_ip.is_none() && !input.host.is_empty()
+}
+
+/// Process info is absent but discoverable: a source socket exists to look
+/// up. Mirrors the guards in `match_engine::maybe_enrich_with_process`.
+fn process_missing(metadata: &Metadata) -> bool {
+    metadata.process.is_empty() && metadata.src_ip.is_some() && metadata.src_port != 0
+}
+
 /// One borrowed result from a compiled rule-set match.
 pub struct CompiledMatchResult<'a> {
     pub adapter_name: &'a str,
@@ -202,8 +253,10 @@ impl CompiledRuleSet {
                 continue;
             }
 
-            needs_ip_resolution |= rule.should_resolve_ip();
-            needs_process_lookup |= rule.should_find_process();
+            let demands_ip = rule.should_resolve_ip();
+            let demands_process = rule.should_find_process();
+            needs_ip_resolution |= demands_ip;
+            needs_process_lookup |= demands_process;
 
             let adapter_name = SmolStr::from(rule.adapter());
             let adapter_index =
@@ -216,6 +269,8 @@ impl CompiledRuleSet {
                 adapter_index,
                 payload: SmolStr::from(payload),
                 target_plan: target_plan(rule_type),
+                demands_ip,
+                demands_process,
                 op,
             });
 
@@ -317,6 +372,95 @@ impl CompiledRuleSet {
         self.scan_range(scan_end..self.slots.len(), &input, rules, &helper)
     }
 
+    /// Like [`Self::match_rules`], but with **demand-driven early stop**:
+    /// the scan halts at the first slot whose predicate needs metadata the
+    /// caller has not materialized yet (a resolved `dst_ip`, or process
+    /// info), instead of evaluating it as a silent non-match.
+    ///
+    /// Callers use this as phase one of lazy enrichment: a connection whose
+    /// match completes before any demanding slot never pays for DNS
+    /// pre-resolution or a process-table walk. On
+    /// [`LazyMatchOutcome::NeedsEnrichment`], materialize the reported
+    /// fields and re-run [`Self::match_rules`] with the enriched metadata.
+    pub fn match_rules_lazy<'a>(
+        &'a self,
+        metadata: &Metadata,
+        rules: &'a [Box<dyn Rule>],
+    ) -> LazyMatchOutcome<'a> {
+        debug_assert_eq!(
+            self.source_rule_count,
+            rules.len(),
+            "CompiledRuleSet must be evaluated with the rule slice it was built from",
+        );
+
+        let helper = RuleMatchHelper;
+        let input = MatchInput::new(metadata);
+        if self.execution_plan == ExecutionPlan::LinearScan {
+            return match self.scan_range_ctl(0..self.slots.len(), &input, rules, &helper, true) {
+                ScanOutcome::Matched(matched) => LazyMatchOutcome::Matched(matched),
+                ScanOutcome::Blocked { pos } => self.enrichment_needs(pos, &input),
+                ScanOutcome::Exhausted => LazyMatchOutcome::NoMatch,
+            };
+        }
+
+        let trie_hit = if input.host.is_empty() {
+            None
+        } else {
+            self.domain_index.search(input.host)
+        };
+        let (scan_end, hit_slot) = match trie_hit {
+            Some(rule_idx) => {
+                let pos = self.slots.partition_point(|s| s.rule_index < rule_idx);
+                let slot = self
+                    .slots
+                    .get(pos)
+                    .filter(|slot| slot.rule_index == rule_idx);
+                (pos, slot)
+            }
+            None => (self.slots.len(), None),
+        };
+
+        match self.scan_range_ctl(0..scan_end, &input, rules, &helper, true) {
+            ScanOutcome::Matched(matched) => return LazyMatchOutcome::Matched(matched),
+            // A blocked slot before the trie hit may match and beat it, so
+            // enrichment is needed even though a domain rule stands ready.
+            ScanOutcome::Blocked { pos } => return self.enrichment_needs(pos, &input),
+            ScanOutcome::Exhausted => {}
+        }
+
+        if let Some(slot) = hit_slot {
+            return LazyMatchOutcome::Matched(self.static_match(slot));
+        }
+
+        match self.scan_range_ctl(scan_end..self.slots.len(), &input, rules, &helper, true) {
+            ScanOutcome::Matched(matched) => LazyMatchOutcome::Matched(matched),
+            ScanOutcome::Blocked { pos } => self.enrichment_needs(pos, &input),
+            ScanOutcome::Exhausted => LazyMatchOutcome::NoMatch,
+        }
+    }
+
+    /// Union the demands of every slot at or after `from_pos`, filtered to
+    /// the fields actually missing from this connection's metadata, so one
+    /// enrichment round suffices before the strict re-match.
+    fn enrichment_needs(&self, from_pos: usize, input: &MatchInput<'_>) -> LazyMatchOutcome<'_> {
+        let mut needs_ip = false;
+        let mut needs_process = false;
+        for slot in &self.slots[from_pos..] {
+            needs_ip |= slot.demands_ip;
+            needs_process |= slot.demands_process;
+        }
+        needs_ip &= ip_missing(input);
+        needs_process &= process_missing(input.metadata);
+        debug_assert!(
+            needs_ip || needs_process,
+            "scan blocked without an actionable demand",
+        );
+        LazyMatchOutcome::NeedsEnrichment {
+            needs_ip,
+            needs_process,
+        }
+    }
+
     pub fn domain_index(&self) -> &DomainIndex {
         &self.domain_index
     }
@@ -360,17 +504,39 @@ impl CompiledRuleSet {
         rules: &'a [Box<dyn Rule>],
         helper: &RuleMatchHelper,
     ) -> Option<CompiledMatchResult<'a>> {
-        for slot in &self.slots[range] {
+        match self.scan_range_ctl(range, input, rules, helper, false) {
+            ScanOutcome::Matched(matched) => Some(matched),
+            ScanOutcome::Blocked { .. } | ScanOutcome::Exhausted => None,
+        }
+    }
+
+    fn scan_range_ctl<'a>(
+        &'a self,
+        range: Range<usize>,
+        input: &MatchInput<'_>,
+        rules: &'a [Box<dyn Rule>],
+        helper: &RuleMatchHelper,
+        stop_on_demand: bool,
+    ) -> ScanOutcome<'a> {
+        let start = range.start;
+        for (offset, slot) in self.slots[range].iter().enumerate() {
+            if stop_on_demand && slot_blocked(slot, input) {
+                return ScanOutcome::Blocked {
+                    pos: start + offset,
+                };
+            }
             match &slot.op {
                 // Owned by the domain index: the trie already proved this
                 // slot does not match anywhere a scan range is consulted.
                 RuleOp::TrieOwned => {}
                 RuleOp::Fallback => {
-                    let rule = rules.get(slot.rule_index)?.as_ref();
+                    let Some(rule) = rules.get(slot.rule_index) else {
+                        return ScanOutcome::Exhausted;
+                    };
                     match slot.target_plan {
                         TargetPlan::StaticAdapter => {
                             if rule.match_metadata(input.metadata, helper) {
-                                return Some(self.static_match(slot));
+                                return ScanOutcome::Matched(self.static_match(slot));
                             }
                         }
                         TargetPlan::DynamicAdapter => {
@@ -378,19 +544,23 @@ impl CompiledRuleSet {
                                 rule.match_and_resolve(input.metadata, helper)
                             {
                                 let adapter_index = self.adapter_lookup.get(adapter_name).copied();
-                                return Some(self.make_match(slot, adapter_name, adapter_index));
+                                return ScanOutcome::Matched(self.make_match(
+                                    slot,
+                                    adapter_name,
+                                    adapter_index,
+                                ));
                             }
                         }
                     }
                 }
                 op => {
                     if matches_op(op, input) {
-                        return Some(self.static_match(slot));
+                        return ScanOutcome::Matched(self.static_match(slot));
                     }
                 }
             }
         }
-        None
+        ScanOutcome::Exhausted
     }
 
     fn static_match<'a>(&'a self, slot: &'a CompiledRuleSlot) -> CompiledMatchResult<'a> {
@@ -1195,6 +1365,156 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn lazy_match_stops_at_ip_demanding_slot() {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("1.2.3.0/24", "CidrProxy", false, false).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+
+        let meta = Metadata {
+            host: "unresolved.test".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        match set.match_rules_lazy(&meta, &rules) {
+            LazyMatchOutcome::NeedsEnrichment {
+                needs_ip,
+                needs_process,
+            } => {
+                assert!(needs_ip);
+                assert!(!needs_process);
+            }
+            _ => panic!("scan must stop at the IP-CIDR slot"),
+        }
+    }
+
+    #[test]
+    fn lazy_match_completes_before_demanding_slot() {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainSuffixRule::new("example.com", "DomainProxy")),
+            Box::new(IpCidrRule::new("1.2.3.0/24", "CidrProxy", false, false).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+
+        let meta = Metadata {
+            host: "sub.example.com".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        match set.match_rules_lazy(&meta, &rules) {
+            LazyMatchOutcome::Matched(m) => assert_eq!(m.adapter_name, "DomainProxy"),
+            _ => panic!("domain match must complete without enrichment"),
+        }
+    }
+
+    #[test]
+    fn lazy_match_does_not_stop_when_ip_unresolvable() {
+        // No hostname to resolve: the IP-CIDR slot evaluates as a plain
+        // non-match, exactly like the strict engine.
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("1.2.3.0/24", "CidrProxy", false, false).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+
+        let meta = Metadata {
+            dst_port: 443,
+            ..Default::default()
+        };
+        match set.match_rules_lazy(&meta, &rules) {
+            LazyMatchOutcome::Matched(m) => assert_eq!(m.adapter_name, "DIRECT"),
+            _ => panic!("must fall through to FINAL without demanding enrichment"),
+        }
+    }
+
+    #[test]
+    fn lazy_match_respects_no_resolve() {
+        // no-resolve IP-CIDR must not trigger resolution; unresolved
+        // metadata simply does not match it.
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("1.2.3.0/24", "CidrProxy", false, true).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+
+        let meta = Metadata {
+            host: "unresolved.test".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        match set.match_rules_lazy(&meta, &rules) {
+            LazyMatchOutcome::Matched(m) => assert_eq!(m.adapter_name, "DIRECT"),
+            _ => panic!("no-resolve rule must not demand enrichment"),
+        }
+    }
+
+    #[test]
+    fn lazy_match_stops_at_process_demanding_slot() {
+        use meow_rules::process::ProcessRule;
+
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(ProcessRule::new("some-binary", "ProcProxy")),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+
+        let meta = Metadata {
+            host: "example.com".into(),
+            src_ip: Some("127.0.0.1".parse::<IpAddr>().unwrap()),
+            src_port: 50000,
+            dst_port: 443,
+            ..Default::default()
+        };
+        match set.match_rules_lazy(&meta, &rules) {
+            LazyMatchOutcome::NeedsEnrichment {
+                needs_ip,
+                needs_process,
+            } => {
+                assert!(!needs_ip);
+                assert!(needs_process);
+            }
+            _ => panic!("scan must stop at the process slot"),
+        }
+    }
+
+    #[test]
+    fn lazy_match_blocked_slot_preempts_trie_hit() {
+        // The blocked IP slot precedes every domain rule, so even with a
+        // trie hit standing ready the scan must demand enrichment first.
+        let mut rules: Vec<Box<dyn Rule>> = vec![Box::new(
+            IpCidrRule::new("1.2.3.0/24", "CidrProxy", false, false).unwrap(),
+        )];
+        rules.extend(filler_suffix_rules(70));
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+
+        let meta = Metadata {
+            host: "s7.example".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        match set.match_rules_lazy(&meta, &rules) {
+            LazyMatchOutcome::NeedsEnrichment { needs_ip, .. } => assert!(needs_ip),
+            _ => panic!("blocked slot before the trie hit must demand enrichment"),
+        }
+
+        // Once resolved (to a non-matching IP), the strict re-match falls
+        // through to the trie hit.
+        let resolved = Metadata {
+            host: "s7.example".into(),
+            dst_ip: Some("9.9.9.9".parse::<IpAddr>().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&resolved, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "P7");
     }
 
     #[test]

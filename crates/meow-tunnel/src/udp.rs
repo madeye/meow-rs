@@ -120,7 +120,10 @@ pub async fn handle_udp(
     // snooping-cache hostname fill-in).
     tunnel.pre_handle_metadata(&mut metadata);
 
-    // Pre-resolve metadata (host -> real IP if rules need it).
+    // Pre-resolve metadata (host -> real IP if rules need it). UDP keeps
+    // the eager pre_resolve + resolve_proxy pair (no lazy enrichment): the
+    // NAT session key below requires a resolved dst_ip regardless of what
+    // the rules demand.
     tunnel.pre_resolve(&mut metadata).await;
 
     // Build destination SocketAddr for the NAT key.

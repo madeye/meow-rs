@@ -43,6 +43,10 @@ impl Rule for AndRule {
     fn should_resolve_ip(&self) -> bool {
         self.rules.iter().any(|r| r.should_resolve_ip())
     }
+
+    fn should_find_process(&self) -> bool {
+        self.rules.iter().any(|r| r.should_find_process())
+    }
 }
 
 pub struct OrRule {
@@ -88,6 +92,10 @@ impl Rule for OrRule {
     fn should_resolve_ip(&self) -> bool {
         self.rules.iter().any(|r| r.should_resolve_ip())
     }
+
+    fn should_find_process(&self) -> bool {
+        self.rules.iter().any(|r| r.should_find_process())
+    }
 }
 
 pub struct NotRule {
@@ -126,5 +134,9 @@ impl Rule for NotRule {
 
     fn should_resolve_ip(&self) -> bool {
         self.rule.should_resolve_ip()
+    }
+
+    fn should_find_process(&self) -> bool {
+        self.rule.should_find_process()
     }
 }
