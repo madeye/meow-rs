@@ -138,7 +138,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Time (used directly by meow-api log timestamps; formatting feature enabled)
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

@@ -11,8 +11,36 @@ use std::time::SystemTime;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DelayHistory {
+    #[serde(with = "rfc3339_system_time")]
     pub time: SystemTime,
     pub delay: u16,
+}
+
+/// Wire format for [`DelayHistory::time`]: an RFC 3339 string, matching
+/// upstream Go mihomo where `history[].time` marshals via `time.Time`
+/// (`"2024-01-15T10:30:45Z"`). serde's default `SystemTime` representation
+/// is a `{secs_since_epoch, nanos_since_epoch}` object, which breaks API
+/// clients and dashboards that decode the upstream string shape — a probe
+/// recording history made `GET /proxies` undecodable for them.
+mod rfc3339_system_time {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::SystemTime;
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+
+    pub fn serialize<S: Serializer>(t: &SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
+        let formatted = OffsetDateTime::from(*t)
+            .format(&Rfc3339)
+            .map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(&formatted)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SystemTime, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        OffsetDateTime::parse(&s, &Rfc3339)
+            .map(SystemTime::from)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,5 +182,36 @@ pub trait Proxy: ProxyAdapter {
     /// (selected/fastest/first-alive depending on group kind).
     fn current(&self) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn delay_history_time_serializes_as_rfc3339_string() {
+        let entry = DelayHistory {
+            time: UNIX_EPOCH + Duration::from_secs(1_751_527_000),
+            delay: 76,
+        };
+        let json = serde_json::to_value(&entry).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({"time": "2025-07-03T07:16:40Z", "delay": 76}),
+        );
+    }
+
+    #[test]
+    fn delay_history_round_trips_through_json() {
+        let entry = DelayHistory {
+            time: UNIX_EPOCH + Duration::from_secs(1_751_527_000),
+            delay: 321,
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        let back: DelayHistory = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.time, entry.time);
+        assert_eq!(back.delay, entry.delay);
     }
 }

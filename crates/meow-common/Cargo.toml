@@ -16,6 +16,7 @@ parking_lot = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
+time = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
 httparse = { version = "1", default-features = false }
