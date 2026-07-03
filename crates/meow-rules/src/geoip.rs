@@ -31,6 +31,12 @@ impl GeoIpRule {
     }
 }
 
+impl GeoIpRule {
+    pub fn ranges(&self) -> &CountryRanges {
+        &self.ranges
+    }
+}
+
 impl Rule for GeoIpRule {
     fn rule_type(&self) -> RuleType {
         RuleType::GeoIp
@@ -60,5 +66,9 @@ impl Rule for GeoIpRule {
 
     fn should_resolve_ip(&self) -> bool {
         !self.no_resolve
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }

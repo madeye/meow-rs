@@ -30,6 +30,30 @@ enum Family {
     V6 { suffix: u128, mask: u128 },
 }
 
+/// The compiled suffix predicate, detached from the rule so the rule IR can
+/// evaluate it without virtual dispatch. `Copy`; matching allocates nothing.
+#[derive(Debug, Clone, Copy)]
+pub struct IpSuffixMatcher {
+    family: Family,
+}
+
+impl IpSuffixMatcher {
+    pub fn matches(&self, ip: IpAddr) -> bool {
+        match (self.family, ip) {
+            (Family::V4 { suffix, mask }, IpAddr::V4(v4)) => {
+                let ip_u32 = u32::from_be_bytes(v4.octets());
+                (ip_u32 & mask) == suffix
+            }
+            (Family::V6 { suffix, mask }, IpAddr::V6(v6)) => {
+                let ip_u128 = u128::from_be_bytes(v6.octets());
+                (ip_u128 & mask) == suffix
+            }
+            // Cross-family comparisons never match — not a panic.
+            _ => false,
+        }
+    }
+}
+
 impl IpSuffixRule {
     /// Parse `addr/prefix_len` — same shape as IP-CIDR, distinct semantics.
     ///
@@ -96,18 +120,17 @@ impl IpSuffixRule {
     }
 
     fn matches_ip(&self, ip: IpAddr) -> bool {
-        match (self.family, ip) {
-            (Family::V4 { suffix, mask }, IpAddr::V4(v4)) => {
-                let ip_u32 = u32::from_be_bytes(v4.octets());
-                (ip_u32 & mask) == suffix
-            }
-            (Family::V6 { suffix, mask }, IpAddr::V6(v6)) => {
-                let ip_u128 = u128::from_be_bytes(v6.octets());
-                (ip_u128 & mask) == suffix
-            }
-            // Cross-family comparisons never match — not a panic.
-            _ => false,
+        self.matcher().matches(ip)
+    }
+
+    pub fn matcher(&self) -> IpSuffixMatcher {
+        IpSuffixMatcher {
+            family: self.family,
         }
+    }
+
+    pub fn is_src(&self) -> bool {
+        self.src
     }
 }
 
@@ -138,6 +161,10 @@ impl Rule for IpSuffixRule {
 
     fn should_resolve_ip(&self) -> bool {
         !self.no_resolve
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 
