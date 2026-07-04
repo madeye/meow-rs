@@ -57,18 +57,27 @@ impl DomainIndex {
     /// Duplicate patterns keep the first (minimum) rule index: inserts happen
     /// in ascending rule order and the trie's per-slot value is first-write.
     pub fn insert_rule(&mut self, index: usize, rule_type: RuleType, payload: &str) -> bool {
-        if !indexable_pattern(payload) {
-            return false;
-        }
         match rule_type {
-            RuleType::Domain => self.trie.insert(payload, index),
+            RuleType::Domain => indexable_pattern(payload) && self.trie.insert(payload, index),
             RuleType::DomainSuffix => {
+                if !indexable_pattern(payload) {
+                    return false;
+                }
                 // A suffix rule matches the apex domain itself as well as any
                 // subdomain; index both forms so a trie miss proves no suffix
                 // rule matches.
                 let subdomains = self.trie.insert(&format!("+.{payload}"), index);
                 let apex = self.trie.insert(payload, index);
                 subdomains && apex
+            }
+            RuleType::DomainWildcard => {
+                // Only the dominant `*.domain` shape is expressible: the
+                // trie's star kind matches exactly one extra label, which is
+                // byte-for-byte the wildcard glob semantics for this shape
+                // (`*` = one non-empty dot-free run). Other shapes
+                // (`a*b.com`, `example.*`, interior stars) stay on the scan
+                // path.
+                star_wildcard_indexable(payload) && self.trie.insert(payload, index)
             }
             _ => false,
         }
@@ -83,6 +92,14 @@ impl DomainIndex {
     pub fn search(&self, host: &str) -> Option<usize> {
         self.trie.search_min_normalized(host).copied()
     }
+}
+
+/// True iff a DOMAIN-WILDCARD payload has the `*.domain` shape the trie can
+/// own outright (see `DomainIndex::insert_rule`).
+pub fn star_wildcard_indexable(payload: &str) -> bool {
+    payload
+        .strip_prefix("*.")
+        .is_some_and(|rest| indexable_pattern(rest) && !rest.contains('*'))
 }
 
 /// True iff `payload` is a plain hostname pattern whose trie insertion

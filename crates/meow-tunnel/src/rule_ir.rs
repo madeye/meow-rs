@@ -143,7 +143,8 @@ enum RuleOp {
     AllOf(Box<[RuleOp]>),
     AnyOf(Box<[RuleOp]>),
     NotOp(Box<RuleOp>),
-    /// A DOMAIN / DOMAIN-SUFFIX predicate fully owned by the domain index:
+    /// A DOMAIN / DOMAIN-SUFFIX / star-shaped DOMAIN-WILDCARD predicate
+    /// fully owned by the domain index:
     /// the trie's min-index search proves whether it matches, so scans skip
     /// the slot without evaluating anything. The slot itself stays alive as
     /// the match-result carrier for trie hits.
@@ -355,8 +356,11 @@ impl CompiledRuleSet {
             // trie hit at T proves no owned slot before T matches, and a
             // trie miss proves no owned slot matches at all.
             for slot in &mut slots {
-                let owned = matches!(slot.op, RuleOp::Domain(_) | RuleOp::DomainSuffix(_))
-                    && domain_index.insert_rule(slot.rule_index, slot.rule_type, &slot.payload);
+                let owned =
+                    matches!(
+                        slot.op,
+                        RuleOp::Domain(_) | RuleOp::DomainSuffix(_) | RuleOp::DomainWildcard(_)
+                    ) && domain_index.insert_rule(slot.rule_index, slot.rule_type, &slot.payload);
                 if owned {
                     slot.op = RuleOp::TrieOwned;
                 }
@@ -686,6 +690,11 @@ impl CompiledRuleSlot {
 
     pub fn is_lowered(&self) -> bool {
         !matches!(self.op, RuleOp::Fallback)
+    }
+
+    /// True iff the domain index fully owns this slot's match semantics.
+    pub fn is_trie_owned(&self) -> bool {
+        matches!(self.op, RuleOp::TrieOwned)
     }
 }
 
@@ -1456,6 +1465,80 @@ mod tests {
     }
 
     #[test]
+    fn star_wildcards_are_trie_owned_in_indexed_plan() {
+        let mut rules: Vec<Box<dyn Rule>> = (0..70)
+            .map(|i| {
+                Box::new(
+                    DomainWildcardRule::new(&format!("*.blocked{i}.example.com"), &format!("W{i}"))
+                        .unwrap(),
+                ) as Box<dyn Rule>
+            })
+            .collect();
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+        assert!(
+            set.slots()
+                .iter()
+                .filter(|s| s.rule_type() == RuleType::DomainWildcard)
+                .all(CompiledRuleSlot::is_trie_owned),
+            "star-shaped wildcards must be owned by the trie",
+        );
+
+        for (host, expected) in [
+            ("x.blocked7.example.com", "W7"),       // exactly one label
+            ("blocked7.example.com", "DIRECT"),     // apex: star needs a label
+            ("a.b.blocked7.example.com", "DIRECT"), // two labels: gap has a dot
+            ("X.BLOCKED9.EXAMPLE.COM", "W9"),       // case-folded by lower_host
+            ("unrelated.test", "DIRECT"),
+        ] {
+            let meta = Metadata {
+                host: Metadata::lower_host(host),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host}");
+        }
+    }
+
+    #[test]
+    fn non_star_wildcard_shapes_stay_on_scan_path() {
+        let mut rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainWildcardRule::new("a*b.example.com", "InteriorStar").unwrap()),
+            Box::new(DomainWildcardRule::new("example.*", "TrailingStar").unwrap()),
+            Box::new(DomainWildcardRule::new("*.multi.*", "DoubleStar").unwrap()),
+        ];
+        rules.extend(filler_suffix_rules(70)); // force indexed plan
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+        for pos in 0..3 {
+            assert!(
+                !set.slots()[pos].is_trie_owned(),
+                "non-star shape at {pos} must stay scanned",
+            );
+        }
+
+        for (host, expected) in [
+            ("axxb.example.com", "InteriorStar"),
+            ("example.net", "TrailingStar"),
+            ("x.multi.org", "DoubleStar"),
+            ("plain.test", "DIRECT"),
+        ] {
+            let meta = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host}");
+        }
+    }
+
+    #[test]
     fn indexed_plan_unindexable_domain_payload_stays_on_scan_path() {
         // Non-ASCII payload: the trie's Unicode lowercasing diverges from
         // the op's ASCII-insensitive compare, so the pattern must not be
@@ -1506,7 +1589,7 @@ mod tests {
             for _ in 0..size {
                 let host = format!("{}.{}", rng.pick(&names), rng.pick(&tlds));
                 let adapter = rng.pick(&adapters);
-                let rule: Box<dyn Rule> = match rng.next() % 7 {
+                let rule: Box<dyn Rule> = match rng.next() % 9 {
                     0 => Box::new(DomainRule::new(&host, adapter)),
                     1 => Box::new(DomainRule::new(
                         &format!("{}.{host}", rng.pick(&subs)),
@@ -1515,6 +1598,14 @@ mod tests {
                     2 | 3 => Box::new(DomainSuffixRule::new(&host, adapter)),
                     4 => Box::new(DomainKeywordRule::new(rng.pick(&names), adapter)),
                     5 => Box::new(PortRule::new(rng.pick(&ports), adapter, false).unwrap()),
+                    6 => Box::new(DomainWildcardRule::new(&format!("*.{host}"), adapter).unwrap()),
+                    7 => Box::new(
+                        DomainWildcardRule::new(
+                            &format!("{}*.{}", rng.pick(&subs), rng.pick(&tlds)),
+                            adapter,
+                        )
+                        .unwrap(),
+                    ),
                     _ => Box::new(
                         IpCidrRule::new(
                             &format!("10.{}.0.0/16", rng.next() % 4),
