@@ -13,6 +13,7 @@ use meow_rules::{
     rule_set_rule::RuleSetRule,
     src_geoip::SrcGeoIpRule,
 };
+use meow_trie::DomainTrie;
 use regex::Regex;
 use smol_str::SmolStr;
 use std::collections::{HashMap, HashSet};
@@ -24,6 +25,13 @@ use std::sync::Arc;
 /// Below this size, trie probing costs more than it saves for common configs
 /// with early matches. Compile small configs to straight-line ordered IR scan.
 const LINEAR_SCAN_RULE_LIMIT: usize = 64;
+
+/// Per-rule cap on fused pattern slots (issue #287, relaxed gate). The
+/// largest real geosite categories (`cn`, `geolocation-!cn`) sit around
+/// 100–150k domains ≈ 200–300k pattern slots, well under this; only
+/// pathological monsters stay on the scan path. Skips are logged — no
+/// silent caps.
+const FUSED_PATTERN_SLOT_LIMIT: usize = 500_000;
 
 /// Native compiled rule metadata plus indexes for hot-path matching.
 ///
@@ -346,7 +354,17 @@ impl CompiledRuleSet {
             }
         }
 
-        let execution_plan = select_execution_plan(slots.len());
+        // Plan selection counts index weight, not just rule count: a config
+        // of two heavyweight GEOSITE rules wants the indexed plan just as
+        // much as a config of 100 DOMAIN lines (issue #287 / review pass 8).
+        let indexed_weight: usize = slots.iter().map(|slot| indexable_weight(&slot.op)).sum();
+        let execution_plan =
+            if slots.len() > LINEAR_SCAN_RULE_LIMIT || indexed_weight > LINEAR_SCAN_RULE_LIMIT {
+                ExecutionPlan::DomainIndexed
+            } else {
+                ExecutionPlan::LinearScan
+            };
+
         let mut domain_index = DomainIndex::empty();
         if execution_plan == ExecutionPlan::DomainIndexed {
             // Build the index from live slots only, and hand fully-indexed
@@ -354,14 +372,40 @@ impl CompiledRuleSet {
             // during scans, because min-index search semantics guarantee a
             // trie hit at T proves no owned slot before T matches, and a
             // trie miss proves no owned slot matches at all.
+            //
+            // GEOSITE / domain RULE-SET slots fuse their pattern tries into
+            // the index under the same min-index contract (issue #287).
+            // Ascending rule order + first-write-wins per trie slot keeps
+            // the minimum rule index for every pattern.
             for slot in &mut slots {
-                let owned = matches!(slot.op, RuleOp::Domain(_) | RuleOp::DomainSuffix(_))
-                    && domain_index.insert_rule(slot.rule_index, slot.rule_type, &slot.payload);
+                let owned = match &slot.op {
+                    RuleOp::Domain(_) | RuleOp::DomainSuffix(_) => {
+                        domain_index.insert_rule(slot.rule_index, slot.rule_type, &slot.payload)
+                    }
+                    RuleOp::GeoSite(op) => {
+                        fuse_geosite_slot(&mut domain_index, slot.rule_index, op)
+                    }
+                    RuleOp::RuleSetRef(handle) => {
+                        fuse_rule_set_slot(&mut domain_index, slot.rule_index, handle)
+                    }
+                    _ => false,
+                };
                 if owned {
                     slot.op = RuleOp::TrieOwned;
+                    // An owned slot's predicate is never evaluated, so it
+                    // must not stall the lazy scan on enrichment demands
+                    // (a GEOSITE rule reports should_resolve_ip, but the
+                    // trie answers it from the hostname alone).
+                    slot.demands_ip = false;
+                    slot.demands_process = false;
                 }
             }
             domain_index.seal();
+
+            // Ownership may have cleared per-slot demands; recompute the
+            // whole-plan enrichment flags from the surviving slots.
+            needs_ip_resolution = slots.iter().any(|slot| slot.demands_ip);
+            needs_process_lookup = slots.iter().any(|slot| slot.demands_process);
         }
 
         Self {
@@ -687,6 +731,12 @@ impl CompiledRuleSlot {
     pub fn is_lowered(&self) -> bool {
         !matches!(self.op, RuleOp::Fallback)
     }
+
+    /// True iff the domain index fully owns this slot's match semantics
+    /// (plain domain predicate or fused GEOSITE / RULE-SET).
+    pub fn is_trie_owned(&self) -> bool {
+        matches!(self.op, RuleOp::TrieOwned)
+    }
 }
 
 fn intern_adapter(
@@ -710,14 +760,6 @@ fn target_plan(rule_type: RuleType) -> TargetPlan {
         // rule's adapter/block name.
         RuleType::SubRule => TargetPlan::DynamicAdapter,
         _ => TargetPlan::StaticAdapter,
-    }
-}
-
-fn select_execution_plan(rule_count: usize) -> ExecutionPlan {
-    if rule_count <= LINEAR_SCAN_RULE_LIMIT {
-        ExecutionPlan::LinearScan
-    } else {
-        ExecutionPlan::DomainIndexed
     }
 }
 
@@ -860,6 +902,87 @@ fn lower_rule(rule: &dyn Rule) -> Option<RuleOp> {
 
 fn lower_children(rules: &[Box<dyn Rule>]) -> Option<Box<[RuleOp]>> {
     rules.iter().map(|rule| lower_rule(rule.as_ref())).collect()
+}
+
+/// Fuse a lowered GEOSITE op's bucket trie into the global domain index
+/// under this rule's index. Returns `true` iff the trie fully owns the
+/// rule's match semantics afterwards (single bucket, no keyword/regex
+/// residuals), so the slot can be skipped during scans.
+///
+/// Multi-attribute categories are intersections — a union-style pattern
+/// index cannot express them, so they are not fused at all (a fused hit
+/// would wrongly claim a match when only one bucket contains the host).
+fn fuse_geosite_slot(index: &mut DomainIndex, rule_index: usize, op: &GeoSiteOp) -> bool {
+    let [key] = op.keys.as_ref() else {
+        return false;
+    };
+    let Some(trie) = op.db.bucket_domain_trie(key) else {
+        // Keyword/regex-only bucket: nothing to fuse.
+        return false;
+    };
+    let slots = trie.pattern_slots();
+    if slots > FUSED_PATTERN_SLOT_LIMIT {
+        tracing::info!(
+            "rule_ir: GEOSITE bucket '{key}' has {slots} pattern slots \
+             (> {FUSED_PATTERN_SLOT_LIMIT}); not fused into the domain index",
+        );
+        return false;
+    }
+    trie.for_each_pattern(|pattern| index.insert_fused_pattern(rule_index, pattern));
+    !op.db.bucket_has_residuals(key)
+}
+
+/// Fuse a lowered domain-behavior RULE-SET into the global domain index.
+/// Domain rule-sets are pure tries, so a fused set is fully owned.
+fn fuse_rule_set_slot(index: &mut DomainIndex, rule_index: usize, handle: &RuleSetHandle) -> bool {
+    let Some(domain_set) = handle
+        .0
+        .as_any()
+        .and_then(|any| any.downcast_ref::<meow_rules::rule_set::DomainRuleSet>())
+    else {
+        return false;
+    };
+    let trie = domain_set.domain_trie();
+    let slots = trie.pattern_slots();
+    if slots > FUSED_PATTERN_SLOT_LIMIT {
+        tracing::info!(
+            "rule_ir: domain rule-set has {slots} pattern slots \
+             (> {FUSED_PATTERN_SLOT_LIMIT}); not fused into the domain index",
+        );
+        return false;
+    }
+    trie.for_each_pattern(|pattern| index.insert_fused_pattern(rule_index, pattern));
+    true
+}
+
+/// Weight this slot contributes to the domain index if the plan is
+/// `DomainIndexed`: 1 for plain domain predicates, the fused pattern-slot
+/// count for fusable GEOSITE / RULE-SET ops, 0 otherwise. Drives plan
+/// selection so a config of a few heavyweight GEOSITE rules still picks
+/// the indexed plan.
+fn indexable_weight(op: &RuleOp) -> usize {
+    match op {
+        RuleOp::Domain(_) | RuleOp::DomainSuffix(_) => 1,
+        RuleOp::GeoSite(geosite) => {
+            let [key] = geosite.keys.as_ref() else {
+                return 0;
+            };
+            geosite
+                .db
+                .bucket_domain_trie(key)
+                .map(DomainTrie::pattern_slots)
+                .filter(|slots| *slots <= FUSED_PATTERN_SLOT_LIMIT)
+                .unwrap_or(0)
+        }
+        RuleOp::RuleSetRef(handle) => handle
+            .0
+            .as_any()
+            .and_then(|any| any.downcast_ref::<meow_rules::rule_set::DomainRuleSet>())
+            .map(|set| set.domain_trie().pattern_slots())
+            .filter(|slots| *slots <= FUSED_PATTERN_SLOT_LIMIT)
+            .unwrap_or(0),
+        _ => 0,
+    }
 }
 
 fn ip_ranges_contain(v4: &IpRange<Ipv4Net>, v6: &IpRange<Ipv6Net>, ip: Option<IpAddr>) -> bool {
@@ -1501,12 +1624,23 @@ mod tests {
 
         let mut rng = Lcg(0x9E37_79B9_7F4A_7C15);
 
+        // Shared geosite DB over the same name/TLD pool, so generated
+        // GEOSITE rules regularly hit, miss, and fuse.
+        let mut geodb = GeositeDB::empty();
+        for name in &names {
+            for tld in &tlds {
+                geodb.insert(name, &format!("{name}.{tld}"));
+                geodb.insert(name, &format!("+.{name}.{tld}"));
+            }
+        }
+        let geodb = Arc::new(geodb);
+
         for &size in &[1usize, 3, 30, 63, 64, 65, 80, 150] {
             let mut rules: Vec<Box<dyn Rule>> = Vec::with_capacity(size + 1);
             for _ in 0..size {
                 let host = format!("{}.{}", rng.pick(&names), rng.pick(&tlds));
                 let adapter = rng.pick(&adapters);
-                let rule: Box<dyn Rule> = match rng.next() % 7 {
+                let rule: Box<dyn Rule> = match rng.next() % 8 {
                     0 => Box::new(DomainRule::new(&host, adapter)),
                     1 => Box::new(DomainRule::new(
                         &format!("{}.{host}", rng.pick(&subs)),
@@ -1515,6 +1649,12 @@ mod tests {
                     2 | 3 => Box::new(DomainSuffixRule::new(&host, adapter)),
                     4 => Box::new(DomainKeywordRule::new(rng.pick(&names), adapter)),
                     5 => Box::new(PortRule::new(rng.pick(&ports), adapter, false).unwrap()),
+                    6 => Box::new(GeoSiteRule::new(
+                        rng.pick(&names),
+                        adapter,
+                        Some(Arc::clone(&geodb)),
+                        false,
+                    )),
                     _ => Box::new(
                         IpCidrRule::new(
                             &format!("10.{}.0.0/16", rng.next() % 4),
@@ -1732,6 +1872,203 @@ mod tests {
         // depends on slot size staying put.
         let size = std::mem::size_of::<RuleOp>();
         assert!(size <= 32, "RuleOp grew to {size} B");
+    }
+
+    fn big_geosite_db(category: &str, count: usize) -> GeositeDB {
+        let mut db = GeositeDB::empty();
+        for i in 0..count {
+            db.insert(category, &format!("+.site{i}.{category}.test"));
+        }
+        db
+    }
+
+    #[test]
+    fn heavyweight_geosite_rule_fuses_and_owns_its_slot() {
+        // Two slots, but the fused pattern weight forces the indexed plan.
+        let db = Arc::new(big_geosite_db("cn", 200));
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(GeoSiteRule::new("cn", "GeoProxy", Some(db), false)),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(
+            !set.uses_linear_scan_plan(),
+            "fused pattern weight must select the indexed plan",
+        );
+        assert!(set.slots()[0].is_trie_owned(), "residual-free bucket owns");
+        assert!(
+            !set.needs_ip_resolution(),
+            "an owned GEOSITE slot must not force DNS pre-resolution",
+        );
+
+        for (host, expected) in [
+            // `+.` patterns match subdomains only — the apex misses,
+            // identically to the legacy GeositeDB lookup path.
+            ("site7.cn.test", "DIRECT"),
+            ("a.site7.cn.test", "GeoProxy"),
+            ("a.b.site42.cn.test", "GeoProxy"),
+            ("unrelated.test", "DIRECT"),
+            ("", "DIRECT"),
+        ] {
+            let meta = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host:?}");
+            if expected == "GeoProxy" {
+                assert_eq!(result.rule_type, RuleType::GeoSite);
+            }
+        }
+    }
+
+    #[test]
+    fn residual_geosite_bucket_fuses_but_stays_scanned() {
+        use std::collections::HashMap;
+
+        // Bucket with both a domain trie and a keyword residual.
+        let mut categories = HashMap::new();
+        let mut trie = meow_trie::DomainTrie::new();
+        for i in 0..100 {
+            trie.insert(&format!("+.listed{i}.kw.test"), ());
+        }
+        categories.insert("kw".to_string(), trie);
+        let mut keywords = HashMap::new();
+        keywords.insert("kw".to_string(), vec!["tracker".to_string()]);
+        let db = Arc::new(GeositeDB::from_parts(
+            categories,
+            HashMap::new(),
+            HashMap::new(),
+            keywords,
+        ));
+
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(GeoSiteRule::new("kw", "KwProxy", Some(db), false)),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+        assert!(
+            !set.slots()[0].is_trie_owned(),
+            "keyword residual must keep the slot on the scan path",
+        );
+
+        for (host, expected) in [
+            ("x.listed3.kw.test", "KwProxy"),  // via fused trie
+            ("my.tracker.example", "KwProxy"), // via keyword residual scan
+            ("clean.example", "DIRECT"),
+        ] {
+            let meta = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host}");
+        }
+    }
+
+    #[test]
+    fn multi_attribute_geosite_rule_is_not_fused() {
+        let mut db = GeositeDB::empty();
+        db.insert("ms@a", "both.test");
+        db.insert("ms@a", "aonly.test");
+        db.insert("ms@b", "both.test");
+        let db = Arc::new(db);
+
+        let mut rules: Vec<Box<dyn Rule>> = vec![Box::new(GeoSiteRule::new(
+            "ms@a@b",
+            "BothProxy",
+            Some(Arc::clone(&db)),
+            false,
+        ))];
+        rules.extend(filler_suffix_rules(70)); // force indexed plan
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+        assert!(
+            !set.slots()[0].is_trie_owned(),
+            "intersection semantics cannot be trie-fused",
+        );
+
+        for (host, expected) in [("both.test", "BothProxy"), ("aonly.test", "DIRECT")] {
+            let meta = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host}");
+        }
+    }
+
+    #[test]
+    fn domain_rule_set_fuses_and_owns_its_slot() {
+        let entries: Vec<String> = (0..100).map(|i| format!("+.rs{i}.set.test")).collect();
+        let set_box = build_rule_set(RuleSetBehavior::Domain, &entries, &ParserContext::default());
+        let rule_set: Arc<dyn RuleSet> = Arc::from(set_box);
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(RuleSetRule::new("mine", rule_set, "SetProxy", false)),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let compiled = CompiledRuleSet::build(&rules);
+        assert!(!compiled.uses_linear_scan_plan());
+        assert!(compiled.slots()[0].is_trie_owned());
+
+        for (host, expected) in [
+            ("a.rs9.set.test", "SetProxy"),
+            ("deep.b.rs50.set.test", "SetProxy"),
+            ("other.test", "DIRECT"),
+        ] {
+            let meta = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = compiled.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host}");
+        }
+    }
+
+    #[test]
+    fn earlier_domain_rule_beats_fused_geosite_and_vice_versa() {
+        let db = Arc::new(big_geosite_db("cn", 100));
+
+        // Case 1: DOMAIN before GEOSITE — domain rule wins its host.
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainRule::new("a.site3.cn.test", "DomainFirst")),
+            Box::new(GeoSiteRule::new(
+                "cn",
+                "GeoProxy",
+                Some(Arc::clone(&db)),
+                false,
+            )),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+        let meta = Metadata {
+            host: "a.site3.cn.test".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&meta, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "DomainFirst", "min-index must win");
+
+        // Case 2: GEOSITE before DOMAIN-SUFFIX covering the same host.
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(GeoSiteRule::new("cn", "GeoProxy", Some(db), false)),
+            Box::new(DomainSuffixRule::new("site3.cn.test", "SuffixLater")),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+        let result = set.match_rules(&meta, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "GeoProxy", "earlier fused rule wins");
     }
 
     #[test]

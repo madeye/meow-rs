@@ -76,6 +76,13 @@ pub trait RuleSet: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Concrete-type escape hatch for the rule IR compiler (mirrors
+    /// `Rule::as_any`); set variants that can be fused into an external
+    /// index override this.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 /// Build a rule-set of the given behavior from already-parsed entries.
@@ -247,6 +254,10 @@ pub struct DomainRuleSet {
 }
 
 impl DomainRuleSet {
+    pub fn domain_trie(&self) -> &DomainTrie<()> {
+        &self.trie
+    }
+
     pub fn from_entries(entries: &[String]) -> Self {
         let mut trie: DomainTrie<()> = DomainTrie::new();
         let mut count = 0;
@@ -286,6 +297,10 @@ impl RuleSet for DomainRuleSet {
             return false;
         }
         self.trie.search(host).is_some()
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 
     fn len(&self) -> usize {

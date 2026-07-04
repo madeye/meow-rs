@@ -74,6 +74,15 @@ impl DomainIndex {
         }
     }
 
+    /// Insert one pattern emitted by `DomainTrie::for_each_pattern` on
+    /// behalf of a fused GEOSITE / RULE-SET rule. The pattern is already in
+    /// canonical insertable form (`domain`, `*.domain`, `.domain`), so no
+    /// shape guard applies; first-write-wins keeps the minimum rule index
+    /// when callers insert in ascending rule order.
+    pub fn insert_fused_pattern(&mut self, index: usize, pattern: &str) {
+        self.trie.insert(pattern, index);
+    }
+
     pub fn seal(&mut self) {
         self.trie.seal();
     }

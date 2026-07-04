@@ -154,6 +154,20 @@ impl GeositeDB {
             .collect()
     }
 
+    /// The domain trie behind one pre-resolved bucket key from
+    /// [`Self::resolve_keys`], if the bucket has one.
+    pub fn bucket_domain_trie(&self, key: &str) -> Option<&DomainTrie<()>> {
+        self.categories.get(key)
+    }
+
+    /// True iff the bucket has non-trie match sources (keywords / regex)
+    /// alongside its domain list — such a bucket cannot be fully handed
+    /// over to an external domain index.
+    pub fn bucket_has_residuals(&self, key: &str) -> bool {
+        self.keywords.get(key).is_some_and(|k| !k.is_empty())
+            || self.regex_compiled.get(key).is_some_and(|r| !r.is_empty())
+    }
+
     /// Match `domain` against one pre-resolved bucket key from
     /// [`Self::resolve_keys`]. Skips the per-lookup attribute splitting and
     /// case-fold scan that [`Self::lookup`] pays.

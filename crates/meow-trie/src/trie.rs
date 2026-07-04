@@ -410,6 +410,107 @@ impl<T: Clone + 'static> DomainTrie<T> {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+
+    /// Number of stored pattern slots. A `+.domain` insert counts as 2
+    /// (its star and dot forms); intended for capacity gating, not exact
+    /// pattern arithmetic.
+    pub fn pattern_slots(&self) -> usize {
+        self.len
+    }
+
+    /// Visit every stored pattern in its canonical insertable form:
+    /// `domain` (exact), `*.domain` (star, one label), `.domain` (dot, any
+    /// subdomain depth). Feeding each emitted string back into
+    /// [`Self::insert`] on another trie reproduces identical match
+    /// semantics — this is the primitive rule-index fusion builds on.
+    ///
+    /// Patterns come out lowercased (inserts fold case). Visit order is
+    /// unspecified.
+    pub fn for_each_pattern<F: FnMut(&str)>(&self, mut f: F) {
+        let mut labels: Vec<&str> = Vec::new();
+        let mut pattern = String::new();
+        match &self.state {
+            TrieState::Building(root) => {
+                Self::walk_build(root, &mut labels, &mut pattern, &mut f);
+            }
+            TrieState::Sealed(root) => {
+                Self::walk_sealed(root, &mut labels, &mut pattern, &mut f);
+            }
+        }
+    }
+
+    fn emit_node_patterns<F: FnMut(&str)>(
+        labels: &[&str],
+        pattern: &mut String,
+        exact: bool,
+        star: bool,
+        dot: bool,
+        f: &mut F,
+    ) {
+        if !(exact || star || dot) {
+            return;
+        }
+        // Labels are stored root-first from the TLD; the domain reads in
+        // reverse label order.
+        pattern.clear();
+        for label in labels.iter().rev() {
+            if !pattern.is_empty() {
+                pattern.push('.');
+            }
+            pattern.push_str(label);
+        }
+        if exact {
+            f(pattern);
+        }
+        if star {
+            f(&format!("*.{pattern}"));
+        }
+        if dot {
+            f(&format!(".{pattern}"));
+        }
+    }
+
+    fn walk_build<'a, F: FnMut(&str)>(
+        node: &'a BuildNode<T>,
+        labels: &mut Vec<&'a str>,
+        pattern: &mut String,
+        f: &mut F,
+    ) {
+        Self::emit_node_patterns(
+            labels,
+            pattern,
+            node.exact_value.is_some(),
+            node.star_value.is_some(),
+            node.dot_value.is_some(),
+            f,
+        );
+        for (label, child) in &node.children {
+            labels.push(label);
+            Self::walk_build(child, labels, pattern, f);
+            labels.pop();
+        }
+    }
+
+    fn walk_sealed<'a, F: FnMut(&str)>(
+        node: &'a SealedNode<T>,
+        labels: &mut Vec<&'a str>,
+        pattern: &mut String,
+        f: &mut F,
+    ) {
+        Self::emit_node_patterns(
+            labels,
+            pattern,
+            node.exact_value.is_some(),
+            node.star_value.is_some(),
+            node.dot_value.is_some(),
+            f,
+        );
+        for (label, child) in &node.children {
+            labels.push(label);
+            Self::walk_sealed(child, labels, pattern, f);
+            labels.pop();
+        }
+    }
 }
 
 fn fold_min<'a, T: Ord>(best: &mut Option<&'a T>, candidate: Option<&'a T>) {
@@ -623,6 +724,57 @@ mod tests {
         trie.insert("Example.COM", 1);
         assert_eq!(trie.search("example.com"), Some(&1));
         assert_eq!(trie.search("EXAMPLE.COM"), Some(&1));
+    }
+
+    #[test]
+    fn for_each_pattern_round_trips_match_semantics() {
+        let patterns = [
+            "exact.example.com",
+            "*.star.example.com",
+            ".dot.example.com",
+            "+.plus.example.com",
+            "MiXeD.example.com",
+        ];
+        let hosts = [
+            "exact.example.com",
+            "a.star.example.com",
+            "a.b.star.example.com",
+            "dot.example.com",
+            "a.dot.example.com",
+            "a.b.dot.example.com",
+            "plus.example.com",
+            "a.plus.example.com",
+            "a.b.plus.example.com",
+            "mixed.example.com",
+            "unrelated.com",
+        ];
+
+        for seal in [false, true] {
+            let mut original = DomainTrie::new();
+            for p in patterns {
+                original.insert(p, 1u32);
+            }
+            if seal {
+                original.seal();
+            }
+
+            let mut rebuilt = DomainTrie::new();
+            let mut emitted = 0usize;
+            original.for_each_pattern(|p| {
+                rebuilt.insert(p, 1u32);
+                emitted += 1;
+            });
+            rebuilt.seal();
+
+            assert_eq!(emitted, original.pattern_slots(), "seal={seal}");
+            for host in hosts {
+                assert_eq!(
+                    original.search(host).is_some(),
+                    rebuilt.search(host).is_some(),
+                    "seal={seal} host={host}",
+                );
+            }
+        }
     }
 
     #[test]

@@ -23,6 +23,18 @@ codegen-units = 1
 panic = "abort"
 opt-level = "z"
 
+# Hot-path exception to the size-first default: the rule-match engine and
+# the domain trie run per connection, and at `opt-level = "z"` their scan
+# and probe loops get shredded by the -Oz inliner/machine-outliner (2-3x
+# swings measured on rules_bench across otherwise-unrelated code growth).
+# Fat LTO honors per-function optsize attrs, so exempting just these two
+# crates buys back the hot path while the rest of the binary stays "z".
+[profile.release.package.meow-tunnel]
+opt-level = 3
+
+[profile.release.package.meow-trie]
+opt-level = 3
+
 # Profile for dhat heap profiling — keeps debug symbols, no strip, no LTO.
 [profile.dhat]
 inherits = "release"
