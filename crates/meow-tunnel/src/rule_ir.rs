@@ -357,7 +357,7 @@ impl CompiledRuleSet {
         // Plan selection counts index weight, not just rule count: a config
         // of two heavyweight GEOSITE rules wants the indexed plan just as
         // much as a config of 100 DOMAIN lines (issue #287 / review pass 8).
-        let indexed_weight: usize = slots.iter().map(|slot| indexable_weight(&slot.op)).sum();
+        let indexed_weight: usize = slots.iter().map(indexable_weight).sum();
         let execution_plan =
             if slots.len() > LINEAR_SCAN_RULE_LIMIT || indexed_weight > LINEAR_SCAN_RULE_LIMIT {
                 ExecutionPlan::DomainIndexed
@@ -379,7 +379,7 @@ impl CompiledRuleSet {
             // the minimum rule index for every pattern.
             for slot in &mut slots {
                 let owned = match &slot.op {
-                    RuleOp::Domain(_) | RuleOp::DomainSuffix(_) => {
+                    RuleOp::Domain(_) | RuleOp::DomainSuffix(_) | RuleOp::DomainWildcard(_) => {
                         domain_index.insert_rule(slot.rule_index, slot.rule_type, &slot.payload)
                     }
                     RuleOp::GeoSite(op) => {
@@ -956,13 +956,16 @@ fn fuse_rule_set_slot(index: &mut DomainIndex, rule_index: usize, handle: &RuleS
 }
 
 /// Weight this slot contributes to the domain index if the plan is
-/// `DomainIndexed`: 1 for plain domain predicates, the fused pattern-slot
-/// count for fusable GEOSITE / RULE-SET ops, 0 otherwise. Drives plan
-/// selection so a config of a few heavyweight GEOSITE rules still picks
-/// the indexed plan.
-fn indexable_weight(op: &RuleOp) -> usize {
-    match op {
+/// `DomainIndexed`: 1 for plain domain predicates (including `*.domain`
+/// wildcards the trie can own), the fused pattern-slot count for fusable
+/// GEOSITE / RULE-SET ops, 0 otherwise. Drives plan selection so a config
+/// of a few heavyweight GEOSITE rules still picks the indexed plan.
+fn indexable_weight(slot: &CompiledRuleSlot) -> usize {
+    match &slot.op {
         RuleOp::Domain(_) | RuleOp::DomainSuffix(_) => 1,
+        RuleOp::DomainWildcard(_) => {
+            usize::from(crate::match_engine::star_wildcard_indexable(&slot.payload))
+        }
         RuleOp::GeoSite(geosite) => {
             let [key] = geosite.keys.as_ref() else {
                 return 0;
@@ -1579,6 +1582,80 @@ mod tests {
     }
 
     #[test]
+    fn star_wildcards_are_trie_owned_in_indexed_plan() {
+        let mut rules: Vec<Box<dyn Rule>> = (0..70)
+            .map(|i| {
+                Box::new(
+                    DomainWildcardRule::new(&format!("*.blocked{i}.example.com"), &format!("W{i}"))
+                        .unwrap(),
+                ) as Box<dyn Rule>
+            })
+            .collect();
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+        assert!(
+            set.slots()
+                .iter()
+                .filter(|s| s.rule_type() == RuleType::DomainWildcard)
+                .all(CompiledRuleSlot::is_trie_owned),
+            "star-shaped wildcards must be owned by the trie",
+        );
+
+        for (host, expected) in [
+            ("x.blocked7.example.com", "W7"),       // exactly one label
+            ("blocked7.example.com", "DIRECT"),     // apex: star needs a label
+            ("a.b.blocked7.example.com", "DIRECT"), // two labels: gap has a dot
+            ("X.BLOCKED9.EXAMPLE.COM", "W9"),       // case-folded by lower_host
+            ("unrelated.test", "DIRECT"),
+        ] {
+            let meta = Metadata {
+                host: Metadata::lower_host(host),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host}");
+        }
+    }
+
+    #[test]
+    fn non_star_wildcard_shapes_stay_on_scan_path() {
+        let mut rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainWildcardRule::new("a*b.example.com", "InteriorStar").unwrap()),
+            Box::new(DomainWildcardRule::new("example.*", "TrailingStar").unwrap()),
+            Box::new(DomainWildcardRule::new("*.multi.*", "DoubleStar").unwrap()),
+        ];
+        rules.extend(filler_suffix_rules(70)); // force indexed plan
+        rules.push(Box::new(FinalRule::new("DIRECT")));
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(!set.uses_linear_scan_plan());
+        for pos in 0..3 {
+            assert!(
+                !set.slots()[pos].is_trie_owned(),
+                "non-star shape at {pos} must stay scanned",
+            );
+        }
+
+        for (host, expected) in [
+            ("axxb.example.com", "InteriorStar"),
+            ("example.net", "TrailingStar"),
+            ("x.multi.org", "DoubleStar"),
+            ("plain.test", "DIRECT"),
+        ] {
+            let meta = Metadata {
+                host: host.into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "host={host}");
+        }
+    }
+
+    #[test]
     fn indexed_plan_unindexable_domain_payload_stays_on_scan_path() {
         // Non-ASCII payload: the trie's Unicode lowercasing diverges from
         // the op's ASCII-insensitive compare, so the pattern must not be
@@ -1640,7 +1717,7 @@ mod tests {
             for _ in 0..size {
                 let host = format!("{}.{}", rng.pick(&names), rng.pick(&tlds));
                 let adapter = rng.pick(&adapters);
-                let rule: Box<dyn Rule> = match rng.next() % 8 {
+                let rule: Box<dyn Rule> = match rng.next() % 10 {
                     0 => Box::new(DomainRule::new(&host, adapter)),
                     1 => Box::new(DomainRule::new(
                         &format!("{}.{host}", rng.pick(&subs)),
@@ -1655,6 +1732,14 @@ mod tests {
                         Some(Arc::clone(&geodb)),
                         false,
                     )),
+                    7 => Box::new(DomainWildcardRule::new(&format!("*.{host}"), adapter).unwrap()),
+                    8 => Box::new(
+                        DomainWildcardRule::new(
+                            &format!("{}*.{}", rng.pick(&subs), rng.pick(&tlds)),
+                            adapter,
+                        )
+                        .unwrap(),
+                    ),
                     _ => Box::new(
                         IpCidrRule::new(
                             &format!("10.{}.0.0/16", rng.next() % 4),
