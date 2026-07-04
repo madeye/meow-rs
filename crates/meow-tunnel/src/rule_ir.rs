@@ -42,13 +42,18 @@ const LINEAR_SCAN_RULE_LIMIT: usize = 64;
 /// 2. **Duplicate elimination** — a later rule whose canonical predicate
 ///    fingerprint equals an earlier rule's can never win against its first
 ///    occurrence (see `dedup_fingerprint`).
-/// 3. **Constant-false pruning** — rules that provably never match (a rule
-///    reporting [`Rule::never_matches`], or a `UID` rule on a platform
-///    without socket-UID lookup) are dropped from the scan plan.
+/// 3. **Constant folding & constant-false pruning** — logic trees simplify
+///    (never-match children erase OR arms and kill AND trees, double
+///    negation cancels, single-child trees collapse); rules that provably
+///    never match (a rule reporting [`Rule::never_matches`], a `UID` rule on
+///    a platform without socket-UID lookup, or a logic tree folding to
+///    false) are dropped from the scan plan, and a tree folding to true
+///    becomes an unconditional `MATCH` terminator.
 /// 4. **Shadowed-rule elimination** — a later domain-family rule whose match
 ///    set is fully covered by earlier DOMAIN-SUFFIX / DOMAIN-KEYWORD /
-///    star-wildcard rules can never fire, so it is dropped regardless of its
-///    adapter (see `ShadowOracle`).
+///    star-wildcard rules, or a later IP-CIDR contained in the union of
+///    earlier same-axis networks, can never fire, so it is dropped
+///    regardless of its adapter (see `ShadowOracle` / `CidrCoverage`).
 ///
 /// Slots therefore form a subsequence of the source rules: each slot keeps
 /// its original `rule_index` (for fallback dispatch and diagnostics), and
@@ -294,15 +299,21 @@ impl CompiledRuleSet {
         let mut adapter_lookup = HashMap::new();
         let mut needs_ip_resolution = false;
         let mut needs_process_lookup = false;
-        let mut seen_ops: HashSet<(RuleType, String)> = HashSet::new();
+        let mut seen_ops: HashSet<(RuleType, bool, bool, String)> = HashSet::new();
         let mut shadow_oracle = ShadowOracle::default();
+        let mut dst_coverage = CidrCoverage::new();
+        let mut src_coverage = CidrCoverage::new();
+        let mut seen_ip_demand = false;
         let mut pruned_never_match = 0usize;
         let mut pruned_duplicates = 0usize;
         let mut pruned_shadowed = 0usize;
+        let mut pruned_covered = 0usize;
 
         for (rule_index, rule) in rules.iter().enumerate() {
             let rule_type = rule.rule_type();
             let payload = rule.payload();
+            let demands_ip = rule.should_resolve_ip();
+            let demands_process = rule.should_find_process();
             // Payload-pure lowering first; then state-carrying native
             // lowering via downcast (Arc handles cloned once at build).
             let op = compile_op(rule_type, payload)
@@ -312,17 +323,38 @@ impl CompiledRuleSet {
             // Constant-false pruning: drop rules that can never match, so
             // they neither occupy scan slots nor force metadata enrichment
             // (a dead GEOSITE rule must not force DNS pre-resolution).
-            if rule.never_matches() || op_never_matches(&op) {
+            if rule.never_matches() {
                 pruned_never_match += 1;
                 continue;
             }
 
+            // Constant folding: logic trees simplify (never-match children
+            // erase OR arms and kill AND trees, double negation cancels).
+            // A tree folding to `Never` joins the constant-false prune —
+            // dropping its metadata demands with it, same as a dead GEOSITE
+            // — and a tree folding to `Always` becomes an unconditional
+            // MATCH terminator for the dead-rule pass below.
+            let op = match fold_op(op) {
+                Folded::Never => {
+                    pruned_never_match += 1;
+                    continue;
+                }
+                Folded::Always => RuleOp::Match,
+                Folded::Op(op) => op,
+            };
+
             // Duplicate elimination on canonical predicate fingerprints: a
             // later rule with an identical predicate can never win under
             // first-match-wins — regardless of its adapter. Ops without a
-            // cheap canonical identity are never deduplicated.
+            // cheap canonical identity are never deduplicated. The key
+            // includes the rule's enrichment demands: an identical predicate
+            // carrying a *stronger* demand (a resolving IP-CIDR after a
+            // no-resolve twin) must stay live as the demand-stop carrier for
+            // the lazy scan — pruning it would silently skip a DNS
+            // resolution whose result earlier rules observe on the strict
+            // re-run.
             if let Some(fingerprint) = dedup_fingerprint(payload, &op) {
-                if !seen_ops.insert((rule_type, fingerprint)) {
+                if !seen_ops.insert((rule_type, demands_ip, demands_process, fingerprint)) {
                     pruned_duplicates += 1;
                     continue;
                 }
@@ -338,10 +370,27 @@ impl CompiledRuleSet {
             }
             shadow_oracle.absorb(&op, payload);
 
-            let demands_ip = rule.should_resolve_ip();
-            let demands_process = rule.should_find_process();
+            // Covered-CIDR elimination: the IP analogue of shadowing. A
+            // network contained in the union of earlier same-axis networks
+            // can never fire. The demand guard mirrors the dedup rule: if
+            // this rule is the first to demand resolution, it must stay
+            // live as the demand-stop carrier even though it can never win.
+            if let RuleOp::IpCidr { net, src } = &op {
+                let coverage = if *src {
+                    &mut src_coverage
+                } else {
+                    &mut dst_coverage
+                };
+                if coverage.covers(*net) && (!demands_ip || seen_ip_demand) {
+                    pruned_covered += 1;
+                    continue;
+                }
+                coverage.absorb(*net);
+            }
+
             needs_ip_resolution |= demands_ip;
             needs_process_lookup |= demands_process;
+            seen_ip_demand |= demands_ip;
 
             let adapter_name = SmolStr::from(rule.adapter());
             let adapter_index =
@@ -373,6 +422,7 @@ impl CompiledRuleSet {
                 live = slots.len(),
                 duplicates = pruned_duplicates,
                 shadowed = pruned_shadowed,
+                covered = pruned_covered,
                 never_match = pruned_never_match,
                 "rule IR clean-up passes pruned rules",
             );
@@ -956,6 +1006,110 @@ fn op_never_matches(op: &RuleOp) -> bool {
     // `false` everywhere else, so the slot would burn a scan step per
     // connection without ever matching.
     matches!(op, RuleOp::Uid(_)) && cfg!(not(target_os = "linux"))
+}
+
+/// Three-valued constant-folding result for a lowered op.
+enum Folded {
+    /// Provably matches no metadata on this platform.
+    Never,
+    /// Provably matches every metadata (vacuous AND, NOT of never-match).
+    Always,
+    Op(RuleOp),
+}
+
+/// Constant-fold a lowered op (clean-up pass 3). Logic trees simplify
+/// bottom-up: a never-match child kills an AND and vanishes from an OR, an
+/// always-match child vanishes from an AND and satisfies an OR, `NOT`
+/// inverts constants, and single-child trees collapse to the child. All
+/// folds mirror `matches_native_op`'s `all` / `any` / `!` evaluation
+/// exactly, so they are observation-equivalent; `Never` / `Always` leaves
+/// come only from compile-time-constant predicates (`MATCH`, platform
+/// never-match ops), never from metadata-dependent ones.
+fn fold_op(op: RuleOp) -> Folded {
+    if op_never_matches(&op) {
+        return Folded::Never;
+    }
+    match op {
+        RuleOp::Match => Folded::Always,
+        RuleOp::AllOf(children) => {
+            let mut kept = Vec::with_capacity(children.len());
+            for child in children.into_vec() {
+                match fold_op(child) {
+                    Folded::Never => return Folded::Never,
+                    Folded::Always => {}
+                    Folded::Op(folded) => kept.push(folded),
+                }
+            }
+            match kept.len() {
+                0 => Folded::Always,
+                1 => Folded::Op(kept.remove(0)),
+                _ => Folded::Op(RuleOp::AllOf(kept.into())),
+            }
+        }
+        RuleOp::AnyOf(children) => {
+            let mut kept = Vec::with_capacity(children.len());
+            for child in children.into_vec() {
+                match fold_op(child) {
+                    Folded::Always => return Folded::Always,
+                    Folded::Never => {}
+                    Folded::Op(folded) => kept.push(folded),
+                }
+            }
+            match kept.len() {
+                0 => Folded::Never,
+                1 => Folded::Op(kept.remove(0)),
+                _ => Folded::Op(RuleOp::AnyOf(kept.into())),
+            }
+        }
+        RuleOp::NotOp(child) => match fold_op(*child) {
+            Folded::Never => Folded::Always,
+            Folded::Always => Folded::Never,
+            Folded::Op(folded) => Folded::Op(RuleOp::NotOp(Box::new(folded))),
+        },
+        other => Folded::Op(other),
+    }
+}
+
+/// Cumulative coverage of earlier IP-CIDR networks (one instance per
+/// src/dst axis) for **covered-CIDR elimination** — the IP analogue of
+/// `ShadowOracle`. A later network fully contained in the union of earlier
+/// same-axis networks can never fire: any address it matches already
+/// matched some earlier rule, and both sides share the same
+/// `ip.is_some()` gate.
+struct CidrCoverage {
+    v4: IpRange<Ipv4Net>,
+    v6: IpRange<Ipv6Net>,
+}
+
+impl CidrCoverage {
+    fn new() -> Self {
+        Self {
+            v4: IpRange::new(),
+            v6: IpRange::new(),
+        }
+    }
+
+    fn covers(&self, net: IpNet) -> bool {
+        match net {
+            IpNet::V4(v4) => self.v4.contains(&v4),
+            IpNet::V6(v6) => self.v6.contains(&v6),
+        }
+    }
+
+    /// `simplify` merges sibling and nested blocks, so containment sees the
+    /// true union (10.0.0.0/9 + 10.128.0.0/9 covers a later 10.0.0.0/8).
+    fn absorb(&mut self, net: IpNet) {
+        match net {
+            IpNet::V4(v4) => {
+                self.v4.add(v4);
+                self.v4.simplify();
+            }
+            IpNet::V6(v6) => {
+                self.v6.add(v6);
+                self.v6.simplify();
+            }
+        }
+    }
 }
 
 fn compile_op(rule_type: RuleType, payload: &str) -> Option<RuleOp> {
@@ -1580,7 +1734,7 @@ mod tests {
         geosite_rule::GeoSiteRule,
         in_port::InPortRule,
         ipcidr::IpCidrRule,
-        logic::OrRule,
+        logic::{AndRule, NotRule, OrRule},
         port::PortRule,
         rule_set::{build_rule_set, RuleSet, RuleSetBehavior},
         rule_set_rule::RuleSetRule,
@@ -1898,6 +2052,183 @@ mod tests {
     }
 
     #[test]
+    fn covered_cidr_rules_are_pruned() {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("10.0.0.0/9", "A", false, true).unwrap()),
+            Box::new(IpCidrRule::new("10.128.0.0/9", "B", false, true).unwrap()),
+            Box::new(IpCidrRule::new("2001:db8::/32", "C", false, true).unwrap()),
+            // Covered — contained in the union of earlier networks:
+            Box::new(IpCidrRule::new("10.64.0.0/10", "S1", false, true).unwrap()),
+            // The two /9s merge to 10.0.0.0/8, so the whole /8 is covered.
+            Box::new(IpCidrRule::new("10.0.0.0/8", "S2", false, true).unwrap()),
+            Box::new(IpCidrRule::new("2001:db8:aa::/48", "S3", false, true).unwrap()),
+            // Not covered — must stay live:
+            Box::new(IpCidrRule::new("10.0.0.0/7", "LiveWider", false, true).unwrap()),
+            Box::new(IpCidrRule::new("10.0.0.0/8", "LiveSrcAxis", true, true).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        let live: Vec<usize> = set
+            .slots()
+            .iter()
+            .map(CompiledRuleSlot::rule_index)
+            .collect();
+        assert_eq!(
+            live,
+            vec![0, 1, 2, 6, 7, 8],
+            "exactly the union-covered networks must be pruned",
+        );
+
+        for (dst, src, expected) in [
+            (Some("10.1.2.3"), None, "A"),
+            (Some("10.200.0.1"), None, "B"),
+            (Some("2001:db8:aa::1"), None, "C"),
+            (Some("11.0.0.1"), None, "LiveWider"),
+            (Some("192.0.2.1"), Some("10.5.5.5"), "LiveSrcAxis"),
+            (Some("192.0.2.1"), None, "DIRECT"),
+        ] {
+            let meta = Metadata {
+                dst_ip: dst.map(|ip| ip.parse::<IpAddr>().unwrap()),
+                src_ip: src.map(|ip| ip.parse::<IpAddr>().unwrap()),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "dst={dst:?} src={src:?}");
+            let (adapter, ..) = naive_match(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, adapter, "dst={dst:?} src={src:?}");
+        }
+    }
+
+    #[test]
+    fn covered_cidr_keeps_sole_lazy_demand_carrier() {
+        // The covered /16 is the only rule demanding DNS resolution: pruning
+        // it would silently disable the enrichment whose result the earlier
+        // no-resolve /8 observes on the strict re-run.
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("10.0.0.0/8", "A", false, true).unwrap()),
+            Box::new(IpCidrRule::new("10.1.0.0/16", "B", false, false).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+        assert_eq!(set.slots().len(), 3, "sole demand carrier must stay live");
+        assert!(set.needs_ip_resolution());
+
+        let meta = Metadata {
+            host: "db.internal".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        assert!(
+            matches!(
+                set.match_rules_lazy(&meta, &rules),
+                LazyMatchOutcome::NeedsEnrichment { needs_ip: true, .. }
+            ),
+            "lazy scan must stop for resolution instead of falling through",
+        );
+
+        // With an earlier demand carrier in place, the covered rule prunes.
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("192.0.2.0/24", "R", false, false).unwrap()),
+            Box::new(IpCidrRule::new("10.0.0.0/8", "A", false, true).unwrap()),
+            Box::new(IpCidrRule::new("10.1.0.0/16", "B", false, false).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+        assert_eq!(
+            set.slots().len(),
+            3,
+            "covered rule prunes once a demand carrier exists"
+        );
+        assert!(set.needs_ip_resolution());
+    }
+
+    #[test]
+    fn dedup_keeps_stronger_demand_twins() {
+        // Identical predicate, stronger demand profile: must NOT dedup.
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("10.0.0.0/8", "A", false, true).unwrap()),
+            Box::new(IpCidrRule::new("10.0.0.0/8", "B", false, false).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+        assert_eq!(set.slots().len(), 3);
+        assert!(set.needs_ip_resolution());
+
+        // Identical predicate, identical demands: dedups as before.
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("10.0.0.0/8", "A", false, true).unwrap()),
+            Box::new(IpCidrRule::new("10.0.0.0/8", "B", false, true).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+        let set = CompiledRuleSet::build(&rules);
+        assert_eq!(set.slots().len(), 2);
+        assert!(!set.needs_ip_resolution());
+    }
+
+    #[test]
+    fn logic_trees_constant_fold() {
+        fn never_rule() -> Box<dyn Rule> {
+            // NOT(MATCH) is a compile-time-constant false.
+            Box::new(NotRule::new(Box::new(FinalRule::new("X")), "X"))
+        }
+        let rules: Vec<Box<dyn Rule>> = vec![
+            // Folds to never → pruned:
+            Box::new(NotRule::new(Box::new(FinalRule::new("X")), "NeverNot")),
+            // AND with a never-match child folds to never → pruned:
+            Box::new(AndRule::new(
+                vec![
+                    Box::new(PortRule::new("443", "X", false).unwrap()),
+                    never_rule(),
+                ],
+                "NeverAnd",
+            )),
+            // OR loses its never arm and collapses to the port predicate:
+            Box::new(OrRule::new(
+                vec![
+                    never_rule(),
+                    Box::new(PortRule::new("8443", "X", false).unwrap()),
+                ],
+                "OrPort",
+            )),
+            // AND of constants folds to always → unconditional terminator:
+            Box::new(AndRule::new(
+                vec![
+                    Box::new(FinalRule::new("X")),
+                    Box::new(NotRule::new(never_rule(), "X")),
+                ],
+                "AlwaysAnd",
+            )),
+            // Dead: truncated by the folded terminator above.
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        let live: Vec<usize> = set
+            .slots()
+            .iter()
+            .map(CompiledRuleSlot::rule_index)
+            .collect();
+        assert_eq!(
+            live,
+            vec![2, 3],
+            "never-folds prune, always-fold terminates"
+        );
+
+        for (port, expected) in [(8443, "OrPort"), (80, "AlwaysAnd")] {
+            let meta = Metadata {
+                dst_port: port,
+                ..Default::default()
+            };
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected, "port={port}");
+            let (adapter, ..) = naive_match(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, adapter, "port={port}");
+        }
+    }
+
+    #[test]
     fn shared_rule_set_handles_dedup_by_identity() {
         let entries = vec!["shared.example".to_string()];
         let set_box = build_rule_set(RuleSetBehavior::Domain, &entries, &ParserContext::default());
@@ -2007,17 +2338,22 @@ mod tests {
                         adapter,
                     )),
                     10 => Box::new(DomainKeywordRule::new(&rng.pick(&names)[..3], adapter)),
-                    // Same networks as arm 8 but with host bits set, so the
-                    // two spellings must fold onto one fingerprint.
-                    _ => Box::new(
-                        IpCidrRule::new(
-                            &format!("10.{}.7.9/16", rng.next() % 4),
-                            adapter,
-                            false,
-                            true,
+                    // Same networks as arm 8 but with host bits set (must
+                    // fold onto one fingerprint), or a /24 subset that the
+                    // coverage pass prunes once the enclosing /16 appeared.
+                    _ => {
+                        let third = rng.next() % 4;
+                        let prefix = if rng.next().is_multiple_of(2) { 16 } else { 24 };
+                        Box::new(
+                            IpCidrRule::new(
+                                &format!("10.{third}.7.9/{prefix}"),
+                                adapter,
+                                false,
+                                true,
+                            )
+                            .unwrap(),
                         )
-                        .unwrap(),
-                    ),
+                    }
                 };
                 rules.push(rule);
                 // Occasionally drop in an early FINAL to exercise dead-rule
