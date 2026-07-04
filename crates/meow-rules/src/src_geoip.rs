@@ -33,6 +33,12 @@ impl SrcGeoIpRule {
     }
 }
 
+impl SrcGeoIpRule {
+    pub fn ranges(&self) -> &CountryRanges {
+        &self.ranges
+    }
+}
+
 impl Rule for SrcGeoIpRule {
     fn rule_type(&self) -> RuleType {
         RuleType::SrcGeoIp
@@ -58,5 +64,9 @@ impl Rule for SrcGeoIpRule {
 
     fn payload(&self) -> &str {
         &self.country
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }

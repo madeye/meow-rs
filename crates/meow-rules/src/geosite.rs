@@ -119,6 +119,63 @@ impl GeositeDB {
             .map(String::as_str)
     }
 
+    fn bucket_exists(&self, key: &str) -> bool {
+        self.categories.contains_key(key)
+            || self.keywords.contains_key(key)
+            || self.regex_compiled.contains_key(key)
+    }
+
+    /// Resolve a rule payload (a category, possibly with `@attr` suffixes)
+    /// into canonical bucket keys — one per required attribute bucket, or a
+    /// single key for a plain category.
+    ///
+    /// Returns `None` when any required bucket is absent from the DB: since
+    /// the DB is immutable after startup, such a rule can never match and
+    /// callers may prune it. The returned keys are pre-case-folded and
+    /// pre-formatted so per-connection matching via
+    /// [`Self::lookup_resolved`] does no splitting, case work, or
+    /// allocation.
+    pub fn resolve_keys(&self, category: &str) -> Option<Vec<String>> {
+        let (base, attrs) = split_category_attrs(category);
+        if base.is_empty() {
+            return None;
+        }
+        let needed: Vec<String> = if attrs.is_empty() {
+            vec![base.to_string()]
+        } else {
+            attrs.iter().map(|attr| format!("{base}@{attr}")).collect()
+        };
+        needed
+            .into_iter()
+            .map(|key| {
+                let canon = self.category_key(&key)?;
+                self.bucket_exists(canon).then(|| canon.to_string())
+            })
+            .collect()
+    }
+
+    /// Match `domain` against one pre-resolved bucket key from
+    /// [`Self::resolve_keys`]. Skips the per-lookup attribute splitting and
+    /// case-fold scan that [`Self::lookup`] pays.
+    pub fn lookup_resolved(&self, key: &str, domain: &str) -> bool {
+        if let Some(trie) = self.categories.get(key) {
+            if trie.search(domain).is_some() {
+                return true;
+            }
+        }
+        if let Some(kws) = self.keywords.get(key) {
+            if kws.iter().any(|kw| domain.contains(kw.as_str())) {
+                return true;
+            }
+        }
+        if let Some(compiled) = self.regex_compiled.get(key) {
+            if compiled.iter().any(|re| re.is_match(domain)) {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Number of categories in the DB.
     pub fn category_count(&self) -> usize {
         self.categories.len()

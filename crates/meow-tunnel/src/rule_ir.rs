@@ -1,11 +1,25 @@
 use crate::match_engine::DomainIndex;
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use iprange::IpRange;
 use meow_common::{ConnType, Metadata, Network, Rule, RuleMatchHelper, RuleType};
+use meow_rules::{
+    geoip::GeoIpRule,
+    geosite::GeositeDB,
+    geosite_rule::GeoSiteRule,
+    ip_asn::IpAsnRule,
+    ip_suffix::{IpSuffixMatcher, IpSuffixRule},
+    logic::{AndRule, NotRule, OrRule},
+    rule_set::RuleSet,
+    rule_set_rule::RuleSetRule,
+    src_geoip::SrcGeoIpRule,
+};
 use regex::Regex;
 use smol_str::SmolStr;
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Below this size, trie probing costs more than it saves for common configs
 /// with early matches. Compile small configs to straight-line ordered IR scan.
@@ -108,12 +122,58 @@ enum RuleOp {
     InType(InTypeMask),
     InUser(String),
     Match,
+    /// GEOSITE lowered to pre-resolved bucket handles: the category lookup,
+    /// attribute splitting, and per-connection `format!` allocation all
+    /// happened once at compile time.
+    GeoSite(Box<GeoSiteOp>),
+    /// RULE-SET lowered to its shared set handle (one virtual call into the
+    /// set, no rule-level dispatch). Safe to freeze: provider refresh goes
+    /// through `Tunnel::update_rules`, which rebuilds this IR.
+    RuleSetRef(RuleSetHandle),
+    /// GEOIP / SRC-GEOIP / IP-ASN lowered to their shared Patricia tries.
+    IpRanges {
+        v4: Arc<IpRange<Ipv4Net>>,
+        v6: Arc<IpRange<Ipv6Net>>,
+        src: bool,
+    },
+    /// IP-SUFFIX lowered to its Copy matcher. Boxed: the matcher carries
+    /// inline u128 V6 masks (48 B) that would otherwise dominate the enum.
+    IpSuffix(Box<IpSuffixOp>),
+    /// AND / OR / NOT lowered to native expression trees over child ops.
+    AllOf(Box<[RuleOp]>),
+    AnyOf(Box<[RuleOp]>),
+    NotOp(Box<RuleOp>),
     /// A DOMAIN / DOMAIN-SUFFIX predicate fully owned by the domain index:
     /// the trie's min-index search proves whether it matches, so scans skip
     /// the slot without evaluating anything. The slot itself stays alive as
     /// the match-result carrier for trie hits.
     TrieOwned,
     Fallback,
+}
+
+#[derive(Debug, Clone)]
+struct GeoSiteOp {
+    db: Arc<GeositeDB>,
+    /// Canonical bucket keys from `GeositeDB::resolve_keys` — all must
+    /// contain the host (attribute categories are intersections).
+    keys: Box<[Box<str>]>,
+}
+
+#[derive(Debug, Clone)]
+struct IpSuffixOp {
+    matcher: IpSuffixMatcher,
+    src: bool,
+}
+
+#[derive(Clone)]
+struct RuleSetHandle(Arc<dyn RuleSet>);
+
+impl std::fmt::Debug for RuleSetHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuleSetHandle")
+            .field("len", &self.0.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -233,7 +293,13 @@ impl CompiledRuleSet {
         for (rule_index, rule) in rules.iter().enumerate() {
             let rule_type = rule.rule_type();
             let payload = rule.payload();
-            let op = compile_op(rule_type, payload).unwrap_or(RuleOp::Fallback);
+            // Payload-pure lowering first; then state-carrying native
+            // lowering via downcast (Arc handles cloned once at build).
+            let pure_op = compile_op(rule_type, payload);
+            let payload_pure = pure_op.is_some();
+            let op = pure_op
+                .or_else(|| lower_native(rule.as_ref()))
+                .unwrap_or(RuleOp::Fallback);
 
             // Constant-false pruning: drop rules that can never match, so
             // they neither occupy scan slots nor force metadata enrichment
@@ -242,14 +308,12 @@ impl CompiledRuleSet {
                 continue;
             }
 
-            // Duplicate elimination, lowered predicates only: the op is a
-            // pure function of (rule_type, payload), so a later identical
-            // predicate can never win under first-match-wins — regardless of
-            // its adapter. Fallback rules carry private state and are never
-            // deduplicated.
-            if !matches!(op, RuleOp::Fallback)
-                && !seen_ops.insert((rule_type, dedup_key(rule_type, payload)))
-            {
+            // Duplicate elimination, payload-pure predicates only: those
+            // ops are a pure function of (rule_type, payload), so a later
+            // identical predicate can never win under first-match-wins —
+            // regardless of its adapter. Ops lowered from private rule
+            // state (and Fallback rules) are never deduplicated.
+            if payload_pure && !seen_ops.insert((rule_type, dedup_key(rule_type, payload))) {
                 continue;
             }
 
@@ -396,7 +460,7 @@ impl CompiledRuleSet {
         let helper = RuleMatchHelper;
         let input = MatchInput::new(metadata);
         if self.execution_plan == ExecutionPlan::LinearScan {
-            return match self.scan_range_ctl(0..self.slots.len(), &input, rules, &helper, true) {
+            return match self.scan_range_ctl::<true>(0..self.slots.len(), &input, rules, &helper) {
                 ScanOutcome::Matched(matched) => LazyMatchOutcome::Matched(matched),
                 ScanOutcome::Blocked { pos } => self.enrichment_needs(pos, &input),
                 ScanOutcome::Exhausted => LazyMatchOutcome::NoMatch,
@@ -420,7 +484,7 @@ impl CompiledRuleSet {
             None => (self.slots.len(), None),
         };
 
-        match self.scan_range_ctl(0..scan_end, &input, rules, &helper, true) {
+        match self.scan_range_ctl::<true>(0..scan_end, &input, rules, &helper) {
             ScanOutcome::Matched(matched) => return LazyMatchOutcome::Matched(matched),
             // A blocked slot before the trie hit may match and beat it, so
             // enrichment is needed even though a domain rule stands ready.
@@ -432,7 +496,7 @@ impl CompiledRuleSet {
             return LazyMatchOutcome::Matched(self.static_match(slot));
         }
 
-        match self.scan_range_ctl(scan_end..self.slots.len(), &input, rules, &helper, true) {
+        match self.scan_range_ctl::<true>(scan_end..self.slots.len(), &input, rules, &helper) {
             ScanOutcome::Matched(matched) => LazyMatchOutcome::Matched(matched),
             ScanOutcome::Blocked { pos } => self.enrichment_needs(pos, &input),
             ScanOutcome::Exhausted => LazyMatchOutcome::NoMatch,
@@ -504,23 +568,26 @@ impl CompiledRuleSet {
         rules: &'a [Box<dyn Rule>],
         helper: &RuleMatchHelper,
     ) -> Option<CompiledMatchResult<'a>> {
-        match self.scan_range_ctl(range, input, rules, helper, false) {
+        match self.scan_range_ctl::<false>(range, input, rules, helper) {
             ScanOutcome::Matched(matched) => Some(matched),
             ScanOutcome::Blocked { .. } | ScanOutcome::Exhausted => None,
         }
     }
 
-    fn scan_range_ctl<'a>(
+    /// `STOP_ON_DEMAND` is a const generic so the strict scan monomorphizes
+    /// to the original tight loop — no per-slot demand branch, no position
+    /// bookkeeping (measured: the runtime-bool version cost ~2.5x on a 10k
+    /// wildcard-rule miss scan).
+    fn scan_range_ctl<'a, const STOP_ON_DEMAND: bool>(
         &'a self,
         range: Range<usize>,
         input: &MatchInput<'_>,
         rules: &'a [Box<dyn Rule>],
         helper: &RuleMatchHelper,
-        stop_on_demand: bool,
     ) -> ScanOutcome<'a> {
         let start = range.start;
         for (offset, slot) in self.slots[range].iter().enumerate() {
-            if stop_on_demand && slot_blocked(slot, input) {
+            if STOP_ON_DEMAND && slot_blocked(slot, input) {
                 return ScanOutcome::Blocked {
                     pos: start + offset,
                 };
@@ -554,7 +621,7 @@ impl CompiledRuleSet {
                     }
                 }
                 op => {
-                    if matches_op(op, input) {
+                    if matches_op(op, input, helper) {
                         return ScanOutcome::Matched(self.static_match(slot));
                     }
                 }
@@ -722,8 +789,147 @@ fn compile_op(rule_type: RuleType, payload: &str) -> Option<RuleOp> {
     }
 }
 
-fn matches_op(op: &RuleOp, input: &MatchInput<'_>) -> bool {
+/// Lower a rule that `compile_op` declined, by downcasting to the concrete
+/// types whose match state is cheap to share. Returns `None` for rules that
+/// must stay on the virtual-dispatch fallback path.
+fn lower_native(rule: &dyn Rule) -> Option<RuleOp> {
+    let any = rule.as_any()?;
+    if let Some(geo) = any.downcast_ref::<GeoSiteRule>() {
+        let db = geo.db()?;
+        // `resolve_keys` returning None means the rule can never match;
+        // `never_matches` already pruned that case before lowering runs.
+        let keys = db.resolve_keys(geo.category())?;
+        return Some(RuleOp::GeoSite(Box::new(GeoSiteOp {
+            db: Arc::clone(db),
+            keys: keys.into_iter().map(String::into_boxed_str).collect(),
+        })));
+    }
+    if let Some(rule_set) = any.downcast_ref::<RuleSetRule>() {
+        return Some(RuleOp::RuleSetRef(RuleSetHandle(Arc::clone(
+            rule_set.rule_set(),
+        ))));
+    }
+    if let Some(geoip) = any.downcast_ref::<GeoIpRule>() {
+        let ranges = geoip.ranges();
+        return Some(RuleOp::IpRanges {
+            v4: Arc::clone(&ranges.v4),
+            v6: Arc::clone(&ranges.v6),
+            src: false,
+        });
+    }
+    if let Some(src_geoip) = any.downcast_ref::<SrcGeoIpRule>() {
+        let ranges = src_geoip.ranges();
+        return Some(RuleOp::IpRanges {
+            v4: Arc::clone(&ranges.v4),
+            v6: Arc::clone(&ranges.v6),
+            src: true,
+        });
+    }
+    if let Some(asn) = any.downcast_ref::<IpAsnRule>() {
+        let ranges = asn.ranges();
+        return Some(RuleOp::IpRanges {
+            v4: Arc::clone(&ranges.v4),
+            v6: Arc::clone(&ranges.v6),
+            src: asn.is_src(),
+        });
+    }
+    if let Some(suffix) = any.downcast_ref::<IpSuffixRule>() {
+        return Some(RuleOp::IpSuffix(Box::new(IpSuffixOp {
+            matcher: suffix.matcher(),
+            src: suffix.is_src(),
+        })));
+    }
+    if let Some(and) = any.downcast_ref::<AndRule>() {
+        return lower_children(and.sub_rules()).map(RuleOp::AllOf);
+    }
+    if let Some(or) = any.downcast_ref::<OrRule>() {
+        return lower_children(or.sub_rules()).map(RuleOp::AnyOf);
+    }
+    if let Some(not) = any.downcast_ref::<NotRule>() {
+        return lower_rule(not.inner()).map(|op| RuleOp::NotOp(Box::new(op)));
+    }
+    None
+}
+
+/// Lower any rule: payload-pure predicates first, then native state
+/// lowering. Used for logic-rule children, where one non-lowerable child
+/// keeps the whole logic rule on the fallback path.
+fn lower_rule(rule: &dyn Rule) -> Option<RuleOp> {
+    compile_op(rule.rule_type(), rule.payload()).or_else(|| lower_native(rule))
+}
+
+fn lower_children(rules: &[Box<dyn Rule>]) -> Option<Box<[RuleOp]>> {
+    rules.iter().map(|rule| lower_rule(rule.as_ref())).collect()
+}
+
+fn ip_ranges_contain(v4: &IpRange<Ipv4Net>, v6: &IpRange<Ipv6Net>, ip: Option<IpAddr>) -> bool {
+    match ip {
+        Some(IpAddr::V4(addr)) => {
+            v4.contains(&Ipv4Net::new(addr, 32).expect("/32 is always valid"))
+        }
+        Some(IpAddr::V6(addr)) => {
+            v6.contains(&Ipv6Net::new(addr, 128).expect("/128 is always valid"))
+        }
+        None => false,
+    }
+}
+
+/// Evaluate the state-carrying native ops (and logic trees, which recurse
+/// back into `matches_op`). Deliberately `#[inline(never)]`: these arms are
+/// fat (hash lookups, virtual calls, recursion), and folding them into
+/// `matches_op` pushed it past the inline threshold — the scan loop then
+/// paid an outlined call per slot even for one-comparison ops, measured as
+/// a 2.3x slowdown on a 10k-rule wildcard miss scan.
+#[inline(never)]
+fn matches_native_op(op: &RuleOp, input: &MatchInput<'_>, helper: &RuleMatchHelper) -> bool {
     match op {
+        RuleOp::GeoSite(geosite) => {
+            !input.host.is_empty()
+                && geosite
+                    .keys
+                    .iter()
+                    .all(|key| geosite.db.lookup_resolved(key, input.host))
+        }
+        RuleOp::RuleSetRef(handle) => handle.0.matches(input.metadata, helper),
+        RuleOp::IpRanges { v4, v6, src } => {
+            let ip = if *src {
+                input.metadata.src_ip
+            } else {
+                input.metadata.dst_ip
+            };
+            ip_ranges_contain(v4, v6, ip)
+        }
+        RuleOp::IpSuffix(suffix) => {
+            let ip = if suffix.src {
+                input.metadata.src_ip
+            } else {
+                input.metadata.dst_ip
+            };
+            ip.is_some_and(|addr| suffix.matcher.matches(addr))
+        }
+        RuleOp::AllOf(children) => children.iter().all(|op| matches_op(op, input, helper)),
+        RuleOp::AnyOf(children) => children.iter().any(|op| matches_op(op, input, helper)),
+        RuleOp::NotOp(child) => !matches_op(child, input, helper),
+        other => matches_op(other, input, helper),
+    }
+}
+
+/// `#[inline(always)]`: the workspace ships at `opt-level = "z"`, whose
+/// inline threshold rejects this function once it has a full opcode match —
+/// leaving the scan loop paying an outlined call per slot even for
+/// one-comparison predicates (measured 2.3x on a 10k wildcard-rule scan).
+/// The body is deliberately kept slim by routing every fat arm through
+/// `matches_native_op`.
+#[inline(always)]
+fn matches_op(op: &RuleOp, input: &MatchInput<'_>, helper: &RuleMatchHelper) -> bool {
+    match op {
+        RuleOp::GeoSite(_)
+        | RuleOp::RuleSetRef(_)
+        | RuleOp::IpRanges { .. }
+        | RuleOp::IpSuffix(_)
+        | RuleOp::AllOf(_)
+        | RuleOp::AnyOf(_)
+        | RuleOp::NotOp(_) => matches_native_op(op, input, helper),
         RuleOp::Domain(domain) => input.host.eq_ignore_ascii_case(domain),
         RuleOp::DomainSuffix(suffix) => domain_suffix_matches(input.host, suffix),
         RuleOp::DomainKeyword(keyword) => domain_keyword_matches(input.host, keyword),
@@ -815,6 +1021,7 @@ enum WildcardMatcher {
 }
 
 impl WildcardMatcher {
+    #[inline(always)]
     fn matches(&self, host: &str) -> bool {
         match self {
             Self::Glob(glob) => glob.matches(host),
@@ -859,6 +1066,7 @@ impl GlobMatcher {
         Some(Self { pieces })
     }
 
+    #[inline(always)]
     fn matches(&self, host: &str) -> bool {
         let host = host.as_bytes();
         let pieces = &self.pieces;
@@ -1518,6 +1726,183 @@ mod tests {
     }
 
     #[test]
+    fn rule_op_size_stays_bounded() {
+        // New native variants must not grow the op past the pre-existing
+        // maximum (Domain(String) = 24 B payload); scan cache behavior
+        // depends on slot size staying put.
+        let size = std::mem::size_of::<RuleOp>();
+        assert!(size <= 32, "RuleOp grew to {size} B");
+    }
+
+    #[test]
+    fn geosite_unknown_category_is_pruned() {
+        let mut db = GeositeDB::empty();
+        db.insert("cn", "cn.example");
+        let rules: Vec<Box<dyn Rule>> = vec![
+            // Category absent from the immutable DB: permanent no-match.
+            Box::new(GeoSiteRule::new(
+                "nonexistent",
+                "Direct",
+                Some(Arc::new(db)),
+                false,
+            )),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+
+        assert_eq!(set.len(), 1, "unknown geosite category must be pruned");
+        assert!(!set.needs_ip_resolution());
+    }
+
+    #[test]
+    fn geoip_rule_lowers_to_ip_ranges_op() {
+        use iprange::IpRange;
+        use meow_rules::country_index::CountryRanges;
+
+        let mut v4: IpRange<ipnet::Ipv4Net> = IpRange::new();
+        v4.add("203.0.113.0/24".parse().unwrap());
+        v4.simplify();
+        let ranges = CountryRanges {
+            v4: Arc::new(v4),
+            v6: Arc::new(IpRange::new()),
+        };
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(GeoIpRule::new("CN", "GeoProxy", false, ranges)),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(set.slots()[0].is_lowered(), "GEOIP must lower natively");
+
+        let hit = Metadata {
+            dst_ip: Some("203.0.113.9".parse::<IpAddr>().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&hit, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "GeoProxy");
+        assert_eq!(result.rule_type, RuleType::GeoIp);
+
+        let miss = Metadata {
+            dst_ip: Some("198.51.100.1".parse::<IpAddr>().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&miss, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "DIRECT");
+    }
+
+    #[test]
+    fn ip_suffix_rule_lowers_and_matches() {
+        use meow_rules::ip_suffix::IpSuffixRule;
+
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpSuffixRule::new("0.0.0.1/8", "SuffixProxy", false, false).unwrap()),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(set.slots()[0].is_lowered(), "IP-SUFFIX must lower natively");
+
+        let hit = Metadata {
+            dst_ip: Some("10.20.30.1".parse::<IpAddr>().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&hit, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "SuffixProxy");
+
+        let miss = Metadata {
+            dst_ip: Some("10.20.30.2".parse::<IpAddr>().unwrap()),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&miss, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "DIRECT");
+    }
+
+    #[test]
+    fn logic_rules_lower_to_expression_trees() {
+        use meow_rules::logic::{AndRule, NotRule};
+
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(AndRule::new(
+                vec![
+                    Box::new(DomainSuffixRule::new("example.com", "unused")),
+                    Box::new(NotRule::new(
+                        Box::new(PortRule::new("80", "unused", false).unwrap()),
+                        "unused",
+                    )),
+                ],
+                "LogicProxy",
+            )),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(
+            set.slots()[0].is_lowered(),
+            "AND(suffix, NOT(port)) must lower"
+        );
+
+        let hit = Metadata {
+            host: "a.example.com".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&hit, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "LogicProxy");
+        assert_eq!(result.rule_type, RuleType::And);
+
+        // Port 80 flips the NOT arm off.
+        let miss = Metadata {
+            host: "a.example.com".into(),
+            dst_port: 80,
+            ..Default::default()
+        };
+        let result = set.match_rules(&miss, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "DIRECT");
+    }
+
+    #[test]
+    fn logic_rule_with_opaque_child_stays_on_fallback() {
+        let counting = CountingRule::new(
+            RuleType::GeoIp,
+            "unused",
+            "CN",
+            true,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(CallCounts::default()),
+        );
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(OrRule::new(
+                vec![
+                    Box::new(DomainRule::new("x.example", "unused")),
+                    Box::new(counting),
+                ],
+                "MixedProxy",
+            )),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert!(
+            !set.slots()[0].is_lowered(),
+            "a non-lowerable child must keep the logic rule on fallback",
+        );
+
+        let meta = Metadata {
+            host: "unrelated.example".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        // The counting child always matches → OR matches via fallback.
+        let result = set.match_rules(&meta, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "MixedProxy");
+    }
+
+    #[test]
     fn dead_rules_after_final_are_eliminated() {
         let mut db = GeositeDB::empty();
         db.insert("cn", "cn.example");
@@ -1732,7 +2117,7 @@ mod tests {
     }
 
     #[test]
-    fn geosite_attribute_rule_fallback_matches_under_ir() {
+    fn geosite_attribute_rule_lowers_and_matches_under_ir() {
         let mut db = GeositeDB::empty();
         db.insert("microsoft", "global.example");
         db.insert("microsoft@cn", "cn.example");
@@ -1744,7 +2129,7 @@ mod tests {
         ))];
 
         let set = CompiledRuleSet::build(&rules);
-        assert!(!set.slots()[0].is_lowered());
+        assert!(set.slots()[0].is_lowered(), "GEOSITE must lower natively");
 
         let meta = Metadata {
             host: "cn.example".into(),
@@ -1788,7 +2173,7 @@ mod tests {
     }
 
     #[test]
-    fn rule_set_rule_fallback_matches_under_ir() {
+    fn rule_set_rule_lowers_and_matches_under_ir() {
         let entries = vec!["example.com".to_string()];
         let set_box = build_rule_set(RuleSetBehavior::Domain, &entries, &ParserContext::default());
         let rule_set: Arc<dyn RuleSet> = Arc::from(set_box);
@@ -1796,7 +2181,10 @@ mod tests {
             vec![Box::new(RuleSetRule::new("cn", rule_set, "Direct", false))];
 
         let compiled = CompiledRuleSet::build(&rules);
-        assert!(!compiled.slots()[0].is_lowered());
+        assert!(
+            compiled.slots()[0].is_lowered(),
+            "RULE-SET must lower natively",
+        );
 
         let meta = Metadata {
             host: "example.com".into(),
@@ -1805,7 +2193,7 @@ mod tests {
         };
         let result = compiled
             .match_rules(&meta, &rules)
-            .expect("rule-set fallback must match");
+            .expect("rule-set op must match");
         assert_eq!(result.adapter_name, "Direct");
         assert_eq!(result.rule_type, RuleType::RuleSet);
     }

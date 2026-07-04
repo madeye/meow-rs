@@ -138,6 +138,16 @@ pub trait Rule: Send + Sync {
         false
     }
 
+    /// Concrete-type escape hatch for the rule IR compiler: rule types that
+    /// can be lowered to native opcodes (their match state is cheap to share
+    /// — `Arc` handles or `Copy` matchers) override this to return `self`.
+    /// The default `None` keeps the rule on the virtual-dispatch fallback
+    /// path. Lowering is an optimization only; `match_metadata` remains the
+    /// source of truth for semantics.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
     /// Match against metadata and, on match, return the routing target.
     ///
     /// Default: `Some(self.adapter())` when `match_metadata`

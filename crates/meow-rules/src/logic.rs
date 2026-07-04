@@ -19,6 +19,10 @@ impl AndRule {
             payload,
         }
     }
+
+    pub fn sub_rules(&self) -> &[Box<dyn Rule>] {
+        &self.rules
+    }
 }
 
 impl Rule for AndRule {
@@ -47,6 +51,10 @@ impl Rule for AndRule {
     fn should_find_process(&self) -> bool {
         self.rules.iter().any(|r| r.should_find_process())
     }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 pub struct OrRule {
@@ -67,6 +75,10 @@ impl OrRule {
             adapter: adapter.to_string(),
             payload,
         }
+    }
+
+    pub fn sub_rules(&self) -> &[Box<dyn Rule>] {
+        &self.rules
     }
 }
 
@@ -96,6 +108,10 @@ impl Rule for OrRule {
     fn should_find_process(&self) -> bool {
         self.rules.iter().any(|r| r.should_find_process())
     }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
 }
 
 pub struct NotRule {
@@ -112,6 +128,10 @@ impl NotRule {
             adapter: adapter.to_string(),
             payload,
         }
+    }
+
+    pub fn inner(&self) -> &dyn Rule {
+        self.rule.as_ref()
     }
 }
 
@@ -138,5 +158,9 @@ impl Rule for NotRule {
 
     fn should_find_process(&self) -> bool {
         self.rule.should_find_process()
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }

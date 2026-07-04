@@ -40,6 +40,16 @@ impl IpAsnRule {
     }
 }
 
+impl IpAsnRule {
+    pub fn ranges(&self) -> &AsnRanges {
+        &self.ranges
+    }
+
+    pub fn is_src(&self) -> bool {
+        self.src
+    }
+}
+
 impl Rule for IpAsnRule {
     fn rule_type(&self) -> RuleType {
         RuleType::IpAsn
@@ -74,6 +84,10 @@ impl Rule for IpAsnRule {
 
     fn should_resolve_ip(&self) -> bool {
         !self.no_resolve
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 

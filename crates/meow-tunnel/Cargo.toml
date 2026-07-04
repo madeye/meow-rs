@@ -15,6 +15,7 @@ meow-rules = { workspace = true }
 meow-proxy = { workspace = true, default-features = false }
 meow-trie = { workspace = true }
 ipnet = { workspace = true }
+iprange = { workspace = true }
 regex = { workspace = true }
 tokio = { workspace = true }
 dashmap = { workspace = true }

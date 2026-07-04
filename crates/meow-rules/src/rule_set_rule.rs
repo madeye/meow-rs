@@ -23,6 +23,10 @@ impl RuleSetRule {
             no_resolve,
         }
     }
+
+    pub fn rule_set(&self) -> &Arc<dyn RuleSet> {
+        &self.set
+    }
 }
 
 impl Rule for RuleSetRule {
@@ -45,5 +49,9 @@ impl Rule for RuleSetRule {
     fn should_resolve_ip(&self) -> bool {
         // Only ipcidr sets need DNS resolution for rule matching.
         matches!(self.set.behavior(), RuleSetBehavior::IpCidr) && !self.no_resolve
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }

@@ -39,6 +39,10 @@ impl GeoSiteRule {
     pub fn category(&self) -> &str {
         &self.category
     }
+
+    pub fn db(&self) -> Option<&Arc<GeositeDB>> {
+        self.db.as_ref()
+    }
 }
 
 impl Rule for GeoSiteRule {
@@ -74,8 +78,17 @@ impl Rule for GeoSiteRule {
 
     fn never_matches(&self) -> bool {
         // The DB is loaded once at startup and never mutated afterwards, so
-        // a missing DB (or empty category name) is a permanent no-match.
-        self.db.is_none() || self.category.is_empty()
+        // a missing DB, empty category name, or category absent from the DB
+        // is a permanent no-match.
+        self.category.is_empty()
+            || self
+                .db
+                .as_ref()
+                .is_none_or(|db| db.resolve_keys(&self.category).is_none())
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 }
 
