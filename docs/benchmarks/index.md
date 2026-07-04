@@ -16,6 +16,7 @@ refactor/cleanup-2026-05 work (M1 + M2).
 | [methodology.md](methodology.md) | Measurement methodology and workload definitions |
 | [binary-size.md](binary-size.md) | Stripped binary sizes by profile + target (ADR-0007 caps) |
 | [rule-engine-findings.md](rule-engine-findings.md) | Rule engine profiling notes |
+| [rule-ir-pi-2026-07.md](rule-ir-pi-2026-07.md) | Rule-IR series (#285–#297) on-device benchmark: Raspberry Pi 4 gateway, real 7,528-rule config — 1.8–2.9× match latency, −11.5% live slots, IR build 37.6→96.1 ms |
 | [baseline-2026-04-18.json](baseline-2026-04-18.json) | Raw dhat JSON snapshot at M2 open |
 
 ## M2 delta summary
