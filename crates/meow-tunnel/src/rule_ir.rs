@@ -33,17 +33,22 @@ const LINEAR_SCAN_RULE_LIMIT: usize = 64;
 /// so successful matches avoid repeat `rule_type` / `payload` / top-level
 /// `adapter` virtual calls.
 ///
-/// Compilation runs three semantics-preserving clean-up passes over the rule
+/// Compilation runs four semantics-preserving clean-up passes over the rule
 /// list (all rely on first-match-wins ordering):
 ///
 /// 1. **Dead-rule elimination** — nothing after the first unconditional
 ///    `MATCH`/`FINAL` rule is reachable, so no slot is emitted for it and it
 ///    does not contribute to `needs_ip_resolution` / `needs_process_lookup`.
-/// 2. **Duplicate elimination** — a later rule that lowers to an identical
-///    native predicate can never win against its first occurrence.
+/// 2. **Duplicate elimination** — a later rule whose canonical predicate
+///    fingerprint equals an earlier rule's can never win against its first
+///    occurrence (see `dedup_fingerprint`).
 /// 3. **Constant-false pruning** — rules that provably never match (a rule
 ///    reporting [`Rule::never_matches`], or a `UID` rule on a platform
 ///    without socket-UID lookup) are dropped from the scan plan.
+/// 4. **Shadowed-rule elimination** — a later domain-family rule whose match
+///    set is fully covered by earlier DOMAIN-SUFFIX / DOMAIN-KEYWORD /
+///    star-wildcard rules can never fire, so it is dropped regardless of its
+///    adapter (see `ShadowOracle`).
 ///
 /// Slots therefore form a subsequence of the source rules: each slot keeps
 /// its original `rule_index` (for fallback dispatch and diagnostics), and
@@ -290,15 +295,17 @@ impl CompiledRuleSet {
         let mut needs_ip_resolution = false;
         let mut needs_process_lookup = false;
         let mut seen_ops: HashSet<(RuleType, String)> = HashSet::new();
+        let mut shadow_oracle = ShadowOracle::default();
+        let mut pruned_never_match = 0usize;
+        let mut pruned_duplicates = 0usize;
+        let mut pruned_shadowed = 0usize;
 
         for (rule_index, rule) in rules.iter().enumerate() {
             let rule_type = rule.rule_type();
             let payload = rule.payload();
             // Payload-pure lowering first; then state-carrying native
             // lowering via downcast (Arc handles cloned once at build).
-            let pure_op = compile_op(rule_type, payload);
-            let payload_pure = pure_op.is_some();
-            let op = pure_op
+            let op = compile_op(rule_type, payload)
                 .or_else(|| lower_native(rule.as_ref()))
                 .unwrap_or(RuleOp::Fallback);
 
@@ -306,17 +313,30 @@ impl CompiledRuleSet {
             // they neither occupy scan slots nor force metadata enrichment
             // (a dead GEOSITE rule must not force DNS pre-resolution).
             if rule.never_matches() || op_never_matches(&op) {
+                pruned_never_match += 1;
                 continue;
             }
 
-            // Duplicate elimination, payload-pure predicates only: those
-            // ops are a pure function of (rule_type, payload), so a later
-            // identical predicate can never win under first-match-wins —
-            // regardless of its adapter. Ops lowered from private rule
-            // state (and Fallback rules) are never deduplicated.
-            if payload_pure && !seen_ops.insert((rule_type, dedup_key(rule_type, payload))) {
+            // Duplicate elimination on canonical predicate fingerprints: a
+            // later rule with an identical predicate can never win under
+            // first-match-wins — regardless of its adapter. Ops without a
+            // cheap canonical identity are never deduplicated.
+            if let Some(fingerprint) = dedup_fingerprint(payload, &op) {
+                if !seen_ops.insert((rule_type, fingerprint)) {
+                    pruned_duplicates += 1;
+                    continue;
+                }
+            }
+
+            // Shadowed-rule elimination: a domain-family predicate whose
+            // match set is fully covered by earlier suffix / keyword /
+            // star-wildcard rules can never fire either, for the same
+            // first-match-wins reason.
+            if shadow_oracle.shadows(&op, payload) {
+                pruned_shadowed += 1;
                 continue;
             }
+            shadow_oracle.absorb(&op, payload);
 
             let demands_ip = rule.should_resolve_ip();
             let demands_process = rule.should_find_process();
@@ -345,6 +365,17 @@ impl CompiledRuleSet {
             if terminator {
                 break;
             }
+        }
+
+        if slots.len() < rules.len() {
+            tracing::debug!(
+                source = rules.len(),
+                live = slots.len(),
+                duplicates = pruned_duplicates,
+                shadowed = pruned_shadowed,
+                never_match = pruned_never_match,
+                "rule IR clean-up passes pruned rules",
+            );
         }
 
         let execution_plan = select_execution_plan(slots.len());
@@ -730,19 +761,193 @@ fn select_execution_plan(rule_count: usize) -> ExecutionPlan {
     }
 }
 
-/// Dedup key for a lowered predicate. Domain-family matchers compare hosts
-/// case-insensitively, so their payloads are folded before comparison; all
-/// other lowered payloads dedup on the exact text (a missed dedup is only a
-/// lost optimization, never a correctness issue).
-fn dedup_key(rule_type: RuleType, payload: &str) -> String {
-    match rule_type {
-        RuleType::Domain
-        | RuleType::DomainSuffix
-        | RuleType::DomainKeyword
-        | RuleType::DomainWildcard
-        | RuleType::ProcessName => payload.to_ascii_lowercase(),
-        _ => payload.to_string(),
+/// Canonical dedup fingerprint for a lowered predicate, or `None` for ops
+/// with no cheap canonical identity (logic trees, IP-SUFFIX matchers, and
+/// fallback rules with private state).
+///
+/// The fingerprint identifies the op's *match semantics*, not its source
+/// text: domain-family payloads are case-folded (their matchers compare
+/// hosts case-insensitively), CIDR host bits are truncated at compile time,
+/// port lists are sorted and merged, and shared-state handles (GEOSITE /
+/// RULE-SET / GEOIP tries) compare by pointer identity plus resolved keys.
+/// Keyed together with `RuleType`, equal fingerprints mean equal predicates.
+/// A missed dedup is only a lost optimization, never a correctness issue.
+fn dedup_fingerprint(payload: &str, op: &RuleOp) -> Option<String> {
+    match op {
+        // These ops store their payload pre-folded / pre-canonicalized.
+        RuleOp::Domain(host) | RuleOp::DomainSuffix(host) | RuleOp::DomainKeyword(host) => {
+            Some(host.clone())
+        }
+        RuleOp::ProcessName(_) | RuleOp::DomainWildcard(_) => Some(payload.to_ascii_lowercase()),
+        RuleOp::DomainRegex(_)
+        | RuleOp::ProcessPath(_)
+        | RuleOp::InName(_)
+        | RuleOp::InUser(_)
+        | RuleOp::Match => Some(payload.to_string()),
+        // `compile_op` stores the truncated network, so textual host-bit
+        // variants ("10.1.2.3/8" vs "10.0.0.0/8") render identically.
+        RuleOp::IpCidr { net, .. } => Some(net.to_string()),
+        RuleOp::SrcPort(matcher) | RuleOp::DstPort(matcher) | RuleOp::InPort(matcher) => {
+            Some(port_fingerprint(matcher))
+        }
+        RuleOp::Dscp(value) => Some(value.to_string()),
+        RuleOp::Uid(uid) => Some(uid.to_string()),
+        RuleOp::Network(network) => Some(format!("{network:?}")),
+        RuleOp::InType(mask) => Some(format!(
+            "{}{}{}{}{}",
+            u8::from(mask.http),
+            u8::from(mask.https),
+            u8::from(mask.socks5),
+            u8::from(mask.tproxy),
+            u8::from(mask.inner)
+        )),
+        // Shared-state handles: pointer identity means the same immutable
+        // trie/set, so the predicates are interchangeable. GEOSITE also keys
+        // on its resolved bucket keys ("google" vs "GOOGLE" fold together).
+        RuleOp::GeoSite(geosite) => Some(format!(
+            "{:p}|{}",
+            Arc::as_ptr(&geosite.db),
+            geosite.keys.join(",")
+        )),
+        RuleOp::RuleSetRef(handle) => Some(format!("{:p}", Arc::as_ptr(&handle.0))),
+        RuleOp::IpRanges { v4, v6, src } => {
+            Some(format!("{:p}|{:p}|{src}", Arc::as_ptr(v4), Arc::as_ptr(v6)))
+        }
+        RuleOp::IpSuffix(_)
+        | RuleOp::AllOf(_)
+        | RuleOp::AnyOf(_)
+        | RuleOp::NotOp(_)
+        | RuleOp::TrieOwned
+        | RuleOp::Fallback => None,
     }
+}
+
+/// Serialize a canonical (sorted, merged — see [`compile_port_matcher`])
+/// port matcher for dedup fingerprinting.
+fn port_fingerprint(matcher: &PortMatcher) -> String {
+    fn span(range: &PortRange) -> String {
+        match range {
+            PortRange::Single(value) => value.to_string(),
+            PortRange::Range(lo, hi) => format!("{lo}-{hi}"),
+        }
+    }
+    match matcher {
+        PortMatcher::Single(value) => value.to_string(),
+        PortMatcher::Range(lo, hi) => format!("{lo}-{hi}"),
+        PortMatcher::Multiple(ranges) => ranges.iter().map(span).collect::<Vec<_>>().join(","),
+    }
+}
+
+/// Build-time oracle for **shadowed-rule elimination** (clean-up pass 4):
+/// answers whether a domain-family predicate's match set is fully covered by
+/// rules seen earlier in the list. Under first-match-wins a covered rule can
+/// never fire — every host it matches is claimed by an earlier rule — so it
+/// is pruned regardless of its adapter, which is observation-equivalent.
+///
+/// Coverage sources are the three shapes with cheap byte-wise subset proofs:
+/// DOMAIN-SUFFIX (covers itself and dot-boundary suffixes), star-shaped
+/// `*.rest` DOMAIN-WILDCARD (covers exactly-one-extra-label hosts), and
+/// DOMAIN-KEYWORD (covers any pattern containing the keyword). All entries
+/// and probes are ASCII-lowercased, mirroring the matchers'
+/// `eq_ignore_ascii_case` byte semantics — the proofs hold byte-for-byte
+/// even for degenerate or non-ASCII payloads.
+#[derive(Default)]
+struct ShadowOracle {
+    /// Lowered DOMAIN-SUFFIX payloads seen so far.
+    suffixes: HashSet<String>,
+    /// Lowered `rest` of star-shaped `*.rest` DOMAIN-WILDCARD payloads.
+    star_rests: HashSet<String>,
+    /// Lowered DOMAIN-KEYWORD payloads seen so far.
+    keywords: Vec<String>,
+}
+
+impl ShadowOracle {
+    /// Record a surviving rule's coverage. Empty payloads are excluded: an
+    /// empty keyword matches every host and would need MATCH-terminator
+    /// treatment, not subset reasoning.
+    fn absorb(&mut self, op: &RuleOp, payload: &str) {
+        match op {
+            RuleOp::DomainSuffix(suffix) if !suffix.is_empty() => {
+                self.suffixes.insert(suffix.clone());
+            }
+            RuleOp::DomainKeyword(keyword) if !keyword.is_empty() => {
+                self.keywords.push(keyword.clone());
+            }
+            RuleOp::DomainWildcard(_) => {
+                if let Some(rest) = star_rest(payload) {
+                    self.star_rests.insert(rest);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True iff earlier rules cover every host this predicate matches.
+    fn shadows(&self, op: &RuleOp, payload: &str) -> bool {
+        match op {
+            RuleOp::Domain(domain) => {
+                self.suffix_covers(domain)
+                    || self.keyword_covers(domain)
+                    || self.star_covers(domain)
+            }
+            RuleOp::DomainSuffix(suffix) => {
+                self.suffix_covers(suffix) || self.keyword_covers(suffix)
+            }
+            RuleOp::DomainKeyword(keyword) => self.keyword_covers(keyword),
+            // Only the star shape has an exact host-set description; every
+            // other wildcard shape stays conservatively unpruned.
+            RuleOp::DomainWildcard(_) => star_rest(payload)
+                .is_some_and(|rest| self.suffix_covers(&rest) || self.keyword_covers(&rest)),
+            _ => false,
+        }
+    }
+
+    /// Some earlier DOMAIN-SUFFIX matches every host `pattern` can match:
+    /// an entry equals `pattern` or is a dot-boundary suffix of it.
+    fn suffix_covers(&self, pattern: &str) -> bool {
+        if self.suffixes.is_empty() {
+            return false;
+        }
+        let mut start = 0;
+        loop {
+            if self.suffixes.contains(&pattern[start..]) {
+                return true;
+            }
+            match pattern[start..].find('.') {
+                Some(dot) => start += dot + 1,
+                None => return false,
+            }
+        }
+    }
+
+    /// Some earlier DOMAIN-KEYWORD is a substring of `pattern`: every host
+    /// containing `pattern` (or equal to it, or ending with it) contains
+    /// the keyword too.
+    fn keyword_covers(&self, pattern: &str) -> bool {
+        self.keywords
+            .iter()
+            .any(|keyword| pattern.contains(keyword.as_str()))
+    }
+
+    /// Some earlier star wildcard `*.rest` matches exactly the host
+    /// `domain`: it splits as `<one non-empty label>.rest`.
+    fn star_covers(&self, domain: &str) -> bool {
+        if self.star_rests.is_empty() {
+            return false;
+        }
+        domain
+            .split_once('.')
+            .is_some_and(|(label, rest)| !label.is_empty() && self.star_rests.contains(rest))
+    }
+}
+
+/// The lowered `rest` of a star-shaped `*.rest` DOMAIN-WILDCARD payload —
+/// the only wildcard shape whose host set is exactly describable (one
+/// non-empty dot-free extra label, per [`GlobMatcher`] semantics). `None`
+/// for every other shape.
+fn star_rest(payload: &str) -> Option<String> {
+    let rest = payload.strip_prefix("*.")?;
+    (!rest.is_empty() && !rest.contains('*')).then(|| rest.to_ascii_lowercase())
 }
 
 /// Ops that are compile-time-provably false on this platform.
@@ -760,14 +965,17 @@ fn compile_op(rule_type: RuleType, payload: &str) -> Option<RuleOp> {
         RuleType::DomainKeyword => Some(RuleOp::DomainKeyword(payload.to_ascii_lowercase())),
         RuleType::DomainRegex => compile_domain_regex(payload).map(RuleOp::DomainRegex),
         RuleType::DomainWildcard => compile_domain_wildcard(payload).map(RuleOp::DomainWildcard),
-        RuleType::IpCidr => payload
-            .parse()
-            .ok()
-            .map(|net| RuleOp::IpCidr { net, src: false }),
-        RuleType::SrcIpCidr => payload
-            .parse()
-            .ok()
-            .map(|net| RuleOp::IpCidr { net, src: true }),
+        // Host bits are truncated at compile time: matching only consults
+        // the network prefix, and the canonical form lets textual variants
+        // of the same network share one dedup fingerprint.
+        RuleType::IpCidr => payload.parse().ok().map(|net: IpNet| RuleOp::IpCidr {
+            net: net.trunc(),
+            src: false,
+        }),
+        RuleType::SrcIpCidr => payload.parse().ok().map(|net: IpNet| RuleOp::IpCidr {
+            net: net.trunc(),
+            src: true,
+        }),
         RuleType::SrcPort => compile_port_matcher(payload).map(RuleOp::SrcPort),
         RuleType::DstPort => compile_port_matcher(payload).map(RuleOp::DstPort),
         RuleType::InPort => compile_in_port(payload),
@@ -1208,7 +1416,7 @@ impl PortRange {
 }
 
 fn compile_port_matcher(payload: &str) -> Option<PortMatcher> {
-    let mut ranges = Vec::new();
+    let mut spans: Vec<(u16, u16)> = Vec::new();
     for part in payload.split([',', '/']) {
         let part = part.trim();
         if part.is_empty() {
@@ -1220,16 +1428,43 @@ fn compile_port_matcher(payload: &str) -> Option<PortMatcher> {
             if start > end {
                 return None;
             }
-            ranges.push(PortRange::Range(start, end));
+            spans.push((start, end));
         } else {
-            ranges.push(PortRange::Single(part.parse().ok()?));
+            let value = part.parse().ok()?;
+            spans.push((value, value));
         }
     }
-    match ranges.as_slice() {
-        [PortRange::Single(value)] => Some(PortMatcher::Single(*value)),
-        [PortRange::Range(lo, hi)] => Some(PortMatcher::Range(*lo, *hi)),
+    // Canonicalize: sort by low bound and merge overlapping or adjacent
+    // spans. Matching is order-independent (`any`), so this is
+    // semantics-preserving; it collapses textual variants ("443,80" vs
+    // "80,443", "80-90/85-100" vs "80-100") onto one dedup fingerprint and
+    // keeps `Multiple` scans minimal.
+    spans.sort_unstable();
+    let mut merged: Vec<(u16, u16)> = Vec::with_capacity(spans.len());
+    for (lo, hi) in spans {
+        match merged.last_mut() {
+            Some((_, last_hi)) if u32::from(lo) <= u32::from(*last_hi) + 1 => {
+                *last_hi = (*last_hi).max(hi);
+            }
+            _ => merged.push((lo, hi)),
+        }
+    }
+    match merged.as_slice() {
         [] => None,
-        _ => Some(PortMatcher::Multiple(ranges)),
+        [(lo, hi)] if lo == hi => Some(PortMatcher::Single(*lo)),
+        [(lo, hi)] => Some(PortMatcher::Range(*lo, *hi)),
+        _ => Some(PortMatcher::Multiple(
+            merged
+                .into_iter()
+                .map(|(lo, hi)| {
+                    if lo == hi {
+                        PortRange::Single(lo)
+                    } else {
+                        PortRange::Range(lo, hi)
+                    }
+                })
+                .collect(),
+        )),
     }
 }
 
@@ -1539,6 +1774,155 @@ mod tests {
     }
 
     #[test]
+    fn shadowed_domain_family_rules_are_pruned() {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainSuffixRule::new("example.com", "Suffix")),
+            Box::new(DomainKeywordRule::new("tracker", "Keyword")),
+            Box::new(DomainWildcardRule::new("*.cdn.net", "Star").unwrap()),
+            // Shadowed — every host each of these matches is claimed earlier:
+            Box::new(DomainRule::new("www.example.com", "S1")), // under suffix
+            Box::new(DomainRule::new("EXAMPLE.COM", "S2")),     // suffix apex, case-folded
+            Box::new(DomainSuffixRule::new("api.example.com", "S3")), // nested suffix
+            Box::new(DomainWildcardRule::new("*.example.com", "S4").unwrap()), // star ⊂ suffix
+            Box::new(DomainRule::new("mytracker.io", "S5")),    // contains keyword
+            Box::new(DomainSuffixRule::new("tracker.org", "S6")), // contains keyword
+            Box::new(DomainKeywordRule::new("supertrackers", "S7")), // contains keyword
+            Box::new(DomainWildcardRule::new("*.trackers.net", "S8").unwrap()), // rest ⊇ keyword
+            Box::new(DomainRule::new("edge.cdn.net", "S9")),    // one label under star
+            // Not shadowed — must stay live:
+            Box::new(DomainRule::new("a.b.cdn.net", "LiveTwoLabels")), // star = one label only
+            Box::new(DomainRule::new("cdn.net", "LiveApex")),          // star needs a label
+            Box::new(DomainSuffixRule::new("examples.com", "LiveNoDotBoundary")),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        let live: Vec<usize> = set
+            .slots()
+            .iter()
+            .map(CompiledRuleSlot::rule_index)
+            .collect();
+        assert_eq!(
+            live,
+            vec![0, 1, 2, 12, 13, 14, 15],
+            "exactly the shadowed rules must be pruned",
+        );
+
+        // Pruning must be observation-equivalent to the naive reference.
+        for host in [
+            "www.example.com",
+            "example.com",
+            "x.api.example.com",
+            "y.example.com",
+            "mytracker.io",
+            "tracker.org",
+            "www.supertrackers.dev",
+            "x.trackers.net",
+            "edge.cdn.net",
+            "a.b.cdn.net",
+            "cdn.net",
+            "examples.com",
+            "unrelated.test",
+        ] {
+            let meta = Metadata {
+                host: Metadata::lower_host(host),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let compiled = set.match_rules(&meta, &rules).expect("must match");
+            let (adapter, ..) = naive_match(&meta, &rules).expect("must match");
+            assert_eq!(compiled.adapter_name, adapter, "host={host}");
+        }
+    }
+
+    #[test]
+    fn canonical_fingerprints_dedup_textual_variants() {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(IpCidrRule::new("10.1.2.3/8", "A", false, true).unwrap()),
+            Box::new(IpCidrRule::new("10.0.0.0/8", "B", false, true).unwrap()), // same network
+            Box::new(PortRule::new("80,443", "C", false).unwrap()),
+            Box::new(PortRule::new("443, 80", "D", false).unwrap()), // same port set
+            Box::new(PortRule::new("70-90/85-100", "E", false).unwrap()),
+            Box::new(PortRule::new("70-100", "F", false).unwrap()), // merges to the same span
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        let live: Vec<usize> = set
+            .slots()
+            .iter()
+            .map(CompiledRuleSlot::rule_index)
+            .collect();
+        assert_eq!(
+            live,
+            vec![0, 2, 4, 6],
+            "textual variants of one predicate must dedup onto the first",
+        );
+
+        for (meta, expected) in [
+            (
+                Metadata {
+                    dst_ip: Some("10.9.9.9".parse::<IpAddr>().unwrap()),
+                    dst_port: 7,
+                    ..Default::default()
+                },
+                "A",
+            ),
+            (
+                Metadata {
+                    dst_port: 443,
+                    ..Default::default()
+                },
+                "C",
+            ),
+            (
+                Metadata {
+                    dst_port: 95,
+                    ..Default::default()
+                },
+                "E",
+            ),
+            (
+                Metadata {
+                    dst_port: 7,
+                    ..Default::default()
+                },
+                "DIRECT",
+            ),
+        ] {
+            let result = set.match_rules(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, expected);
+            let (adapter, ..) = naive_match(&meta, &rules).expect("must match");
+            assert_eq!(result.adapter_name, adapter);
+        }
+    }
+
+    #[test]
+    fn shared_rule_set_handles_dedup_by_identity() {
+        let entries = vec!["shared.example".to_string()];
+        let set_box = build_rule_set(RuleSetBehavior::Domain, &entries, &ParserContext::default());
+        let rule_set: Arc<dyn RuleSet> = Arc::from(set_box);
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(RuleSetRule::new("prov", Arc::clone(&rule_set), "A", true)),
+            // Same provider handle: the predicate is identical, so the later
+            // occurrence can never win and must dedup by pointer identity.
+            Box::new(RuleSetRule::new("prov", Arc::clone(&rule_set), "B", true)),
+            Box::new(FinalRule::new("DIRECT")),
+        ];
+
+        let set = CompiledRuleSet::build(&rules);
+        assert_eq!(set.slots().len(), 2, "duplicate RULE-SET must be pruned");
+
+        let meta = Metadata {
+            host: "shared.example".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+        let result = set.match_rules(&meta, &rules).expect("must match");
+        assert_eq!(result.adapter_name, "A");
+    }
+
+    #[test]
     fn indexed_plan_unindexable_domain_payload_stays_on_scan_path() {
         // Non-ASCII payload: the trie's Unicode lowercasing diverges from
         // the op's ASCII-insensitive compare, so the pattern must not be
@@ -1589,7 +1973,7 @@ mod tests {
             for _ in 0..size {
                 let host = format!("{}.{}", rng.pick(&names), rng.pick(&tlds));
                 let adapter = rng.pick(&adapters);
-                let rule: Box<dyn Rule> = match rng.next() % 9 {
+                let rule: Box<dyn Rule> = match rng.next() % 12 {
                     0 => Box::new(DomainRule::new(&host, adapter)),
                     1 => Box::new(DomainRule::new(
                         &format!("{}.{host}", rng.pick(&subs)),
@@ -1606,9 +1990,28 @@ mod tests {
                         )
                         .unwrap(),
                     ),
-                    _ => Box::new(
+                    8 => Box::new(
                         IpCidrRule::new(
                             &format!("10.{}.0.0/16", rng.next() % 4),
+                            adapter,
+                            false,
+                            true,
+                        )
+                        .unwrap(),
+                    ),
+                    // Overlap-heavy shapes exercising the shadowing and
+                    // canonical-dedup passes; the naive reference keeps
+                    // them honest.
+                    9 => Box::new(DomainSuffixRule::new(
+                        &format!("{}.{host}", rng.pick(&subs)),
+                        adapter,
+                    )),
+                    10 => Box::new(DomainKeywordRule::new(&rng.pick(&names)[..3], adapter)),
+                    // Same networks as arm 8 but with host bits set, so the
+                    // two spellings must fold onto one fingerprint.
+                    _ => Box::new(
+                        IpCidrRule::new(
+                            &format!("10.{}.7.9/16", rng.next() % 4),
                             adapter,
                             false,
                             true,
