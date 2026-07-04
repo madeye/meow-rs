@@ -1,6 +1,5 @@
 use meow_common::{find_process, Metadata, Rule, RuleMatchHelper, RuleType};
 use meow_trie::DomainTrie;
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use tracing::trace;
 
@@ -15,9 +14,16 @@ pub struct MatchResult<'a> {
 
 /// Index of DOMAIN and DOMAIN-SUFFIX rules keyed by the trie.
 ///
-/// Stores only the earliest matching rule index for each pattern. The adapter
-/// and payload are borrowed from the rule slice after lookup, which keeps the
-/// index compact and avoids per-match result allocation.
+/// [`Self::search`] returns the **minimum rule index across every pattern
+/// matching the host** (min-index semantics), not the most-specific pattern.
+/// Under first-match-wins ordering this means a trie hit at `T` proves that
+/// no DOMAIN/DOMAIN-SUFFIX rule earlier than `T` matches the host — and a
+/// trie miss proves none matches at all. Suffix rules are indexed under both
+/// `+.pattern` (subdomains) and the bare pattern (the apex domain itself), so
+/// those proofs hold for every host a suffix rule can match.
+///
+/// The adapter and payload are borrowed from the rule slice after lookup,
+/// which keeps the index compact and avoids per-match result allocation.
 pub struct DomainIndex {
     trie: DomainTrie<usize>,
 }
@@ -29,50 +35,65 @@ impl DomainIndex {
         }
     }
 
-    /// Build an index from the rule list, recording the first (minimum-index)
-    /// occurrence of each domain pattern.
+    /// Build a sealed index from the rule list.
     pub fn build(rules: &[Box<dyn Rule>]) -> Self {
-        use std::borrow::Cow;
-        let mut trie: DomainTrie<usize> = DomainTrie::new();
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut index = Self::empty();
         for (idx, rule) in rules.iter().enumerate() {
-            match rule.rule_type() {
-                RuleType::Domain | RuleType::DomainSuffix => {
-                    // Patterns are normally already lowercase; only allocate
-                    // for the rare mixed-case entry, and check `seen` before
-                    // taking an owned copy — duplicates cost no allocation.
-                    let payload = rule.payload();
-                    let lowered: Cow<'_, str> = if payload.chars().any(char::is_uppercase) {
-                        Cow::Owned(payload.to_lowercase())
-                    } else {
-                        Cow::Borrowed(payload)
-                    };
-                    if seen.contains(lowered.as_ref()) {
-                        continue;
-                    }
-                    let pattern = lowered.into_owned();
-                    // For Domain: exact match pattern; trie handles it directly.
-                    // For DomainSuffix: use "+." prefix so trie matches subdomains.
-                    if rule.rule_type() == RuleType::DomainSuffix {
-                        let trie_key = format!("+.{pattern}");
-                        trie.insert(&trie_key, idx);
-                    } else {
-                        trie.insert(&pattern, idx);
-                    }
-                    seen.insert(pattern);
-                }
-                _ => {}
-            }
+            index.insert_rule(idx, rule.rule_type(), rule.payload());
         }
-        trie.seal();
-        Self { trie }
+        index.seal();
+        index
+    }
+
+    /// Index one rule's pattern. Returns `true` iff the pattern was fully
+    /// indexed — meaning the trie completely owns this rule's match
+    /// semantics, so callers may skip the rule during linear scans.
+    ///
+    /// Only DOMAIN and DOMAIN-SUFFIX rules with plain hostname payloads are
+    /// indexable. Degenerate payloads (empty, leading `.`/`*`/`+`, empty
+    /// labels, non-ASCII) would change meaning under the trie's wildcard
+    /// syntax, so they return `false` and stay on the scan path.
+    ///
+    /// Duplicate patterns keep the first (minimum) rule index: inserts happen
+    /// in ascending rule order and the trie's per-slot value is first-write.
+    pub fn insert_rule(&mut self, index: usize, rule_type: RuleType, payload: &str) -> bool {
+        if !indexable_pattern(payload) {
+            return false;
+        }
+        match rule_type {
+            RuleType::Domain => self.trie.insert(payload, index),
+            RuleType::DomainSuffix => {
+                // A suffix rule matches the apex domain itself as well as any
+                // subdomain; index both forms so a trie miss proves no suffix
+                // rule matches.
+                let subdomains = self.trie.insert(&format!("+.{payload}"), index);
+                let apex = self.trie.insert(payload, index);
+                subdomains && apex
+            }
+            _ => false,
+        }
+    }
+
+    pub fn seal(&mut self) {
+        self.trie.seal();
     }
 
     /// Probe the trie for a production-normalized hostname. Returns the
-    /// matching DOMAIN/DOMAIN-SUFFIX rule index, or `None`.
+    /// minimum matching DOMAIN/DOMAIN-SUFFIX rule index, or `None`.
     pub fn search(&self, host: &str) -> Option<usize> {
-        self.trie.search_normalized(host).copied()
+        self.trie.search_min_normalized(host).copied()
     }
+}
+
+/// True iff `payload` is a plain hostname pattern whose trie insertion
+/// matches exactly the hosts the corresponding DOMAIN / DOMAIN-SUFFIX
+/// predicate matches.
+fn indexable_pattern(payload: &str) -> bool {
+    !payload.is_empty()
+        && payload.is_ascii()
+        && !payload.starts_with(['.', '*', '+'])
+        && !payload.ends_with('.')
+        && !payload.contains("..")
 }
 
 /// Match metadata against rules using the domain index for early-exit.
@@ -101,12 +122,13 @@ pub fn match_rules<'rules>(
         index.search(host)
     };
 
-    // Determine the scan ceiling: if trie found a hit at index T, we only
-    // need to check rules[0..T] for an earlier match.  The trie returns the
-    // most-specific match (exact > wildcard), NOT the minimum-index rule across
-    // all patterns that match this host.  A broader rule at index < T (e.g.
-    // DOMAIN-SUFFIX "example.com" at idx 0 before DOMAIN "sub.example.com" at
-    // idx 1) can still match, so we cannot skip domain rules in the prefix scan.
+    // Determine the scan ceiling: on a trie hit at index T, only rules[0..T]
+    // can contain an earlier match. `DomainIndex::search` returns the
+    // minimum rule index across ALL patterns matching this host (min-index
+    // semantics), so no domain rule below T matches — the prefix scan only
+    // exists to catch earlier non-domain rules. It still evaluates domain
+    // rules for simplicity (they are provably non-matching but harmless);
+    // the compiled IR path skips them outright.
     let scan_end = trie_hit.unwrap_or(rules.len());
 
     for rule in &rules[..scan_end] {

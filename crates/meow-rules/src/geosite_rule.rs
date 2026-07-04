@@ -71,6 +71,12 @@ impl Rule for GeoSiteRule {
     fn should_resolve_ip(&self) -> bool {
         !self.no_resolve
     }
+
+    fn never_matches(&self) -> bool {
+        // The DB is loaded once at startup and never mutated afterwards, so
+        // a missing DB (or empty category name) is a permanent no-match.
+        self.db.is_none() || self.category.is_empty()
+    }
 }
 
 #[cfg(test)]

@@ -169,6 +169,31 @@ impl<T: Clone + 'static> DomainTrie<T> {
         self.search_inner(domain_lower.trim_end_matches('.'))
     }
 
+    /// Search with a pre-lowercased domain, returning the **minimum** value
+    /// among all patterns matching the query — not the most-specific one.
+    ///
+    /// [`Self::search_normalized`] answers "which pattern is the best match"
+    /// (exact beats wildcard, deeper beats shallower). First-match-wins rule
+    /// engines need a different question answered: "what is the smallest rule
+    /// index whose pattern matches this host". This walks the same path but
+    /// folds the minimum over every matching exact/star/dot value.
+    pub fn search_min_normalized(&self, domain_lower: &str) -> Option<&T>
+    where
+        T: Ord,
+    {
+        if self.len == 0 {
+            return None;
+        }
+        let query = domain_lower.trim_end_matches('.');
+        if query.is_empty() {
+            return None;
+        }
+        match &self.state {
+            TrieState::Building(root) => Self::search_min_build(root, query),
+            TrieState::Sealed(root) => Self::search_min_sealed(root, query),
+        }
+    }
+
     fn search_inner(&self, query: &str) -> Option<&T> {
         if query.is_empty() {
             return None;
@@ -323,8 +348,76 @@ impl<T: Clone + 'static> DomainTrie<T> {
         best
     }
 
+    fn search_min_build<'a>(root: &'a BuildNode<T>, query: &str) -> Option<&'a T>
+    where
+        T: Ord,
+    {
+        let n = query.bytes().filter(|&b| b == b'.').count() + 1;
+        let mut node = root;
+        let mut best: Option<&T> = None;
+
+        for (d, label) in query.rsplit('.').enumerate() {
+            match node.children.get(label) {
+                None => break,
+                Some(child) => {
+                    node = child;
+                    let remaining = n - d - 1;
+                    if remaining == 0 {
+                        fold_min(&mut best, node.exact_value.as_ref());
+                    } else {
+                        if remaining == 1 {
+                            fold_min(&mut best, node.star_value.as_ref());
+                        }
+                        fold_min(&mut best, node.dot_value.as_ref());
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    fn search_min_sealed<'a>(root: &'a SealedNode<T>, query: &str) -> Option<&'a T>
+    where
+        T: Ord,
+    {
+        let n = query.bytes().filter(|&b| b == b'.').count() + 1;
+        let mut node = root;
+        let mut best: Option<&T> = None;
+
+        for (d, label) in query.rsplit('.').enumerate() {
+            let found = node
+                .children
+                .binary_search_by(|(k, _)| k.as_bytes().cmp(label.as_bytes()));
+            match found {
+                Err(_) => break,
+                Ok(idx) => {
+                    node = &node.children[idx].1;
+                    let remaining = n - d - 1;
+                    if remaining == 0 {
+                        fold_min(&mut best, node.exact_value.as_ref());
+                    } else {
+                        if remaining == 1 {
+                            fold_min(&mut best, node.star_value.as_ref());
+                        }
+                        fold_min(&mut best, node.dot_value.as_ref());
+                    }
+                }
+            }
+        }
+        best
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+}
+
+fn fold_min<'a, T: Ord>(best: &mut Option<&'a T>, candidate: Option<&'a T>) {
+    if let Some(candidate) = candidate {
+        match best {
+            Some(current) if *current <= candidate => {}
+            _ => *best = Some(candidate),
+        }
     }
 }
 
@@ -530,6 +623,44 @@ mod tests {
         trie.insert("Example.COM", 1);
         assert_eq!(trie.search("example.com"), Some(&1));
         assert_eq!(trie.search("EXAMPLE.COM"), Some(&1));
+    }
+
+    #[test]
+    fn search_min_folds_across_all_matching_patterns() {
+        let mut trie = DomainTrie::new();
+        trie.insert("+.a.com", 1);
+        trie.insert("+.b.a.com", 3);
+        trie.insert("x.b.a.com", 7);
+
+        // Most-specific search prefers the exact/deepest pattern...
+        assert_eq!(trie.search_normalized("x.b.a.com"), Some(&7));
+        // ...min search folds the minimum over every matching pattern.
+        assert_eq!(trie.search_min_normalized("x.b.a.com"), Some(&1));
+        assert_eq!(trie.search_min_normalized("y.b.a.com"), Some(&1));
+        assert_eq!(trie.search_min_normalized("deep.y.b.a.com"), Some(&1));
+        assert_eq!(trie.search_min_normalized("unrelated.com"), None);
+
+        // Sealed trie must agree with the building trie.
+        trie.seal();
+        assert_eq!(trie.search_min_normalized("x.b.a.com"), Some(&1));
+        assert_eq!(trie.search_min_normalized("deep.y.b.a.com"), Some(&1));
+        assert_eq!(trie.search_min_normalized("unrelated.com"), None);
+    }
+
+    #[test]
+    fn search_min_sees_star_dot_and_exact_values() {
+        let mut trie = DomainTrie::new();
+        trie.insert("exact.example.com", 9);
+        trie.insert("*.example.com", 4);
+        trie.insert(".example.com", 6);
+        trie.seal();
+
+        // exact(9) vs star(4, one label) vs dot(6): min of the matching set.
+        assert_eq!(trie.search_min_normalized("exact.example.com"), Some(&4));
+        // Two labels below: star no longer applies, dot(6) does.
+        assert_eq!(trie.search_min_normalized("a.b.example.com"), Some(&6));
+        // Apex: only an exact pattern could match, none present.
+        assert_eq!(trie.search_min_normalized("example.com"), None);
     }
 
     #[test]
