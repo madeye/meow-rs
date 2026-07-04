@@ -7,7 +7,7 @@ use smol_str::SmolStr;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 struct CountingAlloc;
 
@@ -29,6 +29,34 @@ unsafe impl GlobalAlloc for CountingAlloc {
 
 #[global_allocator]
 static A: CountingAlloc = CountingAlloc;
+
+/// Serialize the measuring tests, recovering from poisoning so a failed
+/// assertion in one test surfaces as that test's failure instead of
+/// cascading `PoisonError`s into the rest.
+///
+/// The counters are process-global: anything a concurrent thread allocates
+/// lands in the measuring test's window. Every test must therefore acquire
+/// this lock BEFORE any allocating work — fixtures included — not just
+/// before its measured section. The libtest harness itself still allocates
+/// outside any lock we can take (test-thread spawn preambles, the previous
+/// test's result reporting), so after acquiring, wait for the allocation
+/// counter to go quiet: parked threads don't allocate, and the harness
+/// settles within a few milliseconds.
+fn serial() -> MutexGuard<'static, ()> {
+    let guard = ALLOC_TEST_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut last = ALLOC_COUNT.load(Ordering::SeqCst);
+    for _ in 0..250 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let now = ALLOC_COUNT.load(Ordering::SeqCst);
+        if now == last {
+            break;
+        }
+        last = now;
+    }
+    guard
+}
 
 fn reset_counts() -> (usize, usize) {
     let a = ALLOC_COUNT.swap(0, Ordering::SeqCst);
@@ -122,7 +150,7 @@ fn test_metadata() -> Metadata {
 
 #[test]
 fn rule_match_zero_alloc_on_hot_path() {
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap();
+    let _guard = serial();
     let long_adapter = "ProxyNameThatExceedsSmolStrInlineCapacity";
     let long_domain = "very-long-subdomain-name-that-exceeds-inline-capacity.example.com";
     let rules: Vec<Box<dyn Rule>> = vec![
@@ -160,9 +188,18 @@ fn rule_match_zero_alloc_on_hot_path() {
     );
 }
 
-#[tokio::test]
-async fn rule_engine_pressure_zero_alloc_free_on_critical_path() {
+#[test]
+fn rule_engine_pressure_zero_alloc_free_on_critical_path() {
     const ITERS: usize = 50_000;
+
+    // Take the serialization lock before building any fixture: loading the
+    // provider-backed config allocates heavily, and doing that on a
+    // concurrent test thread pollutes whichever test is measuring the
+    // process-global counters at that moment (observed as
+    // track_connection_alloc_count "failing" at 8+ allocs/conn once the
+    // geodata files exist locally). A manual runtime instead of
+    // #[tokio::test] keeps the runtime construction inside the lock too.
+    let _guard = serial();
 
     let required_providers = [
         "/Users/mlv/.config/meow/Country.mmdb",
@@ -176,8 +213,14 @@ async fn rule_engine_pressure_zero_alloc_free_on_critical_path() {
         return;
     }
 
-    let config = load_config_from_str(include_str!("fixtures/memleak_ech_pressure_config.yaml"))
-        .await
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime must build");
+    let config = runtime
+        .block_on(load_config_from_str(include_str!(
+            "fixtures/memleak_ech_pressure_config.yaml"
+        )))
         .expect("memleak ECH pressure config must load with geodata providers");
     let rules = config.rules;
     let index = DomainIndex::build(&rules);
@@ -224,7 +267,6 @@ async fn rule_engine_pressure_zero_alloc_free_on_critical_path() {
         "其他"
     );
 
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap();
     reset_counts();
     for _ in 0..ITERS {
         let domain = match_rules(
@@ -271,7 +313,7 @@ async fn rule_engine_pressure_zero_alloc_free_on_critical_path() {
 
 #[test]
 fn track_connection_alloc_count() {
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap();
+    let _guard = serial();
     let stats = Statistics::new();
     let meta = test_metadata();
 
@@ -322,7 +364,7 @@ fn track_connection_alloc_count() {
 
 #[test]
 fn metadata_remote_address_zero_alloc() {
-    let _guard = ALLOC_TEST_LOCK.lock().unwrap();
+    let _guard = serial();
     let meta = test_metadata();
 
     reset_counts();

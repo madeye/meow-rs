@@ -94,6 +94,13 @@ jobs:
       - name: Rules tests
         run: cargo test --test rules_test -- --nocapture
 
+      # ADR-0008 allocation-count gates. Release build: the thresholds are
+      # calibrated against release codegen. The provider-backed pressure
+      # test self-skips when geodata files are absent (as on CI runners);
+      # the remaining gates run everywhere.
+      - name: Allocation-count gates (ADR-0008)
+        run: cargo test -p meow-tunnel --test alloc_count_test --release -- --nocapture
+
       - name: Shadowsocks integration tests (incl. simple-obfs)
         env:
           # Force-fail (instead of silently SKIP) if ssserver / obfs-local /
