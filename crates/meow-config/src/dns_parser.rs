@@ -587,34 +587,30 @@ fn build_hosts_trie(
     Ok(trie)
 }
 
-/// Merge `/etc/hosts` entries into the trie at lower priority than config entries.
-/// No-op on non-Unix platforms (warn logged).
+/// Merge system hosts entries into the trie at lower priority than config entries.
 async fn merge_system_hosts(trie: &mut DomainTrie<Vec<IpAddr>>) {
-    #[cfg(unix)]
-    {
-        let entries = parse_system_hosts().await;
-        for (domain, ips) in entries {
-            if trie.search(&domain).is_none() {
-                trie.insert(&domain, ips);
-            }
+    let entries = parse_system_hosts().await;
+    for (domain, ips) in entries {
+        if trie.search(&domain).is_none() {
+            trie.insert(&domain, ips);
         }
-    }
-    #[cfg(not(unix))]
-    {
-        warn!(
-            "use-system-hosts: reading /etc/hosts is not supported on this platform \
-            (Class B per ADR-0002); ignoring use-system-hosts=true"
-        );
     }
 }
 
-/// Parse `/etc/hosts` and return (domain, ips) pairs.
-#[cfg(unix)]
+/// Parse system hosts file and return (domain, ips) pairs.
+/// On Unix reads `/etc/hosts`; on Windows reads `C:\Windows\System32\drivers\etc\hosts`.
 async fn parse_system_hosts() -> Vec<(String, Vec<IpAddr>)> {
-    let content = match tokio::fs::read_to_string("/etc/hosts").await {
+    let hosts_path = if cfg!(target_os = "windows") {
+        std::env::var("SystemRoot")
+            .map(|sr| std::path::PathBuf::from(sr).join("System32").join("drivers").join("etc").join("hosts"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts"))
+    } else {
+        std::path::PathBuf::from("/etc/hosts")
+    };
+    let content = match tokio::fs::read_to_string(&hosts_path).await {
         Ok(c) => c,
         Err(e) => {
-            warn!("use-system-hosts: cannot read /etc/hosts: {}", e);
+            warn!("use-system-hosts: cannot read {}: {}", hosts_path.display(), e);
             return vec![];
         }
     };

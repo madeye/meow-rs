@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 
 const DEFAULT_URL: &str = "http://www.gstatic.com/generate_204";
 const DEFAULT_INTERVAL_SECS: u64 = 300;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct HealthCheckSpec {
     pub group_name: String,
@@ -66,7 +66,7 @@ async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
 
         let mut alive_count = 0u32;
         let mut total_count = 0u32;
-        for (name, delay) in meow_proxy::health::probe_many_bounded(
+        for result in meow_proxy::health::probe_many_bounded_detailed(
             members,
             &spec.url,
             None,
@@ -76,12 +76,17 @@ async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
         .await
         {
             total_count += 1;
-            if delay > 0 {
+            if result.delay > 0 {
                 alive_count += 1;
             } else {
+                let err_detail = result
+                    .error
+                    .as_ref()
+                    .map(|e| format!(": {e:?}"))
+                    .unwrap_or_default();
                 warn!(
-                    "health-check: {} / {} is dead (probe failed)",
-                    spec.group_name, name
+                    "health-check: {} / {} is dead (probe failed{err_detail})",
+                    spec.group_name, result.name
                 );
             }
         }
