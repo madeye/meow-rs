@@ -288,14 +288,15 @@ impl TlsLayer {
             ));
         }
 
-        // Route to boring when fingerprint is requested (no rustls equivalent
-        // for uTLS fingerprinting) or when ECH is requested and the `ech`
-        // feature is *not* compiled in (boring is then the only ECH backend).
+        // Route to boring when fingerprint or ECH is requested. Besides being
+        // the fingerprint-capable backend, BoringSSL applies ECH config lists
+        // per connection and can consume server-provided retry configs. Rustls
+        // remains the ECH backend when boring support is not compiled in.
         //
         // The BoringSSL SslConnector is built lazily on first connect() to
         // avoid allocating ~160 KB for proxies that never receive traffic.
         #[cfg(feature = "boring-tls")]
-        if config.fingerprint.is_some() || (config.ech.is_some() && !cfg!(feature = "ech")) {
+        if config.fingerprint.is_some() || config.ech.is_some() {
             BoringInner::validate(config)?;
             tracing::debug!(
                 fingerprint = ?config.fingerprint,
