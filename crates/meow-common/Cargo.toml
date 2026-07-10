@@ -34,6 +34,14 @@ libc = "0.2"
 libproc = "0.14"
 libc = "0.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_Foundation",
+] }
+
 # Unix-only dev deps used by socket_protect's `#[cfg(all(test, unix))]` tests:
 # they exercise the protector hook against real loopback sockets on the CI
 # host instead of waiting for an Android emulator.

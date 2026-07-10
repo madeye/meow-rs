@@ -292,7 +292,7 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod platform {
     use super::{Network, ProcessInfo, SocketAddr};
 
@@ -303,7 +303,158 @@ mod platform {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+mod platform {
+    use super::{Network, ProcessInfo, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr};
+    use tracing::trace;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCPROW_OWNER_PID,
+        MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+    };
+    use windows_sys::Win32::System::ProcessStatus::GetModuleFileNameExW;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+
+    const AF_INET: u32 = 2;
+
+    pub fn find_process(network: Network, local: SocketAddr) -> Option<ProcessInfo> {
+        let pid = match network {
+            Network::Tcp => find_pid_in_tcp_table(local)?,
+            Network::Udp => find_pid_in_udp_table(local)?,
+        };
+        let (name, path) = get_process_info(pid)?;
+        trace!(pid, name, path, "process_lookup: matched via Win32 API");
+        Some(ProcessInfo { name, path, uid: None })
+    }
+
+    fn find_pid_in_tcp_table(target: SocketAddr) -> Option<u32> {
+        unsafe {
+            let mut buf_size: u32 = 0;
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut buf_size,
+                0, // sort = FALSE
+                AF_INET,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+
+            let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
+            let ret = GetExtendedTcpTable(
+                buf.as_mut_ptr() as *mut _,
+                &mut buf_size,
+                0,
+                AF_INET,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+
+            if ret != 0 {
+                return None;
+            }
+
+            // MIB_TCPTABLE_OWNER_PID: dwNumEntries followed by MIB_TCPROW_OWNER_PID entries
+            let num_entries = *(buf.as_ptr() as *const u32);
+            let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+
+            for i in 0..num_entries as usize {
+                let offset = 4 + i * row_size;
+                if offset + row_size > buf.len() {
+                    break;
+                }
+                let row = &*(buf.as_ptr().add(offset) as *const MIB_TCPROW_OWNER_PID);
+                // dwLocalAddr is in network byte order (big-endian)
+                let addr = Ipv4Addr::from(u32::from_be(row.dwLocalAddr));
+                let port = (row.dwLocalPort as u16).swap_bytes();
+                if IpAddr::V4(addr) == target.ip() && port == target.port() {
+                    return Some(row.dwOwningPid);
+                }
+            }
+        }
+        None
+    }
+
+    fn find_pid_in_udp_table(target: SocketAddr) -> Option<u32> {
+        unsafe {
+            let mut buf_size: u32 = 0;
+            GetExtendedUdpTable(
+                std::ptr::null_mut(),
+                &mut buf_size,
+                0,
+                AF_INET,
+                UDP_TABLE_OWNER_PID,
+                0,
+            );
+
+            let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
+            let ret = GetExtendedUdpTable(
+                buf.as_mut_ptr() as *mut _,
+                &mut buf_size,
+                0,
+                AF_INET,
+                UDP_TABLE_OWNER_PID,
+                0,
+            );
+
+            if ret != 0 {
+                return None;
+            }
+
+            // MIB_UDPTABLE_OWNER_PID: dwNumEntries followed by MIB_UDPROW_OWNER_PID entries
+            let num_entries = *(buf.as_ptr() as *const u32);
+            let row_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
+
+            for i in 0..num_entries as usize {
+                let offset = 4 + i * row_size;
+                if offset + row_size > buf.len() {
+                    break;
+                }
+                let row = &*(buf.as_ptr().add(offset) as *const MIB_UDPROW_OWNER_PID);
+                let addr = Ipv4Addr::from(u32::from_be(row.dwLocalAddr));
+                let port = (row.dwLocalPort as u16).swap_bytes();
+                if IpAddr::V4(addr) == target.ip() && port == target.port() {
+                    return Some(row.dwOwningPid);
+                }
+            }
+        }
+        None
+    }
+
+    fn get_process_info(pid: u32) -> Option<(String, String)> {
+        unsafe {
+            let handle = OpenProcess(
+                PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                0, // bInheritHandle = FALSE
+                pid,
+            );
+            if handle.is_null() {
+                return None;
+            }
+
+            let mut buf = [0u16; 1024];
+            let size = GetModuleFileNameExW(handle, std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32);
+
+            let _ = CloseHandle(handle);
+
+            if size == 0 {
+                return None;
+            }
+
+            let path_str = String::from_utf16_lossy(&buf[..size as usize]);
+            let name = std::path::Path::new(&path_str)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+
+            Some((name, path_str))
+        }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod tests {
     use super::*;
 

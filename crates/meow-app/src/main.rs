@@ -414,6 +414,23 @@ fn service_status() -> Result<()> {
     Ok(())
 }
 
+// --- Windows stubs ---
+
+#[cfg(target_os = "windows")]
+fn install_service(_config: Option<&str>, _args: &Args) -> Result<()> {
+    anyhow::bail!("Service management is not yet supported on Windows. Run meow directly.");
+}
+
+#[cfg(target_os = "windows")]
+fn uninstall_service() -> Result<()> {
+    anyhow::bail!("Service management is not yet supported on Windows.");
+}
+
+#[cfg(target_os = "windows")]
+fn service_status() -> Result<()> {
+    anyhow::bail!("Service management is not yet supported on Windows.");
+}
+
 #[cfg(target_os = "linux")]
 fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
@@ -684,11 +701,18 @@ async fn run(
 
     info!("meow-rs is running");
 
-    // Wait for shutdown signal (SIGINT or SIGTERM)
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        _ = sigterm.recv() => {},
+    // Wait for shutdown signal
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await?;
     }
     info!("Shutting down...");
 
