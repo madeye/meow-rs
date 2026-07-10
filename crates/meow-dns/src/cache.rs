@@ -195,12 +195,9 @@ impl DnsCache {
         let shard = &self.reverse[shard_ip(ip)];
         let mut reverse = shard.lock();
         let now = Instant::now();
-        if let Some(entry) = reverse.get(&ip) {
-            if entry.expire_at > now {
-                return Some(SmolStr::from(entry.domain.as_ref()));
-            }
-        } else {
-            return None;
+        let entry = reverse.get(&ip)?;
+        if entry.expire_at > now {
+            return Some(SmolStr::from(entry.domain.as_ref()));
         }
         reverse.pop(&ip);
         None
