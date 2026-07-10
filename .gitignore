@@ -15,6 +15,7 @@ dh_out.json
 *.un~
 .claude/scheduled_tasks.lock
 .antigravitycli/
+.mimocode/
 
 # VitePress docs build output (generated into docs/ by CI; see website/).
 # Build-only: published via the Deploy GitHub Pages workflow's artifact, so
