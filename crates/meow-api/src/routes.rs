@@ -251,7 +251,7 @@ struct HelloResponse {
 
 async fn hello() -> Json<HelloResponse> {
     Json(HelloResponse {
-        hello: "mihomo".to_string(),
+        hello: "meow".to_string(),
     })
 }
 
@@ -356,12 +356,12 @@ async fn update_proxy(
         return StatusCode::NOT_FOUND;
     };
     match select_proxy_member_async(proxy, body.name.clone()).await {
-        Ok(Some(true)) => {
+        Ok(SelectResult::Selected(true)) => {
             info!("Selector '{}' switched to '{}'", group_name, body.name);
             StatusCode::NO_CONTENT
         }
-        Ok(Some(false)) => StatusCode::BAD_REQUEST,
-        Ok(None) => StatusCode::NOT_FOUND,
+        Ok(SelectResult::Selected(false)) => StatusCode::BAD_REQUEST,
+        Ok(SelectResult::NotSelector) => StatusCode::BAD_REQUEST,
         Err(e) => {
             warn!("Selector '{}' update task failed: {}", group_name, e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -683,16 +683,21 @@ async fn rebuild_from_raw_with_resolver_async(
     .map_err(|e| e.to_string())
 }
 
+enum SelectResult {
+    Selected(bool),
+    NotSelector,
+}
+
 async fn select_proxy_member_async(
     proxy: Arc<dyn Proxy>,
     member: String,
-) -> Result<Option<bool>, tokio::task::JoinError> {
+) -> Result<SelectResult, tokio::task::JoinError> {
     tokio::task::spawn_blocking(move || {
         use meow_proxy::SelectorGroup;
-        proxy
-            .as_any()
-            .and_then(|a| a.downcast_ref::<SelectorGroup>())
-            .map(|selector| selector.select(&member))
+        match proxy.as_any().and_then(|a| a.downcast_ref::<SelectorGroup>()) {
+            Some(selector) => SelectResult::Selected(selector.select(&member)),
+            None => SelectResult::NotSelector,
+        }
     })
     .await
 }
@@ -1032,12 +1037,12 @@ async fn select_proxy_in_group(
         return StatusCode::NOT_FOUND;
     };
     match select_proxy_member_async(proxy, body.name.clone()).await {
-        Ok(Some(true)) => {
+        Ok(SelectResult::Selected(true)) => {
             info!("Selector '{}' switched to '{}'", group_name, body.name);
             StatusCode::NO_CONTENT
         }
-        Ok(Some(false)) => StatusCode::BAD_REQUEST,
-        Ok(None) => StatusCode::NOT_FOUND,
+        Ok(SelectResult::Selected(false)) => StatusCode::BAD_REQUEST,
+        Ok(SelectResult::NotSelector) => StatusCode::BAD_REQUEST,
         Err(e) => {
             warn!("Selector '{}' update task failed: {}", group_name, e);
             StatusCode::INTERNAL_SERVER_ERROR

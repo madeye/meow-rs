@@ -125,7 +125,7 @@ fn main() -> Result<()> {
     // Handle -v flag: print version in mihomo format and exit
     if args.version {
         println!(
-            "Mihomo Meta {} {} {}",
+            "Meow Meta {} {} {}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH

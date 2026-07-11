@@ -246,7 +246,7 @@ async fn root_returns_hello() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["hello"], "mihomo");
+    assert_eq!(json["hello"], "meow");
 }
 
 #[tokio::test]
@@ -1244,8 +1244,8 @@ async fn put_proxy_not_a_group() {
         )
         .await
         .unwrap();
-    // DIRECT is not a SelectorGroup, as_any returns None, falls through to NOT_FOUND
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // DIRECT is not a SelectorGroup, returns BAD_REQUEST (matching mihomo behavior)
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
