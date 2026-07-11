@@ -26,7 +26,11 @@ use tracing::{error, info, warn};
 const SERVICE_NAME: &str = "meow";
 
 #[derive(Parser)]
-#[command(name = "meow", version, about = "A rule-based tunnel in Rust")]
+#[command(
+    name = "mihomo",
+    about = "A rule-based tunnel in Rust",
+    disable_version_flag = true
+)]
 struct Args {
     /// Path to configuration file
     #[arg(short = 'f', long = "config", default_value = "config.yaml")]
@@ -39,6 +43,58 @@ struct Args {
     /// Test configuration and exit
     #[arg(short = 't', long = "test")]
     test: bool,
+
+    /// Set geodata mode
+    #[arg(short = 'm', long = "geodata-mode")]
+    geodata_mode: bool,
+
+    /// Show current version of mihomo
+    #[arg(short = 'v')]
+    version: bool,
+
+    /// Specify base64-encoded configuration string
+    #[arg(long = "config-string")]
+    config_string: Option<String>,
+
+    /// Override external UI directory
+    #[arg(long = "ext-ui")]
+    ext_ui: Option<String>,
+
+    /// Override external controller address
+    #[arg(long = "ext-ctl")]
+    ext_ctl: Option<String>,
+
+    /// Override external controller TLS address
+    #[arg(long = "ext-ctl-tls")]
+    ext_ctl_tls: Option<String>,
+
+    /// Override external controller unix address
+    #[arg(long = "ext-ctl-unix")]
+    ext_ctl_unix: Option<String>,
+
+    /// Override external controller pipe address
+    #[arg(long = "ext-ctl-pipe")]
+    ext_ctl_pipe: Option<String>,
+
+    /// Override external controller routing mark
+    #[arg(long = "ext-ctl-routing-mark")]
+    ext_ctl_routing_mark: Option<u32>,
+
+    /// Override secret for RESTful API
+    #[arg(long = "secret")]
+    secret: Option<String>,
+
+    /// Set post-up script
+    #[arg(long = "post-up")]
+    post_up: Option<String>,
+
+    /// Set post-down script
+    #[arg(long = "post-down")]
+    post_down: Option<String>,
+
+    /// Specify age secret key to decrypt configuration
+    #[arg(long = "age-secret-key")]
+    age_secret_key: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -65,6 +121,17 @@ fn main() -> Result<()> {
     let _profiler = dhat::Profiler::new_heap();
 
     let args = Args::parse();
+
+    // Handle -v flag: print version in mihomo format and exit
+    if args.version {
+        println!(
+            "Mihomo Meta {} {} {}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        return Ok(());
+    }
 
     // Handle subcommands before initializing logging/runtime
     if let Some(cmd) = &args.command {

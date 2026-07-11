@@ -245,7 +245,8 @@ async fn root_returns_hello() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_string(resp).await, "meow-rs");
+    let json = body_json(resp).await;
+    assert_eq!(json["hello"], "mihomo");
 }
 
 #[tokio::test]
@@ -262,7 +263,7 @@ async fn version_endpoint() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(json["version"], format!("v{}", env!("CARGO_PKG_VERSION")));
     assert_eq!(json["meta"], true);
 }
 

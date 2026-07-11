@@ -244,8 +244,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 // ── Basic endpoints ──────────────────────────────────────────────────
 
-async fn hello() -> &'static str {
-    "meow-rs"
+#[derive(Serialize)]
+struct HelloResponse {
+    hello: String,
+}
+
+async fn hello() -> Json<HelloResponse> {
+    Json(HelloResponse {
+        hello: "mihomo".to_string(),
+    })
 }
 
 #[derive(Serialize)]
@@ -256,7 +263,7 @@ struct VersionResponse {
 
 async fn version() -> Json<VersionResponse> {
     Json(VersionResponse {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: format!("v{}", env!("CARGO_PKG_VERSION")),
         meta: true,
     })
 }
@@ -275,6 +282,9 @@ struct ProxyInfo {
     /// Group-only: name of the currently active member.
     #[serde(skip_serializing_if = "Option::is_none")]
     now: Option<String>,
+    /// Last measured delay in ms, 0 if unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delay: Option<u16>,
 }
 
 impl ProxyInfo {
@@ -288,6 +298,10 @@ impl ProxyInfo {
             current = ?current,
             "building ProxyInfo",
         );
+        let delay = {
+            let h = proxy.delay_history();
+            h.last().map(|d| d.delay).filter(|&d| d > 0)
+        };
         Self {
             name: proxy.name().to_string(),
             proxy_type: proxy.adapter_type().to_string(),
@@ -296,6 +310,7 @@ impl ProxyInfo {
             udp: proxy.support_udp(),
             all: members,
             now: current,
+            delay,
         }
     }
 }
@@ -429,11 +444,27 @@ struct ConfigResponse {
     socks_port: Option<u16>,
     #[serde(rename = "port", skip_serializing_if = "Option::is_none")]
     http_port: Option<u16>,
+    #[serde(rename = "redir-port")]
+    redir_port: u16,
+    #[serde(rename = "tproxy-port")]
+    tproxy_port: u16,
     #[serde(
         rename = "external-controller",
         skip_serializing_if = "Option::is_none"
     )]
     external_controller: Option<String>,
+    #[serde(rename = "allow-lan")]
+    allow_lan: bool,
+    #[serde(rename = "bind-address")]
+    bind_address: String,
+    #[serde(rename = "ipv6")]
+    ipv6: bool,
+    #[serde(rename = "find-process-mode")]
+    find_process_mode: String,
+    #[serde(rename = "tcp-concurrent")]
+    tcp_concurrent: bool,
+    #[serde(rename = "sniffing")]
+    sniffing: bool,
 }
 
 async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
@@ -444,7 +475,18 @@ async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse>
         mixed_port: raw.mixed_port,
         socks_port: raw.socks_port,
         http_port: raw.port,
+        redir_port: 0,
+        tproxy_port: raw.tproxy_port.unwrap_or(0),
         external_controller: raw.external_controller.clone(),
+        allow_lan: raw.allow_lan.unwrap_or(false),
+        bind_address: raw
+            .bind_address
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0".to_string()),
+        ipv6: raw.ipv6.unwrap_or(false),
+        find_process_mode: "off".to_string(),
+        tcp_concurrent: false,
+        sniffing: true,
     })
 }
 

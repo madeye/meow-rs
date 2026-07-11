@@ -196,8 +196,9 @@ fn rebuild_from_raw_with_groups() {
     let (proxies, _rules) = rebuild_from_raw(&raw).unwrap();
     assert!(proxies.contains_key("Select"));
     assert!(proxies.contains_key("Auto"));
-    // 3 built-in + 2 groups
-    assert_eq!(proxies.len(), 5);
+    assert!(proxies.contains_key("GLOBAL"));
+    // 3 built-in + 2 groups + 1 auto-created GLOBAL
+    assert_eq!(proxies.len(), 6);
 }
 
 #[test]

@@ -427,6 +427,39 @@ fn rebuild_from_raw_impl(
         remaining = still_remaining;
     }
 
+    // Auto-create GLOBAL selector if not defined by user (mihomo compatibility).
+    // clash-nyanpasu and other frontends depend on GLOBAL to build proxy tree.
+    if !proxies.contains_key("GLOBAL") {
+        let all_proxy_names: Vec<String> = proxies
+            .keys()
+            .filter(|name| {
+                !matches!(
+                    name.as_str(),
+                    "DIRECT" | "REJECT" | "REJECT-DROP"
+                )
+            })
+            .map(|name| name.to_string())
+            .collect();
+        let global_config = raw::RawProxyGroup {
+            name: "GLOBAL".to_string(),
+            group_type: "select".to_string(),
+            proxies: Some(all_proxy_names),
+            ..Default::default()
+        };
+        match proxy_parser::parse_proxy_group_with_store(
+            &global_config,
+            &proxies,
+            providers,
+            selector_store,
+        ) {
+            Ok(group) => {
+                proxies.insert(SmolStr::new_static("GLOBAL"), group);
+                info!("Auto-created GLOBAL selector with all proxies");
+            }
+            Err(e) => warn!("Failed to create GLOBAL selector: {}", e),
+        }
+    }
+
     // Apply per-outbound `dialer-proxy` wrappers (issue #210). Runs after both
     // leaf proxies and groups are built so a dialer may reference either.
     apply_dialer_proxies(&mut proxies, raw.proxies.as_deref().unwrap_or(&[]));
