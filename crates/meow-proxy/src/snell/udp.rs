@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use meow_common::{MeowError, ProxyPacketConn, Result};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 
 use super::protocol::{Snell, COMMAND_UDP_FORWARD};
@@ -49,19 +49,13 @@ fn build_request_frame(addr: &SocketAddr, payload: &[u8]) -> Vec<u8> {
 
 /// Parse a server-to-client snell UDP response frame, writing the payload
 /// into `out` and returning (bytes copied, source address).
-async fn read_response_frame<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    out: &mut [u8],
-) -> io::Result<(usize, SocketAddr)> {
-    let mut frame = vec![0u8; super::v4::MAX_PAYLOAD_LENGTH];
-    let n = reader.read(&mut frame).await?;
-    if n < 1 {
+fn parse_response_frame(frame: &[u8], out: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+    if frame.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "snell udp: empty response frame",
         ));
     }
-    frame.truncate(n);
 
     let (addr, payload_start) = match frame[0] {
         0x04 => {
@@ -110,17 +104,29 @@ async fn read_response_frame<R: AsyncRead + Unpin>(
 }
 
 /// Per-connection snell UDP relay. Multiplexes datagrams over a single AEAD
-/// stream guarded by a `Mutex`. The lock is held only during one
-/// frame-sized read or write, so reads and writes serialise but never block
-/// each other for long.
+/// stream.
+///
+/// The AEAD codec keeps its read and write cipher states in one object over
+/// one TCP stream, so a `tokio::io::split`-style structural split is not
+/// possible. Instead the stream sits behind a synchronous mutex that is
+/// locked **per poll** (the same mechanism `tokio::io::split` uses
+/// internally): a `read_packet` parked waiting for a server datagram holds
+/// nothing between polls, so `write_packet` on the same conn proceeds freely
+/// (issue #278). The `read_gate`/`write_gate` async mutexes serialise whole
+/// datagrams within each direction so concurrent callers cannot interleave
+/// partial frames.
 pub struct SnellPacketConn<S> {
-    inner: Arc<Mutex<Snell<S>>>,
+    stream: Arc<parking_lot::Mutex<Snell<S>>>,
+    read_gate: Mutex<()>,
+    write_gate: Mutex<()>,
 }
 
 impl<S> SnellPacketConn<S> {
     pub fn new(snell: Snell<S>) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(snell)),
+            stream: Arc::new(parking_lot::Mutex::new(snell)),
+            read_gate: Mutex::new(()),
+            write_gate: Mutex::new(()),
         }
     }
 }
@@ -131,19 +137,34 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
 {
     async fn read_packet(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
-        let mut guard = self.inner.lock().await;
-        read_response_frame(&mut *guard, buf)
-            .await
-            .map_err(MeowError::Io)
+        let _serialized = self.read_gate.lock().await;
+        // One decoded AEAD frame per `poll_read` ready; the frame buffer is
+        // sized so a full frame always fits and never splits across reads.
+        let mut frame = vec![0u8; super::v4::MAX_PAYLOAD_LENGTH];
+        let n = std::future::poll_fn(|cx| {
+            let mut stream = self.stream.lock();
+            let mut rb = tokio::io::ReadBuf::new(&mut frame);
+            match std::pin::Pin::new(&mut *stream).poll_read(cx, &mut rb) {
+                std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(rb.filled().len())),
+                std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        })
+        .await
+        .map_err(MeowError::Io)?;
+        parse_response_frame(&frame[..n], buf).map_err(MeowError::Io)
     }
 
     async fn write_packet(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize> {
+        let _serialized = self.write_gate.lock().await;
         let frame = build_request_frame(addr, buf);
-        let mut guard = self.inner.lock().await;
-        guard
-            .write_packet_frame(&frame)
-            .await
-            .map_err(MeowError::Io)?;
+        let mut progress = super::protocol::PacketFrameProgress::default();
+        std::future::poll_fn(|cx| {
+            let mut stream = self.stream.lock();
+            stream.poll_write_packet_frame(cx, &frame, &mut progress)
+        })
+        .await
+        .map_err(MeowError::Io)?;
         Ok(buf.len())
     }
 
@@ -160,6 +181,68 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snell::protocol::RESPONSE_TUNNEL;
+    use crate::snell::v4::V4Conn;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::timeout;
+
+    /// Regression for issue #278: with a single async mutex held across the
+    /// blocking frame read, a parked `read_packet` starved `write_packet`
+    /// forever and any send-while-awaiting-reply flow stalled after the
+    /// first datagram. The write below must complete while a reader is
+    /// parked on an idle stream.
+    #[tokio::test]
+    async fn write_packet_proceeds_while_read_parked() {
+        let (a, b) = tokio::io::duplex(1 << 16);
+        let psk: Arc<[u8]> = Arc::from(b"test-psk".as_slice());
+        let conn = Arc::new(SnellPacketConn::new(Snell::new(a, Arc::clone(&psk))));
+        let mut peer = V4Conn::new(b, psk);
+
+        let dst: SocketAddr = "9.9.9.9:53".parse().unwrap();
+
+        // Park a reader while the stream is idle.
+        let reader_conn = Arc::clone(&conn);
+        let reader = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            reader_conn
+                .read_packet(&mut buf)
+                .await
+                .map(|(n, addr)| (buf[..n].to_vec(), addr))
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Old design: deadlocked here (reader held the stream lock).
+        timeout(Duration::from_secs(5), conn.write_packet(b"ping", &dst))
+            .await
+            .expect("write_packet must not deadlock while a read is parked")
+            .expect("write_packet");
+
+        // Peer: acknowledge the session, verify the client's request frame,
+        // then echo a response frame so the parked reader completes.
+        peer.write_all(&[RESPONSE_TUNNEL]).await.unwrap();
+        peer.flush().await.unwrap();
+        let mut buf = [0u8; 2048];
+        let n = timeout(Duration::from_secs(5), peer.read(&mut buf))
+            .await
+            .expect("peer read timed out")
+            .unwrap();
+        assert_eq!(&buf[..n], &build_request_frame(&dst, b"ping")[..]);
+
+        let mut resp = vec![0x04, 9, 9, 9, 9];
+        resp.extend_from_slice(&53u16.to_be_bytes());
+        resp.extend_from_slice(b"pong");
+        peer.write_all(&resp).await.unwrap();
+        peer.flush().await.unwrap();
+
+        let (payload, addr) = timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("parked reader timed out")
+            .expect("reader task")
+            .expect("read_packet");
+        assert_eq!(payload, b"pong");
+        assert_eq!(addr, dst);
+    }
 
     #[test]
     fn request_frame_ipv4_layout() {
