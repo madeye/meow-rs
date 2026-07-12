@@ -345,10 +345,8 @@ impl ParsedUrl {
     fn parse(url: &str) -> Option<Self> {
         let (https, rest) = if let Some(r) = url.strip_prefix("https://") {
             (true, r)
-        } else if let Some(r) = url.strip_prefix("http://") {
-            (false, r)
         } else {
-            return None;
+            (false, url.strip_prefix("http://")?)
         };
         let (authority, path) = match rest.find('/') {
             Some(i) => (&rest[..i], &rest[i..]),
