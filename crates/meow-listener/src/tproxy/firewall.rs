@@ -1,8 +1,13 @@
-use std::fmt::Write as _;
 use std::io;
 use std::net::IpAddr;
-use std::process::Command;
 use tracing::{info, warn};
+
+// Needed by `writeln!` in the `build_*` functions which are compiled under
+// `#[cfg(test)]` on every platform for unit testing.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+use std::fmt::Write as _;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::process::Command;
 
 /// RAII guard that sets up firewall redirect rules on creation
 /// and tears them down on drop.
@@ -303,6 +308,7 @@ impl PlatformGuard {
         ))
     }
 
+    #[allow(clippy::unnecessary_wraps)]
     fn teardown(&mut self) -> io::Result<()> {
         Ok(())
     }

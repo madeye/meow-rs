@@ -436,6 +436,7 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
     let status = std::process::Command::new(cmd).args(args).status()?;
     if !status.success() {

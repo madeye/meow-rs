@@ -1,3 +1,5 @@
+#![cfg(unix)] // systemd is Linux-only; PermissionsExt is unavailable on Windows.
+
 use meow_config::raw::RawConfig;
 use meow_config::save_raw_config;
 use std::os::unix::fs::PermissionsExt;

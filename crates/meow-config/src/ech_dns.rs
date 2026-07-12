@@ -28,7 +28,9 @@ use hickory_proto::rr::{RData, RecordType};
 use meow_dns::DnsClient;
 use serde_yaml::Value;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+#[cfg(unix)]
+use std::net::SocketAddrV6;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,6 +51,7 @@ const DOH_FALLBACK_IPS: &[IpAddr] = &[
 /// honouring an optional IPv6 zone identifier (`fe80::1%en0`). Rust's
 /// `IpAddr::FromStr` rejects the `%zone` suffix outright, so we strip it and
 /// resolve it through `if_nametoindex(3)` to populate `SocketAddrV6::scope_id`.
+#[cfg(unix)]
 fn parse_nameserver_token(token: &str) -> Option<SocketAddr> {
     // IPv6 addresses can carry a zone-id (`%en0`) — strip it before parsing
     // and feed it into the resulting SocketAddrV6 as a numeric scope_id.
@@ -80,11 +83,6 @@ fn zone_to_scope_id(zone: &str) -> u32 {
     // SAFETY: `if_nametoindex` reads the NUL-terminated string and returns
     // an index (or 0 on error); no aliasing or lifetime requirements.
     unsafe { libc::if_nametoindex(c_name.as_ptr()) }
-}
-
-#[cfg(not(unix))]
-fn zone_to_scope_id(zone: &str) -> u32 {
-    zone.parse().unwrap_or(0)
 }
 
 /// `_ = Ipv6Addr` keeps the import live on non-unix builds without
@@ -266,7 +264,7 @@ pub async fn preresolve_ech(proxies: &mut [HashMap<String, Value>]) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

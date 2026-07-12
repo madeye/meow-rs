@@ -601,15 +601,13 @@ async fn merge_system_hosts(trie: &mut DomainTrie<Vec<IpAddr>>) {
 /// On Unix reads `/etc/hosts`; on Windows reads `C:\Windows\System32\drivers\etc\hosts`.
 async fn parse_system_hosts() -> Vec<(String, Vec<IpAddr>)> {
     let hosts_path = if cfg!(target_os = "windows") {
-        std::env::var("SystemRoot")
-            .map(|sr| {
+        std::env::var("SystemRoot").map_or_else(|_| std::path::PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts"), |sr| {
                 std::path::PathBuf::from(sr)
                     .join("System32")
                     .join("drivers")
                     .join("etc")
                     .join("hosts")
             })
-            .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts"))
     } else {
         std::path::PathBuf::from("/etc/hosts")
     };
