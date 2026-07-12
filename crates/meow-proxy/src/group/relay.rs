@@ -57,6 +57,35 @@ fn metadata_for_proxy(proxy: &Arc<dyn Proxy>) -> Metadata {
     }
 }
 
+/// Resolve a group hop to the concrete proxy selected for this connection.
+///
+/// Groups may contain other groups, so keep unwrapping until a leaf (or an
+/// adapter without an active member) is reached.  Resolve once before dialing
+/// so stateful selectors such as load-balance use the same member for both the
+/// preceding hop's target and their own `connect_over` call.
+fn resolve_proxy(mut proxy: Arc<dyn Proxy>, metadata: &Metadata) -> Arc<dyn Proxy> {
+    while let Some(selected) = proxy.unwrap_proxy(metadata) {
+        if Arc::ptr_eq(&proxy, &selected) {
+            break;
+        }
+        proxy = selected;
+    }
+    proxy
+}
+
+/// Return the target for a hop, skipping later DIRECT hops because they are
+/// transparent no-ops inside an already-established relay stream.
+fn metadata_for_next_hop(
+    proxies: &[Arc<dyn Proxy>],
+    start: usize,
+    final_target: &Metadata,
+) -> Metadata {
+    proxies[start..]
+        .iter()
+        .find(|proxy| proxy.adapter_type() != AdapterType::Direct)
+        .map_or_else(|| final_target.clone(), metadata_for_proxy)
+}
+
 // ─── Core relay functions ─────────────────────────────────────────────────────
 
 /// Establish a TCP relay chain.
@@ -72,8 +101,15 @@ pub(crate) async fn relay_tcp(
         "relay chain must have at least 2 proxies"
     );
 
-    // proxy[0]: real TCP connect; target = proxy[1]'s server:port.
-    let meta = metadata_for_proxy(&proxies[1]);
+    let proxies: Vec<_> = proxies
+        .iter()
+        .cloned()
+        .map(|proxy| resolve_proxy(proxy, final_target))
+        .collect();
+
+    // proxy[0]: real TCP connect; target = the next non-DIRECT proxy's
+    // server:port, or the final destination if only DIRECT hops remain.
+    let meta = metadata_for_next_hop(&proxies, 1, final_target);
     debug!(
         relay.hop = 0,
         relay.proxy = proxies[0].name(),
@@ -91,7 +127,7 @@ pub(crate) async fn relay_tcp(
 
     // proxy[1..N-2]: connect_over through the previous hop's stream.
     for i in 1..proxies.len() - 1 {
-        let meta = metadata_for_proxy(&proxies[i + 1]);
+        let meta = metadata_for_next_hop(&proxies, i + 1, final_target);
         debug!(
             relay.hop = i,
             relay.proxy = proxies[i].name(),
@@ -284,6 +320,7 @@ impl Proxy for RelayGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SelectorGroup;
     use meow_common::{DelayHistory, MeowError, ProxyConn, ProxyHealth, ProxyPacketConn};
     use std::net::SocketAddr;
     use std::sync::Arc;
@@ -298,6 +335,7 @@ mod tests {
     ///   `last_dial_host` for A5 assertions.
     struct MockProxy {
         proxy_name: String,
+        adapter_type: AdapterType,
         /// Pre-formatted `"server:port"` string — avoids a fresh allocation
         /// (and a `Box::leak`) on every `addr()` call.
         addr_str: String,
@@ -318,6 +356,7 @@ mod tests {
         fn new(name: &str, server: &str, port: u16, marker: u8) -> Arc<Self> {
             Arc::new(Self {
                 proxy_name: name.to_string(),
+                adapter_type: AdapterType::Socks5,
                 addr_str: format!("{server}:{port}"),
                 health: ProxyHealth::new(),
                 udp: false,
@@ -338,6 +377,16 @@ mod tests {
 
         fn no_udp(name: &str, server: &str, port: u16, marker: u8) -> Arc<Self> {
             Self::new(name, server, port, marker) // udp defaults to false
+        }
+
+        fn direct() -> Arc<Self> {
+            let proxy = Self::new("DIRECT", "", 0, 0);
+            let inner = Arc::try_unwrap(proxy).ok().unwrap();
+            Arc::new(Self {
+                adapter_type: AdapterType::Direct,
+                addr_str: String::new(),
+                ..inner
+            })
         }
 
         fn failing(name: &str, server: &str, port: u16, err: MeowError) -> Arc<Self> {
@@ -423,7 +472,7 @@ mod tests {
             &self.proxy_name
         }
         fn adapter_type(&self) -> AdapterType {
-            AdapterType::Direct
+            self.adapter_type
         }
         fn addr(&self) -> &str {
             &self.addr_str
@@ -641,6 +690,71 @@ mod tests {
             "C must receive final target; got {:?}",
             c_host.lock()
         );
+    }
+
+    #[tokio::test]
+    async fn relay_resolves_group_at_later_hop() {
+        let entry = MockProxy::new("entry", "10.0.0.1", 1080, 1);
+        let exit = MockProxy::new("exit", "10.0.0.2", 1081, 2);
+        let entry_host = Arc::clone(&entry.last_dial_host);
+        let exit_host = Arc::clone(&exit.last_dial_host);
+        let exit_visits = Arc::clone(&exit.visits);
+        let exit_group: Arc<dyn Proxy> = Arc::new(SelectorGroup::new("exit-group", vec![exit]));
+
+        let group = RelayGroup::new("group-hop", vec![entry, exit_group]);
+        let target = Metadata {
+            host: "target.example".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+
+        group.dial_tcp(&target).await.expect("group relay hop");
+
+        assert_eq!(*entry_host.lock(), Some("10.0.0.2".into()));
+        assert_eq!(*exit_host.lock(), Some("target.example".into()));
+        assert_eq!(*exit_visits.lock(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn relay_skips_direct_when_choosing_next_hop_target() {
+        let entry = MockProxy::new("entry", "10.0.0.1", 1080, 1);
+        let exit = MockProxy::new("exit", "10.0.0.2", 1081, 2);
+        let entry_host = Arc::clone(&entry.last_dial_host);
+        let exit_host = Arc::clone(&exit.last_dial_host);
+        let direct: Arc<dyn Proxy> = MockProxy::direct();
+
+        let group = RelayGroup::new("direct-hop", vec![entry, direct, exit]);
+        let target = Metadata {
+            host: "target.example".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+
+        group.dial_tcp(&target).await.expect("DIRECT relay hop");
+
+        assert_eq!(*entry_host.lock(), Some("10.0.0.2".into()));
+        assert_eq!(*exit_host.lock(), Some("target.example".into()));
+    }
+
+    #[tokio::test]
+    async fn relay_targets_destination_when_direct_is_last_hop() {
+        let entry = MockProxy::new("entry", "10.0.0.1", 1080, 1);
+        let entry_host = Arc::clone(&entry.last_dial_host);
+        let direct: Arc<dyn Proxy> = MockProxy::direct();
+
+        let group = RelayGroup::new("direct-final-hop", vec![entry, direct]);
+        let target = Metadata {
+            host: "target.example".into(),
+            dst_port: 443,
+            ..Default::default()
+        };
+
+        group
+            .dial_tcp(&target)
+            .await
+            .expect("final DIRECT relay hop");
+
+        assert_eq!(*entry_host.lock(), Some("target.example".into()));
     }
 
     // ─── B. Parse-time validation ─────────────────────────────────────────
