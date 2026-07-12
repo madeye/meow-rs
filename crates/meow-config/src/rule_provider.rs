@@ -123,6 +123,66 @@ impl RuleProvider {
 // Loader
 // ---------------------------------------------------------------------------
 
+/// Payload bytes of file/http rule-providers, fetched/read once and keyed by
+/// provider name. Reused for both the geo-allowlist scan (issue #277) and the
+/// provider parse passes so each payload is fetched exactly once per (re)load.
+/// Inline providers never appear here — their payload lives in the raw config.
+pub type PrefetchedPayloads = HashMap<String, Vec<u8>>;
+
+/// Fetch/read the raw payload bytes of every file/http provider without
+/// parsing them. Failures are logged and skipped; `load_providers_prefetched`
+/// retries any provider missing from the map and reports the error there.
+pub fn prefetch_payloads(
+    raw_providers: &HashMap<String, RawRuleProvider>,
+    cache_dir: Option<&Path>,
+    download_proxy: Option<&Arc<dyn Proxy>>,
+) -> PrefetchedPayloads {
+    let mut out = HashMap::new();
+    for (name, cfg) in raw_providers {
+        match read_payload_bytes(name, cfg, cache_dir, download_proxy) {
+            Ok(Some(bytes)) => {
+                out.insert(name.clone(), bytes);
+            }
+            Ok(None) => {}
+            Err(e) => warn!("rule-provider '{}': payload prefetch failed: {:#}", name, e),
+        }
+    }
+    out
+}
+
+fn read_payload_bytes(
+    name: &str,
+    cfg: &RawRuleProvider,
+    cache_dir: Option<&Path>,
+    download_proxy: Option<&Arc<dyn Proxy>>,
+) -> Result<Option<Vec<u8>>> {
+    match cfg.provider_type.as_str() {
+        "file" => {
+            let path = resolve_path(cfg, cache_dir, name)
+                .ok_or_else(|| anyhow!("file provider '{name}' requires a 'path'"))?;
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("reading provider file {}", path.display()))?;
+            Ok(Some(bytes))
+        }
+        "http" => {
+            let url = cfg
+                .url
+                .as_deref()
+                .ok_or_else(|| anyhow!("http provider '{name}' requires a 'url'"))?;
+            let cache_path = resolve_path(cfg, cache_dir, name);
+            let prefer_cache = cfg.interval.unwrap_or(0) > 0;
+            let bytes = fetch_http_blocking_with_cache(
+                url,
+                cache_path.as_deref(),
+                download_proxy,
+                prefer_cache,
+            )?;
+            Ok(Some(bytes))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Load every configured rule-provider at startup.
 ///
 /// Returns a map from provider name to `Arc<RuleProvider>`.  Providers that
@@ -133,12 +193,32 @@ pub fn load_providers(
     ctx: &ParserContext,
     download_proxy: Option<&Arc<dyn Proxy>>,
 ) -> HashMap<String, Arc<RuleProvider>> {
+    load_providers_prefetched(
+        raw_providers,
+        cache_dir,
+        ctx,
+        download_proxy,
+        &HashMap::new(),
+    )
+}
+
+/// Same as [`load_providers`] but reuses payload bytes already fetched by
+/// [`prefetch_payloads`]. Providers absent from `prefetched` fetch/read their
+/// payload themselves.
+pub fn load_providers_prefetched(
+    raw_providers: &HashMap<String, RawRuleProvider>,
+    cache_dir: Option<&Path>,
+    ctx: &ParserContext,
+    download_proxy: Option<&Arc<dyn Proxy>>,
+    prefetched: &PrefetchedPayloads,
+) -> HashMap<String, Arc<RuleProvider>> {
     let mut out = HashMap::new();
     if raw_providers.is_empty() {
         return out;
     }
     for (name, cfg) in raw_providers {
-        match load_one(name, cfg, cache_dir, ctx, download_proxy) {
+        let payload = prefetched.get(name).map(Vec::as_slice);
+        match load_one(name, cfg, cache_dir, ctx, download_proxy, payload) {
             Ok(provider) => {
                 debug!(
                     "Loaded rule-provider '{}' ({}/{}): {} entries",
@@ -175,12 +255,21 @@ fn load_one(
     cache_dir: Option<&Path>,
     ctx: &ParserContext,
     download_proxy: Option<&Arc<dyn Proxy>>,
+    prefetched: Option<&[u8]>,
 ) -> Result<RuleProvider> {
     let behavior: RuleSetBehavior = cfg.behavior.parse().map_err(|e: String| anyhow!("{e}"))?;
     match cfg.provider_type.as_str() {
         "inline" => load_inline(name, cfg, behavior, ctx),
-        "file" => load_file(name, cfg, cache_dir, behavior, ctx),
-        "http" => load_http(name, cfg, cache_dir, behavior, ctx, download_proxy),
+        "file" => load_file(name, cfg, cache_dir, behavior, ctx, prefetched),
+        "http" => load_http(
+            name,
+            cfg,
+            cache_dir,
+            behavior,
+            ctx,
+            download_proxy,
+            prefetched,
+        ),
         other => Err(anyhow!("unknown rule-provider type: {other}")),
     }
 }
@@ -219,6 +308,7 @@ fn load_file(
     cache_dir: Option<&Path>,
     behavior: RuleSetBehavior,
     ctx: &ParserContext,
+    prefetched: Option<&[u8]>,
 ) -> Result<RuleProvider> {
     if cfg.interval.is_some_and(|i| i > 0) {
         warn!(
@@ -229,8 +319,11 @@ fn load_file(
     }
     let path = resolve_path(cfg, cache_dir, name)
         .ok_or_else(|| anyhow!("file provider '{name}' requires a 'path'"))?;
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("reading provider file {}", path.display()))?;
+    let bytes = match prefetched {
+        Some(b) => b.to_vec(),
+        None => std::fs::read(&path)
+            .with_context(|| format!("reading provider file {}", path.display()))?,
+    };
     let explicit_format = parse_explicit_format(cfg)?;
     let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
     let vehicle = path.display().to_string();
@@ -252,6 +345,7 @@ fn load_http(
     behavior: RuleSetBehavior,
     ctx: &ParserContext,
     download_proxy: Option<&Arc<dyn Proxy>>,
+    prefetched: Option<&[u8]>,
 ) -> Result<RuleProvider> {
     let url = cfg
         .url
@@ -260,8 +354,15 @@ fn load_http(
     let cache_path = resolve_path(cfg, cache_dir, name);
     let explicit_format = parse_explicit_format(cfg)?;
     let interval = cfg.interval.unwrap_or(0);
-    let bytes =
-        fetch_http_blocking_with_cache(url, cache_path.as_deref(), download_proxy, interval > 0)?;
+    let bytes = match prefetched {
+        Some(b) => b.to_vec(),
+        None => fetch_http_blocking_with_cache(
+            url,
+            cache_path.as_deref(),
+            download_proxy,
+            interval > 0,
+        )?,
+    };
     let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
     Ok(make_provider(
         name,
