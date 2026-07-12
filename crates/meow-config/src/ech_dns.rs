@@ -28,9 +28,9 @@ use hickory_proto::rr::{RData, RecordType};
 use meow_dns::DnsClient;
 use serde_yaml::Value;
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 #[cfg(unix)]
 use std::net::SocketAddrV6;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
