@@ -1,16 +1,20 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use super::body::BodyCipher;
+use super::header::{read_aead_response_header, response_body_keys};
 
 /// Spawn a VMess relay task that handles AEAD body record framing.
 ///
 /// Returns a `DuplexStream` that the caller reads/writes plain bytes on.
-/// The background task encrypts writes into body records and decrypts
-/// reads from body records on the underlying stream.
+/// The background task first consumes the AEAD-sealed response header
+/// (validating the per-connection `resp_v` byte), then encrypts writes into
+/// body records and decrypts reads from body records on the underlying stream.
 pub fn spawn_vmess_relay(
     stream: Box<dyn meow_transport::Stream>,
     mut read_cipher: BodyCipher,
     mut write_cipher: BodyCipher,
+    req_key: [u8; 16],
+    req_iv: [u8; 16],
     resp_v: u8,
 ) -> DuplexStream {
     let (client, proxy) = tokio::io::duplex(32768);
@@ -18,13 +22,13 @@ pub fn spawn_vmess_relay(
     tokio::spawn(async move {
         let (mut rd, mut wr) = tokio::io::split(stream);
 
-        // Read and validate the 4-byte response header
-        let mut hdr = [0u8; 4];
-        if rd.read_exact(&mut hdr).await.is_err() {
-            return;
-        }
-        if hdr[0] != resp_v {
-            tracing::warn!("vmess: response validation byte mismatch");
+        // Consume and validate the AEAD-sealed response header. The response
+        // body keys are SHA-256 of the request body key/iv.
+        let (resp_body_key, resp_body_iv) = response_body_keys(&req_key, &req_iv);
+        if let Err(e) =
+            read_aead_response_header(&mut rd, &resp_body_key, &resp_body_iv, resp_v).await
+        {
+            tracing::warn!("vmess: response header decode failed: {e}");
             return;
         }
 
