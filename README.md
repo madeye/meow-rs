@@ -388,4 +388,4 @@ bash tests/test_tproxy_qemu.sh
 
 ## License
 
-MIT
+MIT — Copyright (c) 2026 Max Lv. See [LICENSE](LICENSE).
