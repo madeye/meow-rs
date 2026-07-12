@@ -466,6 +466,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let info = find_process(Network::Tcp, addr)
             .expect("process lookup should locate the current test process");
+        // Win32 process lookup does not populate uid.
+        #[cfg(not(target_os = "windows"))]
         assert!(info.uid.is_some(), "uid should be populated");
         // Exact-match guard-rail: the returned name must equal the full test
         // binary filename. On Linux this catches `/proc/<pid>/comm` truncation

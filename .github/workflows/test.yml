@@ -242,6 +242,45 @@ jobs:
       - name: Cargo check on MSRV toolchain
         run: cargo check --workspace --all-targets
 
+  windows:
+    runs-on: windows-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: windows
+
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features -- -D warnings
+
+      - name: Build
+        run: cargo build --tests
+
+      - name: Core smoke tests
+        run: |
+          cargo test --lib
+          cargo test --test common_test -- --nocapture
+          cargo test --test config_test -- --nocapture
+          cargo test --test rules_test -- --nocapture
+          cargo test --test api_test -- --nocapture
+          cargo test --test trojan_integration -- --nocapture
+          cargo test -p meow-dns --lib -- --nocapture
+          cargo test -p meow-transport --test tls_test -- --nocapture
+          cargo test -p meow-transport --test ws_test -- --nocapture
+
   macos:
     runs-on: macos-latest
     needs: lint
