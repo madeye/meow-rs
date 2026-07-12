@@ -407,6 +407,45 @@ proxy-groups:
 }
 
 #[tokio::test]
+async fn test_relay_dials_through_group_at_later_hop() {
+    use meow_common::Metadata;
+    use tokio::net::TcpListener;
+
+    let yaml = r#"
+proxy-groups:
+  - name: exit
+    type: select
+    proxies:
+      - DIRECT
+  - name: chain
+    type: relay
+    proxies:
+      - DIRECT
+      - exit
+
+rules:
+  - MATCH,chain
+"#;
+    let config = load_config_from_str(yaml).await.unwrap();
+    let chain = config.proxies.get("chain").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = listener.local_addr().unwrap();
+
+    let conn = chain
+        .dial_tcp(&Metadata {
+            host: target.ip().to_string().into(),
+            dst_port: target.port(),
+            ..Default::default()
+        })
+        .await
+        .expect("relay should resolve the group hop and dial the final target");
+
+    let (_accepted, peer) = listener.accept().await.unwrap();
+    assert!(peer.ip().is_loopback());
+    drop(conn);
+}
+
+#[tokio::test]
 async fn test_proxy_group_missing_proxy_warn_not_fail() {
     let yaml = r#"
 proxies:
