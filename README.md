@@ -388,4 +388,4 @@ bash tests/test_tproxy_qemu.sh
 
 ## License
 
-GPL-3.0
+MIT

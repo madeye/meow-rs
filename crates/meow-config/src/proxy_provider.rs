@@ -132,7 +132,7 @@ impl ProxyProvider {
                 }
                 match req.send().await {
                     Ok(resp) if resp.status().is_success() => {
-                        match resp.text().await {
+                        match crate::internal_http::response_text_with_limit(resp).await {
                             Ok(text) => {
                                 // Cache to disk for offline fallback
                                 if let Some(parent) = cache_path.parent() {

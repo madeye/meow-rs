@@ -1,5 +1,7 @@
 pub mod sniffer;
 
+pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 #[cfg(feature = "listener-http")]
 pub mod http_proxy;
 #[cfg(feature = "listener-mixed")]

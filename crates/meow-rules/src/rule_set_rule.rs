@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use meow_common::{Metadata, Rule, RuleMatchHelper, RuleType};
 
-use crate::rule_set::{RuleSet, RuleSetBehavior};
+use crate::rule_set::RuleSet;
 
 /// A `RULE-SET,<name>,<adapter>[,no-resolve]` rule — a thin wrapper that
 /// delegates matching to an `Arc<dyn RuleSet>` loaded by the rule-provider
@@ -47,8 +47,11 @@ impl Rule for RuleSetRule {
     }
 
     fn should_resolve_ip(&self) -> bool {
-        // Only ipcidr sets need DNS resolution for rule matching.
-        matches!(self.set.behavior(), RuleSetBehavior::IpCidr) && !self.no_resolve
+        self.set.should_resolve_ip() && !self.no_resolve
+    }
+
+    fn should_find_process(&self) -> bool {
+        self.set.should_find_process()
     }
 
     fn as_any(&self) -> Option<&dyn std::any::Any> {

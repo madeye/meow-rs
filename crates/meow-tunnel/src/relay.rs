@@ -56,6 +56,7 @@ struct HalfCopy<'buf> {
     pos: usize,
     cap: usize,
     amt: u64,
+    need_flush: bool,
 }
 
 impl<'buf> HalfCopy<'buf> {
@@ -66,6 +67,7 @@ impl<'buf> HalfCopy<'buf> {
             pos: 0,
             cap: 0,
             amt: 0,
+            need_flush: false,
         }
     }
 
@@ -94,7 +96,13 @@ impl<'buf> HalfCopy<'buf> {
                         }
                     }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        if self.need_flush {
+                            ready!(writer.as_mut().poll_flush(cx))?;
+                            self.need_flush = false;
+                        }
+                        return Poll::Pending;
+                    }
                 }
             }
 
@@ -111,6 +119,7 @@ impl<'buf> HalfCopy<'buf> {
                     Poll::Ready(Ok(n)) => {
                         self.pos += n;
                         self.amt += n as u64;
+                        self.need_flush = true;
                     }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Pending => return Poll::Pending,

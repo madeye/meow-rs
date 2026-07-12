@@ -43,6 +43,19 @@ where
     tokio::task::spawn_blocking(move || tracing::dispatcher::with_default(&dispatch, f)).await
 }
 
+pub(crate) fn parse_optional_socket_addr(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<SocketAddr>, anyhow::Error> {
+    match value {
+        Some(value) if !value.is_empty() => value
+            .parse()
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("invalid {field} socket address '{value}': {e}")),
+        _ => Ok(None),
+    }
+}
+
 pub struct Config {
     pub general: GeneralConfig,
     pub dns: DnsConfig,
@@ -102,7 +115,7 @@ pub struct NamedListener {
     pub listen: String,
     pub tproxy_sni: bool,
     /// Cap on concurrent in-flight inbound connections for this listener.
-    /// `0` (default) disables the cap. Resolved from the per-listener
+    /// `0` explicitly disables the cap; the default is 256. Resolved from the per-listener
     /// `max-connections` field, falling back to the global `max-connections`.
     #[serde(default)]
     pub max_connections: usize,
@@ -1062,7 +1075,7 @@ fn build_named_listeners(
     let mut result: Vec<NamedListener> = Vec::new();
     let mut used_ports: HashMap<u16, String> = HashMap::new();
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let global_max_conns = raw.max_connections.unwrap_or(0);
+    let global_max_conns = raw.max_connections.unwrap_or(256);
 
     let mut add = |name: &str,
                    ltype: ListenerType,
@@ -1318,10 +1331,10 @@ async fn build_config(
             dir
         });
     let api = ApiConfig {
-        external_controller: raw
-            .external_controller
-            .as_deref()
-            .and_then(|s| s.parse().ok()),
+        external_controller: parse_optional_socket_addr(
+            "external-controller",
+            raw.external_controller.as_deref(),
+        )?,
         secret: raw.secret.clone(),
         external_ui,
         external_ui_url: raw
@@ -1772,6 +1785,26 @@ mod load_config_encoding_tests {
                 "BOM-prefixed UTF-8 must not trigger encoding error: {msg}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod socket_address_tests {
+    use super::parse_optional_socket_addr;
+
+    #[test]
+    fn configured_socket_addresses_are_validated() {
+        assert_eq!(
+            parse_optional_socket_addr("dns.listen", Some("127.0.0.1:53")).unwrap(),
+            Some("127.0.0.1:53".parse().unwrap())
+        );
+        assert!(parse_optional_socket_addr("dns.listen", Some("localhost")).is_err());
+        assert!(parse_optional_socket_addr("dns.listen", Some("127.0.0.1:70000")).is_err());
+        assert!(parse_optional_socket_addr("external-controller", Some("[::1]:9090")).is_ok());
+        assert_eq!(
+            parse_optional_socket_addr("dns.listen", None).unwrap(),
+            None
+        );
     }
 }
 
