@@ -84,7 +84,7 @@ async fn handle_socks5_inner(
     in_name: &str,
     in_port: u16,
 ) -> Result<PostHandshake, Box<dyn std::error::Error + Send + Sync>> {
-    let deadline = tokio::time::Instant::now() + crate::mixed::DEFAULT_HANDSHAKE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + crate::DEFAULT_HANDSHAKE_TIMEOUT;
     // 1. Version/method negotiation
     let mut header = [0u8; 2];
     read_exact_before(stream, &mut header, deadline).await?;

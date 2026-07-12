@@ -5,7 +5,6 @@ use meow_common::AuthConfig;
 use meow_tunnel::Tunnel;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
@@ -17,7 +16,6 @@ use tracing::{debug, error, info, warn};
 /// VLESS+WS+TLS+ECH tunnel costs ~90 KB of userland memory, so a cap of 256
 /// holds RSS to ~50 MB on top of an ~18 MB idle baseline.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
-pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct MixedListener {
     tunnel: Tunnel,
@@ -145,7 +143,7 @@ async fn handle_connection(
 ) {
     // Peek the first byte to determine protocol
     let mut peek = [0u8; 1];
-    match tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, stream.peek(&mut peek)).await {
+    match tokio::time::timeout(crate::DEFAULT_HANDSHAKE_TIMEOUT, stream.peek(&mut peek)).await {
         Err(_) => {
             debug!("Protocol detection timed out for {src_addr}");
             return;

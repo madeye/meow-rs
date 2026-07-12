@@ -80,7 +80,7 @@ async fn handle_http_inner(
             }
         }
     };
-    let header_end = tokio::time::timeout(crate::mixed::DEFAULT_HANDSHAKE_TIMEOUT, read_headers)
+    let header_end = tokio::time::timeout(crate::DEFAULT_HANDSHAKE_TIMEOUT, read_headers)
         .await
         .map_err(|_| "HTTP proxy handshake timed out")??;
     let leftover: Vec<u8> = request_buf[header_end..].to_vec();
