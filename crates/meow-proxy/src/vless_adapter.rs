@@ -30,6 +30,12 @@ use crate::vless::{addr_from_metadata, Cmd, VlessConn, VlessPacketConn};
 #[cfg(feature = "vless-vision")]
 use crate::vless::VisionConn;
 
+#[cfg(feature = "vless-encryption")]
+use std::sync::Arc;
+
+#[cfg(feature = "vless-encryption")]
+use crate::vless::encryption::ClientInstance;
+
 // ─── XTLS flow ────────────────────────────────────────────────────────────────
 
 /// XTLS flow mode for VLESS.
@@ -52,6 +58,10 @@ pub struct VlessAdapter {
     flow: Option<VlessFlow>,
     udp: bool,
     transport: TransportChain,
+    /// VLESS post-quantum Encryption (`mlkem768x25519plus`), applied below the
+    /// VLESS header exchange once per dial. `None` for plain VLESS.
+    #[cfg(feature = "vless-encryption")]
+    encryption: Option<Arc<ClientInstance>>,
     health: ProxyHealth,
 }
 
@@ -79,16 +89,32 @@ impl VlessAdapter {
             flow,
             udp,
             transport,
+            #[cfg(feature = "vless-encryption")]
+            encryption: None,
             health: ProxyHealth::new(),
         }
     }
 
-    /// Dial a raw TCP + transport-chain stream to the VLESS server.
+    /// Attach a VLESS Encryption client (`encryption: mlkem768x25519plus…`).
+    ///
+    /// Shared across dials so the 0-RTT resumption ticket cache persists.
+    #[cfg(feature = "vless-encryption")]
+    pub fn set_encryption(&mut self, encryption: Option<Arc<ClientInstance>>) {
+        self.encryption = encryption;
+    }
+
+    /// Dial a raw TCP + transport-chain stream to the VLESS server, then run the
+    /// VLESS Encryption handshake if one is configured.
     async fn dial_stream(&self) -> Result<Box<dyn meow_transport::Stream>> {
         let tcp = meow_common::connect_tcp_host(&self.server, self.port)
             .await
             .map_err(MeowError::Io)?;
-        self.transport.connect(Box::new(tcp)).await
+        let stream = self.transport.connect(Box::new(tcp)).await?;
+        #[cfg(feature = "vless-encryption")]
+        if let Some(encryption) = &self.encryption {
+            return encryption.handshake(stream).await;
+        }
+        Ok(stream)
     }
 }
 

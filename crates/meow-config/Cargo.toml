@@ -9,11 +9,12 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess", "snell", "hysteria2"]
+default = ["ss", "trojan", "vless", "vless-vision", "vless-encryption", "ech-tls-tunnel", "vmess", "snell", "hysteria2"]
 ss = ["meow-proxy/ss"]
 trojan = ["meow-proxy/trojan"]
 vless = ["meow-proxy/vless"]
 vless-vision = ["vless", "meow-proxy/vless-vision"]
+vless-encryption = ["vless", "meow-proxy/vless-encryption"]
 vmess = ["meow-proxy/vmess"]
 anytls = ["meow-proxy/anytls"]
 hysteria2 = ["meow-proxy/hysteria2"]

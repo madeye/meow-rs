@@ -66,6 +66,9 @@ pub use trojan::TrojanAdapter;
 
 #[cfg(feature = "vless")]
 pub use vless_adapter::{VlessAdapter, VlessFlow};
+
+#[cfg(feature = "vless-encryption")]
+pub use vless::encryption::{parse_client_encryption, ClientInstance as VlessEncryptionClient};
 #[cfg(feature = "vmess")]
 pub use vmess::VmessAdapter;
 

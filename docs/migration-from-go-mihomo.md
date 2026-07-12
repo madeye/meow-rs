@@ -53,7 +53,7 @@ cause problems; items marked ~ work with caveats; items marked ✓ work.
 | `proxies:` — Trojan | ✓ | TLS + WebSocket transport. |
 | `proxies:` — Direct, Reject | ✓ | Fully supported. |
 | `proxies:` — VMess | ✓ | AEAD VMess outbound with TCP/WebSocket transports. |
-| `proxies:` — VLESS | ✓ | Plain VLESS, XTLS-Vision, and Reality/uTLS paths in the default app build. |
+| `proxies:` — VLESS | ✓ | Plain VLESS, XTLS-Vision, Reality/uTLS, and post-quantum Encryption (`mlkem768x25519plus`) in the default app build. |
 | `proxies:` — HTTP CONNECT outbound | ✓ | Full parity (M1.B-3). |
 | `proxies:` — SOCKS5 outbound | ✓ | Full parity (M1.B-4). |
 | `proxies:` — Snell | ✓ | v3/v4/v5, UDP-over-TCP, optional HTTP/TLS obfs. |
@@ -167,6 +167,14 @@ Security comes from the outer transport (`tls: true`). XTLS-Vision flow
 (`flow: xtls-rprx-vision`) and Reality/uTLS paths are supported in the default
 app build.
 
+VLESS post-quantum **Encryption** (`encryption: mlkem768x25519plus…`, Xray's
+ML-KEM-768 + X25519 hybrid handshake that 3x-ui now emits) is supported in the
+default app build via the `vless-encryption` feature (bundled into `full`, kept
+out of `minimal`). All three XOR modes (`native` / `xorpub` / `random`), 1-RTT
+and 0-RTT, and multi-key relay chains interoperate with Xray-core / mihomo
+servers. On a build without the feature the `encryption:` line is a hard parse
+error pointing at the missing feature.
+
 ```yaml
 proxies:
   - name: vless-example
@@ -178,6 +186,7 @@ proxies:
     servername: example.com
     skip-cert-verify: false
     flow: ""                    # "" (plain) | xtls-rprx-vision
+    encryption: ""              # "" / none, or mlkem768x25519plus.native.0rtt.<key>
     network: ws                 # tcp | ws | grpc | h2 | httpupgrade
     ws-opts:
       path: /vless
@@ -191,7 +200,8 @@ proxies:
 | Field / behaviour | Go mihomo | meow-rs |
 |-------------------|-----------|-------------|
 | `flow: xtls-rprx-direct` / `xtls-rprx-splice` | Accepted (deprecated upstream) | Hard parse error — use `xtls-rprx-vision` instead. |
-| `encryption:` any value other than `""` or `"none"` | Accepted | Hard parse error — VLESS has no body cipher. |
+| `encryption: mlkem768x25519plus…` (post-quantum Encryption) | Accepted | Supported with the `vless-encryption` feature (in `full`); otherwise a hard parse error naming the feature. |
+| `encryption:` any other non-`""`/`"none"` value | Accepted | Hard parse error — VLESS defines no other body cipher. |
 | `mux: {enabled: true}` | Multiplexes | Warn-once, ignored. |
 | `tls: false` with no outer encryption | Accepted silently | Warn-once at load — traffic is plaintext. |
 

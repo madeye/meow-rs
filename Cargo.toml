@@ -128,6 +128,13 @@ chacha20poly1305 = "0.10"
 crc32fast = "1"
 hex = "0.4"
 subtle = "2"
+# VLESS post-quantum Encryption (`mlkem768x25519plus`, Xray/mihomo interop):
+# BLAKE3 KDF + ML-KEM-768 + X25519 hybrid key exchange, AES-CTR record XOR.
+# All pure-Rust RustCrypto/dalek crates, gated behind `vless-encryption`.
+blake3 = "1"
+ml-kem = { version = "0.3", features = ["getrandom"] }
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
+ctr = "0.9"
 # Snell uses Argon2id (t=3, m=8 KiB, p=1) as its KDF and AES-128-GCM
 # (the `aes-gcm` entry above) as its AEAD; both are pure-Rust RustCrypto
 # crates sharing the AES backend with the existing crypto stack.

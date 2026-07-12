@@ -9,12 +9,26 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-default = ["ss", "trojan", "vless", "vless-vision", "ech-tls-tunnel", "vmess", "snell", "hysteria2"]
+default = ["ss", "trojan", "vless", "vless-vision", "vless-encryption", "ech-tls-tunnel", "vmess", "snell", "hysteria2"]
 ss = ["dep:shadowsocks"]
 trojan = []
 vless = []
 vmess = ["dep:md-5", "dep:hmac", "dep:aes", "dep:aes-gcm", "dep:chacha20poly1305", "dep:crc32fast"]
 vless-vision = ["vless"]
+# VLESS post-quantum Encryption layer (`encryption: mlkem768x25519plus...`),
+# the ML-KEM-768 + X25519 hybrid handshake used by Xray-core / mihomo. Adds the
+# BLAKE3 / ML-KEM / X25519 / AES-CTR crypto stack, so it is opt-in (bundled into
+# the app `full` profile, kept out of `minimal` — ADR-0007 binary-size caps).
+vless-encryption = [
+    "vless",
+    "dep:blake3",
+    "dep:ml-kem",
+    "dep:x25519-dalek",
+    "dep:ctr",
+    "dep:aes",
+    "dep:aes-gcm",
+    "dep:chacha20poly1305",
+]
 # Snell v3/v4/v5 outbound — argon2id KDF + AES-128-GCM AEAD frames,
 # optional http/tls obfs (reused from the SS simple-obfs module),
 # UDP-over-TCP, and an opt-in v4/v5 reuse pool (CommandConnectV2).
@@ -68,6 +82,10 @@ aes = { workspace = true, optional = true }
 aes-gcm = { workspace = true, optional = true }
 chacha20poly1305 = { workspace = true, optional = true }
 crc32fast = { workspace = true, optional = true }
+blake3 = { workspace = true, optional = true }
+ml-kem = { workspace = true, optional = true }
+x25519-dalek = { workspace = true, optional = true }
+ctr = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
