@@ -310,8 +310,8 @@ mod platform {
     use tracing::trace;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCPROW_OWNER_PID,
-        MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCPROW_OWNER_PID, MIB_UDPROW_OWNER_PID,
+        TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
     };
     use windows_sys::Win32::System::ProcessStatus::GetModuleFileNameExW;
     use windows_sys::Win32::System::Threading::{
@@ -327,7 +327,11 @@ mod platform {
         };
         let (name, path) = get_process_info(pid)?;
         trace!(pid, name, path, "process_lookup: matched via Win32 API");
-        Some(ProcessInfo { name, path, uid: None })
+        Some(ProcessInfo {
+            name,
+            path,
+            uid: None,
+        })
     }
 
     fn find_pid_in_tcp_table(target: SocketAddr) -> Option<u32> {
@@ -435,7 +439,12 @@ mod platform {
             }
 
             let mut buf = [0u16; 1024];
-            let size = GetModuleFileNameExW(handle, std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32);
+            let size = GetModuleFileNameExW(
+                handle,
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+            );
 
             let _ = CloseHandle(handle);
 
@@ -454,7 +463,10 @@ mod platform {
     }
 }
 
-#[cfg(all(test, any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
 mod tests {
     use super::*;
 

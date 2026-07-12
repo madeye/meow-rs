@@ -602,7 +602,13 @@ async fn merge_system_hosts(trie: &mut DomainTrie<Vec<IpAddr>>) {
 async fn parse_system_hosts() -> Vec<(String, Vec<IpAddr>)> {
     let hosts_path = if cfg!(target_os = "windows") {
         std::env::var("SystemRoot")
-            .map(|sr| std::path::PathBuf::from(sr).join("System32").join("drivers").join("etc").join("hosts"))
+            .map(|sr| {
+                std::path::PathBuf::from(sr)
+                    .join("System32")
+                    .join("drivers")
+                    .join("etc")
+                    .join("hosts")
+            })
             .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts"))
     } else {
         std::path::PathBuf::from("/etc/hosts")
@@ -610,7 +616,11 @@ async fn parse_system_hosts() -> Vec<(String, Vec<IpAddr>)> {
     let content = match tokio::fs::read_to_string(&hosts_path).await {
         Ok(c) => c,
         Err(e) => {
-            warn!("use-system-hosts: cannot read {}: {}", hosts_path.display(), e);
+            warn!(
+                "use-system-hosts: cannot read {}: {}",
+                hosts_path.display(),
+                e
+            );
             return vec![];
         }
     };
