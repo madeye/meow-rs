@@ -35,7 +35,7 @@ opt-level = 1
 version = "0.16.0"
 edition = "2021"
 rust-version = "1.89"
-license = "GPL-3.0"
+license = "MIT"
 repository = "https://github.com/madeye/meow-rs"
 homepage = "https://madeye.github.io/meow-rs/"
 

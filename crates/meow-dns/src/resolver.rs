@@ -597,10 +597,10 @@ impl Resolver {
         let main_urls: Vec<NameServerUrl> = main_urls.into_iter().map(|e| e.url).collect();
         let fallback_urls: Vec<NameServerUrl> = fallback_urls.into_iter().map(|e| e.url).collect();
         let default_ns: Vec<NameServerUrl> = default_ns.into_iter().map(|e| e.url).collect();
-        // Step 1: Validate default_ns — encrypted entries are only allowed
-        // when they use IP literals (no bootstrap loop).
+        // Step 1: default nameservers are themselves the bootstrap roots, so
+        // every entry must use an IP literal regardless of transport.
         for ns in &default_ns {
-            if !ns.is_plain() && ns.needs_bootstrap().is_some() {
+            if ns.needs_bootstrap().is_some() {
                 return Err(BootstrapError::DefaultNameserverNotPlain {
                     entry: ns.to_string(),
                 });
@@ -1426,6 +1426,28 @@ mod tests {
             matches!(err, BootstrapError::DefaultNameserverNotPlain { .. }),
             "expected DefaultNameserverNotPlain, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rejects_plain_hostname_default_ns() {
+        let default_ns = vec![NameServerUrl::parse("dns.google").unwrap()];
+        let err = Resolver::new_with_bootstrap(
+            vec![NameServerUrl::parse("tls://cloudflare-dns.com").unwrap()],
+            vec![],
+            default_ns,
+            DnsMode::Normal,
+            DomainTrie::new(),
+            true,
+            None,
+            None,
+        )
+        .await
+        .err()
+        .expect("expected error");
+        assert!(matches!(
+            err,
+            BootstrapError::DefaultNameserverNotPlain { .. }
+        ));
     }
 
     // B5b: Tls IP-literal in default_ns → accepted (no bootstrap loop).

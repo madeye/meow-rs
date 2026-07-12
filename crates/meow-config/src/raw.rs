@@ -127,7 +127,7 @@ pub struct RawConfig {
     pub skip_auth_prefixes: Option<Vec<String>>,
     pub geodata: Option<RawGeoDataConfig>,
     /// Global default cap on concurrent in-flight inbound connections per
-    /// listener. `0` (the default) disables the cap. Individual `listeners:`
+    /// listener. The default is 256; explicit `0` disables the cap. Individual `listeners:`
     /// entries can override this with their own `max-connections` field.
     pub max_connections: Option<usize>,
 }

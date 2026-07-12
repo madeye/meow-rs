@@ -73,6 +73,12 @@ pub trait RuleSet: Send + Sync {
     fn behavior(&self) -> RuleSetBehavior;
     fn matches(&self, metadata: &Metadata, helper: &RuleMatchHelper) -> bool;
     fn len(&self) -> usize;
+    fn should_resolve_ip(&self) -> bool {
+        false
+    }
+    fn should_find_process(&self) -> bool {
+        false
+    }
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -363,6 +369,10 @@ impl RuleSet for IpCidrRuleSet {
     fn len(&self) -> usize {
         self.count
     }
+
+    fn should_resolve_ip(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +419,14 @@ impl RuleSet for ClassicalRuleSet {
 
     fn len(&self) -> usize {
         self.rules.len()
+    }
+
+    fn should_resolve_ip(&self) -> bool {
+        self.rules.iter().any(|rule| rule.should_resolve_ip())
+    }
+
+    fn should_find_process(&self) -> bool {
+        self.rules.iter().any(|rule| rule.should_find_process())
     }
 }
 
@@ -520,6 +538,20 @@ mod tests {
         assert!(set.matches(&meta_host("mail.google.com"), &helper()));
         assert!(set.matches(&meta_ip("10.1.2.3"), &helper()));
         assert!(!set.matches(&meta_host("example.org"), &helper()));
+    }
+
+    #[test]
+    fn classical_rule_set_propagates_metadata_demands() {
+        let ctx = ParserContext::empty();
+        let set = ClassicalRuleSet::from_entries(
+            &[
+                "IP-CIDR,10.0.0.0/8".to_string(),
+                "PROCESS-NAME,curl".to_string(),
+            ],
+            &ctx,
+        );
+        assert!(set.should_resolve_ip());
+        assert!(set.should_find_process());
     }
 
     #[test]

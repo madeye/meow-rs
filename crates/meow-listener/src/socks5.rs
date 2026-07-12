@@ -40,12 +40,22 @@ pub async fn handle_socks5(
     .await
     {
         Ok(PostHandshake::Done) => {}
-        Ok(PostHandshake::UdpAssociate) => {
+        Ok(PostHandshake::UdpAssociate {
+            requested_ip,
+            requested_port,
+        }) => {
             // The handshake (auth + request) is consumed; the control conn is
             // now ours for the association's lifetime.
-            if let Err(e) =
-                crate::socks5_udp::handle_udp_associate(tunnel, stream, src_addr, in_name, in_port)
-                    .await
+            if let Err(e) = crate::socks5_udp::handle_udp_associate(
+                tunnel,
+                stream,
+                src_addr,
+                requested_ip,
+                requested_port,
+                in_name,
+                in_port,
+            )
+            .await
             {
                 debug!("SOCKS5 UDP ASSOCIATE error from {}: {}", src_addr, e);
             }
@@ -59,7 +69,10 @@ pub async fn handle_socks5(
 /// the UDP relay.
 enum PostHandshake {
     Done,
-    UdpAssociate,
+    UdpAssociate {
+        requested_ip: Option<IpAddr>,
+        requested_port: u16,
+    },
 }
 
 async fn handle_socks5_inner(
@@ -71,15 +84,16 @@ async fn handle_socks5_inner(
     in_name: &str,
     in_port: u16,
 ) -> Result<PostHandshake, Box<dyn std::error::Error + Send + Sync>> {
+    let deadline = tokio::time::Instant::now() + crate::mixed::DEFAULT_HANDSHAKE_TIMEOUT;
     // 1. Version/method negotiation
     let mut header = [0u8; 2];
-    stream.read_exact(&mut header).await?;
+    read_exact_before(stream, &mut header, deadline).await?;
     if header[0] != SOCKS5_VERSION {
         return Err("invalid SOCKS version".into());
     }
     let nmethods = header[1] as usize;
     let mut methods_buf = [0u8; 255];
-    stream.read_exact(&mut methods_buf[..nmethods]).await?;
+    read_exact_before(stream, &mut methods_buf[..nmethods], deadline).await?;
     let methods = &methods_buf[..nmethods];
 
     let in_user: Option<String> = if let Some(auth) = auth
@@ -96,7 +110,7 @@ async fn handle_socks5_inner(
 
         // RFC 1929 sub-negotiation: [0x01, ulen, user..., plen, pass...]
         let mut sub_ver = [0u8; 1];
-        stream.read_exact(&mut sub_ver).await?;
+        read_exact_before(stream, &mut sub_ver, deadline).await?;
         if sub_ver[0] != 0x01 {
             return Err("invalid auth sub-negotiation version".into());
         }
@@ -104,13 +118,13 @@ async fn handle_socks5_inner(
         // copied to the heap after a successful verify (audit #182 — the
         // failure/empty path previously allocated two Strings regardless).
         let mut ulen = [0u8; 1];
-        stream.read_exact(&mut ulen).await?;
+        read_exact_before(stream, &mut ulen, deadline).await?;
         let mut user_buf = [0u8; 255];
-        stream.read_exact(&mut user_buf[..ulen[0] as usize]).await?;
+        read_exact_before(stream, &mut user_buf[..ulen[0] as usize], deadline).await?;
         let mut plen = [0u8; 1];
-        stream.read_exact(&mut plen).await?;
+        read_exact_before(stream, &mut plen, deadline).await?;
         let mut pass_buf = [0u8; 255];
-        stream.read_exact(&mut pass_buf[..plen[0] as usize]).await?;
+        read_exact_before(stream, &mut pass_buf[..plen[0] as usize], deadline).await?;
         let Ok(username) = std::str::from_utf8(&user_buf[..ulen[0] as usize]) else {
             stream.write_all(&[0x01, 0x01]).await?;
             return Err("invalid SOCKS5 username encoding".into());
@@ -139,7 +153,7 @@ async fn handle_socks5_inner(
 
     // 2. Request
     let mut req = [0u8; 4];
-    stream.read_exact(&mut req).await?;
+    read_exact_before(stream, &mut req, deadline).await?;
     if req[0] != SOCKS5_VERSION {
         return Err("invalid SOCKS version in request".into());
     }
@@ -147,13 +161,15 @@ async fn handle_socks5_inner(
     let cmd = req[1];
     let atyp = req[3];
 
-    // Parse address (for UDP ASSOCIATE this is the client's advertised source,
-    // which we ignore — the relay learns the real source from the first packet).
-    let (host, dst_ip, dst_port) = parse_socks5_address(stream, atyp).await?;
+    // Parse address (for UDP ASSOCIATE this is the client's advertised source).
+    let (host, dst_ip, dst_port) = parse_socks5_address(stream, atyp, deadline).await?;
 
     if cmd == CMD_UDP_ASSOCIATE {
         // Hand the control connection to the UDP relay; it writes its own reply.
-        return Ok(PostHandshake::UdpAssociate);
+        return Ok(PostHandshake::UdpAssociate {
+            requested_ip: dst_ip,
+            requested_port: dst_port,
+        });
     }
 
     if cmd != CMD_CONNECT {
@@ -263,25 +279,26 @@ async fn handle_socks5_inner(
 async fn parse_socks5_address(
     stream: &mut TcpStream,
     atyp: u8,
+    deadline: tokio::time::Instant,
 ) -> Result<(String, Option<IpAddr>, u16), Box<dyn std::error::Error + Send + Sync>> {
     match atyp {
         ATYP_IPV4 => {
             let mut addr = [0u8; 4];
-            stream.read_exact(&mut addr).await?;
+            read_exact_before(stream, &mut addr, deadline).await?;
             let mut port_buf = [0u8; 2];
-            stream.read_exact(&mut port_buf).await?;
+            read_exact_before(stream, &mut port_buf, deadline).await?;
             let ip = IpAddr::V4(Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]));
             let port = u16::from_be_bytes(port_buf);
             Ok((String::new(), Some(ip), port))
         }
         ATYP_DOMAIN => {
             let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await?;
+            read_exact_before(stream, &mut len, deadline).await?;
             let dlen = len[0] as usize;
             let mut domain_buf = [0u8; 255];
-            stream.read_exact(&mut domain_buf[..dlen]).await?;
+            read_exact_before(stream, &mut domain_buf[..dlen], deadline).await?;
             let mut port_buf = [0u8; 2];
-            stream.read_exact(&mut port_buf).await?;
+            read_exact_before(stream, &mut port_buf, deadline).await?;
             let host = std::str::from_utf8(&domain_buf[..dlen])
                 .map_err(|_| "invalid domain name encoding")?
                 .to_string();
@@ -290,13 +307,24 @@ async fn parse_socks5_address(
         }
         ATYP_IPV6 => {
             let mut addr = [0u8; 16];
-            stream.read_exact(&mut addr).await?;
+            read_exact_before(stream, &mut addr, deadline).await?;
             let mut port_buf = [0u8; 2];
-            stream.read_exact(&mut port_buf).await?;
+            read_exact_before(stream, &mut port_buf, deadline).await?;
             let ip = IpAddr::V6(Ipv6Addr::from(addr));
             let port = u16::from_be_bytes(port_buf);
             Ok((String::new(), Some(ip), port))
         }
         _ => Err(format!("unsupported address type: {atyp}").into()),
     }
+}
+
+async fn read_exact_before(
+    stream: &mut TcpStream,
+    buf: &mut [u8],
+    deadline: tokio::time::Instant,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tokio::time::timeout_at(deadline, stream.read_exact(buf))
+        .await
+        .map_err(|_| "SOCKS5 handshake timed out")??;
+    Ok(())
 }

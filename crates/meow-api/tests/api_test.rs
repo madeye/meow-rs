@@ -701,6 +701,32 @@ async fn create_proxy_group_selector() {
 }
 
 #[tokio::test]
+async fn rejected_proxy_group_does_not_mutate_raw_config() {
+    let state = test_state_default();
+    let app = create_router(Arc::clone(&state));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/proxy-groups")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"name":"Broken","type":"relay","proxies":["DIRECT"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(state
+        .raw_config
+        .read()
+        .proxy_groups
+        .as_ref()
+        .is_none_or(Vec::is_empty));
+}
+
+#[tokio::test]
 async fn create_proxy_group_duplicate_name() {
     let mut raw = test_raw_config();
     raw.proxy_groups = Some(vec![RawProxyGroup {

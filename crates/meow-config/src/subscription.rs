@@ -17,7 +17,7 @@ pub async fn fetch_subscription(url: &str) -> Result<SubscriptionData, anyhow::E
         .build()?;
     let resp = client.get(url).send().await?;
     let status = resp.status();
-    let text = resp.text().await?;
+    let text = crate::internal_http::response_text_with_limit(resp).await?;
     if !status.is_success() {
         return Err(anyhow::anyhow!(
             "HTTP {}: {}",

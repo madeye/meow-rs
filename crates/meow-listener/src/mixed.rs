@@ -5,18 +5,19 @@ use meow_common::AuthConfig;
 use meow_tunnel::Tunnel;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 /// Default cap on in-flight inbound connections per listener.
-/// `0` means no cap — the listener accepts as many concurrent connections as
-/// the kernel and tokio runtime can hold. Set a positive value (via the
+/// `0` explicitly disables the cap. Set a positive value (via the
 /// `max-connections` config key, top-level or per-listener) to back-pressure
 /// the TCP listen queue and bound RSS under burst load: each live
 /// VLESS+WS+TLS+ECH tunnel costs ~90 KB of userland memory, so a cap of 256
 /// holds RSS to ~50 MB on top of an ~18 MB idle baseline.
-pub const DEFAULT_MAX_CONNECTIONS: usize = 0;
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct MixedListener {
     tunnel: Tunnel,
@@ -144,10 +145,14 @@ async fn handle_connection(
 ) {
     // Peek the first byte to determine protocol
     let mut peek = [0u8; 1];
-    match stream.peek(&mut peek).await {
-        Ok(0) => return,
-        Ok(_) => {}
-        Err(e) => {
+    match tokio::time::timeout(DEFAULT_HANDSHAKE_TIMEOUT, stream.peek(&mut peek)).await {
+        Err(_) => {
+            debug!("Protocol detection timed out for {src_addr}");
+            return;
+        }
+        Ok(Ok(0)) => return,
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
             debug!("Peek error: {}", e);
             return;
         }

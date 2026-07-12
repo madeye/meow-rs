@@ -58,22 +58,31 @@ async fn handle_http_inner(
     const MAX_HEADERS: usize = 8192;
     let mut request_buf = Vec::with_capacity(4096);
     let mut chunk = [0u8; CHUNK];
-    let header_end = loop {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            return Err("connection closed before headers complete".into());
-        }
-        // Overlap the previous tail by 3 bytes so a marker straddling two
-        // reads (e.g. "\r\n\r" then "\n…") is still detected.
-        let search_start = request_buf.len().saturating_sub(3);
-        request_buf.extend_from_slice(&chunk[..n]);
-        if let Some(rel) = find_crlf_crlf(&request_buf[search_start..]) {
-            break search_start + rel + 4;
-        }
-        if request_buf.len() > MAX_HEADERS {
-            return Err("request headers too large".into());
+    let read_headers = async {
+        loop {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Err::<usize, Box<dyn std::error::Error + Send + Sync>>(
+                    "connection closed before headers complete".into(),
+                );
+            }
+            // Overlap the previous tail by 3 bytes so a marker straddling two
+            // reads (e.g. "\r\n\r" then "\n…") is still detected.
+            let search_start = request_buf.len().saturating_sub(3);
+            request_buf.extend_from_slice(&chunk[..n]);
+            if let Some(rel) = find_crlf_crlf(&request_buf[search_start..]) {
+                return Ok(search_start + rel + 4);
+            }
+            if request_buf.len() > MAX_HEADERS {
+                return Err::<usize, Box<dyn std::error::Error + Send + Sync>>(
+                    "request headers too large".into(),
+                );
+            }
         }
     };
+    let header_end = tokio::time::timeout(crate::mixed::DEFAULT_HANDSHAKE_TIMEOUT, read_headers)
+        .await
+        .map_err(|_| "HTTP proxy handshake timed out")??;
     let leftover: Vec<u8> = request_buf[header_end..].to_vec();
     request_buf.truncate(header_end);
 
@@ -163,7 +172,9 @@ async fn handle_http_inner(
 
         // Hand off to tunnel
         let inner = tunnel.inner();
-        let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
+        inner.pre_handle_metadata(&mut metadata);
+        let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy_lazy(&mut metadata).await
+        else {
             return Err("no matching rule".into());
         };
 
@@ -247,7 +258,9 @@ async fn handle_http_inner(
         debug!("HTTP {} to {}:{}", method, host, port);
 
         let inner = tunnel.inner();
-        let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
+        inner.pre_handle_metadata(&mut metadata);
+        let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy_lazy(&mut metadata).await
+        else {
             stream
                 .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
                 .await?;
