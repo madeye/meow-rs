@@ -8,6 +8,9 @@
 <meta property="og:title" content="meow-rs — always lands on its feet">
 <meta property="og:description" content="A high-performance proxy kernel in Rust. Rules in, packets out — over every wall.">
 <meta property="og:type" content="website">
+<meta property="og:image" content="https://madeye.github.io/meow-rs/appicon.png">
+<link rel="icon" type="image/png" href="logo.png">
+<link rel="apple-touch-icon" href="appicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Hanken+Grotesk:wght@400;500;600;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -65,7 +68,7 @@ h2.title{font-family:var(--display);font-weight:700;font-size:clamp(1.7rem,3.4vw
 .nav-in{display:flex;align-items:center;gap:20px;height:62px}
 .brand{display:flex;align-items:center;gap:9px;font-family:var(--display);font-weight:700;font-size:18px;letter-spacing:-.02em;color:var(--ink)}
 .brand:hover{text-decoration:none}
-.brand svg{display:block}
+.brand svg,.brand img,.fb img{display:block}
 .nav-links{display:flex;gap:22px;margin-left:auto;align-items:center}
 .nav-links a{color:var(--ink-soft);font-weight:600;font-size:14.5px}
 .nav-links a:hover{color:var(--ink);text-decoration:none}
@@ -264,12 +267,7 @@ h2.title{font-family:var(--display);font-weight:700;font-size:clamp(1.7rem,3.4vw
 <nav class="nav">
   <div class="wrap nav-in">
     <a class="brand" href="#top" aria-label="meow-rs home">
-      <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true">
-        <path d="M6 12 L6 5 L11 9 Q16 7 21 9 L26 5 L26 12 Q29 16 26 21 Q16 27 6 21 Q3 16 6 12Z" fill="#ED7E2B" stroke="#20140F" stroke-width="1.6" stroke-linejoin="round"/>
-        <circle cx="12" cy="15" r="1.5" fill="#20140F"/><circle cx="20" cy="15" r="1.5" fill="#20140F"/>
-        <path d="M14.5 18 Q16 19.5 17.5 18" fill="none" stroke="#20140F" stroke-width="1.4" stroke-linecap="round"/>
-        <path d="M16 16.4 l-1.2 1 h2.4Z" fill="#E23E2C"/>
-      </svg>
+      <img src="logo.png" width="26" height="26" alt="" aria-hidden="true">
       meow-rs
     </a>
     <div class="nav-links">
@@ -349,7 +347,7 @@ h2.title{font-family:var(--display);font-weight:700;font-size:clamp(1.7rem,3.4vw
       </div>
       <p class="ing"><b>Ingredients:</b> Rust, Tokio, rustls, hickory-dns, Axum, tower — and a great deal of open-source goodness. <b>Contains:</b> network sockets. <b>Free from:</b> garbage collectors, telemetry, vendor lock-in.</p>
       <div class="barcode" aria-hidden="true" id="barcode"></div>
-      <p class="foot">* Percent Daily Value is a joke. Measured on aarch64: stripped static binary ~6&nbsp;MiB, idle RSS ~9&nbsp;MB, ~35&nbsp;KB per connection at steady state. Your mileage varies with traffic. GPL-3.0.</p>
+      <p class="foot">* Percent Daily Value is a joke. Measured on aarch64: stripped static binary ~6&nbsp;MiB, idle RSS ~9&nbsp;MB, ~35&nbsp;KB per connection at steady state. Your mileage varies with traffic. MIT.</p>
     </div>
   </div>
 </section>
@@ -549,10 +547,10 @@ curl https://ipinfo.io</pre></div>
 <footer class="foot">
   <div class="wrap foot-in">
     <span class="fb">
-      <svg width="20" height="20" viewBox="0 0 32 32" aria-hidden="true"><path d="M6 12 L6 5 L11 9 Q16 7 21 9 L26 5 L26 12 Q29 16 26 21 Q16 27 6 21 Q3 16 6 12Z" fill="#ED7E2B" stroke="#20140F" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      <img src="logo.png" width="20" height="20" alt="" aria-hidden="true">
       meow-rs
     </span>
-    <span>Licensed under <a href="https://github.com/madeye/meow-rs/blob/main/LICENSE">GPL-3.0</a>. A Rust take on the mihomo proxy kernel.</span>
+    <span>Licensed under <a href="https://github.com/madeye/meow-rs/blob/main/LICENSE">MIT</a>. A Rust take on the mihomo proxy kernel.</span>
     <a href="https://github.com/madeye/meow-rs">GitHub ↗</a>
   </div>
 </footer>
