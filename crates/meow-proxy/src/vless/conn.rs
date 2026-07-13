@@ -9,7 +9,6 @@
 
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::{BufMut, BytesMut};
@@ -173,9 +172,15 @@ impl ProxyConn for VlessConn {}
 /// Each datagram is framed as `u16_be(length) + data`.  The VLESS request
 /// header (cmd=0x02) is sent on construction; the response header is consumed.
 ///
-/// Implements [`ProxyPacketConn`] with shared-reference access via `Mutex`.
+/// The stream is split into independent read/write halves, each behind its
+/// own `Mutex`, so a `read_packet` parked waiting for a server datagram never
+/// blocks `write_packet` on the same connection (issue #278). The tunnel
+/// drives the two directions from separate tasks; with a single stream-wide
+/// lock any flow needing interleaved sends while a recv is pending (QUIC,
+/// WireGuard, games) stalled after the first packet.
 pub struct VlessPacketConn {
-    inner: Arc<tokio::sync::Mutex<Box<dyn Stream>>>,
+    reader: tokio::sync::Mutex<tokio::io::ReadHalf<Box<dyn Stream>>>,
+    writer: tokio::sync::Mutex<tokio::io::WriteHalf<Box<dyn Stream>>>,
 }
 
 impl VlessPacketConn {
@@ -195,8 +200,10 @@ impl VlessPacketConn {
         // Read and discard the response header.
         decode_response(&mut stream).await?;
 
+        let (reader, writer) = tokio::io::split(stream);
         Ok(Self {
-            inner: Arc::new(tokio::sync::Mutex::new(stream)),
+            reader: tokio::sync::Mutex::new(reader),
+            writer: tokio::sync::Mutex::new(writer),
         })
     }
 }
@@ -205,20 +212,21 @@ impl VlessPacketConn {
 impl ProxyPacketConn for VlessPacketConn {
     /// Write a UDP packet as `u16_be(len) + data`.
     async fn write_packet(&self, buf: &[u8], _addr: &std::net::SocketAddr) -> Result<usize> {
-        let mut guard = self.inner.lock().await;
+        let mut writer = self.writer.lock().await;
         let mut frame = BytesMut::with_capacity(2 + buf.len());
         frame.put_u16(buf.len() as u16);
         frame.put_slice(buf);
-        guard.write_all(&frame).await.map_err(MeowError::Io)?;
+        writer.write_all(&frame).await.map_err(MeowError::Io)?;
+        writer.flush().await.map_err(MeowError::Io)?;
         Ok(buf.len())
     }
 
     /// Read a UDP packet: consume `u16_be(len)` then `len` bytes.
     async fn read_packet(&self, buf: &mut [u8]) -> Result<(usize, std::net::SocketAddr)> {
         use tokio::io::AsyncReadExt;
-        let mut guard = self.inner.lock().await;
+        let mut reader = self.reader.lock().await;
         let mut len_buf = [0u8; 2];
-        guard
+        reader
             .read_exact(&mut len_buf)
             .await
             .map_err(MeowError::Io)?;
@@ -230,7 +238,7 @@ impl ProxyPacketConn for VlessPacketConn {
                 buf.len()
             )));
         }
-        guard
+        reader
             .read_exact(&mut buf[..pkt_len])
             .await
             .map_err(MeowError::Io)?;
@@ -505,6 +513,72 @@ mod tests {
                 || msg.contains("Eof"),
             "error must give diagnostic, got: {msg}"
         );
+    }
+
+    // ─── Issue #278: parked read must not starve writes ───────────────────────
+
+    /// Regression for issue #278: with the whole stream behind one async
+    /// mutex, a `read_packet` parked waiting for a server datagram held the
+    /// lock and every `write_packet` deadlocked, stalling any flow that
+    /// interleaves sends with a pending recv (QUIC, WireGuard, games).
+    #[tokio::test]
+    async fn vless_packet_conn_write_proceeds_while_read_parked() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let (client, server) = duplex(4096);
+        // Mock server: consume the request header, ack, then echo one framed
+        // datagram once it arrives.
+        tokio::spawn(async move {
+            let mut s = server;
+            let mut hdr = vec![0u8; 26];
+            s.read_exact(&mut hdr).await.unwrap();
+            s.write_all(&[0x00, 0x00]).await.unwrap();
+            let mut len = [0u8; 2];
+            s.read_exact(&mut len).await.unwrap();
+            let n = u16::from_be_bytes(len) as usize;
+            let mut payload = vec![0u8; n];
+            s.read_exact(&mut payload).await.unwrap();
+            s.write_all(&len).await.unwrap();
+            s.write_all(&payload).await.unwrap();
+        });
+
+        let conn = Arc::new(
+            VlessPacketConn::new(
+                Box::new(client),
+                &TEST_UUID,
+                53,
+                &VlessAddr::Ipv4([8, 8, 8, 8]),
+            )
+            .await
+            .expect("VlessPacketConn::new"),
+        );
+
+        // Park a reader while no server datagram is available.
+        let reader_conn = Arc::clone(&conn);
+        let reader = tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            reader_conn
+                .read_packet(&mut buf)
+                .await
+                .map(|(n, _)| buf[..n].to_vec())
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Old design: deadlocked here (reader held the stream lock).
+        let dst = "8.8.8.8:53".parse().unwrap();
+        timeout(Duration::from_secs(5), conn.write_packet(b"ping", &dst))
+            .await
+            .expect("write_packet must not deadlock while a read is parked")
+            .expect("write_packet");
+
+        let echoed = timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("parked reader timed out")
+            .expect("reader task")
+            .expect("read_packet");
+        assert_eq!(echoed, b"ping");
     }
 
     // ─── F7: UDP cmd byte is 0x02 ─────────────────────────────────────────────

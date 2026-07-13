@@ -1,10 +1,12 @@
 use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::Aes128;
-use aes_gcm::aead::Aead;
+use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes128Gcm, Nonce};
 use md5::{Digest, Md5};
 use rand::RngCore;
+use sha2::Sha256;
 use std::net::IpAddr;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use meow_common::Metadata;
 
@@ -110,39 +112,54 @@ pub fn seal_request_header(
         &[b"VMess Header AEAD Nonce", &auth_id, &conn_nonce],
     );
 
-    // 4) Derive length encryption keys
+    // 4) Derive length encryption keys. The salts use an underscore
+    //    (`Key_Length` / `Nonce_Length`) in v2ray/xray/mihomo — a space here
+    //    mis-derives the key and the server fails to open the header.
     let length_key = kdf16(
         cmd_key,
-        &[b"VMess Header AEAD Key Length", &auth_id, &conn_nonce],
+        &[b"VMess Header AEAD Key_Length", &auth_id, &conn_nonce],
     );
     let length_iv = kdf12(
         cmd_key,
-        &[b"VMess Header AEAD Nonce Length", &auth_id, &conn_nonce],
+        &[b"VMess Header AEAD Nonce_Length", &auth_id, &conn_nonce],
     );
 
     // 5) Encrypt the header
     let cipher = Aes128Gcm::new_from_slice(&header_key)
         .map_err(|e| format!("vmess: header cipher init: {e}"))?;
     let encrypted_header = cipher
-        .encrypt(Nonce::from_slice(&header_iv), plaintext.as_ref())
+        .encrypt(
+            Nonce::from_slice(&header_iv),
+            Payload {
+                msg: &plaintext,
+                aad: &auth_id,
+            },
+        )
         .map_err(|e| format!("vmess: header encrypt: {e}"))?;
 
-    // 6) Encrypt the length (2 bytes, big-endian)
-    let header_len = encrypted_header.len() as u16;
+    // 6) Encrypt the length. The length field is the PLAINTEXT header length
+    //    (the server reads L then reads L+16 for the tag); using the
+    //    ciphertext length here would make the server over-read by 16 bytes.
+    let header_len = plaintext.len() as u16;
     let length_cipher = Aes128Gcm::new_from_slice(&length_key)
         .map_err(|e| format!("vmess: length cipher init: {e}"))?;
     let encrypted_length = length_cipher
         .encrypt(
             Nonce::from_slice(&length_iv),
-            header_len.to_be_bytes().as_ref(),
+            Payload {
+                msg: &header_len.to_be_bytes(),
+                aad: &auth_id,
+            },
         )
         .map_err(|e| format!("vmess: length encrypt: {e}"))?;
 
-    // 7) Assemble: auth_id(16) || conn_nonce(8) || encrypted_length(18) || encrypted_header(N+16)
-    let mut out = Vec::with_capacity(16 + 8 + encrypted_length.len() + encrypted_header.len());
+    // 7) Assemble in the exact upstream order:
+    //    auth_id(16) || encrypted_length(2+16) || conn_nonce(8) || encrypted_header(N+16)
+    //    (v2ray SealVMessAEADHeader). conn_nonce sits AFTER the length block.
+    let mut out = Vec::with_capacity(16 + encrypted_length.len() + 8 + encrypted_header.len());
     out.extend_from_slice(&auth_id);
-    out.extend_from_slice(&conn_nonce);
     out.extend_from_slice(&encrypted_length);
+    out.extend_from_slice(&conn_nonce);
     out.extend_from_slice(&encrypted_header);
 
     Ok(SealedHeader {
@@ -151,6 +168,68 @@ pub fn seal_request_header(
         req_iv,
         resp_v,
     })
+}
+
+/// Response body key/iv for AEAD VMess, derived from the request body
+/// key/iv: `respBodyKey = SHA256(req_key)[..16]`, `respBodyIV = SHA256(req_iv)[..16]`.
+///
+/// upstream: `transport/vmess/conn.go` (`sendRequest`, AEAD branch)
+pub fn response_body_keys(req_key: &[u8; 16], req_iv: &[u8; 16]) -> ([u8; 16], [u8; 16]) {
+    let bk: [u8; 32] = Sha256::digest(req_key).into();
+    let bi: [u8; 32] = Sha256::digest(req_iv).into();
+    let mut resp_key = [0u8; 16];
+    let mut resp_iv = [0u8; 16];
+    resp_key.copy_from_slice(&bk[..16]);
+    resp_iv.copy_from_slice(&bi[..16]);
+    (resp_key, resp_iv)
+}
+
+/// Read and validate the AEAD-sealed VMess response header from `rd`, leaving
+/// the reader positioned at the first response body record.
+///
+/// Wire layout (all AES-128-GCM, single-shot): `encrypted_length(2+16)` sealed
+/// with (`AEAD Resp Header Len Key`/`IV`), then `encrypted_header(L+16)` sealed
+/// with (`AEAD Resp Header Key`/`IV`). The header's first byte must equal the
+/// per-connection response-verification byte (`resp_v`).
+///
+/// upstream: `transport/vmess/conn.go` (`recvResponse`)
+pub async fn read_aead_response_header<R: AsyncRead + Unpin>(
+    rd: &mut R,
+    resp_body_key: &[u8; 16],
+    resp_body_iv: &[u8; 16],
+    resp_v: u8,
+) -> std::io::Result<()> {
+    let invalid = |msg: &'static str| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
+
+    // Length block.
+    let len_key = kdf16(resp_body_key, &[b"AEAD Resp Header Len Key"]);
+    let len_iv = kdf12(resp_body_iv, &[b"AEAD Resp Header Len IV"]);
+    let mut len_ct = [0u8; 18];
+    rd.read_exact(&mut len_ct).await?;
+    let len_cipher =
+        Aes128Gcm::new_from_slice(&len_key).map_err(|_| invalid("vmess: resp len cipher init"))?;
+    let len_pt = len_cipher
+        .decrypt(Nonce::from_slice(&len_iv), len_ct.as_ref())
+        .map_err(|_| invalid("vmess: response length AEAD open failed"))?;
+    if len_pt.len() != 2 {
+        return Err(invalid("vmess: response length not 2 bytes"));
+    }
+    let hdr_len = u16::from_be_bytes([len_pt[0], len_pt[1]]) as usize;
+
+    // Header block (L plaintext + 16 tag).
+    let hdr_key = kdf16(resp_body_key, &[b"AEAD Resp Header Key"]);
+    let hdr_iv = kdf12(resp_body_iv, &[b"AEAD Resp Header IV"]);
+    let mut hdr_ct = vec![0u8; hdr_len + 16];
+    rd.read_exact(&mut hdr_ct).await?;
+    let hdr_cipher =
+        Aes128Gcm::new_from_slice(&hdr_key).map_err(|_| invalid("vmess: resp hdr cipher init"))?;
+    let hdr = hdr_cipher
+        .decrypt(Nonce::from_slice(&hdr_iv), hdr_ct.as_ref())
+        .map_err(|_| invalid("vmess: response header AEAD open failed"))?;
+    if hdr.first() != Some(&resp_v) {
+        return Err(invalid("vmess: response header verification byte mismatch"));
+    }
+    Ok(())
 }
 
 fn build_auth_id(cmd_key: &[u8; 16], rng: &mut impl RngCore) -> [u8; 16] {
@@ -257,136 +336,137 @@ fn fnv1a32(data: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn cmd_key_is_deterministic() {
+    fn protocol_constants_and_hashes_match_reference() {
         let uuid: [u8; 16] = [
             0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3,
             0x08, 0x11,
         ];
-        let k1 = cmd_key(&uuid);
-        let k2 = cmd_key(&uuid);
-        assert_eq!(k1, k2);
-        assert_ne!(k1, [0u8; 16]);
-    }
-
-    #[test]
-    fn fnv1a_known_value() {
+        assert_eq!(cmd_key(&uuid), cmd_key(&uuid));
+        assert_ne!(cmd_key(&uuid), [0u8; 16]);
         assert_eq!(fnv1a32(b""), 0x811c_9dc5);
         assert_eq!(fnv1a32(b"a"), 0xe40c_292c);
-    }
-
-    #[test]
-    fn address_encode_ipv4() {
-        let meta = Metadata {
-            dst_ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
-            dst_port: 443,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf, vec![0x01, 127, 0, 0, 1]);
-    }
-
-    #[test]
-    fn address_encode_domain() {
-        let meta = Metadata {
-            host: "example.com".into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], 0x02);
-        assert_eq!(buf[1], 11);
-        assert_eq!(&buf[2..], b"example.com");
-    }
-
-    #[test]
-    fn address_encode_domain_too_long() {
-        let long = "a".repeat(256);
-        let meta = Metadata {
-            host: long.into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        assert!(encode_address(&mut buf, &meta).is_err());
-    }
-
-    #[test]
-    fn security_nibble_values() {
         assert_eq!(Security::Aes128Gcm.to_nibble(), 0x03);
         assert_eq!(Security::ChaCha20Poly1305.to_nibble(), 0x04);
         assert_eq!(Security::None.to_nibble(), 0x05);
+        assert!(matches!(
+            auto_security(),
+            Security::Aes128Gcm | Security::ChaCha20Poly1305
+        ));
     }
 
-    #[test]
-    fn address_encode_ipv6() {
-        let meta = Metadata {
+    fn address_encoding_covers_all_wire_variants_and_boundaries() {
+        fn encoded(meta: &Metadata) -> Vec<u8> {
+            let mut buf = Vec::new();
+            encode_address(&mut buf, meta).unwrap();
+            buf
+        }
+
+        assert_eq!(
+            encoded(&Metadata {
+                dst_ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
+                ..Default::default()
+            }),
+            vec![ADDR_IPV4, 127, 0, 0, 1]
+        );
+
+        let ipv6 = encoded(&Metadata {
             dst_ip: Some(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
-            dst_port: 443,
             ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], ADDR_IPV6);
-        assert_eq!(buf.len(), 1 + 16);
-    }
+        });
+        assert_eq!(ipv6[0], ADDR_IPV6);
+        assert_eq!(ipv6.len(), 17);
 
-    #[test]
-    fn address_encode_domain_max_255_ok() {
-        let domain = "a".repeat(255);
-        let meta = Metadata {
-            host: domain.into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], ADDR_DOMAIN);
-        assert_eq!(buf[1], 255);
-        assert_eq!(buf.len(), 2 + 255);
-    }
-
-    #[test]
-    fn address_encode_no_destination_errors() {
-        let meta = Metadata {
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        assert!(encode_address(&mut buf, &meta).is_err());
-    }
-
-    #[test]
-    fn address_encode_domain_idn_not_punycoded() {
-        // upstream: passes raw UTF-8, no punycode conversion
-        let meta = Metadata {
-            host: "例え.jp".into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], ADDR_DOMAIN);
-        assert_eq!(&buf[2..], "例え.jp".as_bytes());
-    }
-
-    #[test]
-    fn address_domain_prefers_host_over_ip() {
-        let meta = Metadata {
+        let domain = encoded(&Metadata {
             host: "example.com".into(),
             dst_ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 2, 3, 4))),
-            dst_port: 443,
             ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], ADDR_DOMAIN, "domain must take priority over IP");
+        });
+        assert_eq!(&domain, b"\x02\x0bexample.com");
+
+        let idn = encoded(&Metadata {
+            host: "例え.jp".into(),
+            ..Default::default()
+        });
+        assert_eq!(&idn[2..], "例え.jp".as_bytes());
+
+        let max_domain = encoded(&Metadata {
+            host: "a".repeat(255).into(),
+            ..Default::default()
+        });
+        assert_eq!(max_domain[1], 255);
+        assert_eq!(max_domain.len(), 257);
     }
 
-    #[test]
-    fn seal_request_header_produces_valid_structure() {
+    fn address_encoding_rejects_missing_or_oversized_destination() {
+        let mut buf = Vec::new();
+        assert!(encode_address(&mut buf, &Metadata::default()).is_err());
+        assert!(encode_address(
+            &mut buf,
+            &Metadata {
+                host: "a".repeat(256).into(),
+                ..Default::default()
+            }
+        )
+        .is_err());
+    }
+
+    /// Independently open a sealed request header the way a conformant server
+    /// (v2ray `OpenVMessAEADHeader`) does, re-deriving every key from the wire
+    /// bytes. This catches the seal-order, plaintext-length, and length-salt
+    /// bugs that a self-consistent seal/open pair would hide.
+    fn server_open_request_header(cmd_key: &[u8; 16], wire: &[u8]) -> Result<Vec<u8>, String> {
+        use aes_gcm::aead::{Aead, Payload};
+        let auth_id = &wire[0..16];
+        let encrypted_length = &wire[16..34]; // 2 + 16 tag
+        let conn_nonce = &wire[34..42]; // 8 bytes AFTER the length block
+        let encrypted_payload = &wire[42..];
+
+        let length_key = kdf16(
+            cmd_key,
+            &[b"VMess Header AEAD Key_Length", auth_id, conn_nonce],
+        );
+        let length_iv = kdf12(
+            cmd_key,
+            &[b"VMess Header AEAD Nonce_Length", auth_id, conn_nonce],
+        );
+        let len_cipher = Aes128Gcm::new_from_slice(&length_key).map_err(|e| e.to_string())?;
+        let len_pt = len_cipher
+            .decrypt(
+                Nonce::from_slice(&length_iv),
+                Payload {
+                    msg: encrypted_length,
+                    aad: auth_id,
+                },
+            )
+            .map_err(|_| "length AEAD open failed".to_string())?;
+        let l = u16::from_be_bytes([len_pt[0], len_pt[1]]) as usize;
+        if encrypted_payload.len() != l + 16 {
+            return Err(format!(
+                "payload len {} != L+16 ({})",
+                encrypted_payload.len(),
+                l + 16
+            ));
+        }
+
+        let header_key = kdf16(cmd_key, &[b"VMess Header AEAD Key", auth_id, conn_nonce]);
+        let header_iv = kdf12(cmd_key, &[b"VMess Header AEAD Nonce", auth_id, conn_nonce]);
+        let hdr_cipher = Aes128Gcm::new_from_slice(&header_key).map_err(|e| e.to_string())?;
+        let plaintext = hdr_cipher
+            .decrypt(
+                Nonce::from_slice(&header_iv),
+                Payload {
+                    msg: encrypted_payload,
+                    aad: auth_id,
+                },
+            )
+            .map_err(|_| "payload AEAD open failed".to_string())?;
+        if plaintext.len() != l {
+            return Err(format!("plaintext len {} != L {}", plaintext.len(), l));
+        }
+        Ok(plaintext)
+    }
+
+    fn sealed_headers_are_unique_and_server_openable() {
         let uuid: [u8; 16] = [
             0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3,
             0x08, 0x11,
@@ -398,36 +478,103 @@ mod tests {
             ..Default::default()
         };
         let sealed = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
+        let second = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
+        assert_ne!(sealed.bytes, second.bytes);
+        assert_ne!(sealed.req_key, second.req_key);
+        assert!(sealed.bytes.len() >= 16 + 18 + 8 + 16);
+        assert_ne!(sealed.req_key, [0; 16]);
+        assert_ne!(sealed.req_iv, [0; 16]);
 
-        // auth_id(16) + conn_nonce(8) + encrypted_length(2+16=18) + encrypted_header(N+16)
-        assert!(sealed.bytes.len() >= 16 + 8 + 18 + 16, "header too short");
-        assert_ne!(sealed.req_key, [0u8; 16], "req_key must be random");
-        assert_ne!(sealed.req_iv, [0u8; 16], "req_iv must be random");
+        let pt = server_open_request_header(&ck, &sealed.bytes)
+            .expect("a conformant server must be able to open the sealed header");
+
+        // Plaintext layout: version(1) | req_iv(16) | req_key(16) | resp_v(1) | ...
+        assert_eq!(pt[0], 0x01, "version byte");
+        assert_eq!(
+            &pt[1..17],
+            &sealed.req_iv,
+            "req_iv round-trips through wire"
+        );
+        assert_eq!(
+            &pt[17..33],
+            &sealed.req_key,
+            "req_key round-trips through wire"
+        );
+        assert_eq!(pt[33], sealed.resp_v, "resp_v round-trips through wire");
+
+        // FNV-1a trailer must cover everything before it.
+        let body = &pt[..pt.len() - 4];
+        let want = fnv1a32(body);
+        let got = u32::from_be_bytes([
+            pt[pt.len() - 4],
+            pt[pt.len() - 3],
+            pt[pt.len() - 2],
+            pt[pt.len() - 1],
+        ]);
+        assert_eq!(got, want, "server-visible FNV-1a must validate");
     }
 
-    #[test]
-    fn seal_request_header_unique_per_call() {
-        let uuid: [u8; 16] = [0x01; 16];
-        let ck = cmd_key(&uuid);
-        let meta = Metadata {
-            host: "test.com".into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let h1 = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
-        let h2 = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
-        assert_ne!(h1.bytes, h2.bytes, "each header must use fresh randomness");
-        assert_ne!(h1.req_key, h2.req_key);
+    async fn response_header_round_trips() {
+        use aes_gcm::aead::Aead;
+        let req_key = [0x11u8; 16];
+        let req_iv = [0x22u8; 16];
+        let resp_v = 0x5A;
+        let (rk, ri) = response_body_keys(&req_key, &req_iv);
+
+        // Server seals a minimal 4-byte response header [resp_v, opt=0, cmdlen=0, 0].
+        let hdr_pt = [resp_v, 0x00, 0x00, 0x00];
+        let len_key = kdf16(&rk, &[b"AEAD Resp Header Len Key"]);
+        let len_iv = kdf12(&ri, &[b"AEAD Resp Header Len IV"]);
+        let len_ct = Aes128Gcm::new_from_slice(&len_key)
+            .unwrap()
+            .encrypt(
+                Nonce::from_slice(&len_iv),
+                (hdr_pt.len() as u16).to_be_bytes().as_ref(),
+            )
+            .unwrap();
+        let hdr_key = kdf16(&rk, &[b"AEAD Resp Header Key"]);
+        let hdr_iv = kdf12(&ri, &[b"AEAD Resp Header IV"]);
+        let hdr_ct = Aes128Gcm::new_from_slice(&hdr_key)
+            .unwrap()
+            .encrypt(Nonce::from_slice(&hdr_iv), hdr_pt.as_ref())
+            .unwrap();
+
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&len_ct);
+        wire.extend_from_slice(&hdr_ct);
+        wire.extend_from_slice(b"body-records-follow");
+
+        let mut cursor = std::io::Cursor::new(wire);
+        read_aead_response_header(&mut cursor, &rk, &ri, resp_v)
+            .await
+            .expect("client must open the server's response header");
+
+        // Reader is positioned exactly at the body bytes.
+        let mut rest = Vec::new();
+        cursor.read_to_end(&mut rest).await.unwrap();
+        assert_eq!(rest, b"body-records-follow");
+
+        // A wrong resp_v must be rejected.
+        let mut cursor2 = std::io::Cursor::new({
+            let mut w = Vec::new();
+            w.extend_from_slice(&len_ct);
+            w.extend_from_slice(&hdr_ct);
+            w
+        });
+        assert!(
+            read_aead_response_header(&mut cursor2, &rk, &ri, resp_v ^ 0xFF)
+                .await
+                .is_err()
+        );
     }
 
-    #[test]
-    fn header_plaintext_port_before_addr_type() {
+    fn plaintext_layout_and_checksum_match_protocol() {
         let meta = Metadata {
             host: "example.com".into(),
             dst_port: 443,
             ..Default::default()
         };
-        let mut rng = rand::rng();
+        let mut rng = FakeRng(0);
         let req_key = [0u8; 16];
         let req_iv = [0u8; 16];
         let pt = build_header_plaintext(
@@ -450,26 +597,7 @@ mod tests {
             ADDR_DOMAIN,
             "addr_type must follow port"
         );
-    }
 
-    #[test]
-    fn header_plaintext_ends_with_fnv1a() {
-        let meta = Metadata {
-            dst_ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 2, 3, 4))),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut rng = FakeRng(0);
-        let pt = build_header_plaintext(
-            &[0u8; 16],
-            &[0u8; 16],
-            0x42,
-            Security::Aes128Gcm,
-            &meta,
-            false,
-            &mut rng,
-        )
-        .unwrap();
         let body = &pt[..pt.len() - 4];
         let expected_hash = fnv1a32(body);
         let actual_hash = u32::from_be_bytes([
@@ -484,13 +612,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_security_returns_valid_cipher() {
-        let s = super::auto_security();
-        assert!(
-            s == Security::Aes128Gcm || s == Security::ChaCha20Poly1305,
-            "auto must pick aes or chacha"
-        );
+    #[tokio::test]
+    async fn header_wire_format_matches_protocol() {
+        protocol_constants_and_hashes_match_reference();
+        address_encoding_covers_all_wire_variants_and_boundaries();
+        address_encoding_rejects_missing_or_oversized_destination();
+        plaintext_layout_and_checksum_match_protocol();
+        sealed_headers_are_unique_and_server_openable();
+        response_header_round_trips().await;
     }
 
     struct FakeRng(u64);

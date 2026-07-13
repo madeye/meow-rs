@@ -110,7 +110,14 @@ impl ProxyAdapter for VmessAdapter {
             sealed.resp_v,
         );
 
-        let duplex = conn::spawn_vmess_relay(stream, read_cipher, write_cipher, sealed.resp_v);
+        let duplex = conn::spawn_vmess_relay(
+            stream,
+            read_cipher,
+            write_cipher,
+            sealed.req_key,
+            sealed.req_iv,
+            sealed.resp_v,
+        );
         Ok(Box::new(crate::stream_conn::StreamConn(Box::new(duplex))))
     }
 

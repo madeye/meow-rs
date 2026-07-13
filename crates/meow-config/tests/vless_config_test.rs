@@ -615,6 +615,48 @@ proxies:
         .expect("encryption: empty string must be accepted");
 }
 
+/// D15b: `parse_vless_encryption_issue_301`
+///
+/// The post-quantum `encryption: mlkem768x25519plus…` line from the issue #301
+/// 3x-ui config — using the reporter's exact key, whose base64 has non-canonical
+/// trailing bits (Go decodes it; strict decoders would not). The proxy builds
+/// with the `vless-encryption` feature and is skipped (with a feature-pointing
+/// error) without it.
+///
+/// (REALITY is exercised separately — `reality-opts` additionally needs the
+/// `boring-tls` feature, which the shipping app build enables.)
+#[tokio::test]
+async fn parse_vless_encryption_issue_301() {
+    let yaml = r#"
+proxies:
+  - name: vpn26
+    type: vless
+    server: vpn26.abc.com
+    port: 443
+    uuid: 55f4ad8f-7ab1-4786-9130-d107e0b9dcdb
+    udp: true
+    tls: true
+    servername: aws.amazon.com
+    network: tcp
+    encryption: mlkem768x25519plus.native.0rtt.DA7B2WRj7X2zGFwMelbIbcaoUrpLjzoPpmydYW8NvQW
+    client-fingerprint: chrome
+"#;
+    let config = load_config_from_str(yaml)
+        .await
+        .expect("config load must succeed (warn-and-skip if feature absent)");
+
+    #[cfg(feature = "vless-encryption")]
+    assert!(
+        config.proxies.contains_key("vpn26"),
+        "issue #301 encryption config must build a proxy with the vless-encryption feature"
+    );
+    #[cfg(not(feature = "vless-encryption"))]
+    assert!(
+        !config.proxies.contains_key("vpn26"),
+        "mlkem768x25519plus encryption must be skipped without the vless-encryption feature"
+    );
+}
+
 // ─── D16: mux enabled → warn + ignores ───────────────────────────────────────
 
 /// D16: `parse_vless_mux_enabled_warns_and_ignores`

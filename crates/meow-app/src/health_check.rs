@@ -20,7 +20,10 @@ pub fn extract_specs(raw_groups: &[meow_config::raw::RawProxyGroup]) -> Vec<Heal
         .map(|g| HealthCheckSpec {
             group_name: g.name.clone(),
             url: g.url.as_deref().unwrap_or(DEFAULT_URL).to_string(),
-            interval_secs: g.interval.unwrap_or(DEFAULT_INTERVAL_SECS),
+            interval_secs: g
+                .interval
+                .filter(|interval| *interval > 0)
+                .unwrap_or(DEFAULT_INTERVAL_SECS),
             lazy: g.lazy.unwrap_or(false),
         })
         .collect()
@@ -90,5 +93,22 @@ async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
             "health-check: {} — {}/{} alive",
             spec.group_name, alive_count, total_count
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_interval_uses_safe_default() {
+        let group = meow_config::raw::RawProxyGroup {
+            name: "auto".into(),
+            group_type: "url-test".into(),
+            interval: Some(0),
+            ..Default::default()
+        };
+        let specs = extract_specs(&[group]);
+        assert_eq!(specs[0].interval_secs, DEFAULT_INTERVAL_SECS);
     }
 }

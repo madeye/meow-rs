@@ -4,9 +4,8 @@
 # crates.io `anytls-rs@0.5.4` is jxo-me's UPSTREAM crate and lacks `close()`,
 # so meow-proxy could not build the `anytls` feature against the registry.
 #
-# This crate is MIT-licensed (see LICENSE) — distinct from the workspace's
-# GPL-3.0 — and uses Rust edition 2024, so package metadata is declared
-# explicitly here rather than inherited from `[workspace.package]`.
+# This crate uses Rust edition 2024, so package metadata is declared explicitly
+# here rather than inherited from `[workspace.package]`.
 #
 # The package is renamed (`meow-anytls`) to avoid a crates.io name collision
 # with the upstream `anytls-rs`, while the library name stays `anytls_rs` so

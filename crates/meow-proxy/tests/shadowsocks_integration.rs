@@ -140,31 +140,72 @@ async fn start_ssserver_inner(
         args.push(opts.to_string());
     }
 
-    let child = Command::new("ssserver")
+    // stderr is inherited on purpose: when ssserver dies on startup (e.g. a
+    // port bind failure) the test otherwise fails with an opaque reset/EOF
+    // and no clue why.
+    let mut child = Command::new("ssserver")
         .args(&args)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .kill_on_drop(true)
         .spawn()
         .expect("failed to start ssserver");
 
-    // Wait for ssserver to be ready by attempting TCP connections
-    for _ in 0..50 {
+    // Wait for ssserver (or its SIP003 plugin, which owns the external port)
+    // to be ready by attempting TCP connections. Plugin startup on a loaded CI
+    // runner can be slow, so allow a generous window.
+    for _ in 0..100 {
+        if let Some(status) = child.try_wait().expect("ssserver try_wait failed") {
+            panic!("ssserver exited during startup: {status}");
+        }
         if tokio::net::TcpStream::connect(format!("127.0.0.1:{ss_port}"))
             .await
             .is_ok()
         {
+            // A successful connect only proves the TCP side is up; ssserver
+            // still aborts moments later if e.g. its UDP bind (-U) fails.
+            // Give it a beat and confirm it survived before handing it out.
+            sleep(Duration::from_millis(50)).await;
+            if let Some(status) = child.try_wait().expect("ssserver try_wait failed") {
+                panic!("ssserver exited right after binding: {status}");
+            }
             return child;
         }
         sleep(Duration::from_millis(100)).await;
     }
-    panic!("ssserver did not become ready within 5 seconds");
+    panic!("ssserver did not become ready within 10 seconds");
 }
 
-/// Find an available port by binding to port 0.
+/// Hand out server ports from a range *below* the Linux ephemeral range
+/// (32768–60999), checked free by binding.
+///
+/// Ports must not come from `bind(":0")`: the port is released before
+/// ssserver's plugin subprocess binds it (~100ms later), and during that
+/// window the kernel can hand the same ephemeral port to a concurrent test's
+/// `free_port()` or echo server. The readiness probe then connects to that
+/// impostor listener and the test dials a port its own server never bound
+/// (seen in CI as `Connection refused` / `UnexpectedEof` flakes). A
+/// process-wide counter outside the ephemeral range makes in-process
+/// collisions impossible; the bind check skips ports held by other processes.
+///
+/// Both TCP *and* UDP must be free: ssserver runs with `-U` and binds both on
+/// the same port, and a UDP-only conflict kills it right after its TCP side
+/// came up (seen in CI as `ConnectionReset` on the first write). The base is
+/// staggered by PID so consecutive runs don't all contend on the same ports.
 async fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap().port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT_OFFSET: AtomicU16 = AtomicU16::new(0);
+    let base = 21000 + (std::process::id() % 500) as u16 * 16;
+    loop {
+        let offset = NEXT_OFFSET.fetch_add(1, Ordering::Relaxed);
+        assert!(offset < 1000, "test port allocator exhausted");
+        let port = base + offset;
+        if TcpListener::bind(("127.0.0.1", port)).await.is_ok()
+            && UdpSocket::bind(("127.0.0.1", port)).await.is_ok()
+        {
+            return port;
+        }
+    }
 }
 
 #[tokio::test]

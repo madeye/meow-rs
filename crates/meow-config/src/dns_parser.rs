@@ -56,7 +56,7 @@ pub async fn parse_dns(
         _ => DnsMode::Normal,
     };
 
-    let listen_addr = dns.listen.as_deref().and_then(|s| s.parse().ok());
+    let listen_addr = crate::parse_optional_socket_addr("dns.listen", dns.listen.as_deref())?;
     let mut hosts = build_hosts_trie(raw.hosts.as_ref())?;
 
     if use_hosts && use_system_hosts {

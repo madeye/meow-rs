@@ -22,6 +22,7 @@ use lru::LruCache;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -124,10 +125,11 @@ impl DnsCache {
     }
 
     pub fn get(&self, domain: &str) -> Option<IpList> {
-        let shard = &self.cache[shard_str(domain)];
+        let domain = normalize_domain(domain);
+        let shard = &self.cache[shard_str(&domain)];
         let mut cache = shard.lock();
         let mut expired = false;
-        if let Some(entry) = cache.get(domain) {
+        if let Some(entry) = cache.get(domain.as_ref()) {
             if entry.expire_at > Instant::now() {
                 return Some(SmallVec::from_slice(&entry.ips));
             }
@@ -135,7 +137,7 @@ impl DnsCache {
             expired = true;
         }
         if expired {
-            cache.pop(domain);
+            cache.pop(domain.as_ref());
         }
         None
     }
@@ -161,11 +163,8 @@ impl DnsCache {
         // until the inbound connection that uses the IP can recover its host
         // for rule matching, even when the DNS TTL is short (10s clamp).
         let reverse_expire_at = now + ttl.max(REVERSE_TTL_FLOOR);
-        let key: Arc<str> = if domain.bytes().any(|b| b.is_ascii_uppercase()) {
-            Arc::from(domain.to_ascii_lowercase().as_str())
-        } else {
-            Arc::from(domain)
-        };
+        let domain = normalize_domain(domain);
+        let key: Arc<str> = Arc::from(domain.as_ref());
 
         // One reverse-shard lock per unique shard; common case is N=2-4 IPs
         // so we just take each shard's lock per insert. For larger N we
@@ -187,7 +186,7 @@ impl DnsCache {
             expire_at,
             source: source.map(Arc::from),
         };
-        self.cache[shard_str(domain)].lock().put(key, entry);
+        self.cache[shard_str(&domain)].lock().put(key, entry);
     }
 
     /// Reverse lookup: given an IP, return the domain that resolved to it.
@@ -195,12 +194,9 @@ impl DnsCache {
         let shard = &self.reverse[shard_ip(ip)];
         let mut reverse = shard.lock();
         let now = Instant::now();
-        if let Some(entry) = reverse.get(&ip) {
-            if entry.expire_at > now {
-                return Some(SmolStr::from(entry.domain.as_ref()));
-            }
-        } else {
-            return None;
+        let entry = reverse.get(&ip)?;
+        if entry.expire_at > now {
+            return Some(SmolStr::from(entry.domain.as_ref()));
         }
         reverse.pop(&ip);
         None
@@ -263,6 +259,14 @@ impl DnsCache {
     }
 }
 
+fn normalize_domain(domain: &str) -> Cow<'_, str> {
+    if domain.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(domain.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(domain)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +301,16 @@ mod tests {
         c.put("a.example", &ips, Duration::from_secs(30));
         assert_eq!(c.get("a.example").as_deref(), Some(&ips[..]));
         assert!(c.get("nope.example").is_none());
+    }
+
+    #[test]
+    fn cache_keys_are_ascii_case_insensitive() {
+        let c = DnsCache::new(64);
+        let ip = ipv4(1, 2, 3, 4);
+        c.put("GitHub.COM", &[ip], Duration::from_secs(30));
+        assert_eq!(c.get("github.com").as_deref(), Some(&[ip][..]));
+        assert_eq!(c.get("GITHUB.com").as_deref(), Some(&[ip][..]));
+        assert_eq!(c.reverse_lookup(ip).as_deref(), Some("github.com"));
     }
 
     #[test]

@@ -140,6 +140,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> SnellInner<S> {
     }
 }
 
+/// Cross-poll state for [`Snell::poll_write_packet_frame`]. One instance per
+/// datagram write; the caller keeps it alive across `Poll::Pending` returns
+/// because the stream lock (and thus `&mut Snell`) is released between polls.
+#[derive(Default)]
+pub struct PacketFrameProgress {
+    /// v4: the frame has been staged into the writer's pending buffer.
+    staged: bool,
+    /// v3: bytes of `frame` already accepted by the AEAD stream.
+    written: usize,
+}
+
 /// AEAD-wrapped stream with snell request/response semantics.
 ///
 /// On the first `poll_read`, the wrapper consumes the server's status byte
@@ -231,6 +242,65 @@ impl<S> Snell<S> {
             }
         }
         Ok(buf.len())
+    }
+
+    /// Poll-based equivalent of [`Snell::write_packet_frame`] for callers
+    /// that must not hold a lock across an `.await` (issue #278): the UDP
+    /// packet conn locks the shared stream only for the duration of each
+    /// poll, so `progress` carries the write state between polls.
+    ///
+    /// v4 stages `frame` as a single AEAD packet frame and drains it; v3
+    /// writes through the regular AEAD stream. Both flush before returning
+    /// `Ready(Ok(()))`.
+    pub fn poll_write_packet_frame(
+        &mut self,
+        cx: &mut Context<'_>,
+        frame: &[u8],
+        progress: &mut PacketFrameProgress,
+    ) -> Poll<io::Result<()>>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        if frame.len() > MAX_PAYLOAD_LENGTH {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "snell: packet frame too large",
+            )));
+        }
+        match &mut self.inner {
+            SnellInner::V3(conn) => {
+                while progress.written < frame.len() {
+                    match Pin::new(&mut *conn).poll_write(cx, &frame[progress.written..]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(0)) => {
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::WriteZero,
+                                "snell v3: packet frame write returned 0",
+                            )));
+                        }
+                        Poll::Ready(Ok(n)) => progress.written += n,
+                    }
+                }
+                Pin::new(conn).poll_flush(cx)
+            }
+            SnellInner::V4(conn) => {
+                if !progress.staged {
+                    conn.stage_packet_frame(frame)?;
+                    progress.staged = true;
+                }
+                if conn.has_pending_write() {
+                    // poll_flush drains the staged frame and flushes the
+                    // underlying stream.
+                    match Pin::new(&mut *conn).poll_flush(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(())) => {}
+                    }
+                }
+                Poll::Ready(Ok(()))
+            }
+        }
     }
 
     /// Read from the raw version-specific codec without the status-byte

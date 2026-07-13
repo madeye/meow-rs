@@ -365,10 +365,9 @@ impl<S: AsyncRead> V4Conn<S> {
 
 impl<S> V4Conn<S> {
     /// Stage a single frame carrying `buf` as a UDP datagram payload. The
-    /// caller is responsible for draining the stream (calling `poll_write`
-    /// with an empty buf is a no-op here; the higher-level
-    /// `SnellPacketConn::write_packet` uses a dedicated path that owns the
-    /// stream mutex and drives the drain to completion).
+    /// caller is responsible for draining the stream to completion (see
+    /// `Snell::poll_write_packet_frame`, which the higher-level
+    /// `SnellPacketConn::write_packet` drives with a per-poll stream lock).
     pub fn stage_packet_frame(&mut self, buf: &[u8]) -> io::Result<()> {
         if buf.len() > MAX_PAYLOAD_LENGTH {
             return Err(io::Error::new(

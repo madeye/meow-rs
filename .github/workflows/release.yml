@@ -29,6 +29,25 @@ jobs:
             # aarch64: hard gate — release fails if minimal binary exceeds 8 MiB
             minimal_budget_bytes: 8388608
             minimal_soft_gate: false
+            # Static musl binary → one build serves several OpenWrt arch
+            # labels; the .ipk differs only in the Architecture field (#284).
+            openwrt_archs: >-
+              aarch64_generic aarch64_cortex-a53 aarch64_cortex-a72
+              aarch64_cortex-a76
+          - target: armv7-unknown-linux-musleabihf
+            # armv7: soft gate only for now (no ADR-0007 budget yet)
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+            # boring-sys is broken on 32-bit musl (bindgen emits time64
+            # `time_t: i64` per musl 1.2, while boring passes i32), so build
+            # without the boring-tls default. Trade-off: no ECH/uTLS
+            # fingerprinting on armv7 — everything else in `full` is present.
+            cargo_flags: --no-default-features --features full
+            # Rust's armv7 musleabihf baseline is vfpv3-d16 without NEON, so
+            # the same binary is safe on every core listed here (#284).
+            openwrt_archs: >-
+              arm_cortex-a7_neon-vfpv4 arm_cortex-a8_vfpv3
+              arm_cortex-a9_vfpv3-d16 arm_cortex-a15_neon-vfpv4
           # mipsel-unknown-linux-musl: temporarily disabled — `rust-std` is no
           # longer published for this target on stable. Re-enable when stable
           # ships the component again, or when ADR-0007 §1 promotes it to a
@@ -52,8 +71,8 @@ jobs:
 
       - run: cargo install --locked cargo-zigbuild
 
-      - name: Build release binary (static musl, default features)
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }} --bin meow
+      - name: Build release binary (static musl)
+        run: cargo zigbuild --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} --bin meow
 
       - name: Build minimal release binary (stripped, for size check)
         if: matrix.minimal_budget_bytes != 0
@@ -90,7 +109,10 @@ jobs:
         id: pkg
         run: |
           set -euo pipefail
-          ref="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          # On workflow_dispatch GITHUB_REF_NAME is the *branch* name (which
+          # may contain slashes and break the tarball path) — use the tag
+          # input instead.
+          ref="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
           name="meow-${ref}-${{ matrix.target }}"
           staging="dist/${name}"
           mkdir -p "${staging}"
@@ -101,6 +123,21 @@ jobs:
           echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "checksum=${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
+      - name: Package OpenWrt ipks
+        if: matrix.openwrt_archs != ''
+        run: |
+          set -euo pipefail
+          ref="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
+          version="${ref#v}"
+          version="${version//\//-}"
+          for arch in ${{ matrix.openwrt_archs }}; do
+            bash openwrt/build-ipk.sh meow \
+              --binary "target/${{ matrix.target }}/release/meow" \
+              --version "${version}-1" --arch "${arch}" --outdir dist-ipk
+          done
+          cd dist-ipk
+          for f in *.ipk; do sha256sum "$f" > "$f.sha256"; done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -108,6 +145,8 @@ jobs:
           path: |
             ${{ steps.pkg.outputs.archive }}
             ${{ steps.pkg.outputs.checksum }}
+            dist-ipk/*.ipk
+            dist-ipk/*.ipk.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -117,10 +156,21 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Package luci-app-meow ipk (arch-independent)
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          bash openwrt/build-ipk.sh luci --version "${version}-1" --outdir dist
+          cd dist
+          f="luci-app-meow_${version}-1_all.ipk"
+          sha256sum "$f" > "$f.sha256"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -128,5 +178,7 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/**/*.ipk
+            dist/**/*.ipk.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true

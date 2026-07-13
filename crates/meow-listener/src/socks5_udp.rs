@@ -16,7 +16,9 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use meow_common::{ConnType, Metadata, Network, ProxyAdapter, ProxyPacketConn};
 use meow_tunnel::Tunnel;
@@ -32,12 +34,19 @@ const RESERVED: u8 = 0x00;
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 const ATYP_IPV6: u8 = 0x04;
+const NAT_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Per-destination outbound session within one association.
 struct Session {
     conn: Arc<dyn ProxyPacketConn>,
+    last_activity_ms: Arc<AtomicU64>,
     /// Reply task (server→client); aborted when the session is dropped.
     reply_task: tokio::task::AbortHandle,
+}
+
+fn monotonic_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 impl Drop for Session {
@@ -47,12 +56,15 @@ impl Drop for Session {
 }
 
 /// Handle a SOCKS5 UDP ASSOCIATE request. `control` is the TCP control
-/// connection (request already consumed by the caller); the advertised
-/// DST.ADDR/PORT is ignored per common practice (clients send `0.0.0.0:0`).
+/// connection (request already consumed by the caller). An advertised source
+/// endpoint is honored when compatible with the authenticated TCP peer;
+/// otherwise the first valid UDP datagram locks the association endpoint.
 pub async fn handle_udp_associate(
     tunnel: &Tunnel,
     mut control: TcpStream,
     src_addr: SocketAddr,
+    requested_ip: Option<IpAddr>,
+    requested_port: u16,
     in_name: &str,
     in_port: u16,
 ) -> io::Result<()> {
@@ -68,6 +80,14 @@ pub async fn handle_udp_associate(
     let mut nat: HashMap<SocketAddr, Session> = HashMap::new();
     let mut buf = vec![0u8; 65535];
     let mut ctrl_buf = [0u8; 16];
+    let requested_ip = requested_ip.filter(|ip| !ip.is_unspecified());
+    let mut client_endpoint = match (requested_ip, requested_port) {
+        (Some(ip), port) if ip == src_addr.ip() && port != 0 => Some(SocketAddr::new(ip, port)),
+        (None, port) if port != 0 => Some(SocketAddr::new(src_addr.ip(), port)),
+        _ => None,
+    };
+    let mut sweeper = tokio::time::interval(NAT_SWEEP_INTERVAL);
+    sweeper.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -83,11 +103,37 @@ pub async fn handle_udp_associate(
                     Ok(v) => v,
                     Err(e) => { debug!("SOCKS5 UDP recv error: {e}"); continue; }
                 };
+                if client.ip() != src_addr.ip() {
+                    debug!("SOCKS5 UDP ignoring source {client}: TCP peer is {src_addr}");
+                    continue;
+                }
+                match client_endpoint {
+                    Some(expected) if client != expected => {
+                        debug!("SOCKS5 UDP ignoring source {client}: association is bound to {expected}");
+                        continue;
+                    }
+                    None => {
+                        // Do not let a malformed packet claim the association.
+                        if let Err(e) = parse_udp_request(&buf[..n]) {
+                            debug!("SOCKS5 UDP datagram from {client}: {e}");
+                            continue;
+                        }
+                        client_endpoint = Some(client);
+                    }
+                    Some(_) => {}
+                }
                 if let Err(e) =
                     handle_client_datagram(tunnel, &relay, &mut nat, &buf[..n], client, in_name, in_port).await
                 {
                     debug!("SOCKS5 UDP datagram from {client}: {e}");
                 }
+            }
+            _ = sweeper.tick() => {
+                let now = monotonic_ms();
+                let idle_ms = meow_tunnel::udp::DEFAULT_UDP_IDLE.as_millis() as u64;
+                nat.retain(|_, session| {
+                    now.saturating_sub(session.last_activity_ms.load(Ordering::Relaxed)) < idle_ms
+                });
             }
         }
     }
@@ -131,6 +177,9 @@ async fn handle_client_datagram(
     // a resolved dst_ip for its session bookkeeping regardless of what the
     // rules demand.
     inner.pre_resolve(&mut metadata).await;
+    if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
+        metadata.dst_ip = inner.resolver.resolve_ip_real(&metadata.host).await;
+    }
 
     let Some(dst_ip) = metadata.dst_ip else {
         return Err(format!(
@@ -148,6 +197,9 @@ async fn handle_client_datagram(
             .write_packet(payload, &dst_addr)
             .await
             .map_err(|e| format!("udp write {dst_addr}: {e}"))?;
+        session
+            .last_activity_ms
+            .store(monotonic_ms(), Ordering::Relaxed);
         return Ok(());
     }
 
@@ -181,9 +233,11 @@ async fn handle_client_datagram(
 
     // Reply task: server→client. Wraps each datagram in the SOCKS5 UDP header
     // and sends it back to the client's UDP source address.
+    let last_activity_ms = Arc::new(AtomicU64::new(monotonic_ms()));
     let reply_task = {
         let relay = Arc::clone(relay);
         let conn = Arc::clone(&conn);
+        let last_activity_ms = Arc::clone(&last_activity_ms);
         tokio::spawn(async move {
             let mut rbuf = vec![0u8; 65535];
             while let Ok((m, src)) = conn.read_packet(&mut rbuf).await {
@@ -193,12 +247,20 @@ async fn handle_client_datagram(
                 if relay.send_to(&out, client).await.is_err() {
                     break;
                 }
+                last_activity_ms.store(monotonic_ms(), Ordering::Relaxed);
             }
         })
         .abort_handle()
     };
 
-    nat.insert(dst_addr, Session { conn, reply_task });
+    nat.insert(
+        dst_addr,
+        Session {
+            conn,
+            last_activity_ms,
+            reply_task,
+        },
+    );
     Ok(())
 }
 

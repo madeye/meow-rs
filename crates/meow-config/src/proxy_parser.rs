@@ -1028,17 +1028,19 @@ fn parse_vless(
         }
     }
 
-    // ── Hard error: encryption != "" / "none" ─────────────────────────────
+    // ── VLESS Encryption (`mlkem768x25519plus…`) ──────────────────────────
+    // "" / "none" → plain VLESS. The post-quantum Encryption layer is parsed
+    // when the `vless-encryption` feature is compiled in; anything else (a real
+    // cipher name, or the ML-KEM string on a build without the feature) is a
+    // hard error (Class A — silently ignoring it would send unprotected bytes).
     let encryption = config
         .get("encryption")
         .and_then(|v| v.as_str())
         .unwrap_or("none");
-    if !encryption.is_empty() && encryption != "none" {
-        return Err(format!(
-            "vless: encryption '{encryption}' is not supported; VLESS uses no body cipher \
-             (set `encryption: none` or omit the field)"
-        ));
-    }
+    #[cfg(feature = "vless-encryption")]
+    let vless_encryption = parse_vless_encryption(encryption)?;
+    #[cfg(not(feature = "vless-encryption"))]
+    parse_vless_encryption(encryption)?;
 
     // ── client-fingerprint ──────────────────────────────────────────────
     // Passed through to TlsConfig.fingerprint; the TLS layer selects the
@@ -1314,9 +1316,62 @@ fn parse_vless(
         }
     }
 
-    Ok(VlessAdapter::new(
-        name, server, port, uuid_bytes, flow, udp, chain,
+    #[cfg_attr(not(feature = "vless-encryption"), allow(unused_mut))]
+    let mut adapter = VlessAdapter::new(name, server, port, uuid_bytes, flow, udp, chain);
+    #[cfg(feature = "vless-encryption")]
+    adapter.set_encryption(vless_encryption);
+    Ok(adapter)
+}
+
+/// Parse the VLESS `encryption` field.
+///
+/// With the `vless-encryption` feature: `""`/`"none"` → `None`, a
+/// `mlkem768x25519plus…` string → a shared [`VlessEncryptionClient`], anything
+/// else → error.
+#[cfg(all(feature = "vless", feature = "vless-encryption"))]
+fn parse_vless_encryption(
+    encryption: &str,
+) -> std::result::Result<Option<std::sync::Arc<meow_proxy::VlessEncryptionClient>>, String> {
+    meow_proxy::parse_client_encryption(encryption)
+        .map(|opt| opt.map(std::sync::Arc::new))
+        .map_err(|e| format!("vless: {e}"))
+}
+
+/// Without the feature: accept only `""`/`"none"`; reject everything else with a
+/// diagnostic that points at the missing feature for the ML-KEM string.
+#[cfg(all(feature = "vless", not(feature = "vless-encryption")))]
+fn parse_vless_encryption(encryption: &str) -> std::result::Result<(), String> {
+    if encryption.is_empty() || encryption == "none" {
+        return Ok(());
+    }
+    if encryption.starts_with("mlkem768x25519plus") {
+        return Err(format!(
+            "vless: encryption '{encryption}' (VLESS post-quantum Encryption) requires the \
+             `vless-encryption` Cargo feature; rebuild with --features vless-encryption"
+        ));
+    }
+    Err(format!(
+        "vless: encryption '{encryption}' is not supported; set `encryption: none`, omit the \
+         field, or use `mlkem768x25519plus…` on a build with the `vless-encryption` feature"
     ))
+}
+
+/// Decode a base64 raw-url string the way Go's `base64.RawURLEncoding` does:
+/// no padding, and (unlike the crate's strict `URL_SAFE_NO_PAD`) tolerant of a
+/// final symbol's non-canonical trailing bits. 3x-ui / Xray configs in the wild
+/// carry such keys (see issue #301), so strict decoding would wrongly reject
+/// otherwise-valid 32-byte X25519 keys.
+#[cfg(feature = "vless")]
+fn decode_raw_url_base64_lenient(s: &str) -> Option<Vec<u8>> {
+    use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+    use base64::{alphabet, Engine};
+    let engine = GeneralPurpose::new(
+        &alphabet::URL_SAFE,
+        GeneralPurposeConfig::new()
+            .with_decode_padding_mode(DecodePaddingMode::RequireNone)
+            .with_decode_allow_trailing_bits(true),
+    );
+    engine.decode(s).ok()
 }
 
 /// Parse VLESS `reality-opts` into transport-layer REALITY parameters.
@@ -1339,10 +1394,8 @@ fn parse_vless_reality_opts(
         .and_then(serde_yaml::Value::as_str)
         .ok_or_else(|| "vless: reality-opts.public-key is required".to_string())?;
 
-    use base64::Engine;
-    let public_key_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(public_key_str)
-        .map_err(|_| "vless: invalid REALITY public key".to_string())?;
+    let public_key_bytes = decode_raw_url_base64_lenient(public_key_str)
+        .ok_or_else(|| "vless: invalid REALITY public key".to_string())?;
     if public_key_bytes.len() != 32 {
         return Err("vless: invalid REALITY public key".into());
     }
@@ -1819,6 +1872,18 @@ mod tests {
 
     fn proxy_config(yaml: &str) -> HashMap<String, serde_yaml::Value> {
         serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[cfg(feature = "vless")]
+    #[test]
+    fn lenient_base64_accepts_noncanonical_trailing_bits() {
+        // The REALITY public-key from issue #301 has non-canonical base64
+        // trailing bits; Go decodes it, and so must we (32-byte X25519 key).
+        let key = "OKkD6Wt1lC4-9avJj2t3PkvIDkvcA1Fu0b09QwJ7GGh";
+        let decoded = decode_raw_url_base64_lenient(key).expect("must decode");
+        assert_eq!(decoded.len(), 32);
+        // Garbage is still rejected.
+        assert!(decode_raw_url_base64_lenient("!!!not base64!!!").is_none());
     }
 
     #[test]

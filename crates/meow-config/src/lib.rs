@@ -43,6 +43,19 @@ where
     tokio::task::spawn_blocking(move || tracing::dispatcher::with_default(&dispatch, f)).await
 }
 
+pub(crate) fn parse_optional_socket_addr(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<SocketAddr>, anyhow::Error> {
+    match value {
+        Some(value) if !value.is_empty() => value
+            .parse()
+            .map(Some)
+            .map_err(|e| anyhow::anyhow!("invalid {field} socket address '{value}': {e}")),
+        _ => Ok(None),
+    }
+}
+
 pub struct Config {
     pub general: GeneralConfig,
     pub dns: DnsConfig,
@@ -102,7 +115,7 @@ pub struct NamedListener {
     pub listen: String,
     pub tproxy_sni: bool,
     /// Cap on concurrent in-flight inbound connections for this listener.
-    /// `0` (default) disables the cap. Resolved from the per-listener
+    /// `0` explicitly disables the cap; the default is 256. Resolved from the per-listener
     /// `max-connections` field, falling back to the global `max-connections`.
     #[serde(default)]
     pub max_connections: usize,
@@ -208,7 +221,7 @@ pub type RebuildResult = (HashMap<SmolStr, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>);
 /// Does not resolve rule-provider cache paths; use
 /// [`rebuild_from_raw_with_cache_dir`] when a working directory is available.
 pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, None, None, &HashMap::new(), None, None)
+    rebuild_from_raw_impl(raw, None, None, &HashMap::new(), None, None, None)
 }
 
 /// Rebuild proxies/rules and inject `resolver` into the built-in DIRECT
@@ -217,7 +230,7 @@ pub fn rebuild_from_raw_with_resolver(
     raw: &raw::RawConfig,
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, None, resolver, &HashMap::new(), None, None)
+    rebuild_from_raw_impl(raw, None, resolver, &HashMap::new(), None, None, None)
 }
 
 /// Same as [`rebuild_from_raw`] but accepts a `cache_dir` used to resolve
@@ -228,7 +241,7 @@ pub fn rebuild_from_raw_with_cache_dir(
     cache_dir: Option<&Path>,
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None, None)
+    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None, None, None)
 }
 
 /// Apply per-outbound `dialer-proxy` wrappers in place (issue #210).
@@ -319,6 +332,7 @@ fn rebuild_from_raw_impl(
     providers: &HashMap<String, Arc<ProxyProvider>>,
     selector_store: Option<&Arc<meow_proxy::SelectorStore>>,
     shared_ctx: Option<&meow_rules::ParserContext>,
+    prefetched_payloads: Option<&rule_provider::PrefetchedPayloads>,
 ) -> Result<RebuildResult, anyhow::Error> {
     let mut proxies: HashMap<SmolStr, Arc<dyn Proxy>> = HashMap::new();
     // Built-in proxies
@@ -417,20 +431,42 @@ fn rebuild_from_raw_impl(
     // leaf proxies and groups are built so a dialer may reference either.
     apply_dialer_proxies(&mut proxies, raw.proxies.as_deref().unwrap_or(&[]));
 
+    let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
+
+    // Fetch/read rule-provider payload bytes once — the parser-context build
+    // scans them for geo keys (issue #277) and the provider load below parses
+    // the same bytes, so nothing is fetched twice.
+    let owned_payloads;
+    let payloads = match prefetched_payloads {
+        Some(p) => p,
+        None => {
+            owned_payloads = match raw.rule_providers.as_ref() {
+                Some(map) if !map.is_empty() => {
+                    rule_provider::prefetch_payloads(map, cache_dir, download_proxy.as_ref())
+                }
+                _ => HashMap::new(),
+            };
+            &owned_payloads
+        }
+    };
+
     let owned_ctx;
     let ctx = match shared_ctx {
         Some(c) => c,
         None => {
-            owned_ctx = build_parser_context_from_raw(raw)?;
+            owned_ctx = build_parser_context_from_raw(raw, payloads)?;
             &owned_ctx
         }
     };
 
-    let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
     let providers = match raw.rule_providers.as_ref() {
-        Some(map) if !map.is_empty() => {
-            rule_provider::load_providers(map, cache_dir, ctx, download_proxy.as_ref())
-        }
+        Some(map) if !map.is_empty() => rule_provider::load_providers_prefetched(
+            map,
+            cache_dir,
+            ctx,
+            download_proxy.as_ref(),
+            payloads,
+        ),
         _ => HashMap::new(),
     };
     let ruleset_map = rule_provider::snapshot_ruleset_map(&providers);
@@ -478,10 +514,45 @@ async fn open_selector_store_async(
 async fn build_parser_context_with_geo_async(
     raw: raw::RawConfig,
     geo: GeoDataConfig,
+    provider_payloads: Arc<rule_provider::PrefetchedPayloads>,
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
-    spawn_blocking_with_current_dispatcher(move || build_parser_context_with_geo(&raw, &geo))
-        .await
-        .map_err(|e| anyhow::anyhow!("parser context build task failed: {e}"))?
+    spawn_blocking_with_current_dispatcher(move || {
+        build_parser_context_with_geo(&raw, &geo, &provider_payloads)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("parser context build task failed: {e}"))?
+}
+
+/// Prefetch every file/http rule-provider payload on a blocking thread.
+/// Uses the first parseable proxy from the raw config for tunneled fetches
+/// (same policy as [`ensure_geodata`]) since the proxy registry is not built
+/// yet at this point of startup.
+async fn prefetch_rule_provider_payloads_async(
+    raw: &raw::RawConfig,
+    cache_dir: Option<PathBuf>,
+) -> rule_provider::PrefetchedPayloads {
+    let Some(raw_providers) = raw.rule_providers.as_ref().filter(|m| !m.is_empty()) else {
+        return HashMap::new();
+    };
+    let raw_providers = raw_providers.clone();
+    let download_proxy: Option<Arc<dyn Proxy>> = raw
+        .proxies
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find_map(|raw_proxy| proxy_parser::parse_proxy(raw_proxy).ok());
+    spawn_blocking_with_current_dispatcher(move || {
+        rule_provider::prefetch_payloads(
+            &raw_providers,
+            cache_dir.as_deref(),
+            download_proxy.as_ref(),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| {
+        warn!("rule-provider payload prefetch task failed: {e}");
+        HashMap::new()
+    })
 }
 
 async fn rebuild_from_raw_impl_async(
@@ -491,6 +562,7 @@ async fn rebuild_from_raw_impl_async(
     providers: HashMap<String, Arc<ProxyProvider>>,
     selector_store: Option<Arc<meow_proxy::SelectorStore>>,
     ctx: meow_rules::ParserContext,
+    provider_payloads: Arc<rule_provider::PrefetchedPayloads>,
 ) -> Result<RebuildResult, anyhow::Error> {
     spawn_blocking_with_current_dispatcher(move || {
         rebuild_from_raw_impl(
@@ -500,6 +572,7 @@ async fn rebuild_from_raw_impl_async(
             &providers,
             selector_store.as_ref(),
             Some(&ctx),
+            Some(&provider_payloads),
         )
     })
     .await
@@ -511,13 +584,15 @@ async fn load_rule_providers_async(
     cache_dir: Option<PathBuf>,
     ctx: meow_rules::ParserContext,
     download_proxy: Option<Arc<dyn Proxy>>,
+    provider_payloads: Arc<rule_provider::PrefetchedPayloads>,
 ) -> Result<HashMap<String, Arc<rule_provider::RuleProvider>>, anyhow::Error> {
     spawn_blocking_with_current_dispatcher(move || {
-        rule_provider::load_providers(
+        rule_provider::load_providers_prefetched(
             &raw_providers,
             cache_dir.as_deref(),
             &ctx,
             download_proxy.as_ref(),
+            &provider_payloads,
         )
     })
     .await
@@ -640,19 +715,17 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
 /// no proxy is configured. Download failures are logged as warnings — the
 /// subsequent parser-context build will hard-error if the file is still
 /// absent, giving a clear diagnostic.
-async fn ensure_geodata(raw: &raw::RawConfig, geo: &GeoDataConfig) {
+async fn ensure_geodata(raw: &raw::RawConfig, geo: &GeoDataConfig, scan_lines: &[String]) {
     // The direct download path (no proxy) uses reqwest which needs a rustls
     // CryptoProvider. Install ring as the default — idempotent if main.rs
     // already did this, and harmless in --all-features builds where both
     // ring and aws-lc-rs are compiled in.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let lines: &[String] = raw.rules.as_deref().unwrap_or(&[]);
-
-    let needs_geoip = lines.iter().any(|l| line_is_geoip_rule(l));
-    let needs_asn = lines.iter().any(|l| line_is_asn_rule(l));
+    let needs_geoip = scan_lines.iter().any(|l| line_references_geoip(l));
+    let needs_asn = scan_lines.iter().any(|l| line_references_asn(l));
     let needs_geosite =
-        lines.iter().any(|l| line_is_geosite_rule(l)) || dns_policy_uses_geosite(raw);
+        scan_lines.iter().any(|l| line_references_geosite(l)) || dns_policy_uses_geosite(raw);
 
     if !needs_geoip && !needs_asn && !needs_geosite {
         return;
@@ -713,14 +786,16 @@ async fn ensure_geodata(raw: &raw::RawConfig, geo: &GeoDataConfig) {
 /// `rebuild_from_raw_impl` so all code paths honour the same config.
 fn build_parser_context_from_raw(
     raw: &raw::RawConfig,
+    provider_payloads: &rule_provider::PrefetchedPayloads,
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
     let geo = geodata::parse_geodata(raw.geodata.as_ref())?;
-    build_parser_context_with_geo(raw, &geo)
+    build_parser_context_with_geo(raw, &geo, provider_payloads)
 }
 
 fn build_parser_context_with_geo(
     raw: &raw::RawConfig,
     geo: &GeoDataConfig,
+    provider_payloads: &rule_provider::PrefetchedPayloads,
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
     let geoip_path = geo.mmdb_path.clone().unwrap_or_else(default_geoip_path);
     let asn_path = geo.asn_path.clone().unwrap_or_else(default_asn_path);
@@ -730,6 +805,7 @@ fn build_parser_context_with_geo(
         &asn_path,
         &meow_rules::geosite::default_geosite_candidates(),
         geo.geosite_path.as_deref(),
+        provider_payloads,
     )
 }
 
@@ -741,14 +817,18 @@ fn build_parser_context_at(
     asn_path: &Path,
     geosite_candidates: &[PathBuf],
     geosite_explicit: Option<&Path>,
+    provider_payloads: &rule_provider::PrefetchedPayloads,
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
-    let lines: &[String] = raw.rules.as_deref().unwrap_or(&[]);
+    // Scan everything that can hold a geo rule — top-level rules, sub-rules
+    // blocks, and rule-provider payloads — so a GEOIP/IP-ASN/GEOSITE key used
+    // only outside `rules:` still gets binned into the indexes (issue #277).
+    let lines = collect_geo_scan_lines(raw, provider_payloads);
 
-    let geoip_trigger = lines.iter().find(|l| line_is_geoip_rule(l));
+    let geoip_trigger = lines.iter().find(|l| line_references_geoip(l));
     let geoip = match geoip_trigger {
         Some(trigger) => {
             let reader = load_mmdb_mmap(geoip_path, "GeoIP", trigger)?;
-            let allowed = collect_geoip_countries(lines);
+            let allowed = collect_geoip_countries(&lines);
             let index = meow_rules::country_index::CountryIndex::build(&reader, &allowed)
                 .map_err(|e| anyhow::anyhow!("failed to build GeoIP country index: {e}"))?;
             // reader is mmap-backed — pages are returned to the OS on drop.
@@ -758,11 +838,11 @@ fn build_parser_context_at(
         None => None,
     };
 
-    let asn_trigger = lines.iter().find(|l| line_is_asn_rule(l));
+    let asn_trigger = lines.iter().find(|l| line_references_asn(l));
     let asn = match asn_trigger {
         Some(trigger) => {
             let reader = load_mmdb_mmap(asn_path, "GeoLite2-ASN", trigger)?;
-            let allowed = collect_asn_numbers(lines);
+            let allowed = collect_asn_numbers(&lines);
             let index = meow_rules::asn_index::AsnIndex::build(&reader, &allowed)
                 .map_err(|e| anyhow::anyhow!("failed to build ASN index: {e}"))?;
             drop(reader);
@@ -772,9 +852,9 @@ fn build_parser_context_at(
     };
 
     let geosite_trigger =
-        lines.iter().any(|l| line_is_geosite_rule(l)) || dns_policy_uses_geosite(raw);
+        lines.iter().any(|l| line_references_geosite(l)) || dns_policy_uses_geosite(raw);
     let geosite = if geosite_trigger {
-        let mut allowed = collect_geosite_categories(lines);
+        let mut allowed = collect_geosite_categories(&lines);
         allowed.extend(collect_dns_policy_geosite_categories(raw));
         info!(
             "Loading geosite database for {} referenced categories",
@@ -828,15 +908,18 @@ fn load_mmdb_mmap(
 ///
 /// Used to drive a targeted [`CountryIndex`] build so we never allocate
 /// per-country ranges for codes no rule cares about.
-fn collect_geoip_countries(lines: &[String]) -> std::collections::HashSet<String> {
-    use regex::Regex;
+fn geoip_scan_regex() -> &'static regex::Regex {
     use std::sync::OnceLock;
     // `\bGEOIP` matches both `GEOIP,CN` and `SRC-GEOIP,CN` because the `-`
     // before `GEOIP` is a non-word boundary.
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)\bGEOIP\s*,\s*([A-Za-z0-9]+)").expect("compile GEOIP scan regex")
-    });
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\bGEOIP\s*,\s*([A-Za-z0-9]+)").expect("compile GEOIP scan regex")
+    })
+}
+
+fn collect_geoip_countries(lines: &[String]) -> std::collections::HashSet<String> {
+    let re = geoip_scan_regex();
     let mut out = std::collections::HashSet::new();
     for line in lines {
         let trimmed = line.trim();
@@ -856,14 +939,17 @@ fn collect_geoip_countries(lines: &[String]) -> std::collections::HashSet<String
 ///
 /// Used to drive targeted geosite loading so we only parse categories that
 /// are actually referenced by rules, skipping the rest at the byte level.
-fn collect_geosite_categories(lines: &[String]) -> std::collections::HashSet<String> {
-    use regex::Regex;
+fn geosite_scan_regex() -> &'static regex::Regex {
     use std::sync::OnceLock;
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)\bGEOSITE\s*,\s*([A-Za-z0-9_!\-]+)(?:@[A-Za-z0-9_!\-]+)*")
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\bGEOSITE\s*,\s*([A-Za-z0-9_!\-]+)(?:@[A-Za-z0-9_!\-]+)*")
             .expect("compile GEOSITE scan regex")
-    });
+    })
+}
+
+fn collect_geosite_categories(lines: &[String]) -> std::collections::HashSet<String> {
+    let re = geosite_scan_regex();
     let mut out = std::collections::HashSet::new();
     for line in lines {
         let trimmed = line.trim();
@@ -921,13 +1007,16 @@ fn collect_dns_policy_geosite_categories(
 
 /// Scan raw rule lines and return the ASN numbers referenced by `IP-ASN,` /
 /// `SRC-IP-ASN,` payloads, including occurrences inside logic rules.
-fn collect_asn_numbers(lines: &[String]) -> std::collections::HashSet<u32> {
-    use regex::Regex;
+fn asn_scan_regex() -> &'static regex::Regex {
     use std::sync::OnceLock;
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:SRC-)?IP-ASN\s*,\s*(\d+)").expect("compile IP-ASN scan regex")
-    });
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"(?i)\b(?:SRC-)?IP-ASN\s*,\s*(\d+)").expect("compile IP-ASN scan regex")
+    })
+}
+
+fn collect_asn_numbers(lines: &[String]) -> std::collections::HashSet<u32> {
+    let re = asn_scan_regex();
     let mut out = std::collections::HashSet::new();
     for line in lines {
         let trimmed = line.trim();
@@ -943,38 +1032,64 @@ fn collect_asn_numbers(lines: &[String]) -> std::collections::HashSet<u32> {
     out
 }
 
-/// True iff `line` (a raw `rules:` entry) reads the GeoIP Country database.
-/// Covers `GEOIP` and `SRC-GEOIP` — both share the same MMDB reader.
-fn line_is_geoip_rule(line: &str) -> bool {
+/// True iff `line` references the GeoIP Country database anywhere — as a
+/// top-level `GEOIP,`/`SRC-GEOIP,` rule or nested inside a logic rule
+/// (`AND`/`OR`/`NOT`). Comment lines never match. Uses the same regex as
+/// [`collect_geoip_countries`] so the trigger and the allowlist agree.
+fn line_references_geoip(line: &str) -> bool {
     let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return false;
-    }
-    let ty = line.split(',').next().unwrap_or("").trim();
-    ty.eq_ignore_ascii_case("GEOIP") || ty.eq_ignore_ascii_case("SRC-GEOIP")
+    !line.is_empty() && !line.starts_with('#') && geoip_scan_regex().is_match(line)
 }
 
-/// True iff `line` (a raw `rules:` entry) is a `GEOSITE` entry that needs
-/// the geosite DB. Guards against false positives from `GEOIP` (shares the
-/// `GEO` prefix).
-fn line_is_geosite_rule(line: &str) -> bool {
+/// True iff `line` references the geosite database anywhere (top-level or
+/// nested inside a logic rule). Comment lines never match.
+fn line_references_geosite(line: &str) -> bool {
     let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return false;
-    }
-    let ty = line.split(',').next().unwrap_or("").trim();
-    ty.eq_ignore_ascii_case("GEOSITE")
+    !line.is_empty() && !line.starts_with('#') && geosite_scan_regex().is_match(line)
 }
 
-/// True iff `line` (a raw `rules:` entry) reads the GeoLite2-ASN database.
-/// Covers `IP-ASN` and `SRC-IP-ASN`.
-fn line_is_asn_rule(line: &str) -> bool {
+/// True iff `line` references the GeoLite2-ASN database anywhere — `IP-ASN,`
+/// or `SRC-IP-ASN,`, top-level or nested. Comment lines never match.
+fn line_references_asn(line: &str) -> bool {
     let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return false;
+    !line.is_empty() && !line.starts_with('#') && asn_scan_regex().is_match(line)
+}
+
+/// Gather every rule line that can reference a geo database (issue #277):
+/// top-level `rules:`, all `sub-rules:` blocks, inline rule-provider
+/// payloads, and the prefetched payloads of file/http rule-providers.
+/// Binary MRS payloads are skipped — the MRS format holds compiled
+/// domain/ipcidr sets and can never contain GEOIP/GEOSITE/IP-ASN lines.
+fn collect_geo_scan_lines(
+    raw: &raw::RawConfig,
+    provider_payloads: &rule_provider::PrefetchedPayloads,
+) -> Vec<String> {
+    let mut lines: Vec<String> = raw.rules.clone().unwrap_or_default();
+    if let Some(sub_rules) = raw.sub_rules.as_ref() {
+        for block in sub_rules.values() {
+            lines.extend(block.iter().cloned());
+        }
     }
-    let ty = line.split(',').next().unwrap_or("").trim();
-    ty.eq_ignore_ascii_case("IP-ASN") || ty.eq_ignore_ascii_case("SRC-IP-ASN")
+    if let Some(providers) = raw.rule_providers.as_ref() {
+        for cfg in providers.values() {
+            if let Some(payload) = cfg.payload.as_ref() {
+                lines.extend(payload.iter().cloned());
+            }
+        }
+    }
+    for bytes in provider_payloads.values() {
+        if meow_rules::is_mrs_bytes(bytes) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        lines.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(String::from),
+        );
+    }
+    lines
 }
 
 /// Default path for the GeoIP Country MMDB.
@@ -1062,7 +1177,7 @@ fn build_named_listeners(
     let mut result: Vec<NamedListener> = Vec::new();
     let mut used_ports: HashMap<u16, String> = HashMap::new();
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let global_max_conns = raw.max_connections.unwrap_or(0);
+    let global_max_conns = raw.max_connections.unwrap_or(256);
 
     let mut add = |name: &str,
                    ltype: ListenerType,
@@ -1228,13 +1343,28 @@ async fn build_config(
         None => None,
     };
 
+    // Fetch/read rule-provider payloads once; the geodata check, the parser
+    // context build, and every provider load pass below reuse these bytes so
+    // geo keys referenced only inside provider payloads are seen (issue #277)
+    // and nothing is fetched twice.
+    let provider_payloads =
+        Arc::new(prefetch_rule_provider_payloads_async(&raw, cache_dir_buf.clone()).await);
+
     // Ensure geodata files exist — download any that are missing and needed
-    // by the config's rules. This must happen before building the parser
-    // context, which hard-errors on missing GeoIP/ASN files.
-    ensure_geodata(&raw, &geodata).await;
+    // by the config's rules (including sub-rules and provider payloads). This
+    // must happen before building the parser context, which hard-errors on
+    // missing GeoIP/ASN files.
+    let geo_scan_lines = collect_geo_scan_lines(&raw, &provider_payloads);
+    ensure_geodata(&raw, &geodata, &geo_scan_lines).await;
+    drop(geo_scan_lines);
 
     // Build the parser context once and share across all passes.
-    let ctx = build_parser_context_with_geo_async(raw.clone(), geodata.clone()).await?;
+    let ctx = build_parser_context_with_geo_async(
+        raw.clone(),
+        geodata.clone(),
+        Arc::clone(&provider_payloads),
+    )
+    .await?;
 
     let (proxies, _) = rebuild_from_raw_impl_async(
         raw.clone(),
@@ -1243,6 +1373,7 @@ async fn build_config(
         proxy_providers.clone(),
         selector_store.clone(),
         ctx.clone(),
+        Arc::clone(&provider_payloads),
     )
     .await?;
 
@@ -1265,6 +1396,7 @@ async fn build_config(
         proxy_providers.clone(),
         selector_store.clone(),
         ctx.clone(),
+        Arc::clone(&provider_payloads),
     )
     .await?;
 
@@ -1276,6 +1408,7 @@ async fn build_config(
                 cache_dir_buf.clone(),
                 ctx.clone(),
                 download_proxy,
+                provider_payloads,
             )
             .await?
         }
@@ -1318,10 +1451,10 @@ async fn build_config(
             dir
         });
     let api = ApiConfig {
-        external_controller: raw
-            .external_controller
-            .as_deref()
-            .and_then(|s| s.parse().ok()),
+        external_controller: parse_optional_socket_addr(
+            "external-controller",
+            raw.external_controller.as_deref(),
+        )?,
         secret: raw.secret.clone(),
         external_ui,
         external_ui_url: raw
@@ -1480,13 +1613,20 @@ mod geoip_context_tests {
 
     #[test]
     fn scanner_matches_geoip_rule() {
-        assert!(line_is_geoip_rule("GEOIP,CN,DIRECT"));
-        assert!(line_is_geoip_rule("  geoip,us,proxy,no-resolve"));
-        assert!(!line_is_geoip_rule("DOMAIN,example.com,DIRECT"));
-        assert!(!line_is_geoip_rule("# GEOIP,CN,DIRECT"));
-        assert!(!line_is_geoip_rule(""));
+        assert!(line_references_geoip("GEOIP,CN,DIRECT"));
+        assert!(line_references_geoip("  geoip,us,proxy,no-resolve"));
+        // Nested inside a logic rule (issue #277: trigger must agree with
+        // the allowlist collector, which walks into AND/OR/NOT).
+        assert!(line_references_geoip(
+            "AND,((GEOIP,CN),(DST-PORT,443)),PROXY"
+        ));
+        assert!(!line_references_geoip("DOMAIN,example.com,DIRECT"));
+        assert!(!line_references_geoip("# GEOIP,CN,DIRECT"));
+        assert!(!line_references_geoip(""));
         // Avoid false positives on rule types that happen to contain "GEO".
-        assert!(!line_is_geoip_rule("GEOSITE,twitter,Proxy"));
+        assert!(!line_references_geoip("GEOSITE,twitter,Proxy"));
+        // RULE-SET names containing "geoip" must not trigger the DB load.
+        assert!(!line_references_geoip("RULE-SET,geoip-cn,DIRECT"));
     }
 
     #[test]
@@ -1534,6 +1674,123 @@ mod geoip_context_tests {
         );
     }
 
+    /// Issue #277 — geo keys referenced only inside `sub-rules:` blocks must
+    /// be seen by the scan (both for the DB-load trigger and the allowlist).
+    #[test]
+    fn scan_lines_include_sub_rules_blocks() {
+        let mut sub_rules = HashMap::new();
+        sub_rules.insert(
+            "my-sub".to_string(),
+            vec![
+                "GEOIP,JP,PROXY".to_string(),
+                "IP-ASN,13335,DIRECT".to_string(),
+            ],
+        );
+        let raw = raw::RawConfig {
+            rules: Some(vec![
+                "SUB-RULE,(DOMAIN-SUFFIX,example.com),my-sub".to_string()
+            ]),
+            sub_rules: Some(sub_rules),
+            ..Default::default()
+        };
+        let lines = collect_geo_scan_lines(&raw, &HashMap::new());
+        let countries = collect_geoip_countries(&lines);
+        assert!(
+            countries.contains("JP"),
+            "sub-rules GEOIP,JP must be binned"
+        );
+        let asns = collect_asn_numbers(&lines);
+        assert!(asns.contains(&13335), "sub-rules IP-ASN must be binned");
+    }
+
+    /// Issue #277 — geo keys referenced only in an inline rule-provider
+    /// payload must be seen by the scan.
+    #[test]
+    fn scan_lines_include_inline_provider_payloads() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "my-provider".to_string(),
+            raw::RawRuleProvider {
+                provider_type: "inline".to_string(),
+                behavior: "classical".to_string(),
+                format: None,
+                url: None,
+                path: None,
+                interval: None,
+                payload: Some(vec!["GEOIP,KR".to_string(), "GEOSITE,youtube".to_string()]),
+            },
+        );
+        let raw = raw::RawConfig {
+            rules: Some(vec!["RULE-SET,my-provider,PROXY".to_string()]),
+            rule_providers: Some(providers),
+            ..Default::default()
+        };
+        let lines = collect_geo_scan_lines(&raw, &HashMap::new());
+        assert!(collect_geoip_countries(&lines).contains("KR"));
+        assert!(collect_geosite_categories(&lines).contains("youtube"));
+    }
+
+    /// Issue #277 — prefetched file/http provider payload bytes are scanned
+    /// (yaml and text forms); binary MRS payloads are skipped.
+    #[test]
+    fn scan_lines_include_prefetched_provider_payloads() {
+        let raw = raw::RawConfig::default();
+        let mut payloads: rule_provider::PrefetchedPayloads = HashMap::new();
+        payloads.insert(
+            "yaml-provider".to_string(),
+            b"payload:\n  - 'GEOIP,BR,no-resolve'\n  - DOMAIN,example.com\n".to_vec(),
+        );
+        payloads.insert(
+            "text-provider".to_string(),
+            b"# comment GEOIP,XX\nSRC-IP-ASN,15169\n".to_vec(),
+        );
+        payloads.insert(
+            "mrs-provider".to_string(),
+            meow_rules::mrs_parser::write_ruleset_mrs(
+                meow_rules::mrs_parser::TYPE_DOMAIN,
+                &["example.com"],
+            )
+            .unwrap(),
+        );
+        let lines = collect_geo_scan_lines(&raw, &payloads);
+        let countries = collect_geoip_countries(&lines);
+        assert!(countries.contains("BR"), "yaml payload GEOIP must be seen");
+        assert!(!countries.contains("XX"), "comment lines must be skipped");
+        assert!(collect_asn_numbers(&lines).contains(&15169));
+    }
+
+    /// Issue #277 — a GEOIP rule that appears only inside a sub-rules block
+    /// must trigger the mmdb load (observable here as the fail-fast error for
+    /// a missing DB, which names the triggering line).
+    #[test]
+    fn sub_rules_only_geoip_triggers_mmdb_load() {
+        let mut sub_rules = HashMap::new();
+        sub_rules.insert("my-sub".to_string(), vec!["GEOIP,JP,PROXY".to_string()]);
+        let raw = raw::RawConfig {
+            rules: Some(vec![
+                "SUB-RULE,(DOMAIN-SUFFIX,example.com),my-sub".to_string()
+            ]),
+            sub_rules: Some(sub_rules),
+            ..Default::default()
+        };
+        let nonexistent = PathBuf::from("/nonexistent-test-path-277/Country.mmdb");
+        let err = build_parser_context_at(
+            &raw,
+            &nonexistent,
+            &nonexistent_asn(),
+            &nonexistent_geosite(),
+            None,
+            &HashMap::new(),
+        )
+        .expect_err("sub-rules GEOIP must trigger the mmdb load");
+        let msg = format!("{err}");
+        assert!(msg.contains("/nonexistent-test-path-277/Country.mmdb"));
+        assert!(
+            msg.contains("GEOIP,JP,PROXY"),
+            "error must name the sub-rule line that triggered the load: {msg}"
+        );
+    }
+
     #[test]
     fn collect_geoip_countries_ignores_geosite() {
         let lines = vec![
@@ -1565,6 +1822,7 @@ mod geoip_context_tests {
             &nonexistent_asn(),
             &nonexistent_geosite(),
             None,
+            &HashMap::new(),
         )
         .unwrap();
         assert!(ctx.geoip.is_none());
@@ -1581,6 +1839,7 @@ mod geoip_context_tests {
             &nonexistent_asn(),
             &nonexistent_geosite(),
             None,
+            &HashMap::new(),
         )
         .expect_err("must fail-fast when mmdb is missing");
         let msg = format!("{err}");
@@ -1605,6 +1864,7 @@ mod geoip_context_tests {
             &nonexistent_asn(),
             &nonexistent_geosite(),
             None,
+            &HashMap::new(),
         )
         .expect_err("garbage bytes must fail to parse as mmdb");
         let msg = format!("{err}");
@@ -1614,17 +1874,17 @@ mod geoip_context_tests {
     #[test]
     fn scanner_matches_src_geoip_rule() {
         // SRC-GEOIP shares the GeoIP Country database.
-        assert!(line_is_geoip_rule("SRC-GEOIP,AU,DIRECT"));
-        assert!(line_is_geoip_rule("  src-geoip,us,proxy"));
+        assert!(line_references_geoip("SRC-GEOIP,AU,DIRECT"));
+        assert!(line_references_geoip("  src-geoip,us,proxy"));
     }
 
     #[test]
     fn scanner_matches_ip_asn_rule() {
-        assert!(line_is_asn_rule("IP-ASN,13335,PROXY"));
-        assert!(line_is_asn_rule("  src-ip-asn,15169,DIRECT"));
-        assert!(!line_is_asn_rule("DOMAIN,example.com,DIRECT"));
-        assert!(!line_is_asn_rule("# IP-ASN,13335,PROXY"));
-        assert!(!line_is_asn_rule("GEOIP,CN,DIRECT"));
+        assert!(line_references_asn("IP-ASN,13335,PROXY"));
+        assert!(line_references_asn("  src-ip-asn,15169,DIRECT"));
+        assert!(!line_references_asn("DOMAIN,example.com,DIRECT"));
+        assert!(!line_references_asn("# IP-ASN,13335,PROXY"));
+        assert!(!line_references_asn("GEOIP,CN,DIRECT"));
     }
 
     #[test]
@@ -1637,6 +1897,7 @@ mod geoip_context_tests {
             &nonexistent_asn(),
             &nonexistent_geosite(),
             None,
+            &HashMap::new(),
         )
         .unwrap();
         assert!(ctx.asn.is_none());
@@ -1695,9 +1956,15 @@ rule-providers:
         let raw = raw_with_rules(vec!["IP-ASN,13335,PROXY"]);
         let nonexistent_geoip = PathBuf::from("/definitely/not/a/real/path/Country.mmdb");
         let asn = PathBuf::from("/nonexistent-test-path-asn/GeoLite2-ASN.mmdb");
-        let err =
-            build_parser_context_at(&raw, &nonexistent_geoip, &asn, &nonexistent_geosite(), None)
-                .expect_err("must fail-fast when ASN mmdb is missing");
+        let err = build_parser_context_at(
+            &raw,
+            &nonexistent_geoip,
+            &asn,
+            &nonexistent_geosite(),
+            None,
+            &HashMap::new(),
+        )
+        .expect_err("must fail-fast when ASN mmdb is missing");
         let msg = format!("{err}");
         assert!(
             msg.contains(&asn.display().to_string()),
@@ -1772,6 +2039,26 @@ mod load_config_encoding_tests {
                 "BOM-prefixed UTF-8 must not trigger encoding error: {msg}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod socket_address_tests {
+    use super::parse_optional_socket_addr;
+
+    #[test]
+    fn configured_socket_addresses_are_validated() {
+        assert_eq!(
+            parse_optional_socket_addr("dns.listen", Some("127.0.0.1:53")).unwrap(),
+            Some("127.0.0.1:53".parse().unwrap())
+        );
+        assert!(parse_optional_socket_addr("dns.listen", Some("localhost")).is_err());
+        assert!(parse_optional_socket_addr("dns.listen", Some("127.0.0.1:70000")).is_err());
+        assert!(parse_optional_socket_addr("external-controller", Some("[::1]:9090")).is_ok());
+        assert_eq!(
+            parse_optional_socket_addr("dns.listen", None).unwrap(),
+            None
+        );
     }
 }
 

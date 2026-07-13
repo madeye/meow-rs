@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{debug, info, warn};
 
@@ -45,6 +45,10 @@ pub struct AppState {
     /// at `/ui`; when `None`, the built-in panel is served (issue #223).
     pub external_ui: Option<std::path::PathBuf>,
 }
+
+/// The API server owns one raw/runtime configuration, so all mutation
+/// endpoints share one commit lane. Reads remain independent.
+static CONFIG_MUTATION: Mutex<()> = Mutex::const_new(());
 
 impl AppState {
     fn auth_required(&self) -> bool {
@@ -589,14 +593,39 @@ async fn apply_raw_to_tunnel(
     mut raw: RawConfig,
     tunnel: &Tunnel,
 ) -> Result<(), (StatusCode, String)> {
+    let expected_groups: Vec<String> = raw
+        .proxy_groups
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|group| group.name.clone())
+        .collect();
     if let Some(ps) = raw.proxies.as_mut() {
         meow_config::ech_dns::preresolve_ech(ps).await;
     }
     let (proxies, rules) = rebuild_from_raw_with_resolver_async(raw, Arc::clone(tunnel.resolver()))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    if let Some(missing) = expected_groups
+        .iter()
+        .find(|name| !proxies.contains_key(name.as_str()))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("proxy group '{missing}' failed validation"),
+        ));
+    }
     tunnel.update_proxies(proxies);
     tunnel.update_rules(rules);
+    Ok(())
+}
+
+async fn commit_raw_candidate(
+    state: &AppState,
+    candidate: RawConfig,
+) -> Result<(), (StatusCode, String)> {
+    apply_raw_to_tunnel(candidate.clone(), &state.tunnel).await?;
+    *state.raw_config.write() = candidate;
     Ok(())
 }
 
@@ -682,8 +711,9 @@ async fn add_subscription(
     let gc = fetched.proxy_groups.len();
     let rc = fetched.rules.len();
 
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
 
         if let Some(ref subs) = raw.subscriptions {
             if subs.iter().any(|s| s.name == body.name) {
@@ -707,13 +737,14 @@ async fn add_subscription(
         raw.proxy_groups = Some(fetched.proxy_groups);
         raw.rules = Some(fetched.rules);
 
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot.clone()).await?;
 
     // Auto-save so subscription data is cached on disk
-    let raw = state.raw_config.read().clone();
-    let _ = meow_config::save_raw_config_async(&state.config_path, &raw).await;
+    meow_config::save_raw_config_async(&state.config_path, &snapshot)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "message": "subscription added",
@@ -725,8 +756,9 @@ async fn delete_subscription(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
 
         if let Some(ref mut subs) = raw.subscriptions {
             let before = subs.len();
@@ -743,11 +775,12 @@ async fn delete_subscription(
         raw.proxy_groups = Some(Vec::new());
         raw.rules = Some(Vec::new());
 
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
-    let raw = state.raw_config.read().clone();
-    let _ = meow_config::save_raw_config_async(&state.config_path, &raw).await;
+    commit_raw_candidate(&state, snapshot.clone()).await?;
+    meow_config::save_raw_config_async(&state.config_path, &snapshot)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -777,8 +810,9 @@ async fn refresh_subscription(
     let gc = fetched.proxy_groups.len();
     let rc = fetched.rules.len();
 
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
 
         if let Some(ref mut subs) = raw.subscriptions {
             if let Some(sub) = subs.iter_mut().find(|s| s.name == name) {
@@ -790,13 +824,14 @@ async fn refresh_subscription(
         raw.proxy_groups = Some(fetched.proxy_groups);
         raw.rules = Some(fetched.rules);
 
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot.clone()).await?;
 
     // Auto-save so subscription data is cached on disk
-    let raw = state.raw_config.read().clone();
-    let _ = meow_config::save_raw_config_async(&state.config_path, &raw).await;
+    meow_config::save_raw_config_async(&state.config_path, &snapshot)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({
         "message": "subscription refreshed",
@@ -862,8 +897,9 @@ async fn create_proxy_group(
     Json(body): Json<CreateProxyGroupRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let group_name = body.name.clone();
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
         if let Some(ref groups) = raw.proxy_groups {
             if groups.iter().any(|g| g.name == body.name) {
                 return Err((StatusCode::CONFLICT, "group name already exists".into()));
@@ -879,9 +915,9 @@ async fn create_proxy_group(
             ..Default::default()
         };
         raw.proxy_groups.get_or_insert_with(Vec::new).push(group);
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot).await?;
     Ok(Json(
         serde_json::json!({"message": "group created", "name": group_name}),
     ))
@@ -892,8 +928,9 @@ async fn update_proxy_group(
     Path(name): Path<String>,
     Json(body): Json<CreateProxyGroupRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
         let group = raw
             .proxy_groups
             .as_mut()
@@ -904,9 +941,9 @@ async fn update_proxy_group(
         group.url = body.url;
         group.interval = body.interval;
         group.tolerance = body.tolerance;
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -914,8 +951,9 @@ async fn delete_proxy_group(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
         if let Some(ref mut groups) = raw.proxy_groups {
             let before = groups.len();
             groups.retain(|g| g.name != name);
@@ -931,9 +969,9 @@ async fn delete_proxy_group(
                 parts.last().is_none_or(|target| target.trim() != name)
             });
         }
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -976,12 +1014,13 @@ async fn replace_rules(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ReplaceRulesRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
         raw.rules = Some(body.rules);
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -995,16 +1034,17 @@ async fn update_rule_at_index(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateRuleRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
         let rules = raw.rules.get_or_insert_with(Vec::new);
         if body.index >= rules.len() {
             return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
         }
         rules[body.index] = body.rule;
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1012,16 +1052,17 @@ async fn delete_rule(
     State(state): State<Arc<AppState>>,
     Path(index): Path<usize>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
         let rules = raw.rules.get_or_insert_with(Vec::new);
         if index >= rules.len() {
             return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
         }
         rules.remove(index);
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1035,17 +1076,18 @@ async fn reorder_rules(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ReorderRulesRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let _mutation = CONFIG_MUTATION.lock().await;
     let snapshot = {
-        let mut raw = state.raw_config.write();
+        let mut raw = state.raw_config.read().clone();
         let rules = raw.rules.get_or_insert_with(Vec::new);
         if body.from >= rules.len() || body.to >= rules.len() {
             return Err((StatusCode::BAD_REQUEST, "index out of range".into()));
         }
         let rule = rules.remove(body.from);
         rules.insert(body.to, rule);
-        raw.clone()
+        raw
     };
-    apply_raw_to_tunnel(snapshot, &state.tunnel).await?;
+    commit_raw_candidate(&state, snapshot).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1280,6 +1322,8 @@ async fn put_configs(
     if let Some(ps) = raw_config.proxies.as_mut() {
         meow_config::ech_dns::preresolve_ech(ps).await;
     }
+
+    let _mutation = CONFIG_MUTATION.lock().await;
 
     // Semantic rebuild (proxy/rule parsing)
     let resolver = Arc::clone(state.tunnel.resolver());

@@ -13,6 +13,7 @@
 //!     `reqwest::bytes()` semantics on every call site).
 
 use anyhow::{anyhow, bail, Result};
+use futures_util::StreamExt;
 use meow_common::adapter::Proxy;
 use meow_common::metadata::Metadata;
 use meow_common::{ConnType, Network};
@@ -25,7 +26,27 @@ use url::Url;
 const MAX_REDIRECTS: u8 = 5;
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const USER_AGENT: &str = concat!("clash.meta/", env!("CARGO_PKG_VERSION"));
-const MAX_BODY_BYTES: usize = 256 * 1024 * 1024; // 256 MiB hard ceiling
+pub(crate) const MAX_BODY_BYTES: usize = 256 * 1024 * 1024; // 256 MiB hard ceiling
+
+pub(crate) async fn response_text_with_limit(resp: reqwest::Response) -> Result<String> {
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_BODY_BYTES as u64)
+    {
+        bail!("response exceeds max body size ({MAX_BODY_BYTES} bytes)");
+    }
+
+    let mut bytes = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if chunk.len() > MAX_BODY_BYTES.saturating_sub(bytes.len()) {
+            bail!("response exceeds max body size ({MAX_BODY_BYTES} bytes)");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|e| anyhow!("response body is not UTF-8: {e}"))
+}
 
 /// Fetch `url` via `proxy` and return the response body.
 ///
@@ -179,7 +200,52 @@ fn parse_response(buf: &[u8]) -> Result<Outcome> {
     if !(200..300).contains(&status) {
         bail!("HTTP {status}");
     }
-    Ok(Outcome::Body(buf[body_start..].to_vec()))
+    let chunked = resp.headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("transfer-encoding")
+            && std::str::from_utf8(header.value).is_ok_and(|value| {
+                value
+                    .split(',')
+                    .any(|v| v.trim().eq_ignore_ascii_case("chunked"))
+            })
+    });
+    let body = if chunked {
+        decode_chunked(&buf[body_start..])?
+    } else {
+        buf[body_start..].to_vec()
+    };
+    Ok(Outcome::Body(body))
+}
+
+fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    loop {
+        let line_end = input
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .ok_or_else(|| anyhow!("incomplete chunk-size line"))?;
+        let size_text = std::str::from_utf8(&input[..line_end])
+            .map_err(|e| anyhow!("non-UTF-8 chunk size: {e}"))?;
+        let size =
+            usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16)
+                .map_err(|e| anyhow!("invalid chunk size '{size_text}': {e}"))?;
+        input = &input[line_end + 2..];
+
+        if size == 0 {
+            // A zero chunk is followed by optional trailers and a final CRLF.
+            if input == b"\r\n" || input.windows(4).any(|w| w == b"\r\n\r\n") {
+                return Ok(body);
+            }
+            bail!("incomplete chunked response trailers");
+        }
+        if size > MAX_BODY_BYTES.saturating_sub(body.len()) {
+            bail!("response exceeds max body size ({MAX_BODY_BYTES} bytes)");
+        }
+        if input.len() < size + 2 || &input[size..size + 2] != b"\r\n" {
+            bail!("incomplete chunk data");
+        }
+        body.extend_from_slice(&input[..size]);
+        input = &input[size + 2..];
+    }
 }
 
 fn tls_connector() -> tokio_rustls::TlsConnector {
@@ -204,4 +270,24 @@ pub fn first_named_proxy(
     let entry = raw_proxies?.first()?;
     let name = entry.get("name")?.as_str()?;
     proxies.get(name).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_response_decodes_chunked_body_and_extensions() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;foo=bar\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: yes\r\n\r\n";
+        match parse_response(response).unwrap() {
+            Outcome::Body(body) => assert_eq!(body, b"Wikipedia"),
+            Outcome::Redirect(_) => panic!("unexpected redirect"),
+        }
+    }
+
+    #[test]
+    fn parse_response_rejects_truncated_chunk() {
+        let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc";
+        assert!(parse_response(response).is_err());
+    }
 }
