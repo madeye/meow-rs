@@ -38,6 +38,11 @@ jobs:
             # armv7: soft gate only for now (no ADR-0007 budget yet)
             minimal_budget_bytes: 0
             minimal_soft_gate: true
+            # boring-sys is broken on 32-bit musl (bindgen emits time64
+            # `time_t: i64` per musl 1.2, while boring passes i32), so build
+            # without the boring-tls default. Trade-off: no ECH/uTLS
+            # fingerprinting on armv7 — everything else in `full` is present.
+            cargo_flags: --no-default-features --features full
             # Rust's armv7 musleabihf baseline is vfpv3-d16 without NEON, so
             # the same binary is safe on every core listed here (#284).
             openwrt_archs: >-
@@ -66,8 +71,8 @@ jobs:
 
       - run: cargo install --locked cargo-zigbuild
 
-      - name: Build release binary (static musl, default features)
-        run: cargo zigbuild --release --locked --target ${{ matrix.target }} --bin meow
+      - name: Build release binary (static musl)
+        run: cargo zigbuild --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} --bin meow
 
       - name: Build minimal release binary (stripped, for size check)
         if: matrix.minimal_budget_bytes != 0
@@ -104,7 +109,10 @@ jobs:
         id: pkg
         run: |
           set -euo pipefail
-          ref="${GITHUB_REF_NAME:-${{ github.event.inputs.tag }}}"
+          # On workflow_dispatch GITHUB_REF_NAME is the *branch* name (which
+          # may contain slashes and break the tarball path) — use the tag
+          # input instead.
+          ref="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
           name="meow-${ref}-${{ matrix.target }}"
           staging="dist/${name}"
           mkdir -p "${staging}"

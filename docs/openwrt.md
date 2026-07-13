@@ -15,6 +15,12 @@ the same `armv7` (vfpv3-d16, no NEON assumed) binary; all aarch64 packages
 contain the same `aarch64` binary — only the opkg `Architecture:` label
 differs so that `opkg` accepts the package on your device.
 
+Feature note: the armv7 binaries are built without the `boring-tls`
+feature (boring-sys does not compile for 32-bit musl targets), so ECH and
+uTLS fingerprinting are unavailable on 32-bit arm; every other `full`
+feature (all protocols, DNS, listeners) is present. aarch64 binaries are
+full-featured.
+
 Find your device's architecture with:
 
 ```sh
