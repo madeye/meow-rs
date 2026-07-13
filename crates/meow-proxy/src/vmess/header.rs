@@ -336,152 +336,78 @@ fn fnv1a32(data: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn cmd_key_is_deterministic() {
+    fn protocol_constants_and_hashes_match_reference() {
         let uuid: [u8; 16] = [
             0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3,
             0x08, 0x11,
         ];
-        let k1 = cmd_key(&uuid);
-        let k2 = cmd_key(&uuid);
-        assert_eq!(k1, k2);
-        assert_ne!(k1, [0u8; 16]);
-    }
-
-    #[test]
-    fn fnv1a_known_value() {
+        assert_eq!(cmd_key(&uuid), cmd_key(&uuid));
+        assert_ne!(cmd_key(&uuid), [0u8; 16]);
         assert_eq!(fnv1a32(b""), 0x811c_9dc5);
         assert_eq!(fnv1a32(b"a"), 0xe40c_292c);
-    }
-
-    #[test]
-    fn address_encode_ipv4() {
-        let meta = Metadata {
-            dst_ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
-            dst_port: 443,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf, vec![0x01, 127, 0, 0, 1]);
-    }
-
-    #[test]
-    fn address_encode_domain() {
-        let meta = Metadata {
-            host: "example.com".into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], 0x02);
-        assert_eq!(buf[1], 11);
-        assert_eq!(&buf[2..], b"example.com");
-    }
-
-    #[test]
-    fn address_encode_domain_too_long() {
-        let long = "a".repeat(256);
-        let meta = Metadata {
-            host: long.into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        assert!(encode_address(&mut buf, &meta).is_err());
-    }
-
-    #[test]
-    fn security_nibble_values() {
         assert_eq!(Security::Aes128Gcm.to_nibble(), 0x03);
         assert_eq!(Security::ChaCha20Poly1305.to_nibble(), 0x04);
         assert_eq!(Security::None.to_nibble(), 0x05);
+        assert!(matches!(
+            auto_security(),
+            Security::Aes128Gcm | Security::ChaCha20Poly1305
+        ));
     }
 
-    #[test]
-    fn address_encode_ipv6() {
-        let meta = Metadata {
+    fn address_encoding_covers_all_wire_variants_and_boundaries() {
+        fn encoded(meta: &Metadata) -> Vec<u8> {
+            let mut buf = Vec::new();
+            encode_address(&mut buf, meta).unwrap();
+            buf
+        }
+
+        assert_eq!(
+            encoded(&Metadata {
+                dst_ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
+                ..Default::default()
+            }),
+            vec![ADDR_IPV4, 127, 0, 0, 1]
+        );
+
+        let ipv6 = encoded(&Metadata {
             dst_ip: Some(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
-            dst_port: 443,
             ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], ADDR_IPV6);
-        assert_eq!(buf.len(), 1 + 16);
-    }
+        });
+        assert_eq!(ipv6[0], ADDR_IPV6);
+        assert_eq!(ipv6.len(), 17);
 
-    #[test]
-    fn address_encode_domain_max_255_ok() {
-        let domain = "a".repeat(255);
-        let meta = Metadata {
-            host: domain.into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], ADDR_DOMAIN);
-        assert_eq!(buf[1], 255);
-        assert_eq!(buf.len(), 2 + 255);
-    }
-
-    #[test]
-    fn address_encode_no_destination_errors() {
-        let meta = Metadata {
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        assert!(encode_address(&mut buf, &meta).is_err());
-    }
-
-    #[test]
-    fn address_encode_domain_idn_not_punycoded() {
-        // upstream: passes raw UTF-8, no punycode conversion
-        let meta = Metadata {
-            host: "例え.jp".into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], ADDR_DOMAIN);
-        assert_eq!(&buf[2..], "例え.jp".as_bytes());
-    }
-
-    #[test]
-    fn address_domain_prefers_host_over_ip() {
-        let meta = Metadata {
+        let domain = encoded(&Metadata {
             host: "example.com".into(),
             dst_ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 2, 3, 4))),
-            dst_port: 443,
             ..Default::default()
-        };
-        let mut buf = Vec::new();
-        encode_address(&mut buf, &meta).unwrap();
-        assert_eq!(buf[0], ADDR_DOMAIN, "domain must take priority over IP");
+        });
+        assert_eq!(&domain, b"\x02\x0bexample.com");
+
+        let idn = encoded(&Metadata {
+            host: "例え.jp".into(),
+            ..Default::default()
+        });
+        assert_eq!(&idn[2..], "例え.jp".as_bytes());
+
+        let max_domain = encoded(&Metadata {
+            host: "a".repeat(255).into(),
+            ..Default::default()
+        });
+        assert_eq!(max_domain[1], 255);
+        assert_eq!(max_domain.len(), 257);
     }
 
-    #[test]
-    fn seal_request_header_produces_valid_structure() {
-        let uuid: [u8; 16] = [
-            0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3,
-            0x08, 0x11,
-        ];
-        let ck = cmd_key(&uuid);
-        let meta = Metadata {
-            host: "example.com".into(),
-            dst_port: 443,
-            ..Default::default()
-        };
-        let sealed = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
-
-        // auth_id(16) + conn_nonce(8) + encrypted_length(2+16=18) + encrypted_header(N+16)
-        assert!(sealed.bytes.len() >= 16 + 8 + 18 + 16, "header too short");
-        assert_ne!(sealed.req_key, [0u8; 16], "req_key must be random");
-        assert_ne!(sealed.req_iv, [0u8; 16], "req_iv must be random");
+    fn address_encoding_rejects_missing_or_oversized_destination() {
+        let mut buf = Vec::new();
+        assert!(encode_address(&mut buf, &Metadata::default()).is_err());
+        assert!(encode_address(
+            &mut buf,
+            &Metadata {
+                host: "a".repeat(256).into(),
+                ..Default::default()
+            }
+        )
+        .is_err());
     }
 
     /// Independently open a sealed request header the way a conformant server
@@ -540,8 +466,7 @@ mod tests {
         Ok(plaintext)
     }
 
-    #[test]
-    fn sealed_header_is_server_openable() {
+    fn sealed_headers_are_unique_and_server_openable() {
         let uuid: [u8; 16] = [
             0xb8, 0x31, 0x38, 0x1d, 0x63, 0x24, 0x4d, 0x53, 0xad, 0x4f, 0x8c, 0xda, 0x48, 0xb3,
             0x08, 0x11,
@@ -553,6 +478,13 @@ mod tests {
             ..Default::default()
         };
         let sealed = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
+        let second = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
+        assert_ne!(sealed.bytes, second.bytes);
+        assert_ne!(sealed.req_key, second.req_key);
+        assert!(sealed.bytes.len() >= 16 + 18 + 8 + 16);
+        assert_ne!(sealed.req_key, [0; 16]);
+        assert_ne!(sealed.req_iv, [0; 16]);
+
         let pt = server_open_request_header(&ck, &sealed.bytes)
             .expect("a conformant server must be able to open the sealed header");
 
@@ -582,7 +514,6 @@ mod tests {
         assert_eq!(got, want, "server-visible FNV-1a must validate");
     }
 
-    #[tokio::test]
     async fn response_header_round_trips() {
         use aes_gcm::aead::Aead;
         let req_key = [0x11u8; 16];
@@ -637,29 +568,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn seal_request_header_unique_per_call() {
-        let uuid: [u8; 16] = [0x01; 16];
-        let ck = cmd_key(&uuid);
-        let meta = Metadata {
-            host: "test.com".into(),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let h1 = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
-        let h2 = seal_request_header(&ck, Security::Aes128Gcm, &meta, false).unwrap();
-        assert_ne!(h1.bytes, h2.bytes, "each header must use fresh randomness");
-        assert_ne!(h1.req_key, h2.req_key);
-    }
-
-    #[test]
-    fn header_plaintext_port_before_addr_type() {
+    fn plaintext_layout_and_checksum_match_protocol() {
         let meta = Metadata {
             host: "example.com".into(),
             dst_port: 443,
             ..Default::default()
         };
-        let mut rng = rand::rng();
+        let mut rng = FakeRng(0);
         let req_key = [0u8; 16];
         let req_iv = [0u8; 16];
         let pt = build_header_plaintext(
@@ -682,26 +597,7 @@ mod tests {
             ADDR_DOMAIN,
             "addr_type must follow port"
         );
-    }
 
-    #[test]
-    fn header_plaintext_ends_with_fnv1a() {
-        let meta = Metadata {
-            dst_ip: Some(IpAddr::V4(std::net::Ipv4Addr::new(1, 2, 3, 4))),
-            dst_port: 80,
-            ..Default::default()
-        };
-        let mut rng = FakeRng(0);
-        let pt = build_header_plaintext(
-            &[0u8; 16],
-            &[0u8; 16],
-            0x42,
-            Security::Aes128Gcm,
-            &meta,
-            false,
-            &mut rng,
-        )
-        .unwrap();
         let body = &pt[..pt.len() - 4];
         let expected_hash = fnv1a32(body);
         let actual_hash = u32::from_be_bytes([
@@ -716,13 +612,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_security_returns_valid_cipher() {
-        let s = super::auto_security();
-        assert!(
-            s == Security::Aes128Gcm || s == Security::ChaCha20Poly1305,
-            "auto must pick aes or chacha"
-        );
+    #[tokio::test]
+    async fn header_wire_format_matches_protocol() {
+        protocol_constants_and_hashes_match_reference();
+        address_encoding_covers_all_wire_variants_and_boundaries();
+        address_encoding_rejects_missing_or_oversized_destination();
+        plaintext_layout_and_checksum_match_protocol();
+        sealed_headers_are_unique_and_server_openable();
+        response_header_round_trips().await;
     }
 
     struct FakeRng(u64);

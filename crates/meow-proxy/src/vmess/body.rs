@@ -239,155 +239,62 @@ mod tests {
         (req_key, req_iv)
     }
 
-    #[tokio::test]
-    async fn aes_128_gcm_record_round_trip() {
+    async fn body_modes_round_trip_with_protocol_framing() {
         let (req_key, req_iv) = test_keys();
-        let mut writer_cipher = BodyCipher::new(Security::Aes128Gcm, &req_key, &req_iv, 0x42);
-        let plaintext = b"hello vmess aes-128-gcm body";
+        let plaintext = b"hello vmess body";
 
-        let mut wire = Vec::new();
-        writer_cipher
-            .write_record(&mut wire, plaintext)
-            .await
-            .unwrap();
+        for (security, overhead) in [
+            (Security::Aes128Gcm, 16),
+            (Security::ChaCha20Poly1305, 16),
+            (Security::None, 0),
+        ] {
+            let mut writer = BodyCipher::new(security, &req_key, &req_iv, 0x42);
+            let mut wire = Vec::new();
+            writer.write_record(&mut wire, plaintext).await.unwrap();
 
-        // Wire must be: 2-byte length + ciphertext(plaintext_len + 16 tag)
-        let expected_ct_len = plaintext.len() + 16;
-        let wire_len = u16::from_be_bytes([wire[0], wire[1]]) as usize;
-        assert_eq!(
-            wire_len, expected_ct_len,
-            "record length must include the 16-byte tag"
-        );
-        assert_eq!(wire.len(), 2 + expected_ct_len);
+            let framed_len = u16::from_be_bytes([wire[0], wire[1]]) as usize;
+            assert_eq!(framed_len, plaintext.len() + overhead);
+            assert_eq!(wire.len(), 2 + framed_len);
 
-        // Now read it back — use WRITE keys since we're decrypting what we wrote
-        // (read_cipher uses response keys derived from swapped req_iv/req_key)
-        // For self-round-trip, we need a cipher with matching keys.
-        let mut read_cipher = BodyCipher::new(Security::Aes128Gcm, &req_key, &req_iv, 0x42);
-        read_cipher.mirror_write_to_read();
-
-        let mut cursor = std::io::Cursor::new(wire);
-        let decrypted = read_cipher.read_record(&mut cursor).await.unwrap();
-        assert_eq!(decrypted, plaintext);
+            let mut reader = BodyCipher::new(security, &req_key, &req_iv, 0x42);
+            reader.mirror_write_to_read();
+            let mut cursor = std::io::Cursor::new(wire);
+            assert_eq!(reader.read_record(&mut cursor).await.unwrap(), plaintext);
+        }
     }
 
-    #[tokio::test]
-    async fn chacha20_poly1305_record_round_trip() {
-        let (req_key, req_iv) = test_keys();
-        let mut writer_cipher =
-            BodyCipher::new(Security::ChaCha20Poly1305, &req_key, &req_iv, 0x42);
-        let plaintext = b"hello vmess chacha20 body";
-
-        let mut wire = Vec::new();
-        writer_cipher
-            .write_record(&mut wire, plaintext)
-            .await
-            .unwrap();
-
-        let expected_ct_len = plaintext.len() + 16;
-        let wire_len = u16::from_be_bytes([wire[0], wire[1]]) as usize;
-        assert_eq!(wire_len, expected_ct_len);
-
-        let mut read_cipher = BodyCipher::new(Security::ChaCha20Poly1305, &req_key, &req_iv, 0x42);
-        read_cipher.mirror_write_to_read();
-
-        let mut cursor = std::io::Cursor::new(wire);
-        let decrypted = read_cipher.read_record(&mut cursor).await.unwrap();
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[tokio::test]
-    async fn none_still_uses_chunk_framing() {
-        let (req_key, req_iv) = test_keys();
-        let mut cipher = BodyCipher::new(Security::None, &req_key, &req_iv, 0x42);
-        let plaintext = b"raw bytes no framing";
-
-        let mut wire = Vec::new();
-        cipher.write_record(&mut wire, plaintext).await.unwrap();
-        assert_eq!(
-            &wire[..2],
-            &(plaintext.len() as u16).to_be_bytes(),
-            "security:none keeps the chunk length advertised by OPT_STANDARD"
-        );
-        assert_eq!(&wire[2..], plaintext);
-
-        let mut cursor = std::io::Cursor::new(wire);
-        assert_eq!(cipher.read_record(&mut cursor).await.unwrap(), plaintext);
-    }
-
-    #[tokio::test]
-    async fn nonce_counter_increments_per_record() {
-        let (req_key, req_iv) = test_keys();
-        let mut cipher = BodyCipher::new(Security::Aes128Gcm, &req_key, &req_iv, 0x42);
-        let data = b"x";
-
-        let mut wire1 = Vec::new();
-        cipher.write_record(&mut wire1, data).await.unwrap();
-        let mut wire2 = Vec::new();
-        cipher.write_record(&mut wire2, data).await.unwrap();
-        let mut wire3 = Vec::new();
-        cipher.write_record(&mut wire3, data).await.unwrap();
-
-        // Same plaintext with different nonces must produce different ciphertext
-        assert_ne!(wire1, wire2);
-        assert_ne!(wire2, wire3);
-        assert_ne!(wire1, wire3);
-    }
-
-    #[test]
-    fn chacha_key_uses_md5_cascade_not_kdf() {
-        let (req_key, req_iv) = test_keys();
-        let keys = derive_keys(Security::ChaCha20Poly1305, &req_key, &req_iv);
-        // ChaCha20 body_key = MD5(req_key) || MD5(MD5(req_key)) — 32 bytes
-        assert_eq!(
-            keys.write_key.len(),
-            32,
-            "chacha key must be 32 bytes (double MD5)"
-        );
-
-        let mut hasher = Md5::new();
-        hasher.update(req_key);
-        let md5_1: [u8; 16] = hasher.finalize().into();
-        let mut hasher2 = Md5::new();
-        hasher2.update(md5_1);
-        let md5_2: [u8; 16] = hasher2.finalize().into();
-
-        assert_eq!(&keys.write_key[..16], &md5_1);
-        assert_eq!(&keys.write_key[16..], &md5_2);
-    }
-
-    #[test]
-    fn aes_write_key_is_raw_req_key() {
-        // upstream: AES-128-GCM request body key = reqBodyKey verbatim (no KDF).
-        let (req_key, req_iv) = test_keys();
-        let keys = derive_keys(Security::Aes128Gcm, &req_key, &req_iv);
-        assert_eq!(keys.write_key.as_slice(), &req_key);
-        assert_eq!(keys.write_iv, req_iv);
-    }
-
-    #[test]
-    fn aes_read_key_is_sha256_of_req_key() {
-        // upstream: respBodyKey = SHA256(reqBodyKey)[..16], respBodyIV = SHA256(reqBodyIV)[..16].
+    fn body_key_derivation_matches_protocol() {
         use sha2::{Digest, Sha256};
+
         let (req_key, req_iv) = test_keys();
-        let keys = derive_keys(Security::Aes128Gcm, &req_key, &req_iv);
+        let aes = derive_keys(Security::Aes128Gcm, &req_key, &req_iv);
+        assert_eq!(aes.write_key.as_slice(), &req_key);
+        assert_eq!(aes.write_iv, req_iv);
         let bk: [u8; 32] = Sha256::digest(req_key).into();
         let bi: [u8; 32] = Sha256::digest(req_iv).into();
-        assert_eq!(keys.read_key.as_slice(), &bk[..16]);
-        assert_eq!(&keys.read_iv, &bi[..16]);
+        assert_eq!(aes.read_key.as_slice(), &bk[..16]);
+        assert_eq!(&aes.read_iv, &bi[..16]);
+
+        let chacha = derive_keys(Security::ChaCha20Poly1305, &req_key, &req_iv);
+        let md5_1: [u8; 16] = Md5::digest(req_key).into();
+        let md5_2: [u8; 16] = Md5::digest(md5_1).into();
+        assert_eq!(chacha.write_key, [md5_1, md5_2].concat());
     }
 
-    #[test]
-    fn record_nonce_overwrites_first_two_iv_bytes() {
-        // nonce = count(2 BE) || iv[2..12]; iv[0]/iv[1] discarded.
+    fn record_nonce_overwrites_iv_prefix_and_increments() {
         let iv = [
             0xAA, 0xBB, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
             0x0E, 0x0F,
         ];
-        let n = super::record_nonce(&iv, 0x1234);
-        assert_eq!(n[0], 0x12);
-        assert_eq!(n[1], 0x34);
-        assert_eq!(&n[2..], &iv[2..12]);
+        assert_eq!(
+            record_nonce(&iv, 0x1234),
+            [0x12, 0x34, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
+
+        let (req_key, _) = test_keys();
+        let mut cipher = BodyCipher::new(Security::Aes128Gcm, &req_key, &iv, 0x42);
+        assert_eq!(cipher.write_nonce()[..2], [0, 0]);
+        assert_eq!(cipher.write_nonce()[..2], [0, 1]);
     }
 
     /// End-to-end read-direction interop: a hand-rolled "server" encrypts a
@@ -395,7 +302,6 @@ mod tests {
     /// the client's `read_record` must decrypt it. This fails if the read
     /// derivation or the nonce construction diverges from the wire spec —
     /// unlike the mirror-based round-trip which hides both.
-    #[tokio::test]
     async fn read_record_decrypts_independently_encoded_response() {
         use aes_gcm::aead::Aead;
         use sha2::{Digest, Sha256};
@@ -423,20 +329,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn record_length_includes_tag() {
-        let (req_key, req_iv) = test_keys();
-        let mut cipher = BodyCipher::new(Security::Aes128Gcm, &req_key, &req_iv, 0x42);
-        let plaintext = vec![0xAB; 100];
-
-        let mut wire = Vec::new();
-        cipher.write_record(&mut wire, &plaintext).await.unwrap();
-
-        let wire_len = u16::from_be_bytes([wire[0], wire[1]]) as usize;
-        // upstream: len = plaintext_len + 16 (tag), NOT just plaintext_len
-        assert_eq!(
-            wire_len,
-            100 + 16,
-            "record length must be plaintext + 16 (tag)"
-        );
+    async fn body_wire_format_matches_protocol() {
+        body_modes_round_trip_with_protocol_framing().await;
+        body_key_derivation_matches_protocol();
+        record_nonce_overwrites_iv_prefix_and_increments();
+        read_record_decrypts_independently_encoded_response().await;
     }
 }

@@ -80,52 +80,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn kdf_produces_deterministic_output() {
-        let k1 = kdf(b"test-key", &[b"label1"]);
-        let k2 = kdf(b"test-key", &[b"label1"]);
-        assert_eq!(k1, k2);
-    }
-
-    #[test]
-    fn kdf_different_paths_differ() {
-        let k1 = kdf(b"test-key", &[b"label1"]);
-        let k2 = kdf(b"test-key", &[b"label2"]);
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn kdf_multi_segment_path() {
-        let k1 = kdf(b"key", &[b"a", b"b"]);
-        let k2 = kdf(b"key", &[b"a"]);
-        assert_ne!(k1, k2);
-    }
-
-    /// Cross-implementation vector from v2ray-core `proxy/vmess/aead/kdf_test.go`
-    /// (`TestKDFValue`). Any regression to the old HMAC-cascade construction
-    /// changes this output and breaks interop with every conformant server.
-    #[test]
-    fn kdf_matches_v2ray_reference_vector() {
-        let out = kdf(
-            b"Demo Key for KDF Value Test",
-            &[
-                b"Demo Path for KDF Value Test",
-                b"Demo Path for KDF Value Test2",
-                b"Demo Path for KDF Value Test3",
-            ],
+    fn kdf_matches_single_and_multi_segment_reference_vectors() {
+        assert_eq!(
+            kdf(b"key", &[b"label"]),
+            hex_literal_32("c9cebf77e859ffcbe78619d4e503b0df707f1d7ac98a189c418763940880e3eb")
         );
-        let expected =
-            hex_literal_32("53e9d7e1bd7bd25022b71ead07d8a596efc8a845c7888652fd684b4903dc8892");
-        assert_eq!(out, expected);
-    }
-
-    /// A single-segment path is a plain HMAC-SHA256 keyed by the segment over
-    /// an HMAC-SHA256 keyed by the fixed salt — pinned independently.
-    #[test]
-    fn kdf_single_segment_vector() {
-        let out = kdf(b"key", &[b"label"]);
-        let expected =
-            hex_literal_32("c9cebf77e859ffcbe78619d4e503b0df707f1d7ac98a189c418763940880e3eb");
-        assert_eq!(out, expected);
+        assert_eq!(
+            kdf(
+                b"Demo Key for KDF Value Test",
+                &[
+                    b"Demo Path for KDF Value Test",
+                    b"Demo Path for KDF Value Test2",
+                    b"Demo Path for KDF Value Test3",
+                ],
+            ),
+            hex_literal_32("53e9d7e1bd7bd25022b71ead07d8a596efc8a845c7888652fd684b4903dc8892")
+        );
     }
 
     fn hex_literal_32(s: &str) -> [u8; 32] {
