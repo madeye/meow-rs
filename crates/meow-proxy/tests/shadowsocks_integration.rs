@@ -148,8 +148,10 @@ async fn start_ssserver_inner(
         .spawn()
         .expect("failed to start ssserver");
 
-    // Wait for ssserver to be ready by attempting TCP connections
-    for _ in 0..50 {
+    // Wait for ssserver (or its SIP003 plugin, which owns the external port)
+    // to be ready by attempting TCP connections. Plugin startup on a loaded CI
+    // runner can be slow, so allow a generous window.
+    for _ in 0..100 {
         if tokio::net::TcpStream::connect(format!("127.0.0.1:{ss_port}"))
             .await
             .is_ok()
@@ -158,13 +160,30 @@ async fn start_ssserver_inner(
         }
         sleep(Duration::from_millis(100)).await;
     }
-    panic!("ssserver did not become ready within 5 seconds");
+    panic!("ssserver did not become ready within 10 seconds");
 }
 
-/// Find an available port by binding to port 0.
+/// Hand out server ports from a range *below* the Linux ephemeral range
+/// (32768–60999), checked free by binding.
+///
+/// Ports must not come from `bind(":0")`: the port is released before
+/// ssserver's plugin subprocess binds it (~100ms later), and during that
+/// window the kernel can hand the same ephemeral port to a concurrent test's
+/// `free_port()` or echo server. The readiness probe then connects to that
+/// impostor listener and the test dials a port its own server never bound
+/// (seen in CI as `Connection refused` / `UnexpectedEof` flakes). A
+/// process-wide counter outside the ephemeral range makes in-process
+/// collisions impossible; the bind check skips ports held by other processes.
 async fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    listener.local_addr().unwrap().port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(21000);
+    loop {
+        let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+        assert!(port < 32000, "test port allocator exhausted");
+        if TcpListener::bind(("127.0.0.1", port)).await.is_ok() {
+            return port;
+        }
+    }
 }
 
 #[tokio::test]
