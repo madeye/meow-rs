@@ -130,6 +130,25 @@ fn main() -> Result<()> {
     if args.age_secret_key.is_some() {
         anyhow::bail!("--age-secret-key is not yet supported");
     }
+    if args.ext_ctl_tls.is_some() {
+        anyhow::bail!("--ext-ctl-tls is not yet supported");
+    }
+    if args.ext_ctl_unix.is_some() {
+        anyhow::bail!("--ext-ctl-unix is not yet supported");
+    }
+    if args.ext_ctl_pipe.is_some() {
+        anyhow::bail!("--ext-ctl-pipe is not yet supported");
+    }
+
+    // Accepted for mihomo CLI compatibility but not implemented. Frontends may
+    // pass these blindly, so warn instead of bailing (tracing is not yet
+    // initialized here, hence eprintln).
+    if args.geodata_mode {
+        eprintln!("warning: --geodata-mode is not supported and will be ignored");
+    }
+    if args.ext_ctl_routing_mark.is_some() {
+        eprintln!("warning: --ext-ctl-routing-mark is not supported and will be ignored");
+    }
 
     // Handle subcommands before initializing logging/runtime
     if let Some(cmd) = &args.command {
