@@ -1,0 +1,45 @@
+# Default meow-rs configuration shipped with the OpenWrt package.
+# Edit this file, then restart the service: /etc/init.d/meow restart
+# Full reference: https://github.com/madeye/meow-rs/blob/main/config.example.yaml
+
+# Combined HTTP + SOCKS5 proxy for LAN clients.
+mixed-port: 7890
+allow-lan: true
+bind-address: "0.0.0.0"
+
+mode: rule
+log-level: info
+ipv6: false
+
+# REST API + built-in web panel (served at /ui). Bound to 0.0.0.0 so the
+# LuCI app can embed the panel for browsers on the LAN; OpenWrt's default
+# firewall still blocks WAN-side access. The port must match `panel_port`
+# in /etc/config/meow. Set a secret if untrusted hosts share the LAN.
+external-controller: 0.0.0.0:9090
+secret: ""
+
+dns:
+  enable: true
+  # dnsmasq owns :53; meow's resolver listens on 1053.
+  listen: 127.0.0.1:1053
+  nameserver:
+    - 8.8.8.8
+    - 1.1.1.1
+
+# Add your proxies and groups here, e.g.:
+# proxies:
+#   - name: "ss-example"
+#     type: ss
+#     server: 1.2.3.4
+#     port: 8388
+#     cipher: aes-256-gcm
+#     password: "your-password"
+#     udp: true
+#
+# proxy-groups:
+#   - name: "PROXY"
+#     type: select
+#     proxies: ["ss-example", "DIRECT"]
+
+rules:
+  - MATCH,DIRECT

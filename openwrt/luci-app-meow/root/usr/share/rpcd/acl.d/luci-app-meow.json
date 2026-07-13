@@ -1,0 +1,14 @@
+{
+	"luci-app-meow": {
+		"description": "Grant access to meow service configuration",
+		"read": {
+			"uci": [ "meow" ],
+			"ubus": {
+				"service": [ "list" ]
+			}
+		},
+		"write": {
+			"uci": [ "meow" ]
+		}
+	}
+}

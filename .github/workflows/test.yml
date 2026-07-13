@@ -278,3 +278,43 @@ jobs:
 
       - name: TProxy integration tests
         run: bash tests/test_tproxy_qemu.sh
+
+  # OpenWrt packaging e2e (#284): boots an armsr/armv8 OpenWrt image in QEMU,
+  # installs the meow + luci-app-meow ipks, and verifies service, API, web
+  # panel and proxying inside the guest.
+  openwrt:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: openwrt-e2e
+
+      - name: Install cargo-zigbuild and zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.13.0
+
+      - run: cargo install --locked cargo-zigbuild
+
+      - name: Install qemu and expect
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm expect
+
+      - name: Cache OpenWrt image
+        uses: actions/cache@v4
+        with:
+          path: target/openwrt-images
+          # Keyed on the test script so bumping OPENWRT_VERSION refreshes it.
+          key: openwrt-image-armsr-armv8-${{ hashFiles('tests/test_openwrt_qemu.sh') }}
+
+      - name: OpenWrt QEMU e2e tests
+        run: bash tests/test_openwrt_qemu.sh
