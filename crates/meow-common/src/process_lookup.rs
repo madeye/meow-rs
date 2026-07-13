@@ -314,9 +314,7 @@ mod platform {
         MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
     };
     use windows_sys::Win32::System::ProcessStatus::GetModuleFileNameExW;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     const AF_INET: u32 = 2;
     const AF_INET6: u32 = 23;
@@ -324,15 +322,23 @@ mod platform {
 
     pub fn find_process(network: Network, local: SocketAddr) -> Option<ProcessInfo> {
         let pid = match (network, local.is_ipv4()) {
-            (Network::Tcp, true) => find_pid_in_table::<TcpRow>(AF_INET, TCP_TABLE_OWNER_PID_ALL, local),
-            (Network::Tcp, false) => find_pid_in_table::<Tcp6Row>(AF_INET6, TCP_TABLE_OWNER_PID_ALL, local),
+            (Network::Tcp, true) => {
+                find_pid_in_table::<TcpRow>(AF_INET, TCP_TABLE_OWNER_PID_ALL, local)
+            }
+            (Network::Tcp, false) => {
+                find_pid_in_table::<Tcp6Row>(AF_INET6, TCP_TABLE_OWNER_PID_ALL, local)
+            }
             (Network::Udp, true) => find_pid_in_udp_table(local),
             (Network::Udp, false) => find_pid_in_udp6_table(local),
         };
         let pid = pid?;
         let (name, path) = get_process_info(pid)?;
         trace!(pid, name, path, "process_lookup: matched via Win32 API");
-        Some(ProcessInfo { name, path, uid: None })
+        Some(ProcessInfo {
+            name,
+            path,
+            uid: None,
+        })
     }
 
     /// Generic table walk for TCP tables (IPv4 and IPv6).
@@ -509,9 +515,8 @@ mod platform {
             // SAFETY: we verified offset + row_size <= buf.len() and the
             // allocator over-aligns for common types. read_unaligned handles
             // any remaining misalignment.
-            let row = unsafe {
-                std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const R::Row)
-            };
+            let row =
+                unsafe { std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const R::Row) };
             let port = R::local_port(&row);
             if port != target.port() {
                 continue;
@@ -538,9 +543,7 @@ mod platform {
             if offset + row_size > buf.len() {
                 break;
             }
-            let row = unsafe {
-                std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const R)
-            };
+            let row = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const R) };
             if row.local_port() != target.port() {
                 continue;
             }
