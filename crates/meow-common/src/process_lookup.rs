@@ -310,44 +310,44 @@ mod platform {
     use tracing::trace;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
-        MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID,
+        MIB_TCPROW_OWNER_PID, MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID,
+        TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
     };
-    use windows_sys::Win32::System::ProcessStatus::GetModuleFileNameExW;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     const AF_INET: u32 = 2;
     const AF_INET6: u32 = 23;
     const MAX_RETRIES: u32 = 3;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
     pub fn find_process(network: Network, local: SocketAddr) -> Option<ProcessInfo> {
         let pid = match (network, local.is_ipv4()) {
             (Network::Tcp, true) => {
-                find_pid_in_table::<TcpRow>(AF_INET, TCP_TABLE_OWNER_PID_ALL, local)
+                walk_tcp_table::<MIB_TCPROW_OWNER_PID>(AF_INET, local)
             }
             (Network::Tcp, false) => {
-                find_pid_in_table::<Tcp6Row>(AF_INET6, TCP_TABLE_OWNER_PID_ALL, local)
+                walk_tcp_table::<MIB_TCP6ROW_OWNER_PID>(AF_INET6, local)
             }
-            (Network::Udp, true) => find_pid_in_udp_table(local),
-            (Network::Udp, false) => find_pid_in_udp6_table(local),
+            (Network::Udp, true) => {
+                walk_udp_table::<MIB_UDPROW_OWNER_PID>(AF_INET, local)
+            }
+            (Network::Udp, false) => {
+                walk_udp_table::<MIB_UDP6ROW_OWNER_PID>(AF_INET6, local)
+            }
         };
         let pid = pid?;
         let (name, path) = get_process_info(pid)?;
         trace!(pid, name, path, "process_lookup: matched via Win32 API");
-        Some(ProcessInfo {
-            name,
-            path,
-            uid: None,
-        })
+        Some(ProcessInfo { name, path, uid: None })
     }
 
-    /// Generic table walk for TCP tables (IPv4 and IPv6).
-    /// Uses `std::ptr::read_unaligned` for soundness on unaligned buffers.
-    fn find_pid_in_table<R: TableRow>(
-        family: u32,
-        table_class: i32,
-        target: SocketAddr,
-    ) -> Option<u32> {
+    // ── Unified table walk ──────────────────────────────────────────────
+
+    fn walk_tcp_table<R: RowAccess>(family: u32, target: SocketAddr) -> Option<u32> {
         for _ in 0..MAX_RETRIES {
             let mut buf_size: u32 = 0;
             unsafe {
@@ -356,11 +356,10 @@ mod platform {
                     &mut buf_size,
                     0,
                     family,
-                    table_class,
+                    TCP_TABLE_OWNER_PID_ALL,
                     0,
                 );
             }
-            // Allocate as u8 but ensure proper alignment by reading unaligned.
             let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
             let ret = unsafe {
                 GetExtendedTcpTable(
@@ -368,22 +367,21 @@ mod platform {
                     &mut buf_size,
                     0,
                     family,
-                    table_class,
+                    TCP_TABLE_OWNER_PID_ALL,
                     0,
                 )
             };
             if ret == 0 {
                 return parse_table::<R>(&buf, target);
             }
-            // ERROR_INSUFFICIENT_BUFFER (122) = table grew; retry.
-            if ret != 122 {
+            if ret != ERROR_INSUFFICIENT_BUFFER {
                 return None;
             }
         }
         None
     }
 
-    fn find_pid_in_udp_table(target: SocketAddr) -> Option<u32> {
+    fn walk_udp_table<R: RowAccess>(family: u32, target: SocketAddr) -> Option<u32> {
         for _ in 0..MAX_RETRIES {
             let mut buf_size: u32 = 0;
             unsafe {
@@ -391,7 +389,7 @@ mod platform {
                     std::ptr::null_mut(),
                     &mut buf_size,
                     0,
-                    AF_INET,
+                    family,
                     UDP_TABLE_OWNER_PID,
                     0,
                 );
@@ -402,170 +400,30 @@ mod platform {
                     buf.as_mut_ptr() as *mut _,
                     &mut buf_size,
                     0,
-                    AF_INET,
+                    family,
                     UDP_TABLE_OWNER_PID,
                     0,
                 )
             };
             if ret == 0 {
-                return parse_udp_table::<MIB_UDPROW_OWNER_PID>(&buf, target);
+                return parse_table::<R>(&buf, target);
             }
-            if ret != 122 {
+            if ret != ERROR_INSUFFICIENT_BUFFER {
                 return None;
             }
         }
         None
     }
 
-    fn find_pid_in_udp6_table(target: SocketAddr) -> Option<u32> {
-        for _ in 0..MAX_RETRIES {
-            let mut buf_size: u32 = 0;
-            unsafe {
-                GetExtendedUdpTable(
-                    std::ptr::null_mut(),
-                    &mut buf_size,
-                    0,
-                    AF_INET6,
-                    UDP_TABLE_OWNER_PID,
-                    0,
-                );
-            }
-            let mut buf: Vec<u8> = vec![0u8; buf_size as usize];
-            let ret = unsafe {
-                GetExtendedUdpTable(
-                    buf.as_mut_ptr() as *mut _,
-                    &mut buf_size,
-                    0,
-                    AF_INET6,
-                    UDP_TABLE_OWNER_PID,
-                    0,
-                )
-            };
-            if ret == 0 {
-                return parse_udp_table::<MIB_UDP6ROW_OWNER_PID>(&buf, target);
-            }
-            if ret != 122 {
-                return None;
-            }
-        }
-        None
-    }
+    // ── Row access trait (unified for TCP and UDP) ───────────────────────
 
-    // ── Row trait + IPv4/IPv6 table row types ────────────────────────────
-
-    trait TableRow {
-        type Row: Copy;
-        fn local_addr(row: &Self::Row) -> IpAddr;
-        fn local_port(row: &Self::Row) -> u16;
-        fn owning_pid(row: &Self::Row) -> u32;
-        fn row_size() -> usize;
-    }
-
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct TcpRow(MIB_TCPROW_OWNER_PID);
-
-    impl TableRow for TcpRow {
-        type Row = MIB_TCPROW_OWNER_PID;
-        fn local_addr(row: &Self::Row) -> IpAddr {
-            IpAddr::V4(Ipv4Addr::from(u32::from_be(row.dwLocalAddr)))
-        }
-        fn local_port(row: &Self::Row) -> u16 {
-            u16::from_be(row.dwLocalPort as u16)
-        }
-        fn owning_pid(row: &Self::Row) -> u32 {
-            row.dwOwningPid
-        }
-        fn row_size() -> usize {
-            std::mem::size_of::<MIB_TCPROW_OWNER_PID>()
-        }
-    }
-
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    struct Tcp6Row(MIB_TCP6ROW_OWNER_PID);
-
-    impl TableRow for Tcp6Row {
-        type Row = MIB_TCP6ROW_OWNER_PID;
-        fn local_addr(row: &Self::Row) -> IpAddr {
-            IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr))
-        }
-        fn local_port(row: &Self::Row) -> u16 {
-            u16::from_be(row.dwLocalPort as u16)
-        }
-        fn owning_pid(row: &Self::Row) -> u32 {
-            row.dwOwningPid
-        }
-        fn row_size() -> usize {
-            std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>()
-        }
-    }
-
-    fn parse_table<R: TableRow>(buf: &[u8], target: SocketAddr) -> Option<u32> {
-        if buf.len() < 4 {
-            return None;
-        }
-        let num_entries = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let row_size = R::row_size();
-        for i in 0..num_entries as usize {
-            let offset = 4 + i * row_size;
-            if offset + row_size > buf.len() {
-                break;
-            }
-            // SAFETY: we verified offset + row_size <= buf.len() and the
-            // allocator over-aligns for common types. read_unaligned handles
-            // any remaining misalignment.
-            let row =
-                unsafe { std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const R::Row) };
-            let port = R::local_port(&row);
-            if port != target.port() {
-                continue;
-            }
-            let addr = R::local_addr(&row);
-            if addr_matches(addr, target.ip()) {
-                return Some(R::owning_pid(&row));
-            }
-        }
-        None
-    }
-
-    fn parse_udp_table<R>(buf: &[u8], target: SocketAddr) -> Option<u32>
-    where
-        R: Copy + UdpRow,
-    {
-        if buf.len() < 4 {
-            return None;
-        }
-        let num_entries = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
-        let row_size = std::mem::size_of::<R>();
-        for i in 0..num_entries as usize {
-            let offset = 4 + i * row_size;
-            if offset + row_size > buf.len() {
-                break;
-            }
-            let row = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const R) };
-            if row.local_port() != target.port() {
-                continue;
-            }
-            // UDP wildcard: match if row address is unspecified (0.0.0.0 / ::)
-            // OR equals the target address.
-            let addr = row.local_addr();
-            if is_unspecified(addr) || addr == target.ip() {
-                return Some(row.owning_pid());
-            }
-        }
-        None
-    }
-
-    // ── UDP row trait + IPv4/IPv6 implementations ────────────────────────
-
-    trait UdpRow {
+    trait RowAccess {
         fn local_addr(&self) -> IpAddr;
         fn local_port(&self) -> u16;
         fn owning_pid(&self) -> u32;
     }
 
-    impl UdpRow for MIB_UDPROW_OWNER_PID {
+    impl RowAccess for MIB_TCPROW_OWNER_PID {
         fn local_addr(&self) -> IpAddr {
             IpAddr::V4(Ipv4Addr::from(u32::from_be(self.dwLocalAddr)))
         }
@@ -577,17 +435,7 @@ mod platform {
         }
     }
 
-    #[repr(C)]
-    #[derive(Copy, Clone)]
-    #[allow(non_snake_case)]
-    struct MIB_UDP6ROW_OWNER_PID {
-        ucLocalAddr: [u8; 16],
-        dwLocalScopeId: u32,
-        dwLocalPort: u32,
-        dwOwningPid: u32,
-    }
-
-    impl UdpRow for MIB_UDP6ROW_OWNER_PID {
+    impl RowAccess for MIB_TCP6ROW_OWNER_PID {
         fn local_addr(&self) -> IpAddr {
             IpAddr::V6(Ipv6Addr::from(self.ucLocalAddr))
         }
@@ -599,16 +447,59 @@ mod platform {
         }
     }
 
-    // ── Helpers ──────────────────────────────────────────────────────────
-
-    fn is_unspecified(addr: IpAddr) -> bool {
-        match addr {
-            IpAddr::V4(a) => a.is_unspecified(),
-            IpAddr::V6(a) => a.is_unspecified(),
+    impl RowAccess for MIB_UDPROW_OWNER_PID {
+        fn local_addr(&self) -> IpAddr {
+            IpAddr::V4(Ipv4Addr::from(u32::from_be(self.dwLocalAddr)))
+        }
+        fn local_port(&self) -> u16 {
+            u16::from_be(self.dwLocalPort as u16)
+        }
+        fn owning_pid(&self) -> u32 {
+            self.dwOwningPid
         }
     }
 
-    fn addr_matches(found: IpAddr, target: IpAddr) -> bool {
+    impl RowAccess for MIB_UDP6ROW_OWNER_PID {
+        fn local_addr(&self) -> IpAddr {
+            IpAddr::V6(Ipv6Addr::from(self.ucLocalAddr))
+        }
+        fn local_port(&self) -> u16 {
+            u16::from_be(self.dwLocalPort as u16)
+        }
+        fn owning_pid(&self) -> u32 {
+            self.dwOwningPid
+        }
+    }
+
+    fn parse_table<R: RowAccess>(buf: &[u8], target: SocketAddr) -> Option<u32> {
+        if buf.len() < 4 {
+            return None;
+        }
+        let num_entries = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        let row_size = std::mem::size_of::<R>();
+        for i in 0..num_entries as usize {
+            let offset = 4 + i * row_size;
+            if offset + row_size > buf.len() {
+                break;
+            }
+            // SAFETY: read_unaligned handles misalignment from Vec<u8>.
+            let row = unsafe { std::ptr::read_unaligned(buf.as_ptr().add(offset) as *const R) };
+            if row.local_port() != target.port() {
+                continue;
+            }
+            let addr = row.local_addr();
+            if is_udp_target(addr, target.ip()) {
+                return Some(row.owning_pid());
+            }
+        }
+        None
+    }
+
+    // ── Address matching ────────────────────────────────────────────────
+
+    /// For TCP: exact match + wildcard (unspecified) + v4-mapped-v6.
+    /// For UDP: same plus unmatched wildcard binds (row addr unspecified).
+    fn is_udp_target(found: IpAddr, target: IpAddr) -> bool {
         if found == target {
             return true;
         }
@@ -620,10 +511,11 @@ mod platform {
         }
     }
 
-    /// Use PROCESS_QUERY_LIMITED_INFORMATION (sufficient for
-    /// `QueryFullProcessImageNameW` / `GetModuleFileNameExW`) which works
-    /// even when meow runs unprivileged and the target is an elevated
-    /// or system process.
+    // ── Process path lookup ─────────────────────────────────────────────
+
+    /// Use `QueryFullProcessImageNameW` with `PROCESS_QUERY_LIMITED_INFORMATION`.
+    /// Per MSDN, this API is *documented* to work with a limited handle
+    /// (unlike `GetModuleFileNameExW` which requires `PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`).
     fn get_process_info(pid: u32) -> Option<(String, String)> {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -632,16 +524,17 @@ mod platform {
             }
 
             let mut buf = [0u16; 1024];
-            let size = GetModuleFileNameExW(
+            let mut size = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(
                 handle,
-                std::ptr::null_mut(),
+                PROCESS_NAME_WIN32,
                 buf.as_mut_ptr(),
-                buf.len() as u32,
+                &mut size,
             );
 
             let _ = CloseHandle(handle);
 
-            if size == 0 {
+            if ok == 0 {
                 return None;
             }
 

@@ -35,10 +35,9 @@ libproc = "0.14"
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.60", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_System_Threading",
-    "Win32_System_ProcessStatus",
     "Win32_Foundation",
 ] }
 
