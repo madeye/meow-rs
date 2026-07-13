@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 const SERVICE_NAME: &str = "meow";
 
 #[derive(Parser)]
-#[command(name = "meow", about = "A rule-based tunnel in Rust")]
+#[command(name = "meow", version, about = "A rule-based tunnel in Rust")]
 struct Args {
     /// Path to configuration file
     #[arg(short = 'f', long = "config", default_value = "config.yaml")]

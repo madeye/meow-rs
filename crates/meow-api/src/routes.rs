@@ -358,8 +358,7 @@ async fn update_proxy(
             info!("Selector '{}' switched to '{}'", group_name, body.name);
             StatusCode::NO_CONTENT
         }
-        Ok(SelectResult::Selected(false)) => StatusCode::BAD_REQUEST,
-        Ok(SelectResult::NotSelector) => StatusCode::BAD_REQUEST,
+        Ok(SelectResult::Selected(false) | SelectResult::NotSelector) => StatusCode::BAD_REQUEST,
         Err(e) => {
             warn!("Selector '{}' update task failed: {}", group_name, e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1033,8 +1032,7 @@ async fn select_proxy_in_group(
             info!("Selector '{}' switched to '{}'", group_name, body.name);
             StatusCode::NO_CONTENT
         }
-        Ok(SelectResult::Selected(false)) => StatusCode::BAD_REQUEST,
-        Ok(SelectResult::NotSelector) => StatusCode::BAD_REQUEST,
+        Ok(SelectResult::Selected(false) | SelectResult::NotSelector) => StatusCode::BAD_REQUEST,
         Err(e) => {
             warn!("Selector '{}' update task failed: {}", group_name, e);
             StatusCode::INTERNAL_SERVER_ERROR
