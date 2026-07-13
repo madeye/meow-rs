@@ -308,7 +308,7 @@ impl PlatformGuard {
         ))
     }
 
-    #[allow(clippy::unnecessary_wraps)]
+    #[allow(clippy::unnecessary_wraps, reason = "matches PlatformGuard API on supported platforms")]
     fn teardown(&mut self) -> io::Result<()> {
         Ok(())
     }

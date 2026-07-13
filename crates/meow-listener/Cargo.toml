@@ -9,7 +9,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-default = ["listener-http", "listener-socks5", "listener-mixed"]
+default = ["listener-http", "listener-socks5", "listener-mixed", "listener-tproxy"]
 listener-http = []
 listener-socks5 = []
 listener-tproxy = []

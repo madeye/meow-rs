@@ -11,11 +11,7 @@ keywords = ["proxy", "clash", "mihomo", "vpn", "networking"]
 categories = ["network-programming", "command-line-utilities"]
 
 [features]
-default = [
-    "ss", "trojan", "vless", "vless-vision", "vmess", "snell", "hysteria2", "ech-tls-tunnel",
-    "dns-server", "dns-encrypted",
-    "listener-http", "listener-socks5", "listener-mixed", "boring-tls",
-]
+default = ["full", "boring-tls"]
 boring-tls = ["meow-config/boring-tls"]
 # Auto-download a third-party dashboard from `external-ui-url` (issue #223).
 # Off by default — adds the `zip` dependency (ADR-0007 binary-size caps).
