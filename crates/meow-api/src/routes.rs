@@ -280,7 +280,7 @@ struct ProxyInfo {
     /// Group-only: name of the currently active member.
     #[serde(skip_serializing_if = "Option::is_none")]
     now: Option<String>,
-    /// Last measured delay in ms, 0 if unknown.
+    /// Last measured delay in ms; omitted until a probe has succeeded.
     #[serde(skip_serializing_if = "Option::is_none")]
     delay: Option<u16>,
 }
@@ -296,10 +296,7 @@ impl ProxyInfo {
             current = ?current,
             "building ProxyInfo",
         );
-        let delay = {
-            let h = proxy.delay_history();
-            h.last().map(|d| d.delay).filter(|&d| d > 0)
-        };
+        let delay = Some(proxy.last_delay()).filter(|&d| d > 0);
         Self {
             name: proxy.name().to_string(),
             proxy_type: proxy.adapter_type().to_string(),
