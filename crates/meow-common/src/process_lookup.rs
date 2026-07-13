@@ -579,6 +579,41 @@ mod tests {
     }
 
     #[test]
+    fn tcp_ipv6_lookup() {
+        let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let info =
+            find_process(Network::Tcp, addr).expect("TCP IPv6 process lookup should succeed");
+        assert!(!info.name.is_empty());
+    }
+
+    #[test]
+    fn udp_ipv6_lookup() {
+        let sock = std::net::UdpSocket::bind("[::1]:0").unwrap();
+        let addr = sock.local_addr().unwrap();
+        let info =
+            find_process(Network::Udp, addr).expect("UDP IPv6 process lookup should succeed");
+        assert!(!info.name.is_empty());
+    }
+
+    #[test]
+    fn udp_wildcard_binds_match() {
+        // UDP sockets typically bind 0.0.0.0:port. A lookup targeting
+        // 127.0.0.1:<same_port> should still match via the wildcard rule.
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let actual = sock.local_addr().unwrap();
+        // Query with 127.0.0.1 instead of 0.0.0.0 — the row address is
+        // unspecified, so the wildcard match path is exercised.
+        let target = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            actual.port(),
+        );
+        let info = find_process(Network::Udp, target)
+            .expect("UDP wildcard bind lookup should match via unspecified-address path");
+        assert!(!info.name.is_empty());
+    }
+
+    #[test]
     fn unknown_endpoint_returns_none() {
         // Port 1 is reserved and should not be bound by any test-run process.
         let fake = "127.0.0.1:1".parse().unwrap();
