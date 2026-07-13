@@ -310,9 +310,8 @@ mod platform {
     use tracing::trace;
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID,
-        MIB_TCPROW_OWNER_PID, MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID,
-        TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
+        MIB_UDP6ROW_OWNER_PID, MIB_UDPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
     };
     use windows_sys::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -326,23 +325,19 @@ mod platform {
 
     pub fn find_process(network: Network, local: SocketAddr) -> Option<ProcessInfo> {
         let pid = match (network, local.is_ipv4()) {
-            (Network::Tcp, true) => {
-                walk_tcp_table::<MIB_TCPROW_OWNER_PID>(AF_INET, local)
-            }
-            (Network::Tcp, false) => {
-                walk_tcp_table::<MIB_TCP6ROW_OWNER_PID>(AF_INET6, local)
-            }
-            (Network::Udp, true) => {
-                walk_udp_table::<MIB_UDPROW_OWNER_PID>(AF_INET, local)
-            }
-            (Network::Udp, false) => {
-                walk_udp_table::<MIB_UDP6ROW_OWNER_PID>(AF_INET6, local)
-            }
+            (Network::Tcp, true) => walk_tcp_table::<MIB_TCPROW_OWNER_PID>(AF_INET, local),
+            (Network::Tcp, false) => walk_tcp_table::<MIB_TCP6ROW_OWNER_PID>(AF_INET6, local),
+            (Network::Udp, true) => walk_udp_table::<MIB_UDPROW_OWNER_PID>(AF_INET, local),
+            (Network::Udp, false) => walk_udp_table::<MIB_UDP6ROW_OWNER_PID>(AF_INET6, local),
         };
         let pid = pid?;
         let (name, path) = get_process_info(pid)?;
         trace!(pid, name, path, "process_lookup: matched via Win32 API");
-        Some(ProcessInfo { name, path, uid: None })
+        Some(ProcessInfo {
+            name,
+            path,
+            uid: None,
+        })
     }
 
     // ── Unified table walk ──────────────────────────────────────────────
@@ -525,12 +520,8 @@ mod platform {
 
             let mut buf = [0u16; 1024];
             let mut size = buf.len() as u32;
-            let ok = QueryFullProcessImageNameW(
-                handle,
-                PROCESS_NAME_WIN32,
-                buf.as_mut_ptr(),
-                &mut size,
-            );
+            let ok =
+                QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut size);
 
             let _ = CloseHandle(handle);
 
