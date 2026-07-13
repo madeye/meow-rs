@@ -28,8 +28,7 @@ const SERVICE_NAME: &str = "meow";
 #[derive(Parser)]
 #[command(
     name = "meow",
-    about = "A rule-based tunnel in Rust",
-    disable_version_flag = true
+    about = "A rule-based tunnel in Rust"
 )]
 struct Args {
     /// Path to configuration file
