@@ -207,8 +207,25 @@ fn main() -> Result<()> {
         .build()?;
 
     runtime.block_on(async move {
-        let mut config = load_config(&config_path).await?;
-        info!("Config loaded from {}", config_path);
+        // --config-string replaces the config file as the source (mihomo
+        // behavior); the flag overrides below apply on top of either source.
+        let mut config = if let Some(ref cs) = args.config_string {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(cs)
+                .map_err(|e| anyhow::anyhow!("--config-string: invalid base64: {e}"))?;
+            let yaml = String::from_utf8(bytes)
+                .map_err(|e| anyhow::anyhow!("--config-string: invalid UTF-8: {e}"))?;
+            let config = meow_config::load_config_from_str(&yaml)
+                .await
+                .map_err(|e| anyhow::anyhow!("--config-string: {e}"))?;
+            info!("Config loaded from --config-string");
+            config
+        } else {
+            let config = load_config(&config_path).await?;
+            info!("Config loaded from {}", config_path);
+            config
+        };
 
         // Apply CLI overrides to the loaded config.
         if let Some(ref s) = args.secret {
@@ -225,18 +242,6 @@ fn main() -> Result<()> {
         if let Some(ref ui) = args.ext_ui {
             config.api.external_ui = Some(std::path::PathBuf::from(ui));
             info!("External UI overridden by --ext-ui");
-        }
-        if let Some(ref cs) = args.config_string {
-            use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(cs)
-                .map_err(|e| anyhow::anyhow!("--config-string: invalid base64: {e}"))?;
-            let yaml = String::from_utf8(bytes)
-                .map_err(|e| anyhow::anyhow!("--config-string: invalid UTF-8: {e}"))?;
-            config = meow_config::load_config_from_str(&yaml)
-                .await
-                .map_err(|e| anyhow::anyhow!("--config-string: {e}"))?;
-            info!("Config replaced by --config-string");
         }
 
         run(config, config_path, log_tx).await
