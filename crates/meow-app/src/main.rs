@@ -26,11 +26,7 @@ use tracing::{error, info, warn};
 const SERVICE_NAME: &str = "meow";
 
 #[derive(Parser)]
-#[command(
-    name = "meow",
-    about = "A rule-based tunnel in Rust",
-    version = concat!("Meow Meta ", env!("CARGO_PKG_VERSION"))
-)]
+#[command(name = "meow", about = "A rule-based tunnel in Rust")]
 struct Args {
     /// Path to configuration file
     #[arg(short = 'f', long = "config", default_value = "config.yaml")]
@@ -115,6 +111,12 @@ fn main() -> Result<()> {
     // Writes dh_out.json on drop. Active only when compiled with --features dhat-heap.
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
+
+    // nyanpasu uses -v to query version (mihomo format)
+    if std::env::args().any(|a| a == "-v") {
+        println!("Meow Meta {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     let args = Args::parse();
 
