@@ -23,7 +23,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Ignores live in `.cargo/audit.toml` (the workflow's `ignore:` input
       # in audit-check@v2.0.0 mishandles multiline values).
