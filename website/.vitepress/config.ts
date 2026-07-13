@@ -18,9 +18,21 @@ export default defineConfig({
   // guide/assets so they never collide with the hand-built landing page.
   assetsDir: 'assets',
   head: [
+    ['link', { rel: 'icon', type: 'image/png', href: `${base}logo.png` }],
+    ['link', {
+      rel: 'apple-touch-icon',
+      href: 'https://madeye.github.io/meow-rs/appicon.png',
+    }],
     ['meta', { name: 'theme-color', content: '#ED7E2B' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:title', content: 'meow-rs documentation' }],
+    [
+      'meta',
+      {
+        property: 'og:image',
+        content: 'https://madeye.github.io/meow-rs/appicon.png',
+      },
+    ],
     [
       'meta',
       {
@@ -31,7 +43,7 @@ export default defineConfig({
     ],
   ],
   themeConfig: {
-    logo: '/logo.svg',
+    logo: '/logo.png',
     siteTitle: 'meow-rs',
     outline: { level: [2, 3], label: 'On this page' },
     nav: [
@@ -104,7 +116,7 @@ export default defineConfig({
     search: { provider: 'local' },
     footer: {
       message:
-        'Released under the GPL-3.0 License. A Rust take on the mihomo proxy kernel.',
+        'Released under the MIT License. A Rust take on the mihomo proxy kernel.',
       copyright: 'Rules in · packets out · over every wall.',
     },
   },

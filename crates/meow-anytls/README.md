@@ -29,8 +29,8 @@ meow-rs stays publishable to crates.io.
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2024 Mickey and AnyTLS Contributors,
-with fork modifications. This differs from the GPL-3.0 license of the rest of
-the meow-rs workspace.
+with fork modifications. The rest of the meow-rs workspace is MIT-licensed as
+well.
 
 ## Updating
 

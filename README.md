@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="https://madeye.github.io/meow-rs/logo.png" alt="meow-rs — a ginger cat peeking over a wall" width="160">
+</div>
+
 # meow-rs
 
 A high-performance Rust implementation of the [mihomo](https://github.com/MetaCubeX/mihomo) (Clash Meta) proxy kernel. Rule-based tunneling with support for multiple proxy protocols, transparent proxy, DNS snooping, a REST API, and a built-in web dashboard.
