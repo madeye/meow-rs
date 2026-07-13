@@ -246,13 +246,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
 #[derive(Serialize)]
 struct HelloResponse {
-    hello: String,
+    hello: &'static str,
 }
 
 async fn hello() -> Json<HelloResponse> {
-    Json(HelloResponse {
-        hello: "meow".to_string(),
-    })
+    Json(HelloResponse { hello: "meow" })
 }
 
 #[derive(Serialize)]
@@ -459,12 +457,6 @@ struct ConfigResponse {
     bind_address: String,
     #[serde(rename = "ipv6")]
     ipv6: bool,
-    #[serde(rename = "find-process-mode")]
-    find_process_mode: String,
-    #[serde(rename = "tcp-concurrent")]
-    tcp_concurrent: bool,
-    #[serde(rename = "sniffing")]
-    sniffing: bool,
 }
 
 async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
@@ -484,9 +476,6 @@ async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse>
             .clone()
             .unwrap_or_else(|| "0.0.0.0".to_string()),
         ipv6: raw.ipv6.unwrap_or(false),
-        find_process_mode: "off".to_string(),
-        tcp_concurrent: false,
-        sniffing: true,
     })
 }
 
@@ -694,7 +683,10 @@ async fn select_proxy_member_async(
 ) -> Result<SelectResult, tokio::task::JoinError> {
     tokio::task::spawn_blocking(move || {
         use meow_proxy::SelectorGroup;
-        match proxy.as_any().and_then(|a| a.downcast_ref::<SelectorGroup>()) {
+        match proxy
+            .as_any()
+            .and_then(|a| a.downcast_ref::<SelectorGroup>())
+        {
             Some(selector) => SelectResult::Selected(selector.select(&member)),
             None => SelectResult::NotSelector,
         }

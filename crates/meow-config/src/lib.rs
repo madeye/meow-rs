@@ -430,16 +430,11 @@ fn rebuild_from_raw_impl(
     // Auto-create GLOBAL selector if not defined by user (mihomo compatibility).
     // clash-nyanpasu and other frontends depend on GLOBAL to build proxy tree.
     if !proxies.contains_key("GLOBAL") {
-        let all_proxy_names: Vec<String> = proxies
+        let mut all_proxy_names: Vec<String> = proxies
             .keys()
-            .filter(|name| {
-                !matches!(
-                    name.as_str(),
-                    "DIRECT" | "REJECT" | "REJECT-DROP"
-                )
-            })
-            .map(|name| name.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
+        all_proxy_names.sort();
         let global_config = raw::RawProxyGroup {
             name: "GLOBAL".to_string(),
             group_type: "select".to_string(),

@@ -72,6 +72,7 @@ meow-listener = { workspace = true, default-features = false }
 meow-dns = { workspace = true, default-features = false }
 meow-api = { workspace = true }
 meow-proxy = { workspace = true, default-features = false }
+base64 = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

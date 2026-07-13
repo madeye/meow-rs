@@ -168,8 +168,9 @@ fn rebuild_from_raw_parses_rules() {
 fn rebuild_from_raw_empty_config() {
     let raw = RawConfig::default();
     let (proxies, rules) = rebuild_from_raw(&raw).unwrap();
-    // Should still have built-in proxies
-    assert_eq!(proxies.len(), 3);
+    // Should still have built-in proxies + auto-created GLOBAL
+    assert_eq!(proxies.len(), 4);
+    assert!(proxies.contains_key("GLOBAL"));
     assert!(rules.is_empty());
 }
 
