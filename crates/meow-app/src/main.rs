@@ -28,7 +28,8 @@ const SERVICE_NAME: &str = "meow";
 #[derive(Parser)]
 #[command(
     name = "meow",
-    about = "A rule-based tunnel in Rust"
+    about = "A rule-based tunnel in Rust",
+    version = concat!("Meow Meta ", env!("CARGO_PKG_VERSION"))
 )]
 struct Args {
     /// Path to configuration file
@@ -46,10 +47,6 @@ struct Args {
     /// Set geodata mode
     #[arg(short = 'm', long = "geodata-mode")]
     geodata_mode: bool,
-
-    /// Show current version of meow
-    #[arg(short = 'v')]
-    version: bool,
 
     /// Specify base64-encoded configuration string
     #[arg(long = "config-string")]
@@ -120,17 +117,6 @@ fn main() -> Result<()> {
     let _profiler = dhat::Profiler::new_heap();
 
     let args = Args::parse();
-
-    // Handle -v flag: print version in mihomo format and exit
-    if args.version {
-        println!(
-            "Meow Meta {} {} {}",
-            env!("CARGO_PKG_VERSION"),
-            std::env::consts::OS,
-            std::env::consts::ARCH
-        );
-        return Ok(());
-    }
 
     // Hard-error on unsupported flags instead of silently ignoring them.
     if args.post_up.is_some() {
