@@ -172,6 +172,11 @@ impl BodyCipher {
         plaintext: &[u8],
     ) -> std::io::Result<()> {
         if matches!(self.write, RecordCipher::None) {
+            // OPT_STANDARD advertises chunk streaming even when the security
+            // type is none, so the payload still carries the 2-byte size.
+            let len = u16::try_from(plaintext.len())
+                .map_err(|_| std::io::Error::other("vmess plaintext record too large"))?;
+            writer.write_all(&len.to_be_bytes()).await?;
             writer.write_all(plaintext).await?;
             return writer.flush().await;
         }
@@ -190,12 +195,14 @@ impl BodyCipher {
         reader: &mut R,
     ) -> std::io::Result<Vec<u8>> {
         if matches!(self.read, RecordCipher::None) {
-            let mut buf = vec![0u8; 4096];
-            let n = reader.read(&mut buf).await?;
-            if n == 0 {
+            let mut len_buf = [0u8; 2];
+            reader.read_exact(&mut len_buf).await?;
+            let len = u16::from_be_bytes(len_buf) as usize;
+            if len == 0 {
                 return Err(std::io::ErrorKind::UnexpectedEof.into());
             }
-            buf.truncate(n);
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).await?;
             return Ok(buf);
         }
 
@@ -290,14 +297,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn none_is_passthrough() {
+    async fn none_still_uses_chunk_framing() {
         let (req_key, req_iv) = test_keys();
         let mut cipher = BodyCipher::new(Security::None, &req_key, &req_iv, 0x42);
         let plaintext = b"raw bytes no framing";
 
         let mut wire = Vec::new();
         cipher.write_record(&mut wire, plaintext).await.unwrap();
-        assert_eq!(wire, plaintext, "security:none must not add framing");
+        assert_eq!(
+            &wire[..2],
+            &(plaintext.len() as u16).to_be_bytes(),
+            "security:none keeps the chunk length advertised by OPT_STANDARD"
+        );
+        assert_eq!(&wire[2..], plaintext);
+
+        let mut cursor = std::io::Cursor::new(wire);
+        assert_eq!(cipher.read_record(&mut cursor).await.unwrap(), plaintext);
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 use aes::cipher::{BlockEncrypt, KeyInit};
 use aes::Aes128;
-use aes_gcm::aead::Aead;
+use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes128Gcm, Nonce};
 use md5::{Digest, Md5};
 use rand::RngCore;
@@ -128,7 +128,13 @@ pub fn seal_request_header(
     let cipher = Aes128Gcm::new_from_slice(&header_key)
         .map_err(|e| format!("vmess: header cipher init: {e}"))?;
     let encrypted_header = cipher
-        .encrypt(Nonce::from_slice(&header_iv), plaintext.as_ref())
+        .encrypt(
+            Nonce::from_slice(&header_iv),
+            Payload {
+                msg: &plaintext,
+                aad: &auth_id,
+            },
+        )
         .map_err(|e| format!("vmess: header encrypt: {e}"))?;
 
     // 6) Encrypt the length. The length field is the PLAINTEXT header length
@@ -140,7 +146,10 @@ pub fn seal_request_header(
     let encrypted_length = length_cipher
         .encrypt(
             Nonce::from_slice(&length_iv),
-            header_len.to_be_bytes().as_ref(),
+            Payload {
+                msg: &header_len.to_be_bytes(),
+                aad: &auth_id,
+            },
         )
         .map_err(|e| format!("vmess: length encrypt: {e}"))?;
 
@@ -480,7 +489,7 @@ mod tests {
     /// bytes. This catches the seal-order, plaintext-length, and length-salt
     /// bugs that a self-consistent seal/open pair would hide.
     fn server_open_request_header(cmd_key: &[u8; 16], wire: &[u8]) -> Result<Vec<u8>, String> {
-        use aes_gcm::aead::Aead;
+        use aes_gcm::aead::{Aead, Payload};
         let auth_id = &wire[0..16];
         let encrypted_length = &wire[16..34]; // 2 + 16 tag
         let conn_nonce = &wire[34..42]; // 8 bytes AFTER the length block
@@ -496,7 +505,13 @@ mod tests {
         );
         let len_cipher = Aes128Gcm::new_from_slice(&length_key).map_err(|e| e.to_string())?;
         let len_pt = len_cipher
-            .decrypt(Nonce::from_slice(&length_iv), encrypted_length)
+            .decrypt(
+                Nonce::from_slice(&length_iv),
+                Payload {
+                    msg: encrypted_length,
+                    aad: auth_id,
+                },
+            )
             .map_err(|_| "length AEAD open failed".to_string())?;
         let l = u16::from_be_bytes([len_pt[0], len_pt[1]]) as usize;
         if encrypted_payload.len() != l + 16 {
@@ -511,7 +526,13 @@ mod tests {
         let header_iv = kdf12(cmd_key, &[b"VMess Header AEAD Nonce", auth_id, conn_nonce]);
         let hdr_cipher = Aes128Gcm::new_from_slice(&header_key).map_err(|e| e.to_string())?;
         let plaintext = hdr_cipher
-            .decrypt(Nonce::from_slice(&header_iv), encrypted_payload)
+            .decrypt(
+                Nonce::from_slice(&header_iv),
+                Payload {
+                    msg: encrypted_payload,
+                    aad: auth_id,
+                },
+            )
             .map_err(|_| "payload AEAD open failed".to_string())?;
         if plaintext.len() != l {
             return Err(format!("plaintext len {} != L {}", plaintext.len(), l));
