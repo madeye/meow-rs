@@ -20,7 +20,7 @@ spawn qemu-system-aarch64 \
     -M virt -cpu cortex-a57 -smp 2 -m 1024 \
     -nographic -no-reboot \
     -kernel $image \
-    -netdev user,id=net0 -device virtio-net-pci,netdev=net0
+    -netdev user,id=net0 -device virtio-net-pci,netdev=net0,romfile=
 
 expect {
     "Please press Enter to activate this console" {
