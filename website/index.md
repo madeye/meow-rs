@@ -6,7 +6,7 @@ hero:
   text: The manual
   tagline: Every feature and every config key of the Rust proxy kernel that always lands on its feet — protocols, rules, DNS, transparent proxy, and the REST API.
   image:
-    src: /logo.svg
+    src: /logo.png
     alt: meow-rs
   actions:
     - theme: brand

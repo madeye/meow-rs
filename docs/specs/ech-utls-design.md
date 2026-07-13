@@ -25,7 +25,7 @@ primary TLS backend for any connection that has `client-fingerprint` or `ech-opt
 | `tokio-boring` | `5.0.0` | Tokio async wrapper around boring — `SslConnector`, `SslStream` |
 
 Both are Cloudflare-maintained. License: OpenSSL License + ISC (permissive; compatible with
-GPL-3.0).
+the workspace's MIT license).
 
 Both crates are gated behind a new cargo feature `boring-tls` (see §8). They must **not** be
 pulled into the default build to avoid the C toolchain requirement on CI workers that don't need

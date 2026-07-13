@@ -150,7 +150,7 @@ remains CI-only.
 
 **`cargo-deny`: deferred.** A `deny.toml` for license / advisory / duplicate
 auditing is valuable but is its own design exercise (which licenses are
-acceptable for a GPL-3 project? what RUSTSEC IDs are exempted?). Filed as a
+acceptable for an MIT project? what RUSTSEC IDs are exempted?). Filed as a
 follow-up; out of scope for M1.
 
 **`cargo-machete` in CI: yes.** M0 leaves the workspace at zero machete
