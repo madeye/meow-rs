@@ -2222,6 +2222,7 @@ name = "meow-app"
 version = "0.16.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "dashmap",
  "dhat",

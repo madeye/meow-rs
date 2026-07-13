@@ -68,6 +68,7 @@ select option { background: #1a2634; }
 .inline-select { background: #0f1923; border: 1px solid #2a3a4a; color: #e0e0e0; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
 .search-box { margin-bottom: 12px; }
 .search-box input { width: 100%; }
+.secret-input { width: 160px; background: #0f1923; border: 1px solid #2a3a4a; color: #e0e0e0; padding: 6px 10px; border-radius: 4px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -75,6 +76,8 @@ select option { background: #1a2634; }
 <header>
   <h1>meow-rs</h1>
   <div class="header-actions">
+    <input type="password" id="api-secret" placeholder="API Secret"
+           class="secret-input" />
     <button class="btn btn-success" onclick="saveConfig()">Save Config</button>
   </div>
 </header>
@@ -235,7 +238,10 @@ function formatTime(ts) {
 }
 
 async function api(path, opts) {
-  const res = await fetch(API + path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const secret = localStorage.getItem('meow-secret') || '';
+  const headers = { 'Content-Type': 'application/json' };
+  if (secret) headers['Authorization'] = 'Bearer ' + secret;
+  const res = await fetch(API + path, { headers, ...opts });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(text || res.statusText);
@@ -548,6 +554,13 @@ async function saveConfig() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────
+
+// Restore API secret from localStorage
+const secretInput = document.getElementById('api-secret');
+secretInput.value = localStorage.getItem('meow-secret') || '';
+secretInput.addEventListener('change', e => {
+  localStorage.setItem('meow-secret', e.target.value);
+});
 
 loadOverview();
 setInterval(async () => {

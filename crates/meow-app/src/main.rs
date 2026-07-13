@@ -40,6 +40,54 @@ struct Args {
     #[arg(short = 't', long = "test")]
     test: bool,
 
+    /// Set geodata mode
+    #[arg(short = 'm', long = "geodata-mode")]
+    geodata_mode: bool,
+
+    /// Specify base64-encoded configuration string
+    #[arg(long = "config-string")]
+    config_string: Option<String>,
+
+    /// Override external UI directory
+    #[arg(long = "ext-ui")]
+    ext_ui: Option<String>,
+
+    /// Override external controller address
+    #[arg(long = "ext-ctl")]
+    ext_ctl: Option<String>,
+
+    /// Override external controller TLS address
+    #[arg(long = "ext-ctl-tls")]
+    ext_ctl_tls: Option<String>,
+
+    /// Override external controller unix address
+    #[arg(long = "ext-ctl-unix")]
+    ext_ctl_unix: Option<String>,
+
+    /// Override external controller pipe address
+    #[arg(long = "ext-ctl-pipe")]
+    ext_ctl_pipe: Option<String>,
+
+    /// Override external controller routing mark
+    #[arg(long = "ext-ctl-routing-mark")]
+    ext_ctl_routing_mark: Option<u32>,
+
+    /// Override secret for RESTful API
+    #[arg(long = "secret")]
+    secret: Option<String>,
+
+    /// Set post-up script
+    #[arg(long = "post-up")]
+    post_up: Option<String>,
+
+    /// Set post-down script
+    #[arg(long = "post-down")]
+    post_down: Option<String>,
+
+    /// Specify age secret key to decrypt configuration
+    #[arg(long = "age-secret-key")]
+    age_secret_key: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -64,7 +112,24 @@ fn main() -> Result<()> {
     #[cfg(feature = "dhat-heap")]
     let _profiler = dhat::Profiler::new_heap();
 
+    // nyanpasu uses -v to query version (mihomo format)
+    if std::env::args().any(|a| a == "-v") {
+        println!("Meow Meta {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let args = Args::parse();
+
+    // Hard-error on unsupported flags instead of silently ignoring them.
+    if args.post_up.is_some() {
+        anyhow::bail!("--post-up is not yet supported");
+    }
+    if args.post_down.is_some() {
+        anyhow::bail!("--post-down is not yet supported");
+    }
+    if args.age_secret_key.is_some() {
+        anyhow::bail!("--age-secret-key is not yet supported");
+    }
 
     // Handle subcommands before initializing logging/runtime
     if let Some(cmd) = &args.command {
@@ -142,8 +207,38 @@ fn main() -> Result<()> {
         .build()?;
 
     runtime.block_on(async move {
-        let config = load_config(&config_path).await?;
+        let mut config = load_config(&config_path).await?;
         info!("Config loaded from {}", config_path);
+
+        // Apply CLI overrides to the loaded config.
+        if let Some(ref s) = args.secret {
+            config.api.secret = Some(s.clone());
+            info!("API secret overridden by --secret");
+        }
+        if let Some(ref ctl) = args.ext_ctl {
+            let addr: std::net::SocketAddr = ctl
+                .parse()
+                .map_err(|e| anyhow::anyhow!("--ext-ctl: invalid address '{ctl}': {e}"))?;
+            config.api.external_controller = Some(addr);
+            info!("External controller overridden by --ext-ctl: {addr}");
+        }
+        if let Some(ref ui) = args.ext_ui {
+            config.api.external_ui = Some(std::path::PathBuf::from(ui));
+            info!("External UI overridden by --ext-ui");
+        }
+        if let Some(ref cs) = args.config_string {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(cs)
+                .map_err(|e| anyhow::anyhow!("--config-string: invalid base64: {e}"))?;
+            let yaml = String::from_utf8(bytes)
+                .map_err(|e| anyhow::anyhow!("--config-string: invalid UTF-8: {e}"))?;
+            config = meow_config::load_config_from_str(&yaml)
+                .await
+                .map_err(|e| anyhow::anyhow!("--config-string: {e}"))?;
+            info!("Config replaced by --config-string");
+        }
+
         run(config, config_path, log_tx).await
     })
 }
