@@ -483,7 +483,7 @@ mod platform {
                 continue;
             }
             let addr = row.local_addr();
-            if is_udp_target(addr, target.ip()) {
+            if addr_matches(addr, target.ip()) {
                 return Some(row.owning_pid());
             }
         }
@@ -492,9 +492,9 @@ mod platform {
 
     // ── Address matching ────────────────────────────────────────────────
 
-    /// For TCP: exact match + wildcard (unspecified) + v4-mapped-v6.
-    /// For UDP: same plus unmatched wildcard binds (row addr unspecified).
-    fn is_udp_target(found: IpAddr, target: IpAddr) -> bool {
+    /// Match a row address against the target: exact match, wildcard
+    /// (unspecified 0.0.0.0 / ::), or v4-mapped-v6.
+    fn addr_matches(found: IpAddr, target: IpAddr) -> bool {
         if found == target {
             return true;
         }
