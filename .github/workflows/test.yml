@@ -269,17 +269,41 @@ jobs:
       - name: Build
         run: cargo build --tests
 
-      - name: Core smoke tests
-        run: |
-          cargo test --lib
-          cargo test --test common_test -- --nocapture
-          cargo test --test config_test -- --nocapture
-          cargo test --test rules_test -- --nocapture
-          cargo test --test api_test -- --nocapture
-          cargo test --test trojan_integration -- --nocapture
-          cargo test -p meow-dns --lib -- --nocapture
-          cargo test -p meow-transport --test tls_test -- --nocapture
-          cargo test -p meow-transport --test ws_test -- --nocapture
+      - name: Unit tests (windows)
+        shell: bash
+        run: cargo test --lib
+
+      - name: Common types tests (windows)
+        shell: bash
+        run: cargo test --test common_test -- --nocapture
+
+      - name: Config parsing tests (windows)
+        shell: bash
+        run: cargo test --test config_test -- --nocapture
+
+      - name: Rules tests (windows)
+        shell: bash
+        run: cargo test --test rules_test -- --nocapture
+
+      - name: API tests (windows)
+        shell: bash
+        run: cargo test --test api_test -- --nocapture
+
+      - name: Trojan integration tests (windows)
+        shell: bash
+        run: cargo test --test trojan_integration -- --nocapture
+
+      - name: DNS unit tests (windows)
+        shell: bash
+        run: cargo test -p meow-dns --lib -- --nocapture
+
+      - name: Transport TLS tests (windows)
+        shell: bash
+        run: cargo test -p meow-transport --test tls_test -- --nocapture
+
+      - name: Transport WS tests (windows)
+        shell: bash
+        run: cargo test -p meow-transport --test ws_test -- --nocapture
 
   macos:
     runs-on: macos-latest
