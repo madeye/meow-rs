@@ -1,7 +1,7 @@
 use super::{Args, LogTarget, ShutdownSignal};
 use anyhow::{Context, Result};
 use clap::Parser;
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -26,10 +26,32 @@ use windows_sys::Win32::Foundation::{
 const SERVICE_NAME: &str = "meow";
 const SERVICE_DISPLAY_NAME: &str = "meow-rs Proxy Service";
 const SERVICE_DESCRIPTION: &str = "meow-rs rule-based proxy kernel";
-const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(30);
+const SERVICE_START_TIMEOUT: Duration = Duration::from_secs(120);
 const SERVICE_STOP_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const START_PENDING_WAIT_HINT: Duration = Duration::from_secs(15);
+const STARTUP_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServicePhase {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+}
+
+struct ControlState {
+    status_handle: Option<ServiceStatusHandle>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    phase: ServicePhase,
+    checkpoint: u32,
+}
+
+struct ServiceLifecycle {
+    state: Mutex<ControlState>,
+    changed: Condvar,
+}
 
 define_windows_service!(ffi_service_main, service_main);
 
@@ -43,11 +65,22 @@ pub(super) fn install(config_override: Option<&str>, args: &Args) -> Result<()> 
     let executable_path = canonical_file(&current_exe, "meow executable")?;
     let requested_config = absolute_path(config_override.unwrap_or(&args.config))?;
     let config_path = canonical_file(&requested_config, "configuration file")?;
-    let home_dir = config_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .context("configuration file has no parent directory")?
-        .to_path_buf();
+    let current_dir = std::env::current_dir()?;
+    let default_home = meow_config::meow_config_dir();
+    let requested_home =
+        resolve_service_home(args.directory.as_deref(), &default_home, &current_dir);
+    std::fs::create_dir_all(&requested_home).with_context(|| {
+        format!(
+            "failed to create meow home directory {}",
+            requested_home.display()
+        )
+    })?;
+    let home_dir = requested_home.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve meow home directory {}",
+            requested_home.display()
+        )
+    })?;
     let log_dir = service_log_dir()?;
     std::fs::create_dir_all(&log_dir).with_context(|| {
         format!(
@@ -233,30 +266,29 @@ fn run_service() -> Result<()> {
     let log_dir = service_log_dir()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-    struct ControlState {
-        status_handle: Option<ServiceStatusHandle>,
-        shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
-        stopping: bool,
-    }
-
-    let control_state = Arc::new(Mutex::new(ControlState {
-        status_handle: None,
-        shutdown_tx: Some(shutdown_tx),
-        stopping: false,
-    }));
-    let handler_state = Arc::clone(&control_state);
+    let lifecycle = Arc::new(ServiceLifecycle {
+        state: Mutex::new(ControlState {
+            status_handle: None,
+            shutdown_tx: Some(shutdown_tx),
+            phase: ServicePhase::Starting,
+            checkpoint: 1,
+        }),
+        changed: Condvar::new(),
+    });
+    let handler_lifecycle = Arc::clone(&lifecycle);
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             ServiceControl::Stop | ServiceControl::Shutdown => {
-                let mut state = handler_state.lock();
-                state.stopping = true;
+                let mut state = handler_lifecycle.state.lock();
+                state.phase = ServicePhase::Stopping;
                 if let Some(status_handle) = state.status_handle {
                     let _ = status_handle.set_service_status(stop_pending_status());
                 }
                 if let Some(sender) = state.shutdown_tx.take() {
                     let _ = sender.send(());
                 }
+                handler_lifecycle.changed.notify_all();
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
@@ -266,34 +298,76 @@ fn run_service() -> Result<()> {
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
         .context("failed to register the meow service control handler")?;
     {
-        let mut state = control_state.lock();
+        let mut state = lifecycle.state.lock();
         state.status_handle = Some(status_handle);
-        status_handle.set_service_status(if state.stopping {
-            stop_pending_status()
-        } else {
-            running_status()
-        })?;
+        status_handle.set_service_status(start_pending_status(state.checkpoint))?;
     }
+
+    // Keep the SCM startup checkpoint moving while configuration and resource
+    // loading are in progress. The ready callback below wakes this reporter as
+    // soon as all runtime tasks have been created.
+    let reporter_lifecycle = Arc::clone(&lifecycle);
+    let startup_reporter = thread::spawn(move || -> windows_service::Result<()> {
+        let mut state = reporter_lifecycle.state.lock();
+        loop {
+            if state.phase != ServicePhase::Starting {
+                return Ok(());
+            }
+            reporter_lifecycle
+                .changed
+                .wait_for(&mut state, STARTUP_CHECKPOINT_INTERVAL);
+            if state.phase != ServicePhase::Starting {
+                return Ok(());
+            }
+            state.checkpoint = state.checkpoint.saturating_add(1);
+            if let Some(status_handle) = state.status_handle {
+                status_handle.set_service_status(start_pending_status(state.checkpoint))?;
+            }
+        }
+    });
+
+    let ready_lifecycle = Arc::clone(&lifecycle);
+    let on_ready: super::ReadyCallback = Box::new(move || {
+        let mut state = ready_lifecycle.state.lock();
+        if state.phase != ServicePhase::Starting {
+            anyhow::bail!("Windows service stopped before application startup completed");
+        }
+        status_handle
+            .set_service_status(running_status())
+            .context("failed to report the running service status")?;
+        state.phase = ServicePhase::Running;
+        ready_lifecycle.changed.notify_all();
+        Ok(())
+    });
 
     let result = super::run_application(
         args,
         LogTarget::WindowsService(log_dir),
         ShutdownSignal::WindowsService(shutdown_rx),
+        Some(on_ready),
     );
-    if let Err(error) = &result {
-        tracing::error!(error = %format_args!("{error:#}"), "Windows service stopped with an error");
-    }
 
     let exit_code = if result.is_ok() {
         ServiceExitCode::NO_ERROR
     } else {
         ServiceExitCode::ServiceSpecific(1)
     };
-    let status_result = status_handle.set_service_status(stopped_status(exit_code));
+    let status_result = {
+        let mut state = lifecycle.state.lock();
+        state.phase = ServicePhase::Stopped;
+        lifecycle.changed.notify_all();
+        status_handle.set_service_status(stopped_status(exit_code))
+    };
+    let reporter_result = startup_reporter
+        .join()
+        .map_err(|_| anyhow::anyhow!("Windows service startup reporter thread panicked"))?;
 
     match result {
         Err(error) => Err(error),
-        Ok(()) => status_result.context("failed to report the stopped service status"),
+        Ok(()) => {
+            reporter_result.context("failed to update the pending service status")?;
+            status_result.context("failed to report the stopped service status")
+        }
     }
 }
 
@@ -303,6 +377,15 @@ fn absolute_path(path: &str) -> Result<PathBuf> {
         Ok(path)
     } else {
         Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn resolve_service_home(explicit: Option<&str>, default_home: &Path, cwd: &Path) -> PathBuf {
+    let home = explicit.map_or_else(|| default_home.to_path_buf(), PathBuf::from);
+    if home.is_absolute() {
+        home
+    } else {
+        cwd.join(home)
     }
 }
 
@@ -354,7 +437,9 @@ fn wait_until_running(
     service: &windows_service::service::Service,
     timeout: Duration,
 ) -> Result<()> {
-    let deadline = Instant::now() + timeout;
+    let overall_deadline = Instant::now() + timeout;
+    let mut last_checkpoint = None;
+    let mut progress_deadline = Instant::now() + START_PENDING_WAIT_HINT;
     loop {
         let status = service.query_status()?;
         match status.current_state {
@@ -365,11 +450,28 @@ fn wait_until_running(
                     status.exit_code
                 )
             }
-            _ if Instant::now() >= deadline => {
-                anyhow::bail!("timed out waiting for the meow service to start")
+            ServiceState::StartPending if last_checkpoint != Some(status.checkpoint) => {
+                last_checkpoint = Some(status.checkpoint);
+                let wait_hint = status
+                    .wait_hint
+                    .max(STARTUP_CHECKPOINT_INTERVAL)
+                    .min(Duration::from_secs(30));
+                progress_deadline = Instant::now() + wait_hint;
             }
-            _ => thread::sleep(POLL_INTERVAL),
+            _ => {}
         }
+
+        let now = Instant::now();
+        if now >= overall_deadline {
+            anyhow::bail!("timed out waiting for the meow service to start")
+        }
+        if now >= progress_deadline {
+            anyhow::bail!(
+                "meow service stopped making startup progress at checkpoint {}",
+                last_checkpoint.unwrap_or(0)
+            )
+        }
+        thread::sleep(POLL_INTERVAL);
     }
 }
 
@@ -412,6 +514,18 @@ fn running_status() -> ServiceStatus {
         exit_code: ServiceExitCode::NO_ERROR,
         checkpoint: 0,
         wait_hint: Duration::ZERO,
+        process_id: None,
+    }
+}
+
+fn start_pending_status(checkpoint: u32) -> ServiceStatus {
+    ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::StartPending,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::NO_ERROR,
+        checkpoint,
+        wait_hint: START_PENDING_WAIT_HINT,
         process_id: None,
     }
 }
@@ -487,6 +601,44 @@ mod tests {
             log_dir_from_program_data(program_data),
             PathBuf::from(r"D:\Shared Program Data\meow\logs")
         );
+    }
+
+    #[test]
+    fn default_service_home_matches_cli_default_under_install_cwd() {
+        let cwd = Path::new(r"E:\test");
+        let home = resolve_service_home(None, Path::new("meow"), cwd);
+        assert_eq!(home, PathBuf::from(r"E:\test\meow"));
+    }
+
+    #[test]
+    fn explicit_service_home_preserves_absolute_and_resolves_relative_paths() {
+        let cwd = Path::new(r"E:\test");
+        let relative = resolve_service_home(Some("custom 猫 data"), Path::new("meow"), cwd);
+        assert_eq!(relative, PathBuf::from(r"E:\test\custom 猫 data"));
+
+        let absolute = resolve_service_home(
+            Some(r"D:\Shared Program Data\meow"),
+            Path::new("ignored"),
+            cwd,
+        );
+        assert_eq!(absolute, PathBuf::from(r"D:\Shared Program Data\meow"));
+    }
+
+    #[test]
+    fn service_starts_pending_and_accepts_controls_only_when_running() {
+        let pending = start_pending_status(7);
+        assert_eq!(pending.current_state, ServiceState::StartPending);
+        assert_eq!(pending.checkpoint, 7);
+        assert!(pending.controls_accepted.is_empty());
+
+        let running = running_status();
+        assert_eq!(running.current_state, ServiceState::Running);
+        assert!(running
+            .controls_accepted
+            .contains(ServiceControlAccept::STOP));
+        assert!(running
+            .controls_accepted
+            .contains(ServiceControlAccept::SHUTDOWN));
     }
 
     #[test]
