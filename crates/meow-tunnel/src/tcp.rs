@@ -1,4 +1,4 @@
-use crate::relay::{copy_bidirectional_buf, RELAY_BUF_SIZE};
+use crate::relay::{copy_bidirectional_buf_tracked, RELAY_BUF_SIZE};
 use crate::statistics::Statistics;
 use crate::tunnel::TunnelInner;
 use meow_common::{Metadata, ProxyConn};
@@ -79,7 +79,7 @@ pub async fn handle_tcp(
     // the abort case where the manual close call below would never run.
     // `rule_name` / `rule_payload` are moved in (already `SmolStr`); the
     // chains vec carries one `Arc<str>` for the proxy name.
-    let _guard = ConnectionGuard::track(
+    let guard = ConnectionGuard::track(
         &tunnel.stats,
         metadata.pure(),
         rule_name,
@@ -95,10 +95,18 @@ pub async fn handle_tcp(
     // Dial the remote via proxy
     match proxy.dial_tcp(&metadata).await {
         Ok(mut remote) => {
-            match copy_bidirectional_buf(&mut conn, &mut remote, &mut buf_up, &mut buf_dn).await {
+            let id = guard.id();
+            match copy_bidirectional_buf_tracked(
+                &mut conn,
+                &mut remote,
+                &mut buf_up,
+                &mut buf_dn,
+                |n| tunnel.stats.record_connection_upload(id, n as i64),
+                |n| tunnel.stats.record_connection_download(id, n as i64),
+            )
+            .await
+            {
                 Ok((up, down)) => {
-                    tunnel.stats.add_upload(up as i64);
-                    tunnel.stats.add_download(down as i64);
                     debug!(
                         "{} closed: up={} down={}",
                         metadata.remote_address(),

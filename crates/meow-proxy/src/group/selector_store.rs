@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
 
+static GLOBAL_STORE: std::sync::OnceLock<Arc<SelectorStore>> = std::sync::OnceLock::new();
+
 /// Map of `{group_name → selected_proxy_name}` persisted to a JSON file.
 pub struct SelectorStore {
     path: PathBuf,
@@ -36,10 +38,18 @@ impl SelectorStore {
                 HashMap::new()
             }
         };
-        Arc::new(Self {
+        let store = Arc::new(Self {
             path,
             map: Mutex::new(map),
-        })
+        });
+        let _ = GLOBAL_STORE.set(Arc::clone(&store));
+        store
+    }
+
+    /// Process-wide store used by runtime config rebuilds so rebuilt groups
+    /// retain the same persistence side-channel as startup-created groups.
+    pub fn global() -> Option<Arc<Self>> {
+        GLOBAL_STORE.get().cloned()
     }
 
     pub fn get(&self, group: &str) -> Option<String> {

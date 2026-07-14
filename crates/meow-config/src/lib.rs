@@ -233,6 +233,17 @@ pub fn rebuild_from_raw_with_resolver(
     rebuild_from_raw_impl(raw, None, resolver, &HashMap::new(), None, None, None)
 }
 
+/// Runtime rebuild variant that keeps live proxy-provider slots and the
+/// process-wide selection store wired into rebuilt groups.
+pub fn rebuild_from_raw_runtime(
+    raw: &raw::RawConfig,
+    resolver: Option<Arc<Resolver>>,
+    providers: &HashMap<String, Arc<ProxyProvider>>,
+) -> Result<RebuildResult, anyhow::Error> {
+    let store = meow_proxy::SelectorStore::global();
+    rebuild_from_raw_impl(raw, None, resolver, providers, store.as_ref(), None, None)
+}
+
 /// Same as [`rebuild_from_raw`] but accepts a `cache_dir` used to resolve
 /// relative rule-provider paths and to cache fetched HTTP payloads, and an
 /// optional DNS `resolver` injected into the built-in DIRECT adapter.

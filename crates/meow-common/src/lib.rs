@@ -13,7 +13,9 @@ pub mod sniffer;
 pub mod socket_protect;
 pub mod tunnel_mode;
 
-pub use adapter::{DelayHistory, ProviderSlot, Proxy, ProxyAdapter, ProxyHealth, ProxyState};
+pub use adapter::{
+    DelayHistory, ProviderSlot, Proxy, ProxyAdapter, ProxyHealth, ProxySelection, ProxyState,
+};
 pub use adapter_type::{AdapterType, ConnType};
 pub use auth::{AuthConfig, Credentials};
 pub use conn::{ProxyConn, ProxyPacketConn, UdpPacket};

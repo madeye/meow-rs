@@ -83,6 +83,10 @@ pub struct ConnectionInfo {
 pub struct Statistics {
     pub upload_total: AtomicI64,
     pub download_total: AtomicI64,
+    upload_temp: AtomicI64,
+    download_temp: AtomicI64,
+    upload_rate: AtomicI64,
+    download_rate: AtomicI64,
     /// Keyed by `Uuid` (16 B Copy) — formerly `String`, which heap-allocated a
     /// 36-byte hyphenated representation per insert.  REST handlers parse the
     /// query path back into a `Uuid` at lookup time.
@@ -95,17 +99,59 @@ impl Statistics {
         Self {
             upload_total: AtomicI64::new(0),
             download_total: AtomicI64::new(0),
+            upload_temp: AtomicI64::new(0),
+            download_temp: AtomicI64::new(0),
+            upload_rate: AtomicI64::new(0),
+            download_rate: AtomicI64::new(0),
             connections: DashMap::new(),
             rule_match: Arc::new(RuleMatchCounters::new()),
         }
     }
 
     pub fn add_upload(&self, n: i64) {
+        self.upload_temp.fetch_add(n, Ordering::Relaxed);
         self.upload_total.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn add_download(&self, n: i64) {
+        self.download_temp.fetch_add(n, Ordering::Relaxed);
         self.download_total.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn record_connection_upload(&self, id: Uuid, n: i64) {
+        self.add_upload(n);
+        if let Some(mut entry) = self.connections.get_mut(&id) {
+            entry.upload += n;
+        }
+    }
+
+    pub fn record_connection_download(&self, id: Uuid, n: i64) {
+        self.add_download(n);
+        if let Some(mut entry) = self.connections.get_mut(&id) {
+            entry.download += n;
+        }
+    }
+
+    /// Roll the current one-second counters into the values exposed by the
+    /// mihomo `/traffic` stream.
+    pub fn sample_traffic(&self) {
+        self.upload_rate.store(
+            self.upload_temp.swap(0, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.download_rate.store(
+            self.download_temp.swap(0, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn traffic_snapshot(&self) -> (i64, i64, i64, i64) {
+        (
+            self.upload_rate.load(Ordering::Relaxed),
+            self.download_rate.load(Ordering::Relaxed),
+            self.upload_total.load(Ordering::Relaxed),
+            self.download_total.load(Ordering::Relaxed),
+        )
     }
 
     pub fn track_connection(
@@ -190,10 +236,10 @@ impl Serialize for EntryRef<'_> {
 }
 
 fn chrono_now() -> SmolStr {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut buf = itoa::Buffer::new();
-    SmolStr::new(buf.format(secs))
+    use time::format_description::well_known::Rfc3339;
+    SmolStr::new(
+        time::OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_default(),
+    )
 }

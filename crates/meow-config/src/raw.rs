@@ -231,6 +231,7 @@ pub struct RawProxyGroup {
     pub url: Option<String>,
     pub interval: Option<u64>,
     pub tolerance: Option<u16>,
+    pub expected_status: Option<String>,
     pub strategy: Option<String>,
     pub lazy: Option<bool>,
     #[serde(rename = "use")]
@@ -275,6 +276,7 @@ pub struct RawHealthCheck {
     pub url: Option<String>,
     pub interval: Option<u64>,
     pub timeout: Option<u64>,
+    pub expected_status: Option<String>,
     pub lazy: Option<bool>,
 }
 

@@ -168,15 +168,19 @@ fn main() -> Result<()> {
 
         let (tx, _) = broadcast::channel(128);
         let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
         tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer().with_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                ),
-            )
+            .with(filter_layer)
+            .with(tracing_subscriber::fmt::layer())
             .with(log_layer)
             .init();
+        meow_api::log_stream::install_log_reloader(move |level| {
+            reload_handle
+                .reload(tracing_subscriber::EnvFilter::new(level))
+                .map_err(|e| e.to_string())
+        });
         tx
     };
 

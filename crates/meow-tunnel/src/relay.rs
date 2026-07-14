@@ -71,15 +71,17 @@ impl<'buf> HalfCopy<'buf> {
         }
     }
 
-    fn poll_copy<R, W>(
+    fn poll_copy<R, W, F>(
         &mut self,
         cx: &mut Context<'_>,
         mut reader: Pin<&mut R>,
         mut writer: Pin<&mut W>,
+        on_progress: &mut F,
     ) -> Poll<io::Result<u64>>
     where
         R: AsyncRead + ?Sized,
         W: AsyncWrite + ?Sized,
+        F: FnMut(u64),
     {
         loop {
             // Fill buffer from reader when empty.
@@ -119,6 +121,7 @@ impl<'buf> HalfCopy<'buf> {
                     Poll::Ready(Ok(n)) => {
                         self.pos += n;
                         self.amt += n as u64;
+                        on_progress(n as u64);
                         self.need_flush = true;
                     }
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
@@ -157,6 +160,26 @@ where
     A: AsyncRead + AsyncWrite + Unpin + ?Sized,
     B: AsyncRead + AsyncWrite + Unpin + ?Sized,
 {
+    copy_bidirectional_buf_tracked(a, b, buf_a_to_b, buf_b_to_a, |_| {}, |_| {}).await
+}
+
+/// Tracked variant of [`copy_bidirectional_buf`]. The callbacks run after
+/// bytes are successfully written in each direction, allowing live traffic
+/// and connection statistics without waiting for relay completion.
+pub async fn copy_bidirectional_buf_tracked<A, B, FA, FB>(
+    a: &mut A,
+    b: &mut B,
+    buf_a_to_b: &mut [u8],
+    buf_b_to_a: &mut [u8],
+    mut on_a_to_b: FA,
+    mut on_b_to_a: FB,
+) -> io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+    FA: FnMut(u64),
+    FB: FnMut(u64),
+{
     let mut a_to_b = HalfCopy::new(buf_a_to_b);
     let mut b_to_a = HalfCopy::new(buf_b_to_a);
     let mut a_done = false;
@@ -179,7 +202,7 @@ where
         if !a_done {
             let a_pin = Pin::new(&mut *a);
             let b_pin = Pin::new(&mut *b);
-            match a_to_b.poll_copy(cx, a_pin, b_pin) {
+            match a_to_b.poll_copy(cx, a_pin, b_pin, &mut on_a_to_b) {
                 Poll::Ready(Ok(_)) => a_done = true,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {}
@@ -189,7 +212,7 @@ where
         if !b_done {
             let a_pin = Pin::new(&mut *a);
             let b_pin = Pin::new(&mut *b);
-            match b_to_a.poll_copy(cx, b_pin, a_pin) {
+            match b_to_a.poll_copy(cx, b_pin, a_pin, &mut on_b_to_a) {
                 Poll::Ready(Ok(_)) => b_done = true,
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Pending => {}

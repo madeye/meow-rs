@@ -398,9 +398,18 @@ async fn get_traffic() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
+    let mut body = resp.into_body();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+        .await
+        .expect("traffic frame timeout")
+        .expect("traffic stream ended")
+        .expect("traffic body error");
+    let json: serde_json::Value =
+        serde_json::from_slice(frame.data_ref().expect("traffic data frame")).unwrap();
     assert_eq!(json["up"], 0);
     assert_eq!(json["down"], 0);
+    assert_eq!(json["upTotal"], 0);
+    assert_eq!(json["downTotal"], 0);
 }
 
 #[tokio::test]
@@ -460,8 +469,9 @@ async fn get_connections_empty() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["upload_total"], 0);
-    assert_eq!(json["download_total"], 0);
+    assert_eq!(json["uploadTotal"], 0);
+    assert_eq!(json["downloadTotal"], 0);
+    assert!(json["memory"].is_number());
     assert!(json["connections"].as_array().unwrap().is_empty());
 }
 
@@ -1230,6 +1240,112 @@ async fn put_proxy_selector_switch() {
 }
 
 #[tokio::test]
+async fn put_and_delete_automatic_group_selection() {
+    let mut raw = test_raw_config();
+    raw.proxy_groups = Some(vec![
+        RawProxyGroup {
+            name: "Auto".into(),
+            group_type: "url-test".into(),
+            proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
+            ..Default::default()
+        },
+        RawProxyGroup {
+            name: "Failover".into(),
+            group_type: "fallback".into(),
+            proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
+            ..Default::default()
+        },
+    ]);
+    let state = test_state(raw);
+    let app = create_router(state);
+
+    for group in ["Auto", "Failover"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/proxies/{group}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(r#"{"name":"REJECT"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/group/{group}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(detail).await["fixed"], "REJECT");
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/proxies/{group}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let detail = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/group/{group}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(body_json(detail).await["fixed"], "");
+    }
+}
+
+#[tokio::test]
+async fn group_routes_filter_leaf_proxies() {
+    let mut raw = test_raw_config();
+    raw.proxy_groups = Some(vec![RawProxyGroup {
+        name: "Choice".into(),
+        group_type: "select".into(),
+        proxies: Some(vec!["DIRECT".into()]),
+        ..Default::default()
+    }]);
+    let app = create_router(test_state(raw));
+    let groups = app
+        .clone()
+        .oneshot(
+            Request::get("/group")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(groups).await;
+    assert!(json["proxies"].get("Choice").is_some());
+    assert!(json["proxies"].get("DIRECT").is_none());
+
+    let leaf = app
+        .oneshot(
+            Request::get("/group/DIRECT")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(leaf.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn put_proxy_not_a_group() {
     let state = test_state_default();
     let app = create_router(state);
@@ -1374,7 +1490,7 @@ async fn auth_correct_token_allows_request() {
 }
 
 #[tokio::test]
-async fn auth_lowercase_bearer_prefix_allowed() {
+async fn auth_lowercase_bearer_prefix_rejected() {
     let state = test_state_with_secret("hunter2");
     let app = create_router(state);
     let resp = app
@@ -1386,7 +1502,7 @@ async fn auth_lowercase_bearer_prefix_allowed() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -2610,7 +2726,8 @@ fn test_state_with_hosts_entry() -> Arc<AppState> {
 
     let resolver = Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
     let tunnel = Tunnel::new(resolver);
-    let raw = test_raw_config();
+    let mut raw = test_raw_config();
+    raw.dns = Some(serde_yaml::from_str("enable: true").unwrap());
     let (proxies, rules) = meow_config::rebuild_from_raw(&raw).unwrap();
     tunnel.update_proxies(proxies);
     tunnel.update_rules(rules);
@@ -2692,8 +2809,9 @@ async fn get_dns_query_returns_known_host() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
-    assert_eq!(json["name"], "test.local");
-    assert_eq!(json["answer"], "192.0.2.1");
+    assert_eq!(json["Status"], 0);
+    assert_eq!(json["Question"][0]["Name"], "test.local.");
+    assert_eq!(json["Answer"][0]["data"], "192.0.2.1");
 }
 
 // ── DNS cache flush ───────────────────────────────────────────────

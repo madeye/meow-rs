@@ -176,7 +176,7 @@ async fn logs_ws_emits_error_events() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn logs_ws_frame_has_time_field() {
+async fn logs_ws_plain_frame_matches_mihomo_shape() {
     let (state, log_tx) = make_state();
     let (addr, _handle) = spawn_server(state).await;
     let mut ws = ws_connect(&format!("ws://127.0.0.1:{}/logs?level=info", addr.port())).await;
@@ -185,16 +185,10 @@ async fn logs_ws_frame_has_time_field() {
 
     let text = recv_text(&mut ws).await;
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let ts = v["time"].as_str().expect("time field must be present");
-    // YYYY-MM-DDTHH:MM:SS minimum
-    assert!(
-        ts.len() >= 19 && ts.contains('T'),
-        "time looks like RFC3339: {ts}"
-    );
-    assert!(
-        ts.ends_with('Z') || ts.ends_with("+00:00"),
-        "time must be UTC: {ts}"
-    );
+    assert_eq!(v["type"], "info");
+    assert_eq!(v["payload"], "t");
+    assert!(v.get("time").is_none(), "plain mihomo frames omit time");
+    assert_eq!(v.as_object().unwrap().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -295,30 +289,19 @@ async fn logs_ws_lagged_client_continues() {
         let _ = log_tx.send(log_msg(LogLevel::Info, &format!("msg{i}")));
     }
 
-    // Drain — expect at least one lagged frame
-    let mut saw_lagged = false;
+    // Drain available messages. Mihomo silently drops overflow rather than
+    // emitting a controller-specific synthetic frame.
     for _ in 0..25 {
         match tokio::time::timeout(Duration::from_millis(500), ws.next()).await {
             Ok(Some(Ok(msg))) => {
                 let text = msg.into_text().unwrap();
                 let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-                if v.get("type").and_then(|t| t.as_str()) == Some("lagged") {
-                    assert!(
-                        v["missed"].as_u64().unwrap_or(0) > 0,
-                        "lagged frame must report missed > 0"
-                    );
-                    saw_lagged = true;
-                }
+                assert_ne!(v["type"], "lagged");
             }
             _ => break,
         }
     }
-    assert!(
-        saw_lagged,
-        "expected at least one lagged frame (cap=4, 20 sends)"
-    );
-
-    // Connection stays open — subsequent events must still arrive (Class B: not conn-terminating)
+    // Connection stays open and subsequent events still arrive.
     log_tx.send(log_msg(LogLevel::Info, "post-lag")).unwrap();
     let text = recv_text(&mut ws).await;
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();

@@ -1,14 +1,15 @@
 use axum::{
+    body::Body,
     extract::ws::{Message, WebSocketUpgrade},
-    extract::{Path, Query, Request, State},
-    http::{header, StatusCode},
+    extract::{FromRequestParts, Path, Query, Request, State},
+    http::{header, request::Parts, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post, put},
     Router,
 };
 use dashmap::DashMap;
-use meow_common::{Proxy, TunnelMode};
+use meow_common::TunnelMode;
 use meow_config::{
     proxy_provider::ProxyProvider,
     raw::{RawConfig, RawProxyGroup, RawSubscription},
@@ -23,10 +24,35 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::log_stream::{parse_log_level, LogMessage};
 use crate::ui;
+
+struct MaybeWebSocket(Option<WebSocketUpgrade>);
+
+impl<S> FromRequestParts<S> for MaybeWebSocket
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let is_websocket = parts
+            .headers
+            .get(header::UPGRADE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+        if !is_websocket {
+            return Ok(Self(None));
+        }
+        Ok(Self(
+            WebSocketUpgrade::from_request_parts(parts, state)
+                .await
+                .ok(),
+        ))
+    }
+}
 
 pub struct AppState {
     pub tunnel: Tunnel,
@@ -60,41 +86,6 @@ impl AppState {
 /// `Authorization: Bearer <secret>`. When the configured secret is empty or
 /// unset, the middleware is a no-op. Otherwise, requests without a matching
 /// header return `401 Unauthorized`.
-async fn require_auth(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
-    if !state.auth_required() {
-        return next.run(req).await;
-    }
-
-    let Some(expected) = state.secret.as_deref() else {
-        return next.run(req).await;
-    };
-
-    let provided = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            v.strip_prefix("Bearer ")
-                .or_else(|| v.strip_prefix("bearer "))
-        });
-
-    // Constant-time comparison so a byte-by-byte attacker cannot distinguish
-    // "first N bytes matched" from "failed immediately". Length still leaks;
-    // that is acceptable for a config-scoped shared secret.
-    let ok = match provided {
-        Some(token) if token.len() == expected.len() => {
-            use subtle::ConstantTimeEq;
-            token.as_bytes().ct_eq(expected.as_bytes()).into()
-        }
-        _ => false,
-    };
-    if ok {
-        next.run(req).await
-    } else {
-        (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
-    }
-}
-
 /// Auth middleware for WebSocket upgrade routes. Accepts `Authorization: Bearer <secret>`
 /// header OR `?token=<secret>` query param (browser WebSocket clients cannot set headers).
 /// `?token=` is accepted ONLY on this middleware — REST routes keep header-only auth.
@@ -113,12 +104,18 @@ async fn require_auth_ws(
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| {
-            v.strip_prefix("Bearer ")
-                .or_else(|| v.strip_prefix("bearer "))
-        });
+        .and_then(|v| v.strip_prefix("Bearer "));
 
-    let token_param = query.get("token").map(std::string::String::as_str);
+    let is_websocket = req
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let token_param = if is_websocket {
+        query.get("token").map(std::string::String::as_str)
+    } else {
+        None
+    };
     let provided = bearer.or(token_param);
 
     let ok = match provided {
@@ -131,27 +128,28 @@ async fn require_auth_ws(
     if ok {
         next.run(req).await
     } else {
-        (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"message": "Unauthorized"})),
+        )
+            .into_response()
     }
 }
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     // WS routes — accept header or ?token= query param for browser dashboard compat.
-    let ws_routes = Router::new()
-        .route("/logs", get(get_logs))
-        .route("/memory", get(get_memory))
-        .route_layer(middleware::from_fn_with_state(
-            Arc::clone(&state),
-            require_auth_ws,
-        ));
-
     // REST API routes gated behind the Bearer middleware (header-only).
     let api = Router::new()
         .route("/", get(hello))
         .route("/version", get(version))
         .route("/proxies", get(get_proxies))
-        .route("/proxies/{name}", get(get_proxy).put(update_proxy))
+        .route(
+            "/proxies/{name}",
+            get(get_proxy).put(update_proxy).delete(unfix_proxy),
+        )
         .route("/proxies/{name}/delay", get(get_proxy_delay))
+        .route("/group", get(get_groups))
+        .route("/group/{name}", get(get_group))
         .route("/group/{name}/delay", get(get_group_delay))
         .route(
             "/rules",
@@ -168,6 +166,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/metrics", get(get_metrics))
         .route("/traffic", get(get_traffic))
+        .route("/logs", get(get_logs))
+        .route("/memory", get(get_memory))
         .route("/dns/results", get(get_dns_results))
         .route("/dns/query", get(dns_query_get).post(dns_query))
         .route("/cache/dns/flush", post(flush_dns_cache))
@@ -207,6 +207,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/providers/proxies/{name}/healthcheck",
             get(provider_healthcheck),
         )
+        .route(
+            "/providers/proxies/{provider_name}/{proxy_name}",
+            get(get_provider_proxy),
+        )
+        .route(
+            "/providers/proxies/{provider_name}/{proxy_name}/healthcheck",
+            get(provider_proxy_healthcheck),
+        )
         // Rule providers
         .route("/providers/rules", get(get_rule_providers))
         .route(
@@ -217,7 +225,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/listeners", get(get_listeners))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
-            require_auth,
+            require_auth_ws,
         ));
 
     // Web UI is intentionally unauthenticated so dashboards can load and then
@@ -226,7 +234,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // When `external-ui` is configured (issue #223) the static directory is
     // served at `/ui` via tower-http's `ServeDir`; otherwise the built-in
     // single-page panel is served.
-    let router = api.merge(ws_routes);
+    let router = api;
     let router = if let Some(dir) = state.external_ui.clone() {
         // `ServeDir` resolves `index.html` for the directory root and serves
         // any nested asset; `nest_service("/ui", …)` strips the `/ui` prefix so
@@ -280,6 +288,13 @@ struct ProxyInfo {
     /// Group-only: name of the currently active member.
     #[serde(skip_serializing_if = "Option::is_none")]
     now: Option<String>,
+    /// Automatic-group user pin. `Some("")` means automatic mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fixed: Option<String>,
+    #[serde(rename = "testUrl", skip_serializing_if = "Option::is_none")]
+    test_url: Option<String>,
+    #[serde(rename = "expectedStatus", skip_serializing_if = "Option::is_none")]
+    expected_status: Option<String>,
     /// Last measured delay in ms; omitted until a probe has succeeded.
     #[serde(skip_serializing_if = "Option::is_none")]
     delay: Option<u16>,
@@ -305,6 +320,11 @@ impl ProxyInfo {
             udp: proxy.support_udp(),
             all: members,
             now: current,
+            fixed: proxy
+                .selection()
+                .and_then(meow_common::ProxySelection::fixed),
+            test_url: proxy.test_url().map(str::to_string),
+            expected_status: proxy.expected_status().map(str::to_string),
             delay,
         }
     }
@@ -345,30 +365,74 @@ async fn update_proxy(
     State(state): State<Arc<AppState>>,
     Path(group_name): Path<String>,
     Json(body): Json<UpdateProxyRequest>,
-) -> StatusCode {
+) -> Response {
     let route = state.tunnel.route_snapshot();
     let Some(proxy) = route.proxies.get(group_name.as_str()).cloned() else {
-        return StatusCode::NOT_FOUND;
+        return msg_err(StatusCode::NOT_FOUND, "Resource not found");
     };
-    match select_proxy_member_async(proxy, body.name.clone()).await {
-        Ok(SelectResult::Selected(true)) => {
-            info!("Selector '{}' switched to '{}'", group_name, body.name);
-            StatusCode::NO_CONTENT
+    let Some(selection) = proxy.selection() else {
+        return msg_err(StatusCode::BAD_REQUEST, "Must be a Selector");
+    };
+    match selection.set(&body.name).await {
+        Ok(()) => {
+            info!("Proxy group '{}' switched to '{}'", group_name, body.name);
+            StatusCode::NO_CONTENT.into_response()
         }
-        Ok(SelectResult::Selected(false) | SelectResult::NotSelector) => StatusCode::BAD_REQUEST,
-        Err(e) => {
-            warn!("Selector '{}' update task failed: {}", group_name, e);
-            StatusCode::INTERNAL_SERVER_ERROR
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"message": format!("Selector update error: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+async fn unfix_proxy(
+    State(state): State<Arc<AppState>>,
+    Path(group_name): Path<String>,
+) -> Response {
+    let route = state.tunnel.route_snapshot();
+    let Some(proxy) = route.proxies.get(group_name.as_str()).cloned() else {
+        return msg_err(StatusCode::NOT_FOUND, "Resource not found");
+    };
+    let Some(selection) = proxy.selection() else {
+        return msg_err(StatusCode::BAD_REQUEST, "Body invalid");
+    };
+    if !selection.can_unfix() {
+        return msg_err(StatusCode::BAD_REQUEST, "Body invalid");
+    }
+    selection.force_set(None);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn get_groups(State(state): State<Arc<AppState>>) -> Json<ProxiesResponse> {
+    let route = state.tunnel.route_snapshot();
+    let proxies = route
+        .proxies
+        .iter()
+        .filter(|(_, proxy)| proxy.members().is_some())
+        .map(|(name, proxy)| (name.to_string(), ProxyInfo::from_proxy(proxy)))
+        .collect();
+    Json(ProxiesResponse { proxies })
+}
+
+async fn get_group(State(state): State<Arc<AppState>>, Path(name): Path<String>) -> Response {
+    let route = state.tunnel.route_snapshot();
+    match route.proxies.get(name.as_str()) {
+        Some(proxy) if proxy.members().is_some() => {
+            Json(ProxyInfo::from_proxy(proxy)).into_response()
         }
+        _ => msg_err(StatusCode::NOT_FOUND, "Resource not found"),
     }
 }
 
 #[derive(Serialize)]
 struct RuleInfo<'a> {
+    index: usize,
     #[serde(rename = "type")]
     rule_type: &'static str,
     payload: &'a str,
     proxy: &'a str,
+    size: i64,
 }
 
 #[derive(Serialize)]
@@ -383,19 +447,24 @@ async fn get_rules(State(state): State<Arc<AppState>>) -> Response {
     let result: Vec<RuleInfo> = route
         .rules
         .iter()
-        .map(|r| RuleInfo {
+        .enumerate()
+        .map(|(index, r)| RuleInfo {
+            index,
             rule_type: r.rule_type().as_str(),
             payload: r.payload(),
             proxy: r.adapter(),
+            size: -1,
         })
         .collect();
     Json(RulesResponse { rules: result }).into_response()
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ConnectionsResponse<'a> {
     upload_total: i64,
     download_total: i64,
+    memory: u64,
     /// Serialised straight from the live table — no per-connection
     /// `serde_json::Value` tree, no cloned snapshot Vec (audit M8). The
     /// JSON shape (id/upload/download/start/chains/rule/rulePayload) comes
@@ -403,15 +472,65 @@ struct ConnectionsResponse<'a> {
     connections: meow_tunnel::statistics::ActiveConnectionsView<'a>,
 }
 
-async fn get_connections(State(state): State<Arc<AppState>>) -> Response {
+#[derive(Deserialize)]
+struct ConnectionsParams {
+    interval: Option<String>,
+}
+
+async fn connections_json(state: &AppState) -> String {
     let stats = state.tunnel.statistics();
     let (up, down) = stats.snapshot();
-    Json(ConnectionsResponse {
+    let memory = read_rss_bytes().await;
+    serde_json::to_string(&ConnectionsResponse {
         upload_total: up,
         download_total: down,
+        memory,
         connections: stats.active_connections_view(),
     })
-    .into_response()
+    .unwrap_or_else(|_| {
+        "{\"uploadTotal\":0,\"downloadTotal\":0,\"memory\":0,\"connections\":[]}".into()
+    })
+}
+
+async fn get_connections(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ConnectionsParams>,
+    MaybeWebSocket(ws): MaybeWebSocket,
+) -> Response {
+    let interval_ms = match params.interval.as_deref() {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(0) | Err(_) => return msg_err(StatusCode::BAD_REQUEST, "Body invalid"),
+            Ok(value) => value,
+        },
+        None => 1000,
+    };
+
+    if let Some(ws) = ws {
+        return ws.on_upgrade(move |mut socket| async move {
+            if socket
+                .send(Message::Text(connections_json(&state).await.into()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let mut ticker = tokio::time::interval(Duration::from_millis(interval_ms));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if socket
+                    .send(Message::Text(connections_json(&state).await.into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    let body = connections_json(&state).await;
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 async fn close_connection(
@@ -459,7 +578,7 @@ async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse>
     let raw = state.raw_config.read();
     Json(ConfigResponse {
         mode: state.tunnel.mode().to_string(),
-        log_level: "info".to_string(),
+        log_level: raw.log_level.clone().unwrap_or_else(|| "info".to_string()),
         mixed_port: raw.mixed_port,
         socks_port: raw.socks_port,
         http_port: raw.port,
@@ -485,29 +604,85 @@ struct UpdateConfigRequest {
 async fn update_configs(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateConfigRequest>,
-) -> StatusCode {
+) -> Response {
+    let mut raw = state.raw_config.write();
     if let Some(mode_str) = body.mode {
         match mode_str.parse::<TunnelMode>() {
             Ok(mode) => {
                 state.tunnel.set_mode(mode);
+                raw.mode = Some(mode.to_string());
                 info!("Mode changed to {}", mode);
             }
-            Err(_) => return StatusCode::BAD_REQUEST,
+            Err(_) => return msg_err(StatusCode::BAD_REQUEST, "Body invalid"),
         }
     }
-    let _ = body.log_level;
-    StatusCode::NO_CONTENT
+    if let Some(level) = body.log_level {
+        if !matches!(
+            level.to_ascii_lowercase().as_str(),
+            "debug" | "info" | "warning" | "warn" | "error" | "silent"
+        ) {
+            return msg_err(StatusCode::BAD_REQUEST, "Body invalid");
+        }
+        if let Err(e) = crate::log_stream::reload_log_level(&level) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"message": e})),
+            )
+                .into_response();
+        }
+        raw.log_level = Some(level);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Serialize)]
 struct TrafficResponse {
     up: i64,
     down: i64,
+    #[serde(rename = "upTotal")]
+    up_total: i64,
+    #[serde(rename = "downTotal")]
+    down_total: i64,
 }
 
-async fn get_traffic(State(state): State<Arc<AppState>>) -> Json<TrafficResponse> {
-    let (up, down) = state.tunnel.statistics().snapshot();
-    Json(TrafficResponse { up, down })
+fn traffic_json(state: &AppState) -> String {
+    let (up, down, up_total, down_total) = state.tunnel.statistics().traffic_snapshot();
+    serde_json::to_string(&TrafficResponse {
+        up,
+        down,
+        up_total,
+        down_total,
+    })
+    .unwrap_or_default()
+}
+
+async fn get_traffic(
+    State(state): State<Arc<AppState>>,
+    MaybeWebSocket(ws): MaybeWebSocket,
+) -> Response {
+    if let Some(ws) = ws {
+        return ws.on_upgrade(move |mut socket| async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(1));
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let frame = traffic_json(&state);
+                if socket.send(Message::Text(frame.into())).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    let stream = futures::stream::unfold(state, |state| async move {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let line = format!("{}\n", traffic_json(&state));
+        Some((Ok::<String, std::convert::Infallible>(line), state))
+    });
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from_stream(stream))
+        .expect("valid traffic stream response")
 }
 
 #[derive(Deserialize)]
@@ -567,10 +742,118 @@ async fn dns_query(
 async fn dns_query_get(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DnsQueryRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    let enabled = state
+        .raw_config
+        .read()
+        .dns
+        .as_ref()
+        .is_some_and(|dns| dns.enable.unwrap_or(false));
+    if !enabled {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"message": "DNS section is disabled"})),
+        )
+            .into_response();
+    }
+
+    use hickory_proto::rr::RecordType;
+    let qtype_text = params.qtype.as_deref().unwrap_or("A").to_ascii_uppercase();
+    let Ok(record_type) = qtype_text.parse::<RecordType>() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"message": "invalid query type"})),
+        )
+            .into_response();
+    };
+
     let resolver = state.tunnel.resolver();
-    let result = resolver.resolve_ip(&params.name).await;
-    Json(serde_json::json!({ "name": params.name, "answer": result.map(|ip| ip.to_string()) }))
+    let fqdn = if params.name.ends_with('.') {
+        params.name.clone()
+    } else {
+        format!("{}.", params.name)
+    };
+    let question = serde_json::json!({
+        "Name": fqdn,
+        "Qtype": u16::from(record_type),
+        "Qclass": 1,
+    });
+
+    let mut response = serde_json::Map::new();
+    response.insert("Status".into(), 0.into());
+    response.insert("Question".into(), serde_json::Value::Array(vec![question]));
+    response.insert("TC".into(), false.into());
+    response.insert("RD".into(), true.into());
+    response.insert("RA".into(), true.into());
+    response.insert("AD".into(), false.into());
+    response.insert("CD".into(), false.into());
+
+    if matches!(record_type, RecordType::A | RecordType::AAAA) {
+        let ips = resolver.resolve_ips(&params.name).await.unwrap_or_default();
+        let answers: Vec<_> = ips
+            .into_iter()
+            .filter(|ip| {
+                matches!(record_type, RecordType::A) && ip.is_ipv4()
+                    || matches!(record_type, RecordType::AAAA) && ip.is_ipv6()
+            })
+            .map(|ip| {
+                serde_json::json!({
+                    "name": fqdn,
+                    "type": u16::from(record_type),
+                    "TTL": 60,
+                    "data": ip.to_string(),
+                })
+            })
+            .collect();
+        if !answers.is_empty() {
+            response.insert("Answer".into(), serde_json::Value::Array(answers));
+        }
+    } else if let Some(message) = resolver.forward_generic(&params.name, record_type).await {
+        let metadata = &message.metadata;
+        response.insert("Status".into(), u16::from(metadata.response_code).into());
+        response.insert("TC".into(), metadata.truncation.into());
+        response.insert("RD".into(), metadata.recursion_desired.into());
+        response.insert("RA".into(), metadata.recursion_available.into());
+        response.insert("AD".into(), metadata.authentic_data.into());
+        response.insert("CD".into(), metadata.checking_disabled.into());
+        insert_dns_records(&mut response, "Answer", &message.answers);
+        insert_dns_records(&mut response, "Authority", &message.authorities);
+        insert_dns_records(&mut response, "Additional", &message.additionals);
+    } else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"message": "DNS query failed"})),
+        )
+            .into_response();
+    }
+
+    Json(serde_json::Value::Object(response)).into_response()
+}
+
+fn insert_dns_records(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    records: &[hickory_proto::rr::Record],
+) {
+    if records.is_empty() {
+        return;
+    }
+    target.insert(
+        key.to_string(),
+        serde_json::Value::Array(
+            records
+                .iter()
+                .map(|record| {
+                    serde_json::json!({
+                        "name": record.name.to_string(),
+                        "type": u16::from(record.record_type()),
+                        "TTL": record.ttl,
+                        "data": record.data.to_string(),
+                    })
+                })
+                .collect(),
+        ),
+    );
 }
 
 async fn flush_dns_cache(State(state): State<Arc<AppState>>) -> StatusCode {
@@ -618,7 +901,7 @@ async fn save_config(
 /// are not Send and would otherwise break the axum Handler bound.
 async fn apply_raw_to_tunnel(
     mut raw: RawConfig,
-    tunnel: &Tunnel,
+    state: &AppState,
 ) -> Result<(), (StatusCode, String)> {
     let expected_groups: Vec<String> = raw
         .proxy_groups
@@ -630,9 +913,15 @@ async fn apply_raw_to_tunnel(
     if let Some(ps) = raw.proxies.as_mut() {
         meow_config::ech_dns::preresolve_ech(ps).await;
     }
-    let (proxies, rules) = rebuild_from_raw_with_resolver_async(raw, Arc::clone(tunnel.resolver()))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let providers = state
+        .proxy_providers
+        .iter()
+        .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+        .collect();
+    let (proxies, rules) =
+        rebuild_from_raw_with_resolver_async(raw, Arc::clone(state.tunnel.resolver()), providers)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     if let Some(missing) = expected_groups
         .iter()
         .find(|name| !proxies.contains_key(name.as_str()))
@@ -642,8 +931,8 @@ async fn apply_raw_to_tunnel(
             format!("proxy group '{missing}' failed validation"),
         ));
     }
-    tunnel.update_proxies(proxies);
-    tunnel.update_rules(rules);
+    state.tunnel.update_proxies(proxies);
+    state.tunnel.update_rules(rules);
     Ok(())
 }
 
@@ -651,7 +940,7 @@ async fn commit_raw_candidate(
     state: &AppState,
     candidate: RawConfig,
 ) -> Result<(), (StatusCode, String)> {
-    apply_raw_to_tunnel(candidate.clone(), &state.tunnel).await?;
+    apply_raw_to_tunnel(candidate.clone(), state).await?;
     *state.raw_config.write() = candidate;
     Ok(())
 }
@@ -659,35 +948,14 @@ async fn commit_raw_candidate(
 async fn rebuild_from_raw_with_resolver_async(
     raw: RawConfig,
     resolver: Arc<meow_dns::Resolver>,
+    providers: HashMap<String, Arc<ProxyProvider>>,
 ) -> Result<meow_config::RebuildResult, String> {
     tokio::task::spawn_blocking(move || {
-        meow_config::rebuild_from_raw_with_resolver(&raw, Some(resolver))
+        meow_config::rebuild_from_raw_runtime(&raw, Some(resolver), &providers)
     })
     .await
     .map_err(|e| format!("config rebuild task failed: {e}"))?
     .map_err(|e| e.to_string())
-}
-
-enum SelectResult {
-    Selected(bool),
-    NotSelector,
-}
-
-async fn select_proxy_member_async(
-    proxy: Arc<dyn Proxy>,
-    member: String,
-) -> Result<SelectResult, tokio::task::JoinError> {
-    tokio::task::spawn_blocking(move || {
-        use meow_proxy::SelectorGroup;
-        match proxy
-            .as_any()
-            .and_then(|a| a.downcast_ref::<SelectorGroup>())
-        {
-            Some(selector) => SelectResult::Selected(selector.select(&member)),
-            None => SelectResult::NotSelector,
-        }
-    })
-    .await
 }
 
 // ── Subscriptions ────────────────────────────────────────────────────
@@ -1024,16 +1292,15 @@ async fn select_proxy_in_group(
     let Some(proxy) = route.proxies.get(group_name.as_str()).cloned() else {
         return StatusCode::NOT_FOUND;
     };
-    match select_proxy_member_async(proxy, body.name.clone()).await {
-        Ok(SelectResult::Selected(true)) => {
-            info!("Selector '{}' switched to '{}'", group_name, body.name);
+    let Some(selection) = proxy.selection() else {
+        return StatusCode::BAD_REQUEST;
+    };
+    match selection.set(&body.name).await {
+        Ok(()) => {
+            info!("Proxy group '{}' switched to '{}'", group_name, body.name);
             StatusCode::NO_CONTENT
         }
-        Ok(SelectResult::Selected(false) | SelectResult::NotSelector) => StatusCode::BAD_REQUEST,
-        Err(e) => {
-            warn!("Selector '{}' update task failed: {}", group_name, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        Err(_) => StatusCode::BAD_REQUEST,
     }
 }
 
@@ -1226,13 +1493,6 @@ async fn get_group_delay(
     Path(name): Path<String>,
     Query(params): Query<DelayParams>,
 ) -> Response {
-    let timeout = match parse_delay_params(&params) {
-        Ok(t) => t,
-        Err(resp) => return *resp,
-    };
-    let url = params.url.as_deref().unwrap_or("").to_string();
-    let expected = params.expected.clone();
-
     let route = state.tunnel.route_snapshot();
     let Some(group) = route.proxies.get(name.as_str()).cloned() else {
         return msg_err(StatusCode::NOT_FOUND, "resource not found");
@@ -1241,6 +1501,19 @@ async fn get_group_delay(
     let Some(member_names) = group.members() else {
         return msg_err(StatusCode::NOT_FOUND, "resource not found");
     };
+
+    // mihomo clears a URLTest/Fallback user pin before every group-wide
+    // health check, even when query validation subsequently fails.
+    if let Some(selection) = group.selection().filter(|s| s.can_unfix()) {
+        selection.force_set(None);
+    }
+
+    let timeout = match parse_delay_params(&params) {
+        Ok(t) => t,
+        Err(resp) => return *resp,
+    };
+    let url = params.url.as_deref().unwrap_or("").to_string();
+    let expected = params.expected.clone();
 
     // Resolve each member name to an `Arc<dyn Proxy>` *before* dropping the
     // proxies map so the spawned tasks hold their own Arc clones.
@@ -1361,23 +1634,29 @@ async fn put_configs(
 
     // Semantic rebuild (proxy/rule parsing)
     let resolver = Arc::clone(state.tunnel.resolver());
-    let (proxies, rules) = match rebuild_from_raw_with_resolver_async(raw_config.clone(), resolver)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            if force {
-                tracing::error!("config reload forced despite validation error: {e}");
-                (Default::default(), Vec::new())
-            } else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"message": format!("config validation error: {e}")})),
-                )
-                    .into_response();
+    let providers = state
+        .proxy_providers
+        .iter()
+        .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+        .collect();
+    let (proxies, rules) =
+        match rebuild_from_raw_with_resolver_async(raw_config.clone(), resolver, providers).await {
+            Ok(r) => r,
+            Err(e) => {
+                if force {
+                    tracing::error!("config reload forced despite validation error: {e}");
+                    (Default::default(), Vec::new())
+                } else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            serde_json::json!({"message": format!("config validation error: {e}")}),
+                        ),
+                    )
+                        .into_response();
+                }
             }
-        }
-    };
+        };
 
     // Cold reload: close all connections with structured log (Class A divergence from upstream)
     let stats = state.tunnel.statistics();
@@ -1523,36 +1802,91 @@ async fn get_metrics(State(state): State<Arc<AppState>>) -> Response {
 #[derive(Deserialize)]
 struct LogsParams {
     level: Option<String>,
+    format: Option<String>,
+}
+
+fn parse_requested_log_level(
+    value: Option<&str>,
+) -> Result<crate::log_stream::LogLevel, Box<Response>> {
+    let value = value.unwrap_or("info");
+    match value.to_ascii_lowercase().as_str() {
+        "debug" | "info" | "warning" | "warn" | "error" | "silent" => Ok(parse_log_level(value)),
+        _ => Err(Box::new(msg_err(StatusCode::BAD_REQUEST, "Body invalid"))),
+    }
+}
+
+fn log_json(msg: &LogMessage, structured: bool) -> String {
+    if !structured {
+        return serde_json::json!({"type": msg.level.as_str(), "payload": msg.payload}).to_string();
+    }
+    let level = if msg.level.as_str() == "warning" {
+        "warn"
+    } else {
+        msg.level.as_str()
+    };
+    let t = msg.time.time();
+    serde_json::json!({
+        "time": format!("{:02}:{:02}:{:02}", t.hour(), t.minute(), t.second()),
+        "level": level,
+        "message": msg.payload,
+        "fields": [],
+    })
+    .to_string()
 }
 
 // upstream: hub/route/logs.go::getLogs
 async fn get_logs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LogsParams>,
-    ws: WebSocketUpgrade,
+    MaybeWebSocket(ws): MaybeWebSocket,
 ) -> Response {
-    let level = parse_log_level(params.level.as_deref().unwrap_or("info"));
+    let level = match parse_requested_log_level(params.level.as_deref()) {
+        Ok(level) => level,
+        Err(response) => return *response,
+    };
+    let structured = params.format.as_deref() == Some("structured");
     let mut rx = state.log_tx.subscribe();
-    ws.on_upgrade(move |mut socket| async move {
+    if let Some(ws) = ws {
+        return ws.on_upgrade(move |mut socket| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(msg) if msg.level >= level => {
+                        if socket
+                            .send(Message::Text(log_json(&msg, structured).into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    let stream = futures::stream::unfold(rx, move |mut rx| async move {
         loop {
             match rx.recv().await {
                 Ok(msg) if msg.level >= level => {
-                    let json = serde_json::to_string(&msg).unwrap_or_default();
-                    if socket.send(Message::Text(json.into())).await.is_err() {
-                        break;
-                    }
+                    return Some((
+                        Ok::<String, std::convert::Infallible>(format!(
+                            "{}\n",
+                            log_json(&msg, structured)
+                        )),
+                        rx,
+                    ));
                 }
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    let lag_msg = format!("{{\"type\":\"lagged\",\"missed\":{n}}}");
-                    if socket.send(Message::Text(lag_msg.into())).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
-    })
+    });
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from_stream(stream))
+        .expect("valid log stream response")
 }
 
 // ── WebSocket: memory stream ─────────────────────────────────────────
@@ -1599,25 +1933,63 @@ fn subscribe_memory_feed() -> broadcast::Receiver<Arc<str>> {
     rx
 }
 
-async fn get_memory(State(_state): State<Arc<AppState>>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(|mut socket| async move {
-        let mut feed = subscribe_memory_feed();
-        loop {
-            let msg = match feed.recv().await {
-                Ok(msg) => msg,
-                // Slow consumer skipped a tick — just continue with the next.
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            };
+async fn get_memory(
+    State(_state): State<Arc<AppState>>,
+    MaybeWebSocket(ws): MaybeWebSocket,
+) -> Response {
+    let first: Arc<str> = Arc::from("{\"inuse\":0,\"oslimit\":0}");
+    if let Some(ws) = ws {
+        return ws.on_upgrade(move |mut socket| async move {
             if socket
-                .send(Message::Text(msg.as_ref().into()))
+                .send(Message::Text(first.as_ref().into()))
                 .await
                 .is_err()
             {
-                break;
+                return;
+            }
+            let mut feed = subscribe_memory_feed();
+            loop {
+                let msg = match feed.recv().await {
+                    Ok(msg) => msg,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                if socket
+                    .send(Message::Text(msg.as_ref().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+
+    let feed = subscribe_memory_feed();
+    let stream = futures::stream::unfold((Some(first), feed), |(first, mut feed)| async move {
+        if let Some(first) = first {
+            return Some((
+                Ok::<String, std::convert::Infallible>(format!("{first}\n")),
+                (None, feed),
+            ));
+        }
+        loop {
+            match feed.recv().await {
+                Ok(msg) => {
+                    return Some((
+                        Ok::<String, std::convert::Infallible>(format!("{msg}\n")),
+                        (None, feed),
+                    ));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
-    })
+    });
+    Response::builder()
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from_stream(stream))
+        .expect("valid memory stream response")
 }
 
 async fn read_rss_bytes() -> u64 {
@@ -1674,6 +2046,20 @@ struct ProviderInfo {
     provider_type: String,
     vehicle_type: String,
     proxies: Vec<ProxyInfo>,
+    #[serde(rename = "testUrl")]
+    test_url: String,
+    #[serde(rename = "expectedStatus")]
+    expected_status: String,
+    #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
+fn unix_rfc3339(seconds: u64) -> Option<String> {
+    use time::format_description::well_known::Rfc3339;
+    (seconds > 0)
+        .then(|| time::OffsetDateTime::from_unix_timestamp(seconds as i64).ok())
+        .flatten()
+        .and_then(|time| time.format(&Rfc3339).ok())
 }
 
 fn provider_to_info(name: &str, provider: &ProxyProvider) -> ProviderInfo {
@@ -1687,6 +2073,15 @@ fn provider_to_info(name: &str, provider: &ProxyProvider) -> ProviderInfo {
         provider_type: "Proxy".to_string(),
         vehicle_type: provider.vehicle_type.to_string(),
         proxies,
+        test_url: provider
+            .health_check
+            .as_ref()
+            .map_or_else(String::new, |hc| hc.url.clone()),
+        expected_status: provider
+            .health_check
+            .as_ref()
+            .map_or_else(String::new, |hc| hc.expected_status.clone()),
+        updated_at: unix_rfc3339(provider.updated_at_secs()),
     }
 }
 
@@ -1717,8 +2112,14 @@ async fn refresh_provider(
         Some(entry) => Arc::clone(entry.value()),
         None => return msg_err(StatusCode::NOT_FOUND, "resource not found"),
     };
-    provider.refresh().await;
-    StatusCode::NO_CONTENT.into_response()
+    match provider.refresh().await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"message": e})),
+        )
+            .into_response(),
+    }
 }
 
 /// Trigger a health check for all proxies in the named provider.
@@ -1726,19 +2127,18 @@ async fn refresh_provider(
 async fn provider_healthcheck(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-    Query(params): Query<DelayParams>,
 ) -> Response {
-    let timeout = match parse_delay_params(&params) {
-        Ok(t) => t,
-        Err(resp) => return *resp,
-    };
-    let url = params.url.as_deref().unwrap_or("").to_string();
-    let expected = params.expected.clone();
-
     let provider = match state.proxy_providers.get(&name) {
         Some(entry) => Arc::clone(entry.value()),
         None => return msg_err(StatusCode::NOT_FOUND, "resource not found"),
     };
+
+    let Some(health) = provider.health_check.as_ref() else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    let timeout = Duration::from_millis(health.timeout.max(1));
+    let url = health.url.clone();
+    let expected = (!health.expected_status.is_empty()).then(|| health.expected_status.clone());
 
     let members = provider
         .proxies()
@@ -1746,20 +2146,71 @@ async fn provider_healthcheck(
         .map(|proxy| (proxy.name().to_string(), proxy))
         .collect();
 
-    let mut results = serde_json::Map::new();
-    for (pname, delay) in meow_proxy::health::probe_many_bounded(
+    let _ = meow_proxy::health::probe_many_bounded(
         members,
         &url,
         expected.as_deref(),
         timeout,
         meow_proxy::health::PROVIDER_HEALTHCHECK_CONCURRENCY,
     )
+    .await;
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn get_provider_proxy(
+    State(state): State<Arc<AppState>>,
+    Path((provider_name, proxy_name)): Path<(String, String)>,
+) -> Response {
+    let Some(provider) = state.proxy_providers.get(&provider_name) else {
+        return msg_err(StatusCode::NOT_FOUND, "Resource not found");
+    };
+    match provider
+        .proxies()
+        .into_iter()
+        .find(|p| p.name() == proxy_name)
+    {
+        Some(proxy) => Json(ProxyInfo::from_proxy(&proxy)).into_response(),
+        None => msg_err(StatusCode::NOT_FOUND, "Resource not found"),
+    }
+}
+
+async fn provider_proxy_healthcheck(
+    State(state): State<Arc<AppState>>,
+    Path((provider_name, proxy_name)): Path<(String, String)>,
+    Query(params): Query<DelayParams>,
+) -> Response {
+    let timeout = match parse_delay_params(&params) {
+        Ok(timeout) => timeout,
+        Err(response) => return *response,
+    };
+    let Some(provider) = state.proxy_providers.get(&provider_name) else {
+        return msg_err(StatusCode::NOT_FOUND, "Resource not found");
+    };
+    let Some(proxy) = provider
+        .proxies()
+        .into_iter()
+        .find(|p| p.name() == proxy_name)
+    else {
+        return msg_err(StatusCode::NOT_FOUND, "Resource not found");
+    };
+    match probe_and_record(
+        &proxy,
+        params.url.as_deref().unwrap_or(""),
+        params.expected.as_deref(),
+        timeout,
+    )
     .await
     {
-        results.insert(pname, serde_json::Value::Number(delay.into()));
+        Ok(delay) => Json(DelayResp { delay }).into_response(),
+        Err(meow_proxy::health::UrlTestError::Timeout) => {
+            msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout")
+        }
+        Err(meow_proxy::health::UrlTestError::Transport(_)) => msg_err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "An error occurred in the delay test",
+        ),
     }
-
-    Json(serde_json::Value::Object(results)).into_response()
 }
 
 // ── Rule Providers ────────────────────────────────────────────────────
@@ -1770,23 +2221,30 @@ struct RuleProviderInfo {
     #[serde(rename = "type")]
     provider_type: String,
     behavior: String,
+    format: String,
     #[serde(rename = "ruleCount")]
     rule_count: usize,
     #[serde(rename = "updatedAt")]
-    updated_at: u64,
+    updated_at: String,
     #[serde(rename = "vehicleType")]
     vehicle_type: String,
 }
 
 impl RuleProviderInfo {
-    fn from_provider(p: &Arc<RuleProvider>) -> Self {
+    fn from_provider(p: &Arc<RuleProvider>, format: Option<&str>) -> Self {
+        let vehicle_type = match p.provider_type {
+            meow_config::rule_provider::ProviderType::Http => "HTTP",
+            meow_config::rule_provider::ProviderType::File => "File",
+            meow_config::rule_provider::ProviderType::Inline => "Inline",
+        };
         Self {
             name: p.name.clone(),
-            provider_type: p.provider_type.to_string(),
+            provider_type: "Rule".to_string(),
             behavior: p.behavior.to_string(),
+            format: format.unwrap_or("yaml").to_string(),
             rule_count: p.rule_count(),
-            updated_at: p.updated_at_secs(),
-            vehicle_type: p.vehicle.clone(),
+            updated_at: unix_rfc3339(p.updated_at_secs()).unwrap_or_default(),
+            vehicle_type: vehicle_type.to_string(),
         }
     }
 }
@@ -1798,10 +2256,16 @@ struct RuleProvidersResponse {
 
 async fn get_rule_providers(State(state): State<Arc<AppState>>) -> Json<RuleProvidersResponse> {
     let providers = state.rule_providers.read();
+    let raw = state.raw_config.read();
     let map: HashMap<String, RuleProviderInfo> = providers
         .iter()
         .map(|(name, p): (&String, &Arc<RuleProvider>)| {
-            (name.clone(), RuleProviderInfo::from_provider(p))
+            let format = raw
+                .rule_providers
+                .as_ref()
+                .and_then(|all| all.get(name))
+                .and_then(|provider| provider.format.as_deref());
+            (name.clone(), RuleProviderInfo::from_provider(p, format))
         })
         .collect();
     Json(RuleProvidersResponse { providers: map })
@@ -1813,7 +2277,13 @@ async fn get_rule_provider(
 ) -> Result<Json<RuleProviderInfo>, StatusCode> {
     let providers = state.rule_providers.read();
     let p = providers.get(&name).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(RuleProviderInfo::from_provider(p)))
+    let raw = state.raw_config.read();
+    let format = raw
+        .rule_providers
+        .as_ref()
+        .and_then(|all| all.get(&name))
+        .and_then(|provider| provider.format.as_deref());
+    Ok(Json(RuleProviderInfo::from_provider(p, format)))
 }
 
 async fn refresh_rule_provider(
