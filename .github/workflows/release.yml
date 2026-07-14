@@ -136,7 +136,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/meow.exe" "${staging}/"
             cp README.md LICENSE "${staging}/" 2>/dev/null || true
-            pwsh -Command "Compress-Archive -Path '${staging}/*' -DestinationPath '${name}.zip'"
+            pwsh -Command "Compress-Archive -Path 'dist/${name}' -DestinationPath '${name}.zip'"
             pwsh -Command "(Get-FileHash -Algorithm SHA256 '${name}.zip').Hash.ToLower() + '  *${name}.zip'" > "${name}.zip.sha256"
             echo "archive=${name}.zip" >> "$GITHUB_OUTPUT"
             echo "checksum=${name}.zip.sha256" >> "$GITHUB_OUTPUT"
