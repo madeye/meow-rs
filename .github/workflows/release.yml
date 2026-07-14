@@ -16,16 +16,18 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
             # x86_64: informational only, no size gate
             minimal_budget_bytes: 0
             minimal_soft_gate: true
           - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
             # aarch64: hard gate — release fails if minimal binary exceeds 8 MiB
             minimal_budget_bytes: 8388608
             minimal_soft_gate: false
@@ -35,6 +37,7 @@ jobs:
               aarch64_generic aarch64_cortex-a53 aarch64_cortex-a72
               aarch64_cortex-a76
           - target: armv7-unknown-linux-musleabihf
+            runner: ubuntu-latest
             # armv7: soft gate only for now (no ADR-0007 budget yet)
             minimal_budget_bytes: 0
             minimal_soft_gate: true
@@ -48,6 +51,10 @@ jobs:
             openwrt_archs: >-
               arm_cortex-a7_neon-vfpv4 arm_cortex-a8_vfpv3
               arm_cortex-a9_vfpv3-d16 arm_cortex-a15_neon-vfpv4
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
           # mipsel-unknown-linux-musl: temporarily disabled — `rust-std` is no
           # longer published for this target on stable. Re-enable when stable
           # ships the component again, or when ADR-0007 §1 promotes it to a
@@ -65,17 +72,25 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Install cargo-zigbuild and zig
+        if: runner.os == 'Linux'
         uses: mlugg/setup-zig@v1
         with:
           version: 0.13.0
 
       - run: cargo install --locked cargo-zigbuild
+        if: runner.os == 'Linux'
 
-      - name: Build release binary (static musl)
-        run: cargo zigbuild --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} --bin meow
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cargo zigbuild --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} --bin meow
+          else
+            cargo build --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} --bin meow
+          fi
 
       - name: Build minimal release binary (stripped, for size check)
-        if: matrix.minimal_budget_bytes != 0
+        if: matrix.minimal_budget_bytes != 0 && runner.os == 'Linux'
         run: |
           cargo zigbuild --release --locked \
             --no-default-features --features minimal \
@@ -89,7 +104,7 @@ jobs:
              "target/${{ matrix.target }}/release/meow-minimal"
 
       - name: Minimal binary size check
-        if: matrix.minimal_budget_bytes != 0
+        if: matrix.minimal_budget_bytes != 0 && runner.os == 'Linux'
         run: |
           SIZE=$(stat -c%s "target/${{ matrix.target }}/release/meow-minimal")
           BUDGET=${{ matrix.minimal_budget_bytes }}
@@ -105,23 +120,34 @@ jobs:
             echo "Size check passed: ${SIZE} <= ${BUDGET}"
           fi
 
-      - name: Package tarball
+      - name: Package archive
         id: pkg
+        shell: bash
         run: |
           set -euo pipefail
           # On workflow_dispatch GITHUB_REF_NAME is the *branch* name (which
-          # may contain slashes and break the tarball path) — use the tag
+          # may contain slashes and break the archive path) — use the tag
           # input instead.
           ref="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}"
           name="meow-${ref}-${{ matrix.target }}"
           staging="dist/${name}"
           mkdir -p "${staging}"
-          cp "target/${{ matrix.target }}/release/meow" "${staging}/"
-          cp README.md LICENSE "${staging}/" 2>/dev/null || true
-          tar -C dist -czf "${name}.tar.gz" "${name}"
-          sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
-          echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "checksum=${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/meow.exe" "${staging}/"
+            cp README.md LICENSE "${staging}/" 2>/dev/null || true
+            pwsh -Command "Compress-Archive -Path '${staging}/*' -DestinationPath '${name}.zip'"
+            pwsh -Command "(Get-FileHash -Algorithm SHA256 '${name}.zip').Hash.ToLower() + '  *${name}.zip'" > "${name}.zip.sha256"
+            echo "archive=${name}.zip" >> "$GITHUB_OUTPUT"
+            echo "checksum=${name}.zip.sha256" >> "$GITHUB_OUTPUT"
+          else
+            cp "target/${{ matrix.target }}/release/meow" "${staging}/"
+            cp README.md LICENSE "${staging}/" 2>/dev/null || true
+            tar -C dist -czf "${name}.tar.gz" "${name}"
+            sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
+            echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+            echo "checksum=${name}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Package OpenWrt ipks
         if: matrix.openwrt_archs != ''
@@ -178,6 +204,8 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
             dist/**/*.ipk
             dist/**/*.ipk.sha256
           generate_release_notes: true
