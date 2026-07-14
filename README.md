@@ -235,6 +235,42 @@ sudo journalctl -u meow -f
 sudo ./target/release/meow uninstall
 ```
 
+**Windows (Service Control Manager):**
+
+Open PowerShell as Administrator, then run:
+
+```powershell
+# Install, enable automatic startup, and start the service
+.\target\release\meow.exe install -f 'C:\path\to\config.yaml'
+
+# Check status
+.\target\release\meow.exe status
+Get-Service meow
+
+# Manage the service
+Stop-Service meow
+Start-Service meow
+Restart-Service meow
+
+# List the daily rolling logs (the seven newest files are retained)
+Get-ChildItem "$env:ProgramData\meow\logs\meow.*.log"
+
+# Follow the newest log
+$log = Get-ChildItem "$env:ProgramData\meow\logs\meow.*.log" |
+  Sort-Object LastWriteTime | Select-Object -Last 1
+Get-Content $log.FullName -Wait
+
+# Uninstall
+.\target\release\meow.exe uninstall
+```
+
+Installation keeps using the configuration file at the path passed to `-f`,
+starts the service immediately, and configures it to start automatically with
+Windows. Running `install` again updates the registered binary/configuration and
+restarts the service. The service runs as LocalSystem, so that account must have
+read/write access to the configuration directory and any provider/cache files
+that meow updates. Uninstalling preserves both the configuration and the logs.
+
 **macOS (launchd user agent):**
 
 ```bash

@@ -273,6 +273,10 @@ jobs:
         shell: bash
         run: cargo test --lib
 
+      - name: App binary unit tests (windows service)
+        shell: bash
+        run: cargo test -p meow-app --bin meow -- --nocapture
+
       - name: Common types tests (windows)
         shell: bash
         run: cargo test --test common_test -- --nocapture
