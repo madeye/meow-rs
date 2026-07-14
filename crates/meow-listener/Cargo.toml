@@ -3,7 +3,7 @@ name = "meow-listener"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Inbound protocol listeners (Mixed/HTTP/SOCKS5/TProxy) for the meow-rs proxy kernel."
+description = "Inbound protocol listeners (Mixed/HTTP/SOCKS5/TProxy/TUN) for the meow-rs proxy kernel."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -14,6 +14,16 @@ listener-http = []
 listener-socks5 = []
 listener-tproxy = []
 listener-mixed = ["listener-http", "listener-socks5"]
+# TUN inbound (issue #326) — transparent proxy on platforms without a
+# tproxy/REDIRECT firewall (Windows). Off by default: pulls in the device,
+# userspace-stack, and route-control deps below.
+listener-tun = [
+    "dep:tun-rs",
+    "dep:ipstack",
+    "dep:route_manager",
+    "dep:meow-dns",
+    "dep:ipnet",
+]
 
 [dependencies]
 meow-common = { workspace = true }
@@ -24,6 +34,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 libc = "0.2"
 smallvec = { workspace = true }
+tun-rs = { workspace = true, optional = true }
+ipstack = { workspace = true, optional = true }
+route_manager = { workspace = true, optional = true }
+meow-dns = { workspace = true, optional = true }
+ipnet = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

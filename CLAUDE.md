@@ -40,7 +40,7 @@ cargo clippy --all-targets
 ## Architecture
 
 ```
-Listeners (HTTP/SOCKS5/Mixed/TProxy)
+Listeners (HTTP/SOCKS5/Mixed/TProxy/TUN)
         |
         v
     Tunnel (routing engine)  <-->  DNS Resolver (Snooping/Cache/FakeIP)
@@ -71,7 +71,7 @@ The workspace has 13 crates (see also [ADR-0009](docs/adr/0009-cleanup-scope.md)
 | `meow-rules` | Rule matching engine and parser (domain, IP-CIDR, GeoIP, process, logic composition) |
 | `meow-dns` | DNS resolver, cache, DNS snooping (IP→domain reverse table), UDP server |
 | `meow-tunnel` | Core routing engine: TCP/UDP relay, rule matching dispatch, connection statistics |
-| `meow-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy) |
+| `meow-listener` | Inbound protocol handlers (Mixed/HTTP/SOCKS5/TProxy, plus TUN behind the opt-in `listener-tun` feature) |
 | `meow-config` | YAML configuration parsing into typed structs |
 | `meow-api` | REST API server (Axum) for proxies, rules, connections, configs, traffic, DNS query |
 | `meow-app` | CLI entry point (`main.rs`) — wires config → tunnel → listeners → DNS → API → health checks → subscription refresh |
@@ -84,6 +84,10 @@ The workspace has 13 crates (see also [ADR-0009](docs/adr/0009-cleanup-scope.md)
 ### Transparent-proxy gateway
 
 The built-in TProxy listener firewall (`meow-listener/src/tproxy/firewall.rs`) is `output`-chain/REDIRECT-based and only covers the **host's own** traffic — it is *not* a forwarding LAN gateway. To proxy *other* devices' traffic you add prerouting rules + a DNS hijack yourself. Helper scripts automate this: `scripts/tproxy-gateway-linux.sh` (nftables) and `scripts/tproxy-gateway-macos.sh` (pf, experimental). Full setup, DNS-mode (fake-ip vs redir-host) trade-offs, and systemd wiring are in [docs/tproxy-gateway.md](docs/tproxy-gateway.md). Note: the top-level `tproxy-port` hard-binds `127.0.0.1`; a gateway must declare the listener via `listeners:` with a non-loopback `listen`.
+
+### TUN inbound (Windows transparent proxy)
+
+The `tun:` config section (issue #326, feature `listener-tun`, in the `full` bundle) provides transparent proxying via an L3 device — the only transparent option on Windows, also usable on Linux/macOS. Implementation: `meow-listener/src/tun/` (tun-rs device + ipstack userspace stack + route_manager auto-route). v1 is fake-IP-scoped: `auto-route` routes only the fake-ip range into the device, which makes routing loops structurally impossible (outbound dials go to real IPs) at the cost of not capturing IP-literal traffic. TCP flows enter `meow_tunnel::tcp::handle_tcp`; UDP flows are per-flow tasks mirroring the SOCKS5-UDP routing; `dns-hijack` answers UDP :53 via `DnsServer::handle_query`. Setup guide: [docs/tun.md](docs/tun.md).
 
 ### Key Patterns
 
