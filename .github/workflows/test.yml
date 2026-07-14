@@ -76,6 +76,9 @@ jobs:
       - name: Unit tests
         run: cargo test --lib
 
+      - name: App binary unit tests
+        run: cargo test -p meow-app --bin meow -- --nocapture
+
       - name: Common types tests
         run: cargo test --test common_test -- --nocapture
 
@@ -328,6 +331,7 @@ jobs:
       - name: Core smoke tests
         run: |
           cargo test --lib
+          cargo test -p meow-app --bin meow -- --nocapture
           cargo test --test common_test -- --nocapture
           cargo test --test config_test -- --nocapture
           cargo test --test rules_test -- --nocapture

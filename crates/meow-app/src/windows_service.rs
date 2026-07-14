@@ -62,9 +62,7 @@ pub(super) fn dispatch() -> Result<()> {
 
 pub(super) fn install(config_override: Option<&str>, args: &Args) -> Result<()> {
     let current_exe = std::env::current_exe()?;
-    let executable_path = canonical_file(&current_exe, "meow executable")?;
-    let requested_config = absolute_path(config_override.unwrap_or(&args.config))?;
-    let config_path = canonical_file(&requested_config, "configuration file")?;
+    let executable_path = existing_file_absolute(&current_exe, "meow executable")?;
     let current_dir = std::env::current_dir()?;
     let default_home = meow_config::meow_config_dir();
     let requested_home =
@@ -75,12 +73,18 @@ pub(super) fn install(config_override: Option<&str>, args: &Args) -> Result<()> 
             requested_home.display()
         )
     })?;
-    let home_dir = requested_home.canonicalize().with_context(|| {
+    let home_dir = std::path::absolute(&requested_home).with_context(|| {
         format!(
             "failed to resolve meow home directory {}",
             requested_home.display()
         )
     })?;
+    let requested_config = resolve_service_config(
+        config_override.unwrap_or(&args.config),
+        args.directory.as_deref().map(|_| home_dir.as_path()),
+        &current_dir,
+    );
+    let config_path = existing_file_absolute(&requested_config, "configuration file")?;
     let log_dir = service_log_dir()?;
     std::fs::create_dir_all(&log_dir).with_context(|| {
         format!(
@@ -141,10 +145,23 @@ pub(super) fn install(config_override: Option<&str>, args: &Args) -> Result<()> 
             reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
             reboot_msg: None,
             command: None,
-            actions: Some(vec![ServiceAction {
-                action_type: ServiceActionType::Restart,
-                delay: Duration::from_secs(5),
-            }]),
+            // SCM repeats the last action for every subsequent failure, so a
+            // persistently failing service settles into a 60-second retry
+            // cadence instead of a 5-second tight loop.
+            actions: Some(vec![
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(5),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(30),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(60),
+                },
+            ]),
         })
         .context("failed to configure meow service recovery")?;
     service
@@ -371,15 +388,6 @@ fn run_service() -> Result<()> {
     }
 }
 
-fn absolute_path(path: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        Ok(path)
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
-}
-
 fn resolve_service_home(explicit: Option<&str>, default_home: &Path, cwd: &Path) -> PathBuf {
     let home = explicit.map_or_else(|| default_home.to_path_buf(), PathBuf::from);
     if home.is_absolute() {
@@ -389,11 +397,28 @@ fn resolve_service_home(explicit: Option<&str>, default_home: &Path, cwd: &Path)
     }
 }
 
-fn canonical_file(path: &Path, description: &str) -> Result<PathBuf> {
+/// Mirrors the runtime rule in `run_application_inner`: a relative `-f` is
+/// resolved under `-d` when a home directory was given, otherwise under the
+/// invoking directory.
+fn resolve_service_config(config: &str, explicit_home: Option<&Path>, cwd: &Path) -> PathBuf {
+    let config = PathBuf::from(config);
+    if config.is_absolute() {
+        config
+    } else if let Some(home) = explicit_home {
+        home.join(config)
+    } else {
+        cwd.join(config)
+    }
+}
+
+fn existing_file_absolute(path: &Path, description: &str) -> Result<PathBuf> {
     if !path.is_file() {
         anyhow::bail!("{description} not found: {}", path.display());
     }
-    path.canonicalize()
+    // std::path::absolute instead of canonicalize(): the latter yields \\?\
+    // extended-length paths that would be baked into the SCM command line and
+    // shown to users.
+    std::path::absolute(path)
         .with_context(|| format!("failed to resolve {description}: {}", path.display()))
 }
 
@@ -622,6 +647,21 @@ mod tests {
             cwd,
         );
         assert_eq!(absolute, PathBuf::from(r"D:\Shared Program Data\meow"));
+    }
+
+    #[test]
+    fn relative_config_resolves_under_home_like_a_direct_run() {
+        let cwd = Path::new(r"E:\test");
+        let home = Path::new(r"D:\meow-data");
+
+        let under_home = resolve_service_config("config.yaml", Some(home), cwd);
+        assert_eq!(under_home, PathBuf::from(r"D:\meow-data\config.yaml"));
+
+        let under_cwd = resolve_service_config("config.yaml", None, cwd);
+        assert_eq!(under_cwd, PathBuf::from(r"E:\test\config.yaml"));
+
+        let absolute = resolve_service_config(r"C:\configs\config.yaml", Some(home), cwd);
+        assert_eq!(absolute, PathBuf::from(r"C:\configs\config.yaml"));
     }
 
     #[test]
