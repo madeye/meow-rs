@@ -160,12 +160,13 @@ fn test_connection_has_start_time() {
 
     let conns = stats.active_connections();
     assert!(!conns[0].start.is_empty());
-    // start is a Unix timestamp string
-    let ts: u64 = conns[0]
-        .start
-        .parse()
-        .expect("start should be a valid number");
-    assert!(ts > 0, "timestamp should be positive");
+    // mihomo exposes connection start times as RFC 3339 strings.
+    let start = time::OffsetDateTime::parse(
+        &conns[0].start,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .expect("start should be a valid RFC 3339 timestamp");
+    assert!(start.unix_timestamp() > 0, "timestamp should be positive");
 }
 
 #[test]

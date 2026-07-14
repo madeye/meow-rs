@@ -237,9 +237,44 @@ impl Serialize for EntryRef<'_> {
 
 fn chrono_now() -> SmolStr {
     use time::format_description::well_known::Rfc3339;
-    SmolStr::new(
-        time::OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .unwrap_or_default(),
-    )
+
+    // Seconds precision is sufficient for mihomo's connection API and keeps
+    // the 20-byte RFC 3339 value inline in `SmolStr`. Formatting into a stack
+    // buffer also avoids allocating an intermediate `String` on this hot path.
+    let now = time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    let mut buffer = TimestampBuffer::default();
+    if now.format_into(&mut buffer, &Rfc3339).is_ok() {
+        if let Ok(value) = std::str::from_utf8(&buffer.bytes[..buffer.len]) {
+            return SmolStr::new(value);
+        }
+    }
+
+    SmolStr::new_static("1970-01-01T00:00:00Z")
+}
+
+#[derive(Default)]
+struct TimestampBuffer {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl std::io::Write for TimestampBuffer {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        let end = self.len.saturating_add(input.len());
+        if end > self.bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "timestamp exceeds fixed buffer",
+            ));
+        }
+        self.bytes[self.len..end].copy_from_slice(input);
+        self.len = end;
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
