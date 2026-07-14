@@ -342,7 +342,7 @@ fn run_service() -> Result<()> {
 
     let result = super::run_application(
         args,
-        LogTarget::WindowsService(log_dir),
+        &LogTarget::WindowsService(log_dir),
         ShutdownSignal::WindowsService(shutdown_rx),
         Some(on_ready),
     );

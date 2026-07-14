@@ -209,10 +209,10 @@ fn main() -> Result<()> {
         return handle_service_command(cmd, &args);
     }
 
-    run_application(args, LogTarget::Console, ShutdownSignal::Console, None)
+    run_application(args, &LogTarget::Console, ShutdownSignal::Console, None)
 }
 
-fn init_logging(target: LogTarget) -> Result<Logging> {
+fn init_logging(target: &LogTarget) -> Result<Logging> {
     // Initialize logging + log broadcast channel for GET /logs WebSocket.
     // The broadcast layer carries LevelFilter::TRACE so the registry's global
     // max-level is TRACE, preventing the fmt layer's EnvFilter from silencing
@@ -245,7 +245,7 @@ fn init_logging(target: LogTarget) -> Result<Logging> {
         }
         #[cfg(target_os = "windows")]
         LogTarget::WindowsService(log_dir) => {
-            std::fs::create_dir_all(&log_dir).map_err(|e| {
+            std::fs::create_dir_all(log_dir).map_err(|e| {
                 anyhow::anyhow!(
                     "failed to create Windows service log directory {}: {e}",
                     log_dir.display()
@@ -256,7 +256,7 @@ fn init_logging(target: LogTarget) -> Result<Logging> {
                 .filename_prefix("meow")
                 .filename_suffix("log")
                 .max_log_files(7)
-                .build(&log_dir)
+                .build(log_dir)
                 .map_err(|e| {
                     anyhow::anyhow!(
                         "failed to initialize Windows service log in {}: {e}",
@@ -285,7 +285,7 @@ fn init_logging(target: LogTarget) -> Result<Logging> {
 
 fn run_application(
     args: Args,
-    log_target: LogTarget,
+    log_target: &LogTarget,
     shutdown: ShutdownSignal,
     on_ready: Option<ReadyCallback>,
 ) -> Result<()> {
@@ -1038,7 +1038,7 @@ mod tests {
 
         let result = run_application(
             args,
-            LogTarget::WindowsService(log_dir.clone()),
+            &LogTarget::WindowsService(log_dir.clone()),
             ShutdownSignal::WindowsService(shutdown_rx),
             Some(Box::new(move || {
                 ready_flag.store(true, Ordering::Release);
