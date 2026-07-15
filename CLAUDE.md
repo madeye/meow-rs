@@ -87,7 +87,7 @@ The built-in TProxy listener firewall (`meow-listener/src/tproxy/firewall.rs`) i
 
 ### TUN inbound (Windows transparent proxy)
 
-The `tun:` config section (issue #326, feature `listener-tun`, in the `full` bundle) provides transparent proxying via an L3 device — the only transparent option on Windows, also usable on Linux/macOS. Implementation: `meow-listener/src/tun/` (tun-rs device + ipstack userspace stack + route_manager auto-route). v1 is fake-IP-scoped: `auto-route` routes only the fake-ip range into the device, which makes routing loops structurally impossible (outbound dials go to real IPs) at the cost of not capturing IP-literal traffic. TCP flows enter `meow_tunnel::tcp::handle_tcp`; UDP flows are per-flow tasks mirroring the SOCKS5-UDP routing; `dns-hijack` answers UDP :53 via `DnsServer::handle_query`. Setup guide: [docs/tun.md](docs/tun.md).
+The `tun:` config section (issue #326, feature `listener-tun`, in the `full` bundle) provides transparent proxying via an L3 device — the only transparent option on Windows, also usable on Linux/macOS. Implementation: `meow-listener/src/tun/` (tun-rs device + netstack-smoltcp userspace stack + route_manager auto-route). v1 is fake-IP-scoped: `auto-route` routes only the fake-ip range into the device, which makes routing loops structurally impossible (outbound dials go to real IPs) at the cost of not capturing IP-literal traffic. TCP flows enter `meow_tunnel::tcp::handle_tcp`; UDP is one packet-level netstack socket demuxed by a listener-owned flow table (per-flow tasks mirroring the SOCKS5-UDP routing, idle-evicted after `udp-timeout`); `dns-hijack` answers UDP :53 via `DnsServer::handle_query`. Setup guide: [docs/tun.md](docs/tun.md).
 
 ### Key Patterns
 

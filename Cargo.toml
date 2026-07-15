@@ -121,7 +121,7 @@ iprange = "0.6"
 # stack + route table control. All three are optional, pulled in only by
 # meow-listener's `listener-tun` feature.
 tun-rs = { version = "2.8", features = ["async_tokio"] }
-ipstack = "1.0"
+netstack-smoltcp = "0.2"
 route_manager = "0.2"
 
 # Crypto

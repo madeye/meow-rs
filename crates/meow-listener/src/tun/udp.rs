@@ -1,81 +1,149 @@
 //! Per-flow UDP handling for the TUN inbound.
 //!
-//! `ipstack` surfaces each (src, dst) UDP tuple as one `IpStackUdpStream`
-//! and owns the NAT/idle bookkeeping (the stream closes after
-//! `udp-timeout` of silence), so unlike the SOCKS5 associate path there is
-//! no per-listener NAT table here — one task per flow, torn down when the
-//! stream ends.
+//! `netstack-smoltcp` surfaces UDP as one packet-level socket yielding
+//! `(payload, src, dst)` tuples — there are no per-flow streams and no
+//! built-in NAT, so this module owns the flow table: the reader loop
+//! dispatches datagrams to per-flow tasks keyed by the (src, dst) tuple,
+//! and each flow task dials the outbound once, pumps both directions, and
+//! evicts itself after `udp-timeout` of silence.
 //!
 //! Routing mirrors `meow_tunnel::udp::handle_udp`: fake-IP rewrite →
 //! pre-resolve → port-53 handling → rule match → `dial_udp`. Port 53 is
-//! special two ways: with `dns-hijack` enabled the query is answered
-//! in-process by `DnsServer::handle_query` (required for fake-IP mode —
-//! point the OS resolver at any address inside the routed range); without
-//! it the flow bypasses rule matching to DIRECT, mirroring the tunnel-level
-//! DNS bypass.
+//! special two ways: with `dns-hijack` enabled each query is answered
+//! in-process by `DnsServer::handle_query` — statelessly, no flow entry
+//! (required for fake-IP mode — point the OS resolver at any address
+//! inside the routed range); without it the flow bypasses rule matching to
+//! DIRECT, mirroring the tunnel-level DNS bypass.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
-use ipstack::IpStackUdpStream;
-use meow_common::{ConnType, Metadata, Network, ProxyAdapter, ProxyPacketConn};
+use futures::{SinkExt, StreamExt};
+use meow_common::{ConnType, Metadata, Network, ProxyAdapter};
 use meow_dns::server::DnsServer;
 use meow_tunnel::Tunnel;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use netstack_smoltcp::UdpSocket;
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Instant};
 use tracing::{debug, info};
 
 /// One datagram payload cap. UDP over IPv4 tops out below 64 KiB.
 const DATAGRAM_BUF: usize = 65535;
+/// Per-flow upstream queue — buffers datagrams while the flow task is
+/// still routing/dialing; overflow is dropped (UDP semantics).
+const FLOW_QUEUE: usize = 64;
+/// Queue feeding the single stack-writer task (the netstack write half is
+/// a `Sink` and cannot be cloned into per-flow tasks).
+const REPLY_QUEUE: usize = 512;
+/// Sweep dead flow-table entries every this many datagrams.
+const SWEEP_INTERVAL: u32 = 256;
 
-pub(super) async fn handle_udp_flow(
+/// `(payload, packet source, packet destination)` — the netstack `UdpMsg`
+/// layout, so a reply to a flow is sent as `(payload, dst, src)`.
+type ReplyMsg = (Vec<u8>, SocketAddr, SocketAddr);
+
+pub(super) async fn run_udp(
     tunnel: Tunnel,
-    stream: IpStackUdpStream,
+    socket: UdpSocket,
     dns_hijack: bool,
-    in_name: &str,
+    udp_timeout: Duration,
+    in_name: String,
 ) {
-    let src = stream.local_addr();
-    let dst = stream.peer_addr();
+    let (mut read_half, mut write_half) = socket.split();
 
-    if dns_hijack && dst.port() == 53 {
-        if let Err(e) = serve_dns(&tunnel, stream).await {
-            debug!("tun dns-hijack {src} -> {dst}: {e}");
+    let (reply_tx, mut reply_rx) = mpsc::channel::<ReplyMsg>(REPLY_QUEUE);
+    tokio::spawn(async move {
+        while let Some(msg) = reply_rx.recv().await {
+            if let Err(e) = write_half.send(msg).await {
+                debug!("tun UDP write half closed: {e}");
+                break;
+            }
         }
-        return;
-    }
+    });
 
-    if let Err(e) = relay_flow(&tunnel, stream, src, dst, in_name).await {
+    // Flow table, touched only by this loop. A flow task signals its own
+    // death by closing its queue; the entry is evicted lazily — on the next
+    // datagram for the tuple or by the periodic sweep below.
+    let mut flows: HashMap<(SocketAddr, SocketAddr), mpsc::Sender<Vec<u8>>> = HashMap::new();
+    let mut sweep_countdown = SWEEP_INTERVAL;
+
+    while let Some((data, src, dst)) = read_half.next().await {
+        if dns_hijack && dst.port() == 53 {
+            let resolver = Arc::clone(tunnel.resolver());
+            let reply_tx = reply_tx.clone();
+            tokio::spawn(async move {
+                match DnsServer::handle_query(&data, &resolver).await {
+                    Ok(response) => {
+                        let _ = reply_tx.send((response, dst, src)).await;
+                    }
+                    Err(e) => debug!("tun dns-hijack: unanswerable query: {e}"),
+                }
+            });
+            continue;
+        }
+
+        sweep_countdown -= 1;
+        if sweep_countdown == 0 {
+            sweep_countdown = SWEEP_INTERVAL;
+            flows.retain(|_, tx| !tx.is_closed());
+        }
+
+        let key = (src, dst);
+        let data = match flows.get(&key) {
+            Some(tx) => match tx.try_send(data) {
+                // Delivered — or queue full: the flow is alive but slow,
+                // so the datagram is dropped (UDP semantics).
+                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => continue,
+                // Flow task ended (idle timeout or error): evict and fall
+                // through to re-create the flow with this datagram.
+                Err(mpsc::error::TrySendError::Closed(data)) => {
+                    flows.remove(&key);
+                    data
+                }
+            },
+            None => data,
+        };
+
+        let (tx, rx) = mpsc::channel(FLOW_QUEUE);
+        tx.try_send(data).expect("fresh flow queue has capacity");
+        flows.insert(key, tx);
+        tokio::spawn(flow_task(
+            tunnel.clone(),
+            rx,
+            reply_tx.clone(),
+            src,
+            dst,
+            udp_timeout,
+            in_name.clone(),
+        ));
+    }
+}
+
+async fn flow_task(
+    tunnel: Tunnel,
+    rx: mpsc::Receiver<Vec<u8>>,
+    reply_tx: mpsc::Sender<ReplyMsg>,
+    src: SocketAddr,
+    dst: SocketAddr,
+    udp_timeout: Duration,
+    in_name: String,
+) {
+    if let Err(e) = relay_flow(&tunnel, rx, reply_tx, src, dst, udp_timeout, &in_name).await {
         debug!("tun UDP {src} -> {dst}: {e}");
     }
 }
 
-/// Answer DNS queries on this flow with the in-process resolver. Each read
-/// yields one datagram (one query); the response is written straight back.
-async fn serve_dns(tunnel: &Tunnel, mut stream: IpStackUdpStream) -> Result<(), String> {
-    let resolver = Arc::clone(tunnel.resolver());
-    let mut buf = vec![0u8; DATAGRAM_BUF];
-    loop {
-        let n = match stream.read(&mut buf).await {
-            Ok(0) => return Ok(()), // idle-timeout close
-            Ok(n) => n,
-            Err(e) => return Err(format!("read: {e}")),
-        };
-        match DnsServer::handle_query(&buf[..n], &resolver).await {
-            Ok(response) => {
-                if let Err(e) = stream.write_all(&response).await {
-                    return Err(format!("write: {e}"));
-                }
-            }
-            Err(e) => debug!("tun dns-hijack: unanswerable query: {e}"),
-        }
-    }
-}
-
-/// Route the flow and pump datagrams both ways until either side closes.
+/// Route the flow, dial the outbound, then pump datagrams both ways until
+/// `udp_timeout` passes with no traffic in either direction.
 async fn relay_flow(
     tunnel: &Tunnel,
-    stream: IpStackUdpStream,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    reply_tx: mpsc::Sender<ReplyMsg>,
     src: SocketAddr,
     dst: SocketAddr,
+    udp_timeout: Duration,
     in_name: &str,
 ) -> Result<(), String> {
     let mut metadata = Metadata {
@@ -132,44 +200,44 @@ async fn relay_flow(
         }
     };
 
-    let conn: Arc<dyn ProxyPacketConn> = Arc::from(
-        proxy
-            .dial_udp(&metadata)
-            .await
-            .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
-    );
+    let conn = proxy
+        .dial_udp(&metadata)
+        .await
+        .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?;
 
-    // Downstream pump (server → client) runs as its own task so the
-    // upstream loop below can block on the stream read. Reply source
-    // addresses are not rewritten: the tun flow is locked to one (src, dst)
-    // tuple, so every reply is delivered as coming from `dst`.
-    let (mut read_half, mut write_half) = tokio::io::split(stream);
-    let downstream = {
-        let conn = Arc::clone(&conn);
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; DATAGRAM_BUF];
-            while let Ok((n, _from)) = conn.read_packet(&mut buf).await {
-                if write_half.write_all(&buf[..n]).await.is_err() {
-                    break;
-                }
-            }
-        })
-    };
-
+    // Single-task pump: select over upstream datagrams (queued by the
+    // reader loop), downstream packets, and the idle deadline. Reply
+    // source addresses are not rewritten: the tun flow is locked to one
+    // (src, dst) tuple, so every reply is delivered as coming from `dst`.
+    // A downstream read cancelled by another branch may drop one datagram
+    // — acceptable under UDP delivery semantics.
     let mut buf = vec![0u8; DATAGRAM_BUF];
+    let idle = sleep(udp_timeout);
+    tokio::pin!(idle);
     let result = loop {
-        match read_half.read(&mut buf).await {
-            Ok(0) => break Ok(()), // idle-timeout close by ipstack
-            Ok(n) => {
-                if let Err(e) = conn.write_packet(&buf[..n], &dst_addr).await {
-                    break Err(format!("upstream write {dst_addr}: {e}"));
+        tokio::select! {
+            () = &mut idle => break Ok(()), // idle-timeout eviction
+            queued = rx.recv() => match queued {
+                Some(data) => {
+                    if let Err(e) = conn.write_packet(&data, &dst_addr).await {
+                        break Err(format!("upstream write {dst_addr}: {e}"));
+                    }
+                    idle.as_mut().reset(Instant::now() + udp_timeout);
                 }
-            }
-            Err(e) => break Err(format!("read: {e}")),
+                None => break Ok(()), // reader loop gone — listener shutdown
+            },
+            received = conn.read_packet(&mut buf) => match received {
+                Ok((n, _from)) => {
+                    if reply_tx.send((buf[..n].to_vec(), dst, src)).await.is_err() {
+                        break Ok(()); // stack writer gone — listener shutdown
+                    }
+                    idle.as_mut().reset(Instant::now() + udp_timeout);
+                }
+                Err(e) => break Err(format!("downstream read: {e}")),
+            },
         }
     };
 
-    downstream.abort();
     let _ = conn.close();
     result
 }

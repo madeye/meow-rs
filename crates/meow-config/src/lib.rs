@@ -154,8 +154,8 @@ impl Default for TunConfig {
     }
 }
 
-/// Minimum MTU accepted for the TUN device — the userspace stack (ipstack)
-/// rejects anything below the IPv6 floor (RFC 8200 §5).
+/// Minimum MTU accepted for the TUN device — the IPv6 floor (RFC 8200 §5);
+/// smaller values break v6 traffic through the userspace stack.
 const TUN_MIN_MTU: u16 = 1280;
 
 /// Parse and validate the raw `tun:` block. Returns `TunConfig::default()`

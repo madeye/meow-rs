@@ -1,6 +1,6 @@
 # TUN inbound — transparent proxy on Windows (and everywhere else)
 
-Last updated: 2026-07-14. Tracks the `listener-tun` feature (issue
+Last updated: 2026-07-15. Tracks the `listener-tun` feature (issue
 [#326](https://github.com/madeye/meow-rs/issues/326)).
 Audience: users who want system-wide transparent proxying on a platform
 without a tproxy/REDIRECT firewall — Windows first and foremost. The same
@@ -8,7 +8,8 @@ inbound works on Linux and macOS.
 
 The TUN inbound creates an L3 network device (`wintun` on Windows, `tun` on
 Linux, `utun` on macOS), terminates the raw IP packets in a userspace TCP/IP
-stack ([`ipstack`](https://crates.io/crates/ipstack)), and dispatches the
+stack ([`netstack-smoltcp`](https://crates.io/crates/netstack-smoltcp),
+backed by [smoltcp](https://crates.io/crates/smoltcp)), and dispatches the
 resulting TCP/UDP flows through meow's normal routing engine — rules, proxy
 groups, statistics, and the REST API all behave exactly as they do for the
 other inbounds.
@@ -83,7 +84,9 @@ Consequences:
   `auto-route` has nothing safe to route and warns; you can still add routes
   to the device manually, but you are then responsible for loop avoidance.
 - UDP flows (including QUIC) to fake IPs are captured and routed per-rule.
-- ICMP is not handled — `ping` through the tun does not work.
+- ICMP echo requests entering the device are answered by the userspace
+  stack itself — `ping` to a fake IP confirms the tun is up, but is not an
+  end-to-end probe of the remote host.
 
 ## `tun:` reference
 

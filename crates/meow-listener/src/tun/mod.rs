@@ -3,10 +3,10 @@
 //! This is the transparent-proxy path for platforms without a
 //! tproxy/REDIRECT firewall — Windows first and foremost — and works the
 //! same on Linux and macOS. A `tun-rs` device receives raw IP packets; the
-//! `ipstack` userspace TCP/IP stack terminates them and hands us ordinary
-//! `AsyncRead + AsyncWrite` streams (TCP) and per-flow datagram streams
-//! (UDP), which are dispatched into the tunnel exactly like every other
-//! inbound.
+//! `netstack-smoltcp` userspace TCP/IP stack (smoltcp-backed, the same
+//! netstack clash-rs uses) terminates them and hands us ordinary
+//! `AsyncRead + AsyncWrite` streams (TCP) and a packet-level UDP socket,
+//! which are dispatched into the tunnel exactly like every other inbound.
 //!
 //! ## Loop freedom (v1: fake-IP-scoped capture)
 //!
@@ -37,18 +37,20 @@ mod route;
 mod udp;
 
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use futures::StreamExt;
 use ipnet::Ipv4Net;
-use ipstack::{IpStack, IpStackConfig, IpStackStream, IpStackTcpStream};
 use meow_common::{ConnType, Metadata, Network, ProxyConn};
 use meow_tunnel::Tunnel;
+use netstack_smoltcp::{StackBuilder, TcpStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use device::DeviceAdapter;
 use route::RouteGuard;
 
 /// Listener-facing subset of the `tun:` config section, mapped from
@@ -58,7 +60,7 @@ use route::RouteGuard;
 pub struct TunListenerConfig {
     /// Device name. `None` lets the platform pick (`utunN` on macOS).
     pub device: Option<String>,
-    /// Device MTU. `ipstack` requires ≥ 1280.
+    /// Device MTU. The config layer enforces ≥ 1280 (RFC 8200 §5).
     pub mtu: u16,
     /// Address + prefix assigned to the device.
     pub inet4_address: Ipv4Net,
@@ -66,7 +68,7 @@ pub struct TunListenerConfig {
     pub auto_route: bool,
     /// Answer UDP :53 flows with the in-process DNS resolver.
     pub dns_hijack: bool,
-    /// Idle timeout for UDP flows (ipstack NAT eviction).
+    /// Idle timeout for UDP flows (flow-table eviction).
     pub udp_timeout: Duration,
 }
 
@@ -101,6 +103,7 @@ impl TunListener {
                 ),
             )
         })?;
+        let device = Arc::new(device);
         let dev_name = device.name().unwrap_or_else(|_| "<unknown>".into());
 
         // auto-route v1: capture exactly the fake-IP range (see module docs).
@@ -125,12 +128,28 @@ impl TunListener {
             None
         };
 
-        let mut stack_cfg = IpStackConfig::default();
-        stack_cfg
-            .mtu(cfg.mtu)
-            .map_err(|e| format!("tun mtu {}: {e}", cfg.mtu))?
-            .udp_timeout(cfg.udp_timeout);
-        let mut stack = IpStack::new(stack_cfg, DeviceAdapter(device));
+        // ICMP rides on the TCP interface (echo replies are answered by
+        // smoltcp itself), hence tcp+icmp+udp; with tcp and udp enabled the
+        // runner/listener/socket options are always populated.
+        let (stack, runner, udp_socket, tcp_listener) = StackBuilder::default()
+            .mtu(usize::from(cfg.mtu))
+            .enable_tcp(true)
+            .enable_udp(true)
+            .enable_icmp(true)
+            .build()?;
+        let runner = runner.expect("netstack runner (TCP enabled)");
+        let mut tcp_listener = tcp_listener.expect("netstack TCP listener (TCP enabled)");
+        let udp_socket = udp_socket.expect("netstack UDP socket (UDP enabled)");
+
+        tokio::spawn(runner);
+        let (mut pump_in, mut pump_out) = device::spawn_pumps(device, stack);
+        tokio::spawn(udp::run_udp(
+            self.tunnel.clone(),
+            udp_socket,
+            cfg.dns_hijack,
+            cfg.udp_timeout,
+            self.name.clone(),
+        ));
 
         info!(
             "TUN listener '{}' started on device '{dev_name}' ({}, mtu {}, auto-route: {}, \
@@ -139,46 +158,43 @@ impl TunListener {
         );
 
         loop {
-            match stack.accept().await? {
-                IpStackStream::Tcp(tcp) => {
-                    let tunnel = self.tunnel.clone();
-                    let name = self.name.clone();
-                    tokio::spawn(async move {
-                        handle_tcp_flow(tunnel, tcp, &name).await;
-                    });
+            tokio::select! {
+                accepted = tcp_listener.next() => match accepted {
+                    Some((stream, src, dst)) => {
+                        let tunnel = self.tunnel.clone();
+                        let name = self.name.clone();
+                        tokio::spawn(async move {
+                            handle_tcp_flow(tunnel, stream, src, dst, &name).await;
+                        });
+                    }
+                    None => return Err("netstack TCP listener closed".into()),
+                },
+                joined = &mut pump_in => {
+                    return Err(pump_error("device→stack", joined).into());
                 }
-                IpStackStream::Udp(udp_stream) => {
-                    let tunnel = self.tunnel.clone();
-                    let name = self.name.clone();
-                    let dns_hijack = cfg.dns_hijack;
-                    tokio::spawn(async move {
-                        udp::handle_udp_flow(tunnel, udp_stream, dns_hijack, &name).await;
-                    });
-                }
-                IpStackStream::UnknownTransport(pkt) => {
-                    debug!(
-                        "tun '{}': dropping unsupported transport {:?} to {}",
-                        self.name,
-                        pkt.ip_protocol(),
-                        pkt.dst_addr()
-                    );
-                }
-                IpStackStream::UnknownNetwork(pkt) => {
-                    debug!(
-                        "tun '{}': dropping unknown network packet ({} bytes)",
-                        self.name,
-                        pkt.len()
-                    );
+                joined = &mut pump_out => {
+                    return Err(pump_error("stack→device", joined).into());
                 }
             }
         }
     }
 }
 
-async fn handle_tcp_flow(tunnel: Tunnel, tcp: IpStackTcpStream, in_name: &str) {
-    let src = tcp.local_addr(); // client behind the tun
-    let dst = tcp.peer_addr(); // original destination
+fn pump_error(direction: &str, joined: Result<io::Result<()>, tokio::task::JoinError>) -> String {
+    match joined {
+        Ok(Ok(())) => format!("tun {direction} pump exited"),
+        Ok(Err(e)) => format!("tun {direction} pump failed: {e}"),
+        Err(e) => format!("tun {direction} pump panicked: {e}"),
+    }
+}
 
+async fn handle_tcp_flow(
+    tunnel: Tunnel,
+    tcp: TcpStream,
+    src: SocketAddr, // client behind the tun
+    dst: SocketAddr, // original destination
+    in_name: &str,
+) {
     let metadata = Metadata {
         network: Network::Tcp,
         conn_type: ConnType::Tun,
@@ -195,9 +211,9 @@ async fn handle_tcp_flow(tunnel: Tunnel, tcp: IpStackTcpStream, in_name: &str) {
     meow_tunnel::tcp::handle_tcp(tunnel.inner(), Box::new(TunTcpConn(tcp)), metadata).await;
 }
 
-/// Newtype so the ipstack TCP stream satisfies `ProxyConn`
-/// (`AsyncRead + AsyncWrite + Unpin + Send + Sync`).
-struct TunTcpConn(IpStackTcpStream);
+/// Newtype so the netstack TCP stream satisfies `ProxyConn` (a foreign
+/// type cannot implement the foreign `meow_common::ProxyConn` here).
+struct TunTcpConn(TcpStream);
 
 impl AsyncRead for TunTcpConn {
     fn poll_read(

@@ -1,48 +1,61 @@
-//! `AsyncRead`/`AsyncWrite` adapter over a [`tun_rs::AsyncDevice`].
+//! Packet pumps between a [`tun_rs::AsyncDevice`] and the netstack.
 //!
-//! `ipstack` consumes the TUN device as a byte stream where each
-//! `read`/`write` moves exactly one IP packet; `tun-rs` exposes a
-//! packet-oriented `poll_recv`/`poll_send` pair instead of the tokio I/O
-//! traits, so this thin wrapper bridges the two. No buffering — each
-//! `poll_read` receives one packet directly into the caller's buffer and
-//! each `poll_write` sends the caller's slice as one packet.
+//! `netstack-smoltcp` exposes the stack as a `Stream`/`Sink` of raw IP
+//! packets (`Vec<u8>`), while `tun-rs` exposes a packet-oriented
+//! `recv`/`send` pair on the device. Two tasks shuttle packets in each
+//! direction; either task exiting means the device or the stack is gone,
+//! which `run()` treats as fatal for the listener.
 
 use std::io;
-use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
+use netstack_smoltcp::Stack;
+use tokio::task::JoinHandle;
 use tun_rs::AsyncDevice;
 
-pub(super) struct DeviceAdapter(pub(super) AsyncDevice);
+/// One IP packet. UDP/TCP over IPv4/v6 tops out below 64 KiB regardless of
+/// the device MTU, and a fixed buffer sidesteps MTU-change races.
+const PACKET_BUF: usize = 65535;
 
-impl AsyncRead for DeviceAdapter {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let n = ready!(self.0.poll_recv(cx, buf.initialize_unfilled()))?;
-        buf.advance(n);
-        Poll::Ready(Ok(()))
+pub(super) fn spawn_pumps(
+    device: Arc<AsyncDevice>,
+    stack: Stack,
+) -> (JoinHandle<io::Result<()>>, JoinHandle<io::Result<()>>) {
+    let (stack_sink, stack_stream) = stack.split();
+    let dev = Arc::clone(&device);
+    let inbound = tokio::spawn(device_to_stack(dev, stack_sink));
+    let outbound = tokio::spawn(stack_to_device(device, stack_stream));
+    (inbound, outbound)
+}
+
+/// device → stack. The per-packet `to_vec` is imposed by the netstack's
+/// `Sink<Vec<u8>>` API; this path is not covered by the zero-alloc relay
+/// invariant (ADR-0008), which starts at the terminated TCP stream.
+async fn device_to_stack(
+    device: Arc<AsyncDevice>,
+    mut sink: SplitSink<Stack, Vec<u8>>,
+) -> io::Result<()> {
+    let mut buf = vec![0u8; PACKET_BUF];
+    loop {
+        let n = device.recv(&mut buf).await?;
+        if n == 0 {
+            continue;
+        }
+        sink.send(buf[..n].to_vec())
+            .await
+            .map_err(|e| io::Error::other(format!("netstack ingress closed: {e}")))?;
     }
 }
 
-impl AsyncWrite for DeviceAdapter {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        self.0.poll_send(cx, buf)
+/// stack → device.
+async fn stack_to_device(
+    device: Arc<AsyncDevice>,
+    mut stream: SplitStream<Stack>,
+) -> io::Result<()> {
+    while let Some(pkt) = stream.next().await {
+        device.send(&pkt?).await?;
     }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Packets are handed to the kernel synchronously in poll_send.
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
+    Err(io::Error::other("netstack egress closed"))
 }
