@@ -212,6 +212,7 @@ fn main() -> Result<()> {
     run_application(args, &LogTarget::Console, ShutdownSignal::Console, None)
 }
 
+#[allow(clippy::unnecessary_wraps)] // WindowsService arm uses `?`
 fn init_logging(target: &LogTarget) -> Result<Logging> {
     // Initialize logging + log broadcast channel for GET /logs WebSocket.
     // LogBroadcastLayer sits on its own TRACE filter so it receives ALL events
