@@ -33,7 +33,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -83,15 +82,20 @@ pub struct MemoryStore {
 struct MemoryInner {
     by_host: LruCache<SmolStr, IpAddr>,
     by_ip: LruCache<IpAddr, SmolStr>,
+    /// Pool capacity, enforced manually in `put`. The LRUs are constructed
+    /// unbounded because `LruCache::new(cap)` preallocates the full hash
+    /// table up front — for the default /16 fake-ip range that is two
+    /// ~65k-slot tables charged at startup even if no query ever arrives.
+    cap: usize,
 }
 
 impl MemoryStore {
     pub fn new(size: usize) -> Self {
-        let cap = NonZeroUsize::new(size.max(1)).unwrap();
         Self {
             inner: Mutex::new(MemoryInner {
-                by_host: LruCache::new(cap),
-                by_ip: LruCache::new(cap),
+                by_host: LruCache::unbounded(),
+                by_ip: LruCache::unbounded(),
+                cap: size.max(1),
             }),
         }
     }
@@ -115,6 +119,19 @@ impl Store for MemoryStore {
         let mut inner = self.inner.lock();
         inner.by_host.put(SmolStr::from(host), ip);
         inner.by_ip.put(ip, SmolStr::from(host));
+        // Manual cap enforcement (LRUs are unbounded — see `MemoryInner::cap`).
+        // Evict the LRU pair from both directions so the two maps stay
+        // consistent — bounded LRUs would evict each side independently.
+        if inner.by_ip.len() > inner.cap {
+            if let Some((_, evicted_host)) = inner.by_ip.pop_lru() {
+                inner.by_host.pop(&evicted_host);
+            }
+        }
+        if inner.by_host.len() > inner.cap {
+            if let Some((_, evicted_ip)) = inner.by_host.pop_lru() {
+                inner.by_ip.pop(&evicted_ip);
+            }
+        }
     }
     fn del_by_ip(&self, ip: IpAddr) {
         let mut inner = self.inner.lock();
@@ -698,6 +715,30 @@ mod tests {
     fn make_pool_v4() -> Pool {
         let net = IpNet::from_str("198.18.0.0/16").unwrap();
         Pool::new(net, Arc::new(MemoryStore::new(1024))).unwrap()
+    }
+
+    #[test]
+    fn memory_store_caps_at_size_with_paired_eviction() {
+        let s = MemoryStore::new(4);
+        for i in 0..10u8 {
+            let key = format!("h{i}.example");
+            s.put(&key, IpAddr::V4(Ipv4Addr::new(10, 0, 0, i)));
+        }
+        // Oldest entries evicted from BOTH directions...
+        assert!(s.get_by_host("h0.example").is_none());
+        assert!(s
+            .get_by_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)))
+            .is_none());
+        // ...newest present in both.
+        assert_eq!(
+            s.get_by_host("h9.example"),
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)))
+        );
+        assert_eq!(
+            s.get_by_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)))
+                .as_deref(),
+            Some("h9.example")
+        );
     }
 
     #[test]

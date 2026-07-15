@@ -24,7 +24,6 @@ use smallvec::SmallVec;
 use smol_str::SmolStr;
 use std::borrow::Cow;
 use std::net::IpAddr;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -73,6 +72,15 @@ pub struct DnsCache {
     /// Bounded per-shard LRU — entries past capacity are evicted in
     /// least-recently-used order.
     reverse: [Mutex<LruCache<IpAddr, ReverseEntry>>; SHARDS],
+    /// Per-shard capacity caps. The shards are constructed with
+    /// `LruCache::unbounded()` and the cap is enforced manually on insert:
+    /// `LruCache::new(cap)` preallocates the full `cap`-slot hash table per
+    /// shard at construction (16 × 48 KiB ≈ 770 KiB idle RSS at the default
+    /// 4096-entry forward cap), charging every process for tables that only
+    /// fill under sustained DNS load. Lazy tables grow to the same bucket
+    /// count only once the entries actually exist.
+    fwd_shard_cap: usize,
+    rev_shard_cap: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -106,21 +114,20 @@ fn shard_ip(ip: IpAddr) -> usize {
     }
 }
 
-fn per_shard_cap(total: usize, min: usize) -> NonZeroUsize {
-    let per = (total / SHARDS).max(min);
-    NonZeroUsize::new(per).unwrap_or_else(|| NonZeroUsize::new(min).expect("min > 0"))
+fn per_shard_cap(total: usize, min: usize) -> usize {
+    (total / SHARDS).max(min)
 }
 
 impl DnsCache {
     pub fn new(capacity: usize) -> Self {
-        let fwd_cap = per_shard_cap(capacity.max(SHARDS), 8);
-        let rev_cap = per_shard_cap(
-            capacity.saturating_mul(REVERSE_CAP_MULTIPLIER).max(SHARDS),
-            16,
-        );
         Self {
-            cache: std::array::from_fn(|_| Mutex::new(LruCache::new(fwd_cap))),
-            reverse: std::array::from_fn(|_| Mutex::new(LruCache::new(rev_cap))),
+            cache: std::array::from_fn(|_| Mutex::new(LruCache::unbounded())),
+            reverse: std::array::from_fn(|_| Mutex::new(LruCache::unbounded())),
+            fwd_shard_cap: per_shard_cap(capacity.max(SHARDS), 8),
+            rev_shard_cap: per_shard_cap(
+                capacity.saturating_mul(REVERSE_CAP_MULTIPLIER).max(SHARDS),
+                16,
+            ),
         }
     }
 
@@ -179,6 +186,11 @@ impl DnsCache {
                     expire_at: reverse_expire_at,
                 },
             );
+            // Manual cap enforcement (shards are unbounded — see struct docs).
+            // One put per lock hold, so a single eviction restores the cap.
+            if reverse.len() > self.rev_shard_cap {
+                reverse.pop_lru();
+            }
         }
 
         let entry = CacheEntry {
@@ -186,7 +198,11 @@ impl DnsCache {
             expire_at,
             source: source.map(Arc::from),
         };
-        self.cache[shard_str(&domain)].lock().put(key, entry);
+        let mut cache = self.cache[shard_str(&domain)].lock();
+        cache.put(key, entry);
+        if cache.len() > self.fwd_shard_cap {
+            cache.pop_lru();
+        }
     }
 
     /// Reverse lookup: given an IP, return the domain that resolved to it.
@@ -256,6 +272,9 @@ impl DnsCache {
                 expire_at,
             },
         );
+        if reverse.len() > self.rev_shard_cap {
+            reverse.pop_lru();
+        }
     }
 }
 
@@ -436,6 +455,24 @@ mod tests {
         let c = DnsCache::new(1);
         c.put("tiny.example", &[ipv4(1, 1, 1, 1)], Duration::from_secs(30));
         assert!(c.get("tiny.example").is_some());
+    }
+
+    #[test]
+    fn reverse_capacity_evicts_lru() {
+        // capacity 16 → rev per-shard cap = max(16*4/16, 16) = 16, so the
+        // reverse table must never exceed 16 shards × 16 = 256 entries even
+        // though the shards are constructed unbounded.
+        let c = DnsCache::new(16);
+        for i in 0..2000u32 {
+            let ip = ipv4(10, (i >> 8) as u8, (i & 0xff) as u8, 1);
+            let key = format!("r{i}.example");
+            c.put(&key, &[ip], Duration::from_secs(30));
+        }
+        assert!(
+            c.reverse_len() <= 256,
+            "reverse_len {} exceeded global shard cap",
+            c.reverse_len()
+        );
     }
 
     #[test]
