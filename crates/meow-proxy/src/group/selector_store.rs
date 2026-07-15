@@ -48,6 +48,12 @@ impl SelectorStore {
 
     /// Process-wide store used by runtime config rebuilds so rebuilt groups
     /// retain the same persistence side-channel as startup-created groups.
+    ///
+    /// Returns `None` until the first call to [`Self::open`]. The first
+    /// `open()` call wins the process-global slot; subsequent calls still
+    /// return their own `Arc<Self>` but do **not** replace the global.
+    /// Tests or library users that create multiple stores should be aware
+    /// that only the first store is reachable via `global()`.
     pub fn global() -> Option<Arc<Self>> {
         GLOBAL_STORE.get().cloned()
     }
