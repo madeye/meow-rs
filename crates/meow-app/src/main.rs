@@ -218,17 +218,18 @@ fn init_logging(target: &LogTarget) -> Result<Logging> {
     // max-level is TRACE, preventing the fmt layer's EnvFilter from silencing
     // DEBUG/TRACE events before LogBroadcastLayer.on_event fires. Per-connection
     // ?level= filtering in the WS handler provides the client-visible suppression.
-    let log_tx = {
-        use meow_api::log_stream::LogBroadcastLayer;
-        use tokio::sync::broadcast;
-        use tracing_subscriber::filter::LevelFilter;
-        use tracing_subscriber::prelude::*;
-
+    use meow_api::log_stream::LogBroadcastLayer;
+    use tokio::sync::broadcast;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::prelude::*;
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    };
+    let tx = {
         let (tx, _) = broadcast::channel(128);
         let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
-        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-        let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter);
+        let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter());
         tracing_subscriber::registry()
             .with(filter_layer)
             .with(tracing_subscriber::fmt::layer())
