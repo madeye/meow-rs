@@ -64,6 +64,7 @@ pub struct Config {
     pub rules: Vec<Box<dyn Rule>>,
     pub rule_providers: HashMap<String, Arc<rule_provider::RuleProvider>>,
     pub listeners: ListenerConfig,
+    pub tun: TunConfig,
     pub api: ApiConfig,
     pub sniffer: SnifferConfig,
     pub auth: Arc<AuthConfig>,
@@ -119,6 +120,122 @@ pub struct NamedListener {
     /// `max-connections` field, falling back to the global `max-connections`.
     #[serde(default)]
     pub max_connections: usize,
+}
+
+/// Parsed + validated `tun:` section (issue #326). Consumed by the app
+/// layer, which maps it onto `meow_listener::TunListenerConfig` when the
+/// `listener-tun` feature is compiled in.
+#[derive(Debug, Clone)]
+pub struct TunConfig {
+    pub enable: bool,
+    /// Device name; `None` = platform default.
+    pub device: Option<String>,
+    pub mtu: u16,
+    /// Address + prefix assigned to the device.
+    pub inet4_address: ipnet::Ipv4Net,
+    pub auto_route: bool,
+    /// True when `dns-hijack` contains at least one usable (`:53`) entry.
+    pub dns_hijack: bool,
+    pub udp_timeout: std::time::Duration,
+}
+
+impl Default for TunConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            device: None,
+            mtu: 1500,
+            // mihomo's default TUN subnet.
+            inet4_address: "172.19.0.1/30".parse().expect("static CIDR parses"),
+            auto_route: true,
+            dns_hijack: false,
+            udp_timeout: std::time::Duration::from_secs(60),
+        }
+    }
+}
+
+/// Minimum MTU accepted for the TUN device — the IPv6 floor (RFC 8200 §5);
+/// smaller values break v6 traffic through the userspace stack.
+const TUN_MIN_MTU: u16 = 1280;
+
+/// Parse and validate the raw `tun:` block. Returns `TunConfig::default()`
+/// (disabled) when the block is absent.
+fn parse_tun_config(raw: Option<&raw::RawTun>) -> Result<TunConfig, anyhow::Error> {
+    let Some(r) = raw else {
+        return Ok(TunConfig::default());
+    };
+
+    // Warn on upstream-only fields (Class B per ADR-0002; policy of #328:
+    // never silently ignore a mihomo flag).
+    for (name, val) in [
+        ("stack", &r.stack),
+        ("strict-route", &r.strict_route),
+        ("auto-detect-interface", &r.auto_detect_interface),
+        ("auto-redirect", &r.auto_redirect),
+        ("inet6-address", &r.inet6_address),
+        ("endpoint-independent-nat", &r.endpoint_independent_nat),
+        ("mtu-v6", &r.mtu_v6),
+        ("route-address", &r.route_address),
+        ("route-exclude-address", &r.route_exclude_address),
+        ("include-uid", &r.include_uid),
+        ("exclude-uid", &r.exclude_uid),
+    ] {
+        if val.is_some() {
+            warn!(
+                "tun.{name}: field is not supported in meow-rs and will be ignored; \
+                 remove it to suppress this warning"
+            );
+        }
+    }
+
+    let defaults = TunConfig::default();
+
+    let mtu = r.mtu.unwrap_or(defaults.mtu);
+    if mtu < TUN_MIN_MTU {
+        return Err(anyhow::anyhow!(
+            "tun.mtu: {mtu} is below the minimum {TUN_MIN_MTU} required by the userspace stack"
+        ));
+    }
+
+    let inet4_address = match r.inet4_address.as_deref() {
+        Some(s) => s
+            .parse::<ipnet::Ipv4Net>()
+            .map_err(|e| anyhow::anyhow!("tun.inet4-address: invalid CIDR '{s}': {e}"))?,
+        None => defaults.inet4_address,
+    };
+
+    // v1 hijacks all UDP :53 flows when any usable entry is present.
+    let mut dns_hijack = false;
+    for entry in r.dns_hijack.as_deref().unwrap_or(&[]) {
+        let port = entry.rsplit(':').next().and_then(|p| p.parse::<u16>().ok());
+        match port {
+            Some(53) => dns_hijack = true,
+            _ => warn!(
+                "tun.dns-hijack: entry '{entry}' is not a :53 target; meow-rs only hijacks \
+                 UDP port 53 — entry ignored"
+            ),
+        }
+    }
+
+    let udp_timeout = std::time::Duration::from_secs(match r.udp_timeout {
+        Some(0) => {
+            return Err(anyhow::anyhow!(
+                "tun.udp-timeout: must be at least 1 second"
+            ));
+        }
+        Some(secs) => secs,
+        None => defaults.udp_timeout.as_secs(),
+    });
+
+    Ok(TunConfig {
+        enable: r.enable,
+        device: r.device.clone().filter(|s| !s.is_empty()),
+        mtu,
+        inet4_address,
+        auto_route: r.auto_route.unwrap_or(defaults.auto_route),
+        dns_hijack,
+        udp_timeout,
+    })
 }
 
 pub struct ListenerConfig {
@@ -1465,6 +1582,9 @@ async fn build_config(
         named: named_listeners,
     };
 
+    // TUN inbound (issue #326).
+    let tun = parse_tun_config(raw.tun.as_ref())?;
+
     // API config
     let external_ui = raw
         .external_ui
@@ -1518,6 +1638,7 @@ async fn build_config(
         rules,
         rule_providers,
         listeners,
+        tun,
         api,
         sniffer,
         auth,

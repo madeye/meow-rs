@@ -1070,6 +1070,13 @@ impl Resolver {
         self.fakeip_ttl
     }
 
+    /// The v4 fake-IP pool prefix, when fake-IP mode is active. The TUN
+    /// inbound's auto-route uses this to route only the fake range into the
+    /// device (loop-free capture — real IPs never re-enter the tun).
+    pub fn fake_ip_v4_net(&self) -> Option<ipnet::IpNet> {
+        self.fakeip_v4.as_ref().map(|p| p.ipnet())
+    }
+
     /// Install a v4 fake-IP pool. Caller wires this after `new_with_bootstrap`.
     pub fn set_fakeip_v4(&mut self, pool: Arc<Pool>) {
         self.fakeip_v4 = Some(pool);

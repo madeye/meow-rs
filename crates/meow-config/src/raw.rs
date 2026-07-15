@@ -126,6 +126,9 @@ pub struct RawConfig {
     pub authentication: Option<Vec<String>>,
     pub skip_auth_prefixes: Option<Vec<String>>,
     pub geodata: Option<RawGeoDataConfig>,
+    /// TUN inbound (issue #326) — mihomo-compatible `tun:` section.
+    /// Requires a build with the `listener-tun` feature.
+    pub tun: Option<RawTun>,
     /// Global default cap on concurrent in-flight inbound connections per
     /// listener. The default is 256; explicit `0` disables the cap. Individual `listeners:`
     /// entries can override this with their own `max-connections` field.
@@ -147,6 +150,48 @@ impl HostsValue {
             HostsValue::Many(v) => v.iter().map(String::as_str).collect(),
         }
     }
+}
+
+/// `tun:` YAML section (issue #326) — mihomo-compatible TUN inbound.
+///
+/// Only the fields meow-rs implements are typed; upstream-only fields
+/// (`stack`, `strict-route`, `auto-detect-interface`, …) are accepted and
+/// produce a `warn!` (Class B per ADR-0002, forward-compat), never a parse
+/// error — the same policy as [`RawGeoDataConfig`] and #328.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawTun {
+    /// Master switch; the listener is spawned only when true.
+    #[serde(default)]
+    pub enable: bool,
+    /// Device name. Default: platform-chosen (`meow` on Windows/Linux,
+    /// `utunN` auto-assigned on macOS).
+    pub device: Option<String>,
+    /// Device MTU. Default 1500; hard parse error below 1280 (the
+    /// userspace stack's minimum, RFC 8200 §5).
+    pub mtu: Option<u16>,
+    /// CIDR assigned to the device, e.g. `172.19.0.1/30` (default).
+    pub inet4_address: Option<String>,
+    /// Install the fake-IP-range route on startup. Default true.
+    pub auto_route: Option<bool>,
+    /// DNS hijack targets. meow-rs v1 hijacks all UDP :53 flows entering
+    /// the device whenever this list is non-empty; entries with a port
+    /// other than 53 warn and are ignored.
+    pub dns_hijack: Option<Vec<String>>,
+    /// UDP NAT idle timeout in seconds. Default 60.
+    pub udp_timeout: Option<u64>,
+    // Upstream-only fields accepted for forward-compat; warn and ignore.
+    pub stack: Option<serde_yaml::Value>,
+    pub strict_route: Option<serde_yaml::Value>,
+    pub auto_detect_interface: Option<serde_yaml::Value>,
+    pub auto_redirect: Option<serde_yaml::Value>,
+    pub inet6_address: Option<serde_yaml::Value>,
+    pub endpoint_independent_nat: Option<serde_yaml::Value>,
+    pub mtu_v6: Option<serde_yaml::Value>,
+    pub route_address: Option<serde_yaml::Value>,
+    pub route_exclude_address: Option<serde_yaml::Value>,
+    pub include_uid: Option<serde_yaml::Value>,
+    pub exclude_uid: Option<serde_yaml::Value>,
 }
 
 /// One entry in the `listeners:` array.

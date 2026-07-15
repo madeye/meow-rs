@@ -16,6 +16,8 @@ use meow_listener::MixedListener;
 use meow_listener::SnifferRuntime;
 #[cfg(feature = "listener-tproxy")]
 use meow_listener::TProxyListener;
+#[cfg(feature = "listener-tun")]
+use meow_listener::{TunListener, TunListenerConfig};
 use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::{IpAddr, SocketAddr};
@@ -950,6 +952,33 @@ async fn run(
                 );
             }
         }
+    }
+
+    // TUN inbound (issue #326) — spawned from the top-level `tun:` section,
+    // not the `listeners:` array (mihomo layout).
+    if config.tun.enable {
+        #[cfg(feature = "listener-tun")]
+        {
+            let listener = TunListener::new(
+                tunnel.clone(),
+                TunListenerConfig {
+                    device: config.tun.device.clone(),
+                    mtu: config.tun.mtu,
+                    inet4_address: config.tun.inet4_address,
+                    auto_route: config.tun.auto_route,
+                    dns_hijack: config.tun.dns_hijack,
+                    udp_timeout: config.tun.udp_timeout,
+                },
+                "tun".to_string(),
+            );
+            tokio::spawn(async move {
+                if let Err(e) = listener.run().await {
+                    error!("TUN listener error: {}", e);
+                }
+            });
+        }
+        #[cfg(not(feature = "listener-tun"))]
+        warn!("tun.enable is set but this build lacks the 'listener-tun' feature");
     }
 
     if let Some(on_ready) = on_ready {

@@ -12,9 +12,13 @@ pub mod socks5;
 mod socks5_udp;
 #[cfg(feature = "listener-tproxy")]
 pub mod tproxy;
+#[cfg(feature = "listener-tun")]
+pub mod tun;
 
 #[cfg(feature = "listener-mixed")]
 pub use mixed::MixedListener;
 pub use sniffer::SnifferRuntime;
 #[cfg(feature = "listener-tproxy")]
 pub use tproxy::TProxyListener;
+#[cfg(feature = "listener-tun")]
+pub use tun::{TunListener, TunListenerConfig};
