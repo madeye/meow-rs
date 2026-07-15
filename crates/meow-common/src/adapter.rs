@@ -164,6 +164,29 @@ pub trait ProxyAdapter: Send + Sync {
 /// to merge static members with provider-supplied proxies without caching.
 pub type ProviderSlot = std::sync::Arc<parking_lot::RwLock<Vec<std::sync::Arc<dyn Proxy>>>>;
 
+/// Runtime selection capability implemented by mihomo-compatible outbound
+/// groups. `Selector`, `URLTest`, and `Fallback` are selectable; leaf
+/// adapters and non-selectable groups return `None` from [`Proxy::selection`].
+#[async_trait]
+pub trait ProxySelection: Send + Sync {
+    /// Validate and select a member by name.
+    async fn set(&self, name: &str) -> Result<()>;
+
+    /// Set or clear a selection without validation. This mirrors mihomo's
+    /// `SelectAble.ForceSet` and is used to unfix automatic groups before a
+    /// group health check.
+    fn force_set(&self, name: Option<&str>);
+
+    /// Value exposed as the mihomo `fixed` field. Automatic groups return
+    /// `Some("")` while unfixed; selectors return `None` because upstream
+    /// does not expose `fixed` for them.
+    fn fixed(&self) -> Option<String>;
+
+    /// Only automatic groups can be returned to automatic mode through
+    /// `DELETE /proxies/{name}`.
+    fn can_unfix(&self) -> bool;
+}
+
 pub trait Proxy: ProxyAdapter {
     fn alive(&self) -> bool;
     fn alive_for_url(&self, url: &str) -> bool;
@@ -181,6 +204,21 @@ pub trait Proxy: ProxyAdapter {
     /// For group adapters: the name of the currently active member
     /// (selected/fastest/first-alive depending on group kind).
     fn current(&self) -> Option<String> {
+        None
+    }
+
+    /// Optional runtime selection capability for outbound groups.
+    fn selection(&self) -> Option<&dyn ProxySelection> {
+        None
+    }
+
+    /// Group health-check URL exposed by the mihomo API.
+    fn test_url(&self) -> Option<&str> {
+        None
+    }
+
+    /// Group expected-status expression exposed by the mihomo API.
+    fn expected_status(&self) -> Option<&str> {
         None
     }
 }

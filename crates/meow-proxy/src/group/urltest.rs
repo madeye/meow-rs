@@ -1,7 +1,8 @@
+use super::selector_store::SelectorStore;
 use async_trait::async_trait;
 use meow_common::{
     AdapterType, DelayHistory, MeowError, Metadata, ProviderSlot, Proxy, ProxyAdapter, ProxyConn,
-    ProxyHealth, ProxyPacketConn, Result,
+    ProxyHealth, ProxyPacketConn, ProxySelection, Result,
 };
 use parking_lot::RwLock;
 use smol_str::SmolStr;
@@ -12,6 +13,12 @@ pub struct UrlTestGroup {
     static_proxies: Vec<Arc<dyn Proxy>>,
     provider_slots: Vec<ProviderSlot>,
     tolerance: u16,
+    /// User-fixed member. This is independent from `fastest`, which remains
+    /// the automatic URL-test incumbent.
+    fixed: RwLock<Option<SmolStr>>,
+    store: Option<Arc<SelectorStore>>,
+    test_url: String,
+    expected_status: String,
     /// Name of the currently selected proxy; `None` means "not yet picked,
     /// use the first available".  Updated by `pick_for_dial` whenever it
     /// promotes a new best.
@@ -26,6 +33,10 @@ impl UrlTestGroup {
             static_proxies: proxies,
             provider_slots: Vec::new(),
             tolerance,
+            fixed: RwLock::new(None),
+            store: None,
+            test_url: "http://www.gstatic.com/generate_204".to_string(),
+            expected_status: String::new(),
             fastest: RwLock::new(None),
             health: ProxyHealth::new(),
         }
@@ -42,9 +53,57 @@ impl UrlTestGroup {
             static_proxies: proxies,
             provider_slots: slots,
             tolerance,
+            fixed: RwLock::new(None),
+            store: None,
+            test_url: "http://www.gstatic.com/generate_204".to_string(),
+            expected_status: String::new(),
             fastest: RwLock::new(None),
             health: ProxyHealth::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_runtime_options(
+        mut self,
+        test_url: String,
+        expected_status: String,
+        store: Option<Arc<SelectorStore>>,
+    ) -> Self {
+        self.test_url = test_url;
+        self.expected_status = expected_status;
+        if let Some(store) = store {
+            if let Some(prev) = store.get(&self.name).filter(|v| !v.is_empty()) {
+                *self.fixed.write() = Some(SmolStr::from(prev));
+            }
+            self.store = Some(store);
+        }
+        self
+    }
+
+    fn contains_name(&self, name: &str) -> bool {
+        self.static_proxies.iter().any(|p| p.name() == name)
+            || self.provider_slots.iter().any(|slot| {
+                let guard = slot.read();
+                guard.iter().any(|p| p.name() == name)
+            })
+    }
+
+    fn fixed_proxy_if_alive(&self) -> Option<Arc<dyn Proxy>> {
+        let name = self.fixed.read().clone()?;
+        for p in &self.static_proxies {
+            if p.name() == name && p.alive_for_url(&self.test_url) {
+                return Some(Arc::clone(p));
+            }
+        }
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            for p in guard.iter() {
+                if p.name() == name && p.alive_for_url(&self.test_url) {
+                    return Some(Arc::clone(p));
+                }
+            }
+        }
+        None
     }
 
     /// Single-pass dial-path selector: walks `static_proxies` + provider
@@ -57,6 +116,9 @@ impl UrlTestGroup {
     /// scanned again to read the current proxy's delay/aliveness; then
     /// `fastest_proxy` cloned the Vec a second time to look up by name.
     fn pick_for_dial(&self) -> Option<Arc<dyn Proxy>> {
+        if let Some(proxy) = self.fixed_proxy_if_alive() {
+            return Some(proxy);
+        }
         let current_name: Option<SmolStr> = self.fastest.read().clone();
 
         let mut best_proxy: Option<Arc<dyn Proxy>> = None;
@@ -118,6 +180,9 @@ impl UrlTestGroup {
     /// the REST/info methods below.  No Vec allocation; falls back to the
     /// first proxy if `fastest` is unset or names something no longer present.
     fn fastest_proxy(&self) -> Option<Arc<dyn Proxy>> {
+        if let Some(proxy) = self.fixed_proxy_if_alive() {
+            return Some(proxy);
+        }
         let name = self.fastest.read().clone();
         let mut first_any: Option<Arc<dyn Proxy>> = None;
         if let Some(n) = name {
@@ -243,6 +308,49 @@ impl Proxy for UrlTestGroup {
     fn current(&self) -> Option<String> {
         self.fastest_proxy().map(|p| p.name().into())
     }
+
+    fn selection(&self) -> Option<&dyn ProxySelection> {
+        Some(self)
+    }
+
+    fn test_url(&self) -> Option<&str> {
+        Some(&self.test_url)
+    }
+
+    fn expected_status(&self) -> Option<&str> {
+        Some(&self.expected_status)
+    }
+}
+
+#[async_trait]
+impl ProxySelection for UrlTestGroup {
+    async fn set(&self, name: &str) -> Result<()> {
+        if !self.contains_name(name) {
+            return Err(MeowError::Proxy("proxy not exist".into()));
+        }
+        self.force_set(Some(name));
+        Ok(())
+    }
+
+    fn force_set(&self, name: Option<&str>) {
+        *self.fixed.write() = name.map(SmolStr::from);
+        if let Some(store) = &self.store {
+            store.set(&self.name, name.unwrap_or(""));
+        }
+    }
+
+    fn fixed(&self) -> Option<String> {
+        Some(
+            self.fixed
+                .read()
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string),
+        )
+    }
+
+    fn can_unfix(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -341,5 +449,35 @@ mod tests {
         let _ = g.dial_tcp(&Metadata::default()).await;
         assert_eq!(a_ref.dials(), 0);
         assert_eq!(b_ref.dials(), 1);
+    }
+
+    #[tokio::test]
+    async fn user_pin_overrides_fastest_and_can_be_cleared() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        a.set_delay(100);
+        b.set_delay(10);
+        let g = UrlTestGroup::new("ut", vec![a, b], 0);
+
+        ProxySelection::set(&g, "a").await.unwrap();
+        assert_eq!(pick(&g), "a");
+        assert_eq!(ProxySelection::fixed(&g).as_deref(), Some("a"));
+
+        ProxySelection::force_set(&g, None);
+        assert_eq!(pick(&g), "b");
+        assert_eq!(ProxySelection::fixed(&g).as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn dead_url_test_pin_falls_back_without_forgetting_pin() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        a.set_alive(false);
+        b.set_delay(20);
+        let g = UrlTestGroup::new("ut", vec![a, b], 0);
+
+        ProxySelection::set(&g, "a").await.unwrap();
+        assert_eq!(pick(&g), "b");
+        assert_eq!(ProxySelection::fixed(&g).as_deref(), Some("a"));
     }
 }

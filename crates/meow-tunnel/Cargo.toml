@@ -27,6 +27,7 @@ serde = { workspace = true }
 smol_str = { workspace = true }
 smallvec = { workspace = true }
 itoa = "1"
+time = { workspace = true }
 
 [[bench]]
 name = "udp_bench"

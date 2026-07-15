@@ -1,8 +1,10 @@
+use super::selector_store::SelectorStore;
 use async_trait::async_trait;
 use meow_common::{
     AdapterType, DelayHistory, MeowError, Metadata, ProviderSlot, Proxy, ProxyAdapter, ProxyConn,
-    ProxyHealth, ProxyPacketConn, Result,
+    ProxyHealth, ProxyPacketConn, ProxySelection, Result,
 };
+use parking_lot::RwLock;
 use smol_str::SmolStr;
 use std::sync::Arc;
 
@@ -10,6 +12,10 @@ pub struct FallbackGroup {
     name: SmolStr,
     static_proxies: Vec<Arc<dyn Proxy>>,
     provider_slots: Vec<ProviderSlot>,
+    fixed: RwLock<Option<SmolStr>>,
+    store: Option<Arc<SelectorStore>>,
+    test_url: String,
+    expected_status: String,
     health: ProxyHealth,
 }
 
@@ -19,6 +25,10 @@ impl FallbackGroup {
             name: SmolStr::from(name),
             static_proxies: proxies,
             provider_slots: Vec::new(),
+            fixed: RwLock::new(None),
+            store: None,
+            test_url: "http://www.gstatic.com/generate_204".to_string(),
+            expected_status: String::new(),
             health: ProxyHealth::new(),
         }
     }
@@ -32,14 +42,64 @@ impl FallbackGroup {
             name: SmolStr::from(name),
             static_proxies: proxies,
             provider_slots: slots,
+            fixed: RwLock::new(None),
+            store: None,
+            test_url: "http://www.gstatic.com/generate_204".to_string(),
+            expected_status: String::new(),
             health: ProxyHealth::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_runtime_options(
+        mut self,
+        test_url: String,
+        expected_status: String,
+        store: Option<Arc<SelectorStore>>,
+    ) -> Self {
+        self.test_url = test_url;
+        self.expected_status = expected_status;
+        if let Some(store) = store {
+            if let Some(prev) = store.get(&self.name).filter(|v| !v.is_empty()) {
+                *self.fixed.write() = Some(SmolStr::from(prev));
+            }
+            self.store = Some(store);
+        }
+        self
+    }
+
+    fn find_member(&self, name: &str) -> Option<Arc<dyn Proxy>> {
+        for p in &self.static_proxies {
+            if p.name() == name {
+                return Some(Arc::clone(p));
+            }
+        }
+        for slot in &self.provider_slots {
+            let guard = slot.read();
+            for p in guard.iter() {
+                if p.name() == name {
+                    return Some(Arc::clone(p));
+                }
+            }
+        }
+        None
     }
 
     /// Single-pass scan: returns the first alive proxy, or the first
     /// proxy of any kind if none are alive.  Walks `static_proxies` and
     /// each provider slot directly without building a unified `Vec`.
     fn first_alive(&self) -> Option<Arc<dyn Proxy>> {
+        let fixed_name = { self.fixed.read().clone() };
+        if let Some(name) = fixed_name {
+            if let Some(proxy) = self.find_member(&name) {
+                if proxy.alive_for_url(&self.test_url) {
+                    return Some(proxy);
+                }
+            }
+            // Upstream clears a stale fallback pin in memory when it is
+            // observed dead, but leaves the persistent cache untouched.
+            *self.fixed.write() = None;
+        }
         let mut fallback: Option<Arc<dyn Proxy>> = None;
         for p in &self.static_proxies {
             if fallback.is_none() {
@@ -150,6 +210,58 @@ impl Proxy for FallbackGroup {
     fn current(&self) -> Option<String> {
         self.first_alive().map(|p| p.name().to_string())
     }
+
+    fn selection(&self) -> Option<&dyn ProxySelection> {
+        Some(self)
+    }
+
+    fn test_url(&self) -> Option<&str> {
+        Some(&self.test_url)
+    }
+
+    fn expected_status(&self) -> Option<&str> {
+        Some(&self.expected_status)
+    }
+}
+
+#[async_trait]
+impl ProxySelection for FallbackGroup {
+    async fn set(&self, name: &str) -> Result<()> {
+        let proxy = self
+            .find_member(name)
+            .ok_or_else(|| MeowError::Proxy("proxy not exist".into()))?;
+        self.force_set(Some(name));
+        if !proxy.alive_for_url(&self.test_url) {
+            let _ = crate::health::probe_and_record(
+                &proxy,
+                &self.test_url,
+                (!self.expected_status.is_empty()).then_some(self.expected_status.as_str()),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        }
+        Ok(())
+    }
+
+    fn force_set(&self, name: Option<&str>) {
+        *self.fixed.write() = name.map(SmolStr::from);
+        if let Some(store) = &self.store {
+            store.set(&self.name, name.unwrap_or(""));
+        }
+    }
+
+    fn fixed(&self) -> Option<String> {
+        Some(
+            self.fixed
+                .read()
+                .as_ref()
+                .map_or_else(String::new, ToString::to_string),
+        )
+    }
+
+    fn can_unfix(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +346,29 @@ mod tests {
         assert!(!g.support_udp(), "a is alive and tcp-only");
         a_ref.set_alive(false);
         assert!(g.support_udp(), "fallback to udp-capable b");
+    }
+
+    #[tokio::test]
+    async fn user_pin_overrides_order_and_can_be_cleared() {
+        let g = FallbackGroup::new("fb", vec![MockProxy::new("a"), MockProxy::new("b")]);
+        ProxySelection::set(&g, "b").await.unwrap();
+        assert_eq!(g.first_alive().unwrap().name(), "b");
+        assert_eq!(ProxySelection::fixed(&g).as_deref(), Some("b"));
+
+        ProxySelection::force_set(&g, None);
+        assert_eq!(g.first_alive().unwrap().name(), "a");
+        assert_eq!(ProxySelection::fixed(&g).as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn dead_fallback_pin_is_forgotten_in_memory() {
+        let a = MockProxy::new("a");
+        let b = MockProxy::new("b");
+        let b_ref = Arc::clone(&b);
+        let g = FallbackGroup::new("fb", vec![a, b]);
+        ProxySelection::set(&g, "b").await.unwrap();
+        b_ref.set_alive(false);
+        assert_eq!(g.first_alive().unwrap().name(), "a");
+        assert_eq!(ProxySelection::fixed(&g).as_deref(), Some(""));
     }
 }

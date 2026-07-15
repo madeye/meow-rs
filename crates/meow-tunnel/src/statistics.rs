@@ -54,6 +54,41 @@ impl Default for RuleMatchCounters {
     }
 }
 
+/// Live per-connection byte counters, shared between the relay closures and
+/// the `/connections` serializer. `Arc`-owned by the relay's `ConnectionGuard`
+/// so the hot loop bumps the atomics directly — no per-chunk DashMap lookup
+/// (measured −8..10% on bulk throughput when the lookup was per-chunk).
+/// The single `Arc::new` happens once per connection inside
+/// [`Statistics::track_connection`], which is setup-path, not steady-state
+/// (ADR-0008 §3 scopes the zero-alloc rule to per-iteration counts).
+#[derive(Debug, Default)]
+pub struct ConnCounters {
+    pub upload: AtomicI64,
+    pub download: AtomicI64,
+}
+
+impl ConnCounters {
+    pub fn upload_bytes(&self) -> i64 {
+        self.upload.load(Ordering::Relaxed)
+    }
+
+    pub fn download_bytes(&self) -> i64 {
+        self.download.load(Ordering::Relaxed)
+    }
+}
+
+// Serialises as `"upload": N, "download": N` so the flattened field keeps the
+// exact mihomo connection JSON shape the plain i64 fields produced.
+impl Serialize for ConnCounters {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("ConnCounters", 2)?;
+        s.serialize_field("upload", &self.upload_bytes())?;
+        s.serialize_field("download", &self.download_bytes())?;
+        s.end()
+    }
+}
+
 #[derive(Serialize, Clone)]
 pub struct ConnectionInfo {
     /// 16 B inline UUID; serialises as `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"`.
@@ -65,8 +100,10 @@ pub struct ConnectionInfo {
     /// the inner `Metadata`. Struct size is unchanged (still an 8 B thin-ptr);
     /// only the `/connections` JSON payload grows.
     pub metadata: Arc<Metadata>,
-    pub upload: i64,
-    pub download: i64,
+    /// 8 B thin-ptr (was two inline `i64`s, −8 B). Flattened so the JSON keeps
+    /// the top-level `upload`/`download` fields.
+    #[serde(flatten)]
+    pub counters: Arc<ConnCounters>,
     pub start: SmolStr,
     /// Proxy chain; ref-counted so proxy-name strings are shared across entries.
     pub chains: SmallVec<[Arc<str>; 1]>,
@@ -83,6 +120,10 @@ pub struct ConnectionInfo {
 pub struct Statistics {
     pub upload_total: AtomicI64,
     pub download_total: AtomicI64,
+    upload_temp: AtomicI64,
+    download_temp: AtomicI64,
+    upload_rate: AtomicI64,
+    download_rate: AtomicI64,
     /// Keyed by `Uuid` (16 B Copy) — formerly `String`, which heap-allocated a
     /// 36-byte hyphenated representation per insert.  REST handlers parse the
     /// query path back into a `Uuid` at lookup time.
@@ -95,17 +136,67 @@ impl Statistics {
         Self {
             upload_total: AtomicI64::new(0),
             download_total: AtomicI64::new(0),
+            upload_temp: AtomicI64::new(0),
+            download_temp: AtomicI64::new(0),
+            upload_rate: AtomicI64::new(0),
+            download_rate: AtomicI64::new(0),
             connections: DashMap::new(),
             rule_match: Arc::new(RuleMatchCounters::new()),
         }
     }
 
     pub fn add_upload(&self, n: i64) {
+        self.upload_temp.fetch_add(n, Ordering::Relaxed);
         self.upload_total.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn add_download(&self, n: i64) {
+        self.download_temp.fetch_add(n, Ordering::Relaxed);
         self.download_total.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Per-chunk relay accounting: three relaxed atomic adds, no map lookup.
+    /// Callers obtain the `ConnCounters` once at connection setup via
+    /// [`Self::connection_counters`] (or `ConnectionGuard::counters`).
+    pub fn record_upload(&self, counters: &ConnCounters, n: i64) {
+        counters.upload.fetch_add(n, Ordering::Relaxed);
+        self.add_upload(n);
+    }
+
+    /// See [`Self::record_upload`].
+    pub fn record_download(&self, counters: &ConnCounters, n: i64) {
+        counters.download.fetch_add(n, Ordering::Relaxed);
+        self.add_download(n);
+    }
+
+    /// One-time (per connection) handle to the live byte counters of a
+    /// tracked connection. Setup-path only — never call per chunk.
+    pub fn connection_counters(&self, id: Uuid) -> Option<Arc<ConnCounters>> {
+        self.connections
+            .get(&id)
+            .map(|entry| Arc::clone(&entry.counters))
+    }
+
+    /// Roll the current one-second counters into the values exposed by the
+    /// mihomo `/traffic` stream.
+    pub fn sample_traffic(&self) {
+        self.upload_rate.store(
+            self.upload_temp.swap(0, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.download_rate.store(
+            self.download_temp.swap(0, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
+
+    pub fn traffic_snapshot(&self) -> (i64, i64, i64, i64) {
+        (
+            self.upload_rate.load(Ordering::Relaxed),
+            self.download_rate.load(Ordering::Relaxed),
+            self.upload_total.load(Ordering::Relaxed),
+            self.download_total.load(Ordering::Relaxed),
+        )
     }
 
     pub fn track_connection(
@@ -119,8 +210,7 @@ impl Statistics {
         let info = ConnectionInfo {
             id: uuid,
             metadata: Arc::new(metadata),
-            upload: 0,
-            download: 0,
+            counters: Arc::new(ConnCounters::default()),
             start: chrono_now(),
             chains,
             rule,
@@ -190,10 +280,45 @@ impl Serialize for EntryRef<'_> {
 }
 
 fn chrono_now() -> SmolStr {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut buf = itoa::Buffer::new();
-    SmolStr::new(buf.format(secs))
+    use time::format_description::well_known::Rfc3339;
+
+    // Seconds precision is sufficient for mihomo's connection API and keeps
+    // the 20-byte RFC 3339 value inline in `SmolStr`. Formatting into a stack
+    // buffer also avoids allocating an intermediate `String` on this hot path.
+    let now = time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    let mut buffer = TimestampBuffer::default();
+    if now.format_into(&mut buffer, &Rfc3339).is_ok() {
+        if let Ok(value) = std::str::from_utf8(&buffer.bytes[..buffer.len]) {
+            return SmolStr::new(value);
+        }
+    }
+
+    SmolStr::new_static("1970-01-01T00:00:00Z")
+}
+
+#[derive(Default)]
+struct TimestampBuffer {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl std::io::Write for TimestampBuffer {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        let end = self.len.saturating_add(input.len());
+        if end > self.bytes.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "timestamp exceeds fixed buffer",
+            ));
+        }
+        self.bytes[self.len..end].copy_from_slice(input);
+        self.len = end;
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

@@ -4,13 +4,16 @@ use meow_common::{ProviderSlot, Proxy};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 pub struct HealthCheckConfig {
     pub url: String,
     pub interval: u64,
     pub timeout: u64,
+    pub expected_status: String,
     pub lazy: bool,
 }
 
@@ -23,6 +26,7 @@ pub struct ProxyProvider {
     exclude_filter: Option<regex::Regex>,
     exclude_type: Vec<String>,
     pub health_check: Option<HealthCheckConfig>,
+    updated_at: AtomicU64,
     header: HashMap<String, String>,
 }
 
@@ -103,6 +107,7 @@ impl ProxyProvider {
             exclude_filter,
             exclude_type,
             health_check,
+            updated_at: AtomicU64::new(0),
             header,
         })
     }
@@ -225,21 +230,34 @@ impl ProxyProvider {
         result
     }
 
-    pub async fn refresh(&self) {
+    pub async fn refresh(&self) -> Result<(), String> {
         match self.fetch_content().await {
             Ok(content) => {
                 let proxies = self.parse_proxies(&content).await;
                 info!(provider = %self.name, count = proxies.len(), "proxy-provider refreshed");
                 *self.slot.write() = proxies;
+                self.updated_at.store(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    Ordering::Relaxed,
+                );
+                Ok(())
             }
             Err(e) => {
                 warn!(provider = %self.name, error = %e, "proxy-provider refresh failed");
+                Err(e)
             }
         }
     }
 
     pub fn proxies(&self) -> Vec<Arc<dyn Proxy>> {
         self.slot.read().clone()
+    }
+
+    pub fn updated_at_secs(&self) -> u64 {
+        self.updated_at.load(Ordering::Relaxed)
     }
 }
 
@@ -252,7 +270,7 @@ pub async fn load_proxy_providers(
         match ProxyProvider::new(name, raw, cache_dir) {
             Ok(provider) => {
                 let provider = Arc::new(provider);
-                provider.refresh().await;
+                let _ = provider.refresh().await;
                 result.insert(name.clone(), provider);
             }
             Err(e) => {
@@ -293,6 +311,7 @@ fn build_health_check_config(raw: Option<&RawHealthCheck>) -> Option<HealthCheck
             .unwrap_or_else(|| "https://www.gstatic.com/generate_204".to_string()),
         interval: hc.interval.unwrap_or(300),
         timeout: hc.timeout.unwrap_or(5000),
+        expected_status: hc.expected_status.clone().unwrap_or_default(),
         lazy: hc.lazy.unwrap_or(false),
     })
 }

@@ -409,6 +409,17 @@ impl Tunnel {
             udp::DEFAULT_UDP_IDLE,
             udp::DEFAULT_SWEEP_INTERVAL,
         );
+        let stats = Arc::clone(&self.inner.stats);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+            // Consume tokio's immediate first tick; the first rate bucket is a
+            // real one-second interval, matching mihomo's statistic manager.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                stats.sample_traffic();
+            }
+        });
     }
 }
 

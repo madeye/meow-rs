@@ -1,7 +1,7 @@
 use crate::sniffer::SnifferRuntime;
 use base64::Engine;
 use meow_common::{AuthConfig, ConnType, Metadata, Network};
-use meow_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
+use meow_tunnel::{copy_bidirectional_buf_tracked, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
 use smallvec::smallvec;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -200,21 +200,24 @@ async fn handle_http_inner(
                 // Per RFC 7230 the client must wait for 200 OK before sending
                 // application data, but if a client pipelined bytes ahead of
                 // that we already read them — forward before relaying.
+                let up = Arc::clone(_guard.counters());
+                let dn = Arc::clone(_guard.counters());
                 if !leftover.is_empty() {
                     remote.write_all(&leftover).await?;
-                    inner.stats.add_upload(leftover.len() as i64);
+                    inner.stats.record_upload(&up, leftover.len() as i64);
                 }
-                match copy_bidirectional_buf(
+                match copy_bidirectional_buf_tracked(
                     stream,
                     &mut remote,
                     &mut relay_buf_up,
                     &mut relay_buf_dn,
+                    |n| inner.stats.record_upload(&up, n as i64),
+                    |n| inner.stats.record_download(&dn, n as i64),
                 )
                 .await
                 {
                     Ok((up, down)) => {
-                        inner.stats.add_upload(up as i64);
-                        inner.stats.add_download(down as i64);
+                        debug!("HTTP CONNECT relay closed: up={up} down={down}");
                     }
                     Err(e) => debug!("HTTP CONNECT relay error: {}", e),
                 }
@@ -317,23 +320,26 @@ async fn handle_http_inner(
                 // that arrived in the same TCP segment as the headers (POST
                 // payloads typically do).
                 remote.write_all(rewritten.as_bytes()).await?;
+                let up = Arc::clone(_guard.counters());
+                let dn = Arc::clone(_guard.counters());
                 if !leftover.is_empty() {
                     remote.write_all(&leftover).await?;
-                    inner.stats.add_upload(leftover.len() as i64);
+                    inner.stats.record_upload(&up, leftover.len() as i64);
                 }
 
                 // Relay bidirectionally
-                match copy_bidirectional_buf(
+                match copy_bidirectional_buf_tracked(
                     stream,
                     &mut remote,
                     &mut relay_buf_up,
                     &mut relay_buf_dn,
+                    |n| inner.stats.record_upload(&up, n as i64),
+                    |n| inner.stats.record_download(&dn, n as i64),
                 )
                 .await
                 {
                     Ok((up, down)) => {
-                        inner.stats.add_upload(up as i64);
-                        inner.stats.add_download(down as i64);
+                        debug!("HTTP relay closed: up={up} down={down}");
                     }
                     Err(e) => debug!("HTTP relay error: {}", e),
                 }

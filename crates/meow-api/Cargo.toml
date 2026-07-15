@@ -33,6 +33,7 @@ uuid = { workspace = true }
 time = { workspace = true }
 base64 = "0.22"
 prometheus-client = "0.22"
+hickory-proto = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

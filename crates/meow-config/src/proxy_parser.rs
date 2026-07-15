@@ -1783,18 +1783,29 @@ fn parse_proxy_group_inner(
         }
         "url-test" => {
             let tolerance = config.tolerance.unwrap_or(150);
-            Ok(Arc::new(UrlTestGroup::new_with_providers(
-                &config.name,
-                proxies,
-                tolerance,
-                slots,
-            )))
+            let group = UrlTestGroup::new_with_providers(&config.name, proxies, tolerance, slots)
+                .with_runtime_options(
+                    config
+                        .url
+                        .clone()
+                        .unwrap_or_else(|| "http://www.gstatic.com/generate_204".to_string()),
+                    config.expected_status.clone().unwrap_or_default(),
+                    selector_store.cloned(),
+                );
+            Ok(Arc::new(group))
         }
-        "fallback" => Ok(Arc::new(FallbackGroup::new_with_providers(
-            &config.name,
-            proxies,
-            slots,
-        ))),
+        "fallback" => {
+            let group = FallbackGroup::new_with_providers(&config.name, proxies, slots)
+                .with_runtime_options(
+                    config
+                        .url
+                        .clone()
+                        .unwrap_or_else(|| "http://www.gstatic.com/generate_204".to_string()),
+                    config.expected_status.clone().unwrap_or_default(),
+                    selector_store.cloned(),
+                );
+            Ok(Arc::new(group))
+        }
         "load-balance" => {
             let strategy = parse_lb_strategy(config.strategy.as_deref())?;
             Ok(Arc::new(LoadBalanceGroup::new(

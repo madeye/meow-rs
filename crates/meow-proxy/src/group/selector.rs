@@ -2,7 +2,7 @@ use super::selector_store::SelectorStore;
 use async_trait::async_trait;
 use meow_common::{
     AdapterType, DelayHistory, MeowError, Metadata, ProviderSlot, Proxy, ProxyAdapter, ProxyConn,
-    ProxyHealth, ProxyPacketConn, Result,
+    ProxyHealth, ProxyPacketConn, ProxySelection, Result,
 };
 use parking_lot::RwLock;
 use smol_str::SmolStr;
@@ -216,6 +216,42 @@ impl Proxy for SelectorGroup {
 
     fn current(&self) -> Option<String> {
         self.selected_proxy().map(|p| p.name().into())
+    }
+
+    fn selection(&self) -> Option<&dyn ProxySelection> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl ProxySelection for SelectorGroup {
+    async fn set(&self, name: &str) -> Result<()> {
+        if self.select(name) {
+            Ok(())
+        } else {
+            Err(MeowError::Proxy("proxy not exist".into()))
+        }
+    }
+
+    fn force_set(&self, name: Option<&str>) {
+        // SelectorGroup is a manual-pick group with no automatic fallback.
+        // Clearing (None) is intentionally a no-op — a selector without a
+        // selection has no sensible routing target. Automatic groups (UrlTest,
+        // Fallback) handle None by reverting to auto mode.
+        if let Some(name) = name {
+            *self.selected.write() = Some(SmolStr::from(name));
+            if let Some(store) = &self.store {
+                store.set(&self.name, name);
+            }
+        }
+    }
+
+    fn fixed(&self) -> Option<String> {
+        None
+    }
+
+    fn can_unfix(&self) -> bool {
+        false
     }
 }
 

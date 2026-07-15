@@ -3,6 +3,23 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing_subscriber::Layer;
 
+type LogReload = dyn Fn(&str) -> Result<(), String> + Send + Sync;
+static LOG_RELOAD: std::sync::OnceLock<Box<LogReload>> = std::sync::OnceLock::new();
+
+pub fn install_log_reloader<F>(reload: F)
+where
+    F: Fn(&str) -> Result<(), String> + Send + Sync + 'static,
+{
+    let _ = LOG_RELOAD.set(Box::new(reload));
+}
+
+pub fn reload_log_level(level: &str) -> Result<(), String> {
+    match LOG_RELOAD.get() {
+        Some(reload) => reload(level),
+        None => Ok(()),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
     Debug,

@@ -214,18 +214,28 @@ fn main() -> Result<()> {
     run_application(args, &LogTarget::Console, ShutdownSignal::Console, None)
 }
 
+#[allow(clippy::unnecessary_wraps)] // WindowsService arm uses `?`
 fn init_logging(target: &LogTarget) -> Result<Logging> {
     // Initialize logging + log broadcast channel for GET /logs WebSocket.
-    // The broadcast layer carries LevelFilter::TRACE so the registry's global
-    // max-level is TRACE, preventing the fmt layer's EnvFilter from silencing
-    // DEBUG/TRACE events before LogBroadcastLayer.on_event fires. Per-connection
-    // ?level= filtering in the WS handler provides the client-visible suppression.
+    // LogBroadcastLayer sits on its own TRACE filter so it receives ALL events
+    // (including DEBUG/TRACE) regardless of the fmt layer's EnvFilter. This
+    // ensures GET /logs?level=debug works even when the console/file filter is
+    // set to info. Per-connection ?level= filtering in the WS handler provides
+    // client-visible suppression.
     use meow_api::log_stream::LogBroadcastLayer;
     use tokio::sync::broadcast;
     use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::prelude::*;
 
-    let (tx, _) = broadcast::channel(128);
+    // mihomo uses "warning"/"silent" but EnvFilter only understands "warn"/"off".
+    let normalize_level = |level: &str| -> String {
+        match level.to_ascii_lowercase().as_str() {
+            "warning" => "warn".to_string(),
+            "silent" => "off".to_string(),
+            other => other.to_string(),
+        }
+    };
+
     let env_filter = || {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
@@ -233,12 +243,20 @@ fn init_logging(target: &LogTarget) -> Result<Logging> {
 
     match target {
         LogTarget::Console => {
+            let (tx, _) = broadcast::channel(128);
             let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
+            let (filter_layer, reload_handle) =
+                tracing_subscriber::reload::Layer::new(env_filter());
             tracing_subscriber::registry()
-                .with(tracing_subscriber::fmt::layer().with_filter(env_filter()))
+                .with(tracing_subscriber::fmt::layer().with_filter(filter_layer))
                 .with(log_layer)
-                .try_init()
-                .map_err(|e| anyhow::anyhow!("failed to initialize logging: {e}"))?;
+                .init();
+            meow_api::log_stream::install_log_reloader(move |level| {
+                let normalized = normalize_level(level);
+                reload_handle
+                    .reload(tracing_subscriber::EnvFilter::new(&normalized))
+                    .map_err(|e| e.to_string())
+            });
             Ok(Logging {
                 tx,
                 #[cfg(target_os = "windows")]
@@ -266,17 +284,25 @@ fn init_logging(target: &LogTarget) -> Result<Logging> {
                     )
                 })?;
             let (writer, guard) = tracing_appender::non_blocking(appender);
+            let (tx, _) = broadcast::channel(128);
             let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
+            let (filter_layer, reload_handle) =
+                tracing_subscriber::reload::Layer::new(env_filter());
             tracing_subscriber::registry()
                 .with(
                     tracing_subscriber::fmt::layer()
                         .with_writer(writer)
                         .with_ansi(false)
-                        .with_filter(env_filter()),
+                        .with_filter(filter_layer),
                 )
                 .with(log_layer)
-                .try_init()
-                .map_err(|e| anyhow::anyhow!("failed to initialize logging: {e}"))?;
+                .init();
+            meow_api::log_stream::install_log_reloader(move |level| {
+                let normalized = normalize_level(level);
+                reload_handle
+                    .reload(tracing_subscriber::EnvFilter::new(&normalized))
+                    .map_err(|e| e.to_string())
+            });
             Ok(Logging {
                 tx,
                 _file_guard: Some(guard),
