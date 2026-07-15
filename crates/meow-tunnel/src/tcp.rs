@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 pub struct ConnectionGuard<'a> {
     stats: &'a Statistics,
     id: uuid::Uuid,
+    counters: Arc<crate::statistics::ConnCounters>,
 }
 
 impl<'a> ConnectionGuard<'a> {
@@ -35,11 +36,24 @@ impl<'a> ConnectionGuard<'a> {
         chains: SmallVec<[Arc<str>; 1]>,
     ) -> Self {
         let id = stats.track_connection(metadata, rule, rule_payload, chains);
-        Self { stats, id }
+        // Entry was just inserted; the fallback Arc only exists to keep this
+        // infallible if a concurrent close_all ever races connection setup.
+        let counters = stats.connection_counters(id).unwrap_or_default();
+        Self {
+            stats,
+            id,
+            counters,
+        }
     }
 
     pub fn id(&self) -> uuid::Uuid {
         self.id
+    }
+
+    /// Live byte counters shared with the statistics table. Clone the `Arc`
+    /// into relay progress callbacks so the hot loop never touches the map.
+    pub fn counters(&self) -> &Arc<crate::statistics::ConnCounters> {
+        &self.counters
     }
 }
 
@@ -95,14 +109,15 @@ pub async fn handle_tcp(
     // Dial the remote via proxy
     match proxy.dial_tcp(&metadata).await {
         Ok(mut remote) => {
-            let id = guard.id();
+            let up = Arc::clone(guard.counters());
+            let dn = Arc::clone(guard.counters());
             match copy_bidirectional_buf_tracked(
                 &mut conn,
                 &mut remote,
                 &mut buf_up,
                 &mut buf_dn,
-                |n| tunnel.stats.record_connection_upload(id, n as i64),
-                |n| tunnel.stats.record_connection_download(id, n as i64),
+                |n| tunnel.stats.record_upload(&up, n as i64),
+                |n| tunnel.stats.record_download(&dn, n as i64),
             )
             .await
             {

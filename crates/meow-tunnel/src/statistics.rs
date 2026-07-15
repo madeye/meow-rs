@@ -54,6 +54,41 @@ impl Default for RuleMatchCounters {
     }
 }
 
+/// Live per-connection byte counters, shared between the relay closures and
+/// the `/connections` serializer. `Arc`-owned by the relay's `ConnectionGuard`
+/// so the hot loop bumps the atomics directly — no per-chunk DashMap lookup
+/// (measured −8..10% on bulk throughput when the lookup was per-chunk).
+/// The single `Arc::new` happens once per connection inside
+/// [`Statistics::track_connection`], which is setup-path, not steady-state
+/// (ADR-0008 §3 scopes the zero-alloc rule to per-iteration counts).
+#[derive(Debug, Default)]
+pub struct ConnCounters {
+    pub upload: AtomicI64,
+    pub download: AtomicI64,
+}
+
+impl ConnCounters {
+    pub fn upload_bytes(&self) -> i64 {
+        self.upload.load(Ordering::Relaxed)
+    }
+
+    pub fn download_bytes(&self) -> i64 {
+        self.download.load(Ordering::Relaxed)
+    }
+}
+
+// Serialises as `"upload": N, "download": N` so the flattened field keeps the
+// exact mihomo connection JSON shape the plain i64 fields produced.
+impl Serialize for ConnCounters {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("ConnCounters", 2)?;
+        s.serialize_field("upload", &self.upload_bytes())?;
+        s.serialize_field("download", &self.download_bytes())?;
+        s.end()
+    }
+}
+
 #[derive(Serialize, Clone)]
 pub struct ConnectionInfo {
     /// 16 B inline UUID; serialises as `"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"`.
@@ -65,8 +100,10 @@ pub struct ConnectionInfo {
     /// the inner `Metadata`. Struct size is unchanged (still an 8 B thin-ptr);
     /// only the `/connections` JSON payload grows.
     pub metadata: Arc<Metadata>,
-    pub upload: i64,
-    pub download: i64,
+    /// 8 B thin-ptr (was two inline `i64`s, −8 B). Flattened so the JSON keeps
+    /// the top-level `upload`/`download` fields.
+    #[serde(flatten)]
+    pub counters: Arc<ConnCounters>,
     pub start: SmolStr,
     /// Proxy chain; ref-counted so proxy-name strings are shared across entries.
     pub chains: SmallVec<[Arc<str>; 1]>,
@@ -118,18 +155,26 @@ impl Statistics {
         self.download_total.fetch_add(n, Ordering::Relaxed);
     }
 
-    pub fn record_connection_upload(&self, id: Uuid, n: i64) {
+    /// Per-chunk relay accounting: three relaxed atomic adds, no map lookup.
+    /// Callers obtain the `ConnCounters` once at connection setup via
+    /// [`Self::connection_counters`] (or `ConnectionGuard::counters`).
+    pub fn record_upload(&self, counters: &ConnCounters, n: i64) {
+        counters.upload.fetch_add(n, Ordering::Relaxed);
         self.add_upload(n);
-        if let Some(mut entry) = self.connections.get_mut(&id) {
-            entry.upload += n;
-        }
     }
 
-    pub fn record_connection_download(&self, id: Uuid, n: i64) {
+    /// See [`Self::record_upload`].
+    pub fn record_download(&self, counters: &ConnCounters, n: i64) {
+        counters.download.fetch_add(n, Ordering::Relaxed);
         self.add_download(n);
-        if let Some(mut entry) = self.connections.get_mut(&id) {
-            entry.download += n;
-        }
+    }
+
+    /// One-time (per connection) handle to the live byte counters of a
+    /// tracked connection. Setup-path only — never call per chunk.
+    pub fn connection_counters(&self, id: Uuid) -> Option<Arc<ConnCounters>> {
+        self.connections
+            .get(&id)
+            .map(|entry| Arc::clone(&entry.counters))
     }
 
     /// Roll the current one-second counters into the values exposed by the
@@ -165,8 +210,7 @@ impl Statistics {
         let info = ConnectionInfo {
             id: uuid,
             metadata: Arc::new(metadata),
-            upload: 0,
-            download: 0,
+            counters: Arc::new(ConnCounters::default()),
             start: chrono_now(),
             chains,
             rule,

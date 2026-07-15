@@ -220,14 +220,15 @@ async fn handle_tproxy_conn(
 
     match proxy.dial_tcp(&metadata).await {
         Ok(mut remote) => {
-            let id = _guard.id();
+            let up = Arc::clone(_guard.counters());
+            let dn = Arc::clone(_guard.counters());
             match copy_bidirectional_buf_tracked(
                 &mut stream,
                 &mut remote,
                 &mut relay_buf_up,
                 &mut relay_buf_dn,
-                |n| inner.stats.record_connection_upload(id, n as i64),
-                |n| inner.stats.record_connection_download(id, n as i64),
+                |n| inner.stats.record_upload(&up, n as i64),
+                |n| inner.stats.record_download(&dn, n as i64),
             )
             .await
             {
