@@ -24,6 +24,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
 const MAX_REDIRECTS: u8 = 5;
+/// Bounds the proxy dial and the TLS handshake. Without it, a fetch through
+/// an unreachable upstream (e.g. rule-provider load at startup while the
+/// network is down) inherits the adapter's connect behaviour — which for some
+/// protocols never times out — and stalls the caller indefinitely
+/// (BaoLianDeng#79: config update froze the app until force quit).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const USER_AGENT: &str = concat!("clash.meta/", env!("CARGO_PKG_VERSION"));
 pub(crate) const MAX_BODY_BYTES: usize = 256 * 1024 * 1024; // 256 MiB hard ceiling
@@ -99,9 +105,14 @@ async fn fetch_one(url: &Url, proxy: &Arc<dyn Proxy>) -> Result<Outcome> {
         ..Metadata::default()
     };
 
-    let conn = proxy
-        .dial_tcp(&metadata)
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, proxy.dial_tcp(&metadata))
         .await
+        .map_err(|_| {
+            anyhow!(
+                "dial via proxy '{}' timed out after {CONNECT_TIMEOUT:?}",
+                proxy.name()
+            )
+        })?
         .map_err(|e| anyhow!("dial via proxy '{}': {e}", proxy.name()))?;
 
     let request = format!(
@@ -121,9 +132,9 @@ async fn fetch_one(url: &Url, proxy: &Arc<dyn Proxy>) -> Result<Outcome> {
         let tls = tls_connector();
         let server_name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|e| anyhow!("invalid TLS server name '{host}': {e}"))?;
-        let mut stream = tls
-            .connect(server_name, conn)
+        let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, tls.connect(server_name, conn))
             .await
+            .map_err(|_| anyhow!("TLS handshake to {host} timed out after {CONNECT_TIMEOUT:?}"))?
             .map_err(|e| anyhow!("TLS handshake to {host}: {e}"))?;
         stream.write_all(request.as_bytes()).await?;
         stream.flush().await?;
@@ -289,5 +300,78 @@ mod tests {
     fn parse_response_rejects_truncated_chunk() {
         let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc";
         assert!(parse_response(response).is_err());
+    }
+
+    /// `Proxy` whose `dial_tcp` never completes — models an adapter dialing an
+    /// unreachable upstream with no protocol-level connect timeout.
+    struct HangingProxy {
+        health: meow_common::ProxyHealth,
+    }
+
+    #[async_trait::async_trait]
+    impl meow_common::ProxyAdapter for HangingProxy {
+        fn name(&self) -> &str {
+            "hang"
+        }
+        fn adapter_type(&self) -> meow_common::AdapterType {
+            meow_common::AdapterType::Direct
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            false
+        }
+        async fn dial_tcp(
+            &self,
+            _m: &Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyConn>> {
+            std::future::pending().await
+        }
+        async fn dial_udp(
+            &self,
+            _m: &Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyPacketConn>> {
+            Err(meow_common::MeowError::NotSupported(
+                "hang: dial_udp".into(),
+            ))
+        }
+        fn health(&self) -> &meow_common::ProxyHealth {
+            &self.health
+        }
+    }
+
+    impl Proxy for HangingProxy {
+        fn alive(&self) -> bool {
+            true
+        }
+        fn alive_for_url(&self, _url: &str) -> bool {
+            true
+        }
+        fn last_delay(&self) -> u16 {
+            0
+        }
+        fn last_delay_for_url(&self, _url: &str) -> u16 {
+            0
+        }
+        fn delay_history(&self) -> Vec<meow_common::DelayHistory> {
+            Vec::new()
+        }
+    }
+
+    // start_paused: tokio auto-advances the clock when every task is idle, so
+    // the CONNECT_TIMEOUT fires immediately instead of after a real 15 s.
+    #[tokio::test(start_paused = true)]
+    async fn connect_timeout_bounds_hung_dial() {
+        let proxy: Arc<dyn Proxy> = Arc::new(HangingProxy {
+            health: meow_common::ProxyHealth::new(),
+        });
+        let err = fetch_via_proxy("http://192.0.2.1/rules.yaml", &proxy)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("timed out"),
+            "expected connect timeout, got: {err}"
+        );
     }
 }
