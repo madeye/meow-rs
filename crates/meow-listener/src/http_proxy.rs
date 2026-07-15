@@ -1,7 +1,7 @@
 use crate::sniffer::SnifferRuntime;
 use base64::Engine;
 use meow_common::{AuthConfig, ConnType, Metadata, Network};
-use meow_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
+use meow_tunnel::{copy_bidirectional_buf_tracked, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
 use smallvec::smallvec;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -204,17 +204,22 @@ async fn handle_http_inner(
                     remote.write_all(&leftover).await?;
                     inner.stats.add_upload(leftover.len() as i64);
                 }
-                match copy_bidirectional_buf(
+                match copy_bidirectional_buf_tracked(
                     stream,
                     &mut remote,
                     &mut relay_buf_up,
                     &mut relay_buf_dn,
+                    |n| inner.stats.record_connection_upload(_guard.id(), n as i64),
+                    |n| {
+                        inner
+                            .stats
+                            .record_connection_download(_guard.id(), n as i64)
+                    },
                 )
                 .await
                 {
                     Ok((up, down)) => {
-                        inner.stats.add_upload(up as i64);
-                        inner.stats.add_download(down as i64);
+                        debug!("HTTP CONNECT relay closed: up={up} down={down}");
                     }
                     Err(e) => debug!("HTTP CONNECT relay error: {}", e),
                 }
@@ -323,17 +328,22 @@ async fn handle_http_inner(
                 }
 
                 // Relay bidirectionally
-                match copy_bidirectional_buf(
+                match copy_bidirectional_buf_tracked(
                     stream,
                     &mut remote,
                     &mut relay_buf_up,
                     &mut relay_buf_dn,
+                    |n| inner.stats.record_connection_upload(_guard.id(), n as i64),
+                    |n| {
+                        inner
+                            .stats
+                            .record_connection_download(_guard.id(), n as i64)
+                    },
                 )
                 .await
                 {
                     Ok((up, down)) => {
-                        inner.stats.add_upload(up as i64);
-                        inner.stats.add_download(down as i64);
+                        debug!("HTTP relay closed: up={up} down={down}");
                     }
                     Err(e) => debug!("HTTP relay error: {}", e),
                 }

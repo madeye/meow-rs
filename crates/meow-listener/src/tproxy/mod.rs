@@ -4,7 +4,7 @@ mod orig_dest;
 use crate::sniffer::SnifferRuntime;
 use firewall::FirewallGuard;
 use meow_common::{ConnType, Metadata, Network};
-use meow_tunnel::{copy_bidirectional_buf, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
+use meow_tunnel::{copy_bidirectional_buf_tracked, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
 use smallvec::smallvec;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -220,17 +220,19 @@ async fn handle_tproxy_conn(
 
     match proxy.dial_tcp(&metadata).await {
         Ok(mut remote) => {
-            match copy_bidirectional_buf(
+            let id = _guard.id();
+            match copy_bidirectional_buf_tracked(
                 &mut stream,
                 &mut remote,
                 &mut relay_buf_up,
                 &mut relay_buf_dn,
+                |n| inner.stats.record_connection_upload(id, n as i64),
+                |n| inner.stats.record_connection_download(id, n as i64),
             )
             .await
             {
                 Ok((up, down)) => {
-                    inner.stats.add_upload(up as i64);
-                    inner.stats.add_download(down as i64);
+                    debug!("TProxy relay closed: up={up} down={down}");
                 }
                 Err(e) => debug!("TProxy relay error: {e}"),
             }
