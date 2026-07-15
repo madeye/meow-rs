@@ -108,29 +108,34 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 ### REST API
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/` | GET | Health check |
 | `/version` | GET | Version info |
 | `/proxies` | GET | List all proxies |
-| `/proxies/{name}` | GET/PUT | Get or switch proxy |
+| `/proxies/{name}` | GET/PUT/DELETE | Get, switch, or unfix proxy |
 | `/proxies/{name}/delay` | GET | Run an on-demand delay probe |
+| `/group` | GET | List proxy groups |
+| `/group/{name}` | GET | Get group detail |
 | `/group/{name}/delay` | GET | Run a group delay probe |
 | `/rules` | GET/POST/PUT | List, replace, or update rules |
 | `/rules/{index}` | DELETE | Delete rule at index |
 | `/rules/reorder` | POST | Reorder rules |
-| `/connections` | GET | Active connections with traffic stats |
-| `/connections` | DELETE | Close all active connections |
+| `/connections` | GET/DELETE | Active connections (GET also supports WS upgrade) |
 | `/connections/{id}` | DELETE | Close a connection |
 | `/configs` | GET/PATCH/PUT | Get config, patch mode, or reload config |
-| `/traffic` | GET | Upload/download statistics |
-| `/logs` | GET (WS) | Runtime log stream |
-| `/memory` | GET (WS) | Runtime memory stream |
+| `/traffic` | GET | Upload/download statistics (also supports WS upgrade) |
+| `/logs` | GET | Runtime log stream (HTTP streaming or WS upgrade) |
+| `/memory` | GET | Runtime memory stream (HTTP streaming or WS upgrade) |
 | `/metrics` | GET | Prometheus metrics |
 | `/dns/query` | GET/POST | Direct DNS query |
+| `/dns/results` | GET | DNS cache dump (`?search=`, `?limit=`) |
 | `/cache/dns/flush` | POST | Flush DNS cache |
 | `/cache/fakeip/flush` | POST | Flush fake-IP mappings |
 | `/listeners` | GET | List configured named listeners |
 | `/providers/proxies` | GET | List proxy providers |
 | `/providers/proxies/{name}` | GET/PUT | Get or refresh a proxy provider |
 | `/providers/proxies/{name}/healthcheck` | GET | Run provider health check |
+| `/providers/proxies/{provider}/{proxy}` | GET | Get a specific proxy in a provider |
+| `/providers/proxies/{provider}/{proxy}/healthcheck` | GET | Run health check for a specific proxy |
 | `/providers/rules` | GET | List rule providers |
 | `/providers/rules/{name}` | GET/PUT | Get or refresh a rule provider |
 | `/api/config/save` | POST | Save running config to disk |
