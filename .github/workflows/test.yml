@@ -2,9 +2,18 @@ name: Test
 
 on:
   push:
+    branches: [main]
     paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock", ".github/workflows/**"]
   pull_request:
     paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock", ".github/workflows/**"]
+
+# One active run per ref: a superseded push to the same PR/branch cancels the
+# in-flight run instead of racing it to completion. `push` is limited to
+# `main` above, so a PR branch is tested exactly once per push (via the
+# pull_request event) instead of twice.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,6 +38,9 @@ jobs:
       - name: Clippy (default features)
         run: cargo clippy --all-targets -- -D warnings
 
+      # Also stands in for the per-crate `cargo check --all-features` legs
+      # that used to run in the test job (transport G7 incl. boring-tls,
+      # VLESS G3): clippy is a strict superset of check.
       - name: Clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -73,29 +85,32 @@ jobs:
       - name: Build
         run: cargo build --tests
 
-      - name: Unit tests
-        run: cargo test --lib
-
-      - name: App binary unit tests
-        run: cargo test -p meow-app --bin meow -- --nocapture
-
-      - name: Common types tests
-        run: cargo test --test common_test -- --nocapture
-
-      - name: DNS cache tests
-        run: cargo test --test dns_cache_test -- --nocapture
-
-      - name: DNS upstream unit tests (DoH/DoT parser + bootstrap)
-        run: cargo test -p meow-dns --lib -- --nocapture
-
-      - name: Config parsing tests
-        run: cargo test --test config_test -- --nocapture
-
-      - name: Statistics tests
-        run: cargo test --test statistics_test -- --nocapture
-
-      - name: Rules tests
-        run: cargo test --test rules_test -- --nocapture
+      # One workspace-scoped invocation for every default-features test
+      # target. A single invocation keeps a single feature-resolution scope,
+      # so every target reuses the `cargo build --tests` artifacts instead of
+      # re-unifying features (and rebuilding shared deps) per `-p`-scoped
+      # step. `cargo test -p meow-dns --lib` was folded in: `--lib` already
+      # runs every crate's lib tests, meow-dns included.
+      - name: Unit + integration tests (default features)
+        run: |
+          cargo test --lib --bin meow \
+            --test common_test \
+            --test dns_cache_test \
+            --test config_test \
+            --test statistics_test \
+            --test rules_test \
+            --test api_test \
+            --test config_persistence_test \
+            --test systemd_config_test \
+            --test trojan_integration \
+            --test vless_config_test \
+            --test vless_integration \
+            --test v2ray_plugin_integration \
+            --test pre_resolve_test \
+            --test tls_test \
+            --test ws_test \
+            --test crate_invariants_test \
+            -- --nocapture
 
       # ADR-0008 allocation-count gates. Release build: the thresholds are
       # calibrated against release codegen. The provider-backed pressure
@@ -104,6 +119,10 @@ jobs:
       - name: Allocation-count gates (ADR-0008)
         run: cargo test -p meow-tunnel --test alloc_count_test --release -- --nocapture
 
+      # Kept as its own step: MIHOMO_REQUIRE_INTEGRATION_BINS flips *every*
+      # suite that probes for external binaries from skip to fail (e.g.
+      # vless_integration probes for xray, which is not installed here), so
+      # it must only wrap the suite whose binaries are installed above.
       - name: Shadowsocks integration tests (incl. simple-obfs)
         env:
           # Force-fail (instead of silently SKIP) if ssserver / obfs-local /
@@ -111,87 +130,26 @@ jobs:
           MIHOMO_REQUIRE_INTEGRATION_BINS: "1"
         run: cargo test --test shadowsocks_integration -- --nocapture
 
-      - name: API integration tests
-        run: cargo test --test api_test -- --nocapture
-
-      - name: Config persistence tests
-        run: cargo test --test config_persistence_test -- --nocapture
-
-      - name: Systemd config tests
-        run: cargo test -p meow-app --test systemd_config_test -- --nocapture
-
-      - name: Trojan integration tests
-        run: cargo test --test trojan_integration -- --nocapture
-
-      - name: Hysteria2 Docker integration tests
+      - name: Docker integration tests (Hysteria2 + Snell v3)
         env:
           MEOW_REQUIRE_DOCKER: "1"
-        run: cargo test -p meow-proxy --features hysteria2 --test hysteria2_integration -- --nocapture
-
-      - name: Snell v3 Docker integration tests
-        env:
-          MEOW_REQUIRE_DOCKER: "1"
-        run: cargo test -p meow-proxy --features snell --test snell_server_docker_integration -- --nocapture
-
-      - name: v2ray-plugin integration tests
-        run: cargo test --test v2ray_plugin_integration -- --nocapture
-
-      - name: DNS pre-resolve tests
-        run: cargo test --test pre_resolve_test -- --nocapture
-
-      - name: Transport TLS tests
-        run: cargo test -p meow-transport --test tls_test -- --nocapture
-
-      - name: Transport WS tests
-        run: cargo test -p meow-transport --test ws_test -- --nocapture
-
-      - name: Transport gRPC tests
-        run: cargo test -p meow-transport --test grpc_test --features grpc -- --nocapture
-
-      - name: Transport H2 tests
-        run: cargo test -p meow-transport --test h2_test --features h2 -- --nocapture
-
-      - name: Transport HTTPUpgrade tests
-        run: cargo test -p meow-transport --test httpupgrade_test --features httpupgrade -- --nocapture
-
-      - name: Transport crate invariants
-        run: cargo test -p meow-transport --test crate_invariants_test -- --nocapture
-
-      - name: Transport feature matrix (G1-G7)
         run: |
-          cargo check -p meow-transport --no-default-features
-          cargo check -p meow-transport --no-default-features --features "tls"
-          cargo check -p meow-transport --no-default-features --features "tls,ws"
-          cargo check -p meow-transport --no-default-features --features "grpc"
-          cargo check -p meow-transport --no-default-features --features "h2"
-          cargo check -p meow-transport --no-default-features --features "httpupgrade"
-          cargo check -p meow-transport --all-features
+          cargo test -p meow-proxy --features "hysteria2,snell" \
+            --test hysteria2_integration \
+            --test snell_server_docker_integration \
+            -- --nocapture
 
-      - name: VLESS config parser tests
-        run: cargo test -p meow-config --test vless_config_test -- --nocapture
-
-      - name: VLESS integration tests
-        run: cargo test --test vless_integration -- --nocapture
-
-      - name: VLESS feature matrix (G1-G4)
+      # One invocation/feature set for the feature-gated transport suites.
+      # Per-feature-combination *compile* coverage (the old G1-G6 matrix)
+      # lives in the feature-powerset job; the nightly coverage workflow
+      # runs these same tests under --all-features.
+      - name: Transport feature-gated tests (gRPC / H2 / HTTPUpgrade)
         run: |
-          # G1: plain vless, no Vision — vision.rs excluded
-          cargo check -p meow-proxy --no-default-features --features vless
-          # G2: vless + Vision
-          cargo check -p meow-proxy --no-default-features --features "vless,vless-vision"
-          # G3: all proxy features (default)
-          cargo check -p meow-proxy --all-features
-          # G4: vless-vision feature requires vless (transitive dep check)
-          cargo check -p meow-proxy --no-default-features --features "vless-vision"
-
-      - name: DNS encrypted feature matrix (D1-D3)
-        run: |
-          # D1: plain UDP/TCP only, no encrypted features
-          cargo check -p meow-dns --no-default-features
-          # D2: explicitly enable encrypted features
-          cargo check -p meow-dns --no-default-features --features encrypted
-          # D3: default features (= encrypted on)
-          cargo check -p meow-dns
+          cargo test -p meow-transport --features "grpc,h2,httpupgrade" \
+            --test grpc_test \
+            --test h2_test \
+            --test httpupgrade_test \
+            -- --nocapture
 
   features:
     runs-on: ubuntu-latest
@@ -209,9 +167,15 @@ jobs:
       - name: Install cargo-hack
         uses: taiki-e/install-action@cargo-hack
 
+      # These powersets subsume the hand-rolled per-crate feature matrices
+      # that used to run in the test job (transport G1-G6, VLESS G1/G2/G4,
+      # DNS D1-D3): the powerset checks every feature subset with
+      # --no-default-features, including the empty set. The --all-features
+      # legs (transport G7, VLESS G3) are covered by clippy --all-features
+      # in the lint job.
       - name: Feature powerset — meow-transport
-        # boring-tls excluded: requires C++ toolchain at build time; tested via
-        # --all-features in the transport feature matrix step in the test job.
+        # boring-tls excluded: requires C++ toolchain at build time; covered
+        # via clippy --all-features in the lint job.
         run: cargo hack check -p meow-transport --feature-powerset --exclude-features boring-tls
 
       - name: Feature powerset — meow-proxy
@@ -219,6 +183,9 @@ jobs:
 
       - name: Feature powerset — meow-listener
         run: cargo hack check -p meow-listener --feature-powerset
+
+      - name: Feature powerset — meow-dns
+        run: cargo hack check -p meow-dns --feature-powerset
 
   msrv:
     runs-on: ubuntu-latest
@@ -272,45 +239,22 @@ jobs:
       - name: Build
         run: cargo build --tests
 
-      - name: Unit tests (windows)
+      # Single workspace-scoped invocation — same rationale as the ubuntu
+      # test job: one feature-resolution scope, no per-step rebuilds (the
+      # old `-p`-scoped steps re-unified features and spent minutes
+      # relinking on the Windows runner).
+      - name: Unit + integration tests (windows)
         shell: bash
-        run: cargo test --lib
-
-      - name: App binary unit tests (windows service)
-        shell: bash
-        run: cargo test -p meow-app --bin meow -- --nocapture
-
-      - name: Common types tests (windows)
-        shell: bash
-        run: cargo test --test common_test -- --nocapture
-
-      - name: Config parsing tests (windows)
-        shell: bash
-        run: cargo test --test config_test -- --nocapture
-
-      - name: Rules tests (windows)
-        shell: bash
-        run: cargo test --test rules_test -- --nocapture
-
-      - name: API tests (windows)
-        shell: bash
-        run: cargo test --test api_test -- --nocapture
-
-      - name: Trojan integration tests (windows)
-        shell: bash
-        run: cargo test --test trojan_integration -- --nocapture
-
-      - name: DNS unit tests (windows)
-        shell: bash
-        run: cargo test -p meow-dns --lib -- --nocapture
-
-      - name: Transport TLS tests (windows)
-        shell: bash
-        run: cargo test -p meow-transport --test tls_test -- --nocapture
-
-      - name: Transport WS tests (windows)
-        shell: bash
-        run: cargo test -p meow-transport --test ws_test -- --nocapture
+        run: |
+          cargo test --lib --bin meow \
+            --test common_test \
+            --test config_test \
+            --test rules_test \
+            --test api_test \
+            --test trojan_integration \
+            --test tls_test \
+            --test ws_test \
+            -- --nocapture
 
   macos:
     runs-on: macos-latest
@@ -330,16 +274,15 @@ jobs:
 
       - name: Core smoke tests
         run: |
-          cargo test --lib
-          cargo test -p meow-app --bin meow -- --nocapture
-          cargo test --test common_test -- --nocapture
-          cargo test --test config_test -- --nocapture
-          cargo test --test rules_test -- --nocapture
-          cargo test --test api_test -- --nocapture
-          cargo test --test trojan_integration -- --nocapture
-          cargo test -p meow-dns --lib -- --nocapture
-          cargo test -p meow-transport --test tls_test -- --nocapture
-          cargo test -p meow-transport --test ws_test -- --nocapture
+          cargo test --lib --bin meow \
+            --test common_test \
+            --test config_test \
+            --test rules_test \
+            --test api_test \
+            --test trojan_integration \
+            --test tls_test \
+            --test ws_test \
+            -- --nocapture
 
   tproxy:
     runs-on: ubuntu-latest
