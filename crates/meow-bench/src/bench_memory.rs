@@ -22,7 +22,11 @@ pub fn measure_rss(pid: u32) -> anyhow::Result<u64> {
             if line.contains(&pid.to_string()) {
                 let fields: Vec<&str> = line.split(',').collect();
                 if fields.len() >= 5 {
-                    let kb_str = fields[4].trim().trim_matches('"').replace(" K", "").replace(",", "");
+                    let kb_str = fields[4]
+                        .trim()
+                        .trim_matches('"')
+                        .replace(" K", "")
+                        .replace(",", "");
                     let rss_kb: u64 = kb_str
                         .parse()
                         .map_err(|e| anyhow::anyhow!("parse RSS: {e}"))?;
