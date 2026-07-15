@@ -24,6 +24,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+#[cfg(target_os = "windows")]
+mod windows_service;
+
 #[cfg(target_os = "linux")]
 const SERVICE_NAME: &str = "meow";
 
@@ -96,7 +99,7 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install as a system service (systemd on Linux, launchd on macOS)
+    /// Install as a system service
     Install {
         /// Config file path for the service
         #[arg(short = 'f', long = "config")]
@@ -106,7 +109,58 @@ enum Command {
     Uninstall,
     /// Show service status
     Status,
+    /// Internal entry point used by the Windows Service Control Manager
+    #[cfg(target_os = "windows")]
+    #[command(hide = true)]
+    RunService,
 }
+
+enum LogTarget {
+    Console,
+    #[cfg(target_os = "windows")]
+    WindowsService(std::path::PathBuf),
+}
+
+enum ShutdownSignal {
+    Console,
+    #[cfg(target_os = "windows")]
+    WindowsService(tokio::sync::oneshot::Receiver<()>),
+}
+
+impl ShutdownSignal {
+    async fn wait(self) -> Result<()> {
+        match self {
+            Self::Console => {
+                #[cfg(unix)]
+                {
+                    let mut sigterm =
+                        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+                    tokio::select! {
+                        _ = tokio::signal::ctrl_c() => {},
+                        _ = sigterm.recv() => {},
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    tokio::signal::ctrl_c().await?;
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "windows")]
+            Self::WindowsService(receiver) => receiver
+                .await
+                .map_err(|_| anyhow::anyhow!("Windows service shutdown channel closed")),
+        }
+    }
+}
+
+struct Logging {
+    tx: tokio::sync::broadcast::Sender<meow_api::log_stream::LogMessage>,
+    #[cfg(target_os = "windows")]
+    _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
+}
+
+type ReadyCallback = Box<dyn FnOnce() -> Result<()> + Send>;
 
 fn main() -> Result<()> {
     // dhat profiler guard — must be the first local, lives for the duration of main().
@@ -157,31 +211,106 @@ fn main() -> Result<()> {
         return handle_service_command(cmd, &args);
     }
 
+    run_application(args, &LogTarget::Console, ShutdownSignal::Console, None)
+}
+
+fn init_logging(target: &LogTarget) -> Result<Logging> {
     // Initialize logging + log broadcast channel for GET /logs WebSocket.
     // The broadcast layer carries LevelFilter::TRACE so the registry's global
     // max-level is TRACE, preventing the fmt layer's EnvFilter from silencing
     // DEBUG/TRACE events before LogBroadcastLayer.on_event fires. Per-connection
     // ?level= filtering in the WS handler provides the client-visible suppression.
-    let log_tx = {
-        use meow_api::log_stream::LogBroadcastLayer;
-        use tokio::sync::broadcast;
-        use tracing_subscriber::filter::LevelFilter;
-        use tracing_subscriber::prelude::*;
+    use meow_api::log_stream::LogBroadcastLayer;
+    use tokio::sync::broadcast;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::prelude::*;
 
-        let (tx, _) = broadcast::channel(128);
-        let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer().with_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                ),
-            )
-            .with(log_layer)
-            .init();
-        tx
+    let (tx, _) = broadcast::channel(128);
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
     };
 
+    match target {
+        LogTarget::Console => {
+            let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
+            tracing_subscriber::registry()
+                .with(tracing_subscriber::fmt::layer().with_filter(env_filter()))
+                .with(log_layer)
+                .try_init()
+                .map_err(|e| anyhow::anyhow!("failed to initialize logging: {e}"))?;
+            Ok(Logging {
+                tx,
+                #[cfg(target_os = "windows")]
+                _file_guard: None,
+            })
+        }
+        #[cfg(target_os = "windows")]
+        LogTarget::WindowsService(log_dir) => {
+            std::fs::create_dir_all(log_dir).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to create Windows service log directory {}: {e}",
+                    log_dir.display()
+                )
+            })?;
+            let appender = tracing_appender::rolling::RollingFileAppender::builder()
+                .rotation(tracing_appender::rolling::Rotation::DAILY)
+                .filename_prefix("meow")
+                .filename_suffix("log")
+                .max_log_files(7)
+                .build(log_dir)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to initialize Windows service log in {}: {e}",
+                        log_dir.display()
+                    )
+                })?;
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(writer)
+                        .with_ansi(false)
+                        .with_filter(env_filter()),
+                )
+                .with(log_layer)
+                .try_init()
+                .map_err(|e| anyhow::anyhow!("failed to initialize logging: {e}"))?;
+            Ok(Logging {
+                tx,
+                _file_guard: Some(guard),
+            })
+        }
+    }
+}
+
+fn run_application(
+    args: Args,
+    log_target: &LogTarget,
+    shutdown: ShutdownSignal,
+    on_ready: Option<ReadyCallback>,
+) -> Result<()> {
+    let logging = init_logging(log_target)?;
+    let log_tx = logging.tx.clone();
+    let result = run_application_inner(args, log_tx, shutdown, on_ready);
+
+    // Keep the non-blocking file writer guard alive while recording the
+    // terminal error. Dropping it afterwards flushes the queued record before
+    // the Windows service host reports Stopped to SCM.
+    if let Err(error) = &result {
+        error!(error = %format_args!("{error:#}"), "meow-rs stopped with an error");
+    }
+    drop(logging);
+    result
+}
+
+fn run_application_inner(
+    args: Args,
+    log_tx: tokio::sync::broadcast::Sender<meow_api::log_stream::LogMessage>,
+    shutdown: ShutdownSignal,
+    on_ready: Option<ReadyCallback>,
+) -> Result<()> {
     info!("meow-rs starting...");
 
     // Initialize rustls crypto provider (required for TLS-based proxy protocols)
@@ -265,7 +394,7 @@ fn main() -> Result<()> {
             info!("External UI overridden by --ext-ui");
         }
 
-        run(config, config_path, log_tx).await
+        run(config, config_path, log_tx, shutdown, on_ready).await
     })
 }
 
@@ -274,6 +403,8 @@ fn handle_service_command(cmd: &Command, args: &Args) -> Result<()> {
         Command::Install { config } => install_service(config.as_deref(), args),
         Command::Uninstall => uninstall_service(),
         Command::Status => service_status(),
+        #[cfg(target_os = "windows")]
+        Command::RunService => windows_service::dispatch(),
     }
 }
 
@@ -535,21 +666,21 @@ fn service_status() -> Result<()> {
     Ok(())
 }
 
-// --- Windows stubs ---
+// --- Windows Service Control Manager ---
 
 #[cfg(target_os = "windows")]
-fn install_service(_config: Option<&str>, _args: &Args) -> Result<()> {
-    anyhow::bail!("Service management is not yet supported on Windows. Run meow directly.");
+fn install_service(config: Option<&str>, args: &Args) -> Result<()> {
+    windows_service::install(config, args)
 }
 
 #[cfg(target_os = "windows")]
 fn uninstall_service() -> Result<()> {
-    anyhow::bail!("Service management is not yet supported on Windows.");
+    windows_service::uninstall()
 }
 
 #[cfg(target_os = "windows")]
 fn service_status() -> Result<()> {
-    anyhow::bail!("Service management is not yet supported on Windows.");
+    windows_service::status()
 }
 
 #[cfg(target_os = "linux")]
@@ -585,6 +716,8 @@ async fn run(
     config: meow_config::Config,
     config_path: String,
     log_tx: tokio::sync::broadcast::Sender<meow_api::log_stream::LogMessage>,
+    shutdown: ShutdownSignal,
+    on_ready: Option<ReadyCallback>,
 ) -> Result<()> {
     // Keep raw config in shared state for runtime mutations
     let raw_config = Arc::new(RwLock::new(config.raw.clone()));
@@ -848,22 +981,13 @@ async fn run(
         warn!("tun.enable is set but this build lacks the 'listener-tun' feature");
     }
 
+    if let Some(on_ready) = on_ready {
+        on_ready()?;
+    }
     info!("meow-rs is running");
 
     // Wait for shutdown signal
-    #[cfg(unix)]
-    {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {},
-            _ = sigterm.recv() => {},
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await?;
-    }
+    shutdown.wait().await?;
     info!("Shutting down...");
 
     Ok(())
@@ -872,6 +996,10 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::bind_socket_addr;
+    #[cfg(target_os = "windows")]
+    use super::{run_application, Args, LogTarget, ShutdownSignal};
+    #[cfg(target_os = "windows")]
+    use clap::Parser;
 
     #[test]
     fn ipv4_bind_address() {
@@ -900,5 +1028,63 @@ mod tests {
     #[test]
     fn invalid_bind_address_errors() {
         assert!(bind_socket_addr("not-an-ip", 80).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn service_startup_error_is_flushed_before_ready() {
+        use std::ffi::OsString;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("meow");
+        let log_dir = temp.path().join("logs");
+        let mmdb_path = temp.path().join("Country.mmdb");
+        let config_path = temp.path().join("test.yaml");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(&mmdb_path, b"not a maxmind database").unwrap();
+        let yaml_mmdb_path = mmdb_path.to_string_lossy().replace('\\', "/");
+        std::fs::write(
+            &config_path,
+            format!(
+                "mixed-port: 17890\nmode: rule\ngeodata:\n  mmdb-path: '{yaml_mmdb_path}'\nrules:\n  - GEOIP,CN,DIRECT\n"
+            ),
+        )
+        .unwrap();
+
+        let args = Args::try_parse_from(vec![
+            OsString::from("meow"),
+            OsString::from("-f"),
+            config_path.as_os_str().to_os_string(),
+            OsString::from("-d"),
+            home.as_os_str().to_os_string(),
+        ])
+        .unwrap();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_flag = Arc::clone(&ready);
+
+        let result = run_application(
+            args,
+            &LogTarget::WindowsService(log_dir.clone()),
+            ShutdownSignal::WindowsService(shutdown_rx),
+            Some(Box::new(move || {
+                ready_flag.store(true, Ordering::Release);
+                Ok(())
+            })),
+        );
+        assert!(result.is_err());
+        assert!(!ready.load(Ordering::Acquire));
+
+        let log_path = std::fs::read_dir(&log_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "log"))
+            .expect("service log file");
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("meow-rs stopped with an error"), "{log}");
+        assert!(log.contains("Failed to load GeoIP database"), "{log}");
+        assert!(log.contains("GEOIP,CN,DIRECT"), "{log}");
     }
 }

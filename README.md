@@ -235,6 +235,63 @@ sudo journalctl -u meow -f
 sudo ./target/release/meow uninstall
 ```
 
+**Windows (Service Control Manager):**
+
+Open PowerShell as Administrator, then run:
+
+```powershell
+# Install, enable automatic startup, and start the service
+.\target\release\meow.exe install -f 'C:\path\to\config.yaml'
+
+# Optional: pin the meow resource/cache home explicitly. The global -d flag
+# must appear before the install subcommand.
+.\target\release\meow.exe -d 'D:\meow-data' install -f 'C:\path\to\config.yaml'
+
+# Check status
+.\target\release\meow.exe status
+Get-Service meow
+
+# Manage the service
+Stop-Service meow
+Start-Service meow
+Restart-Service meow
+
+# List the daily rolling logs (the seven newest files are retained)
+Get-ChildItem "$env:ProgramData\meow\logs\meow.*.log"
+
+# Follow the newest log
+$log = Get-ChildItem "$env:ProgramData\meow\logs\meow.*.log" |
+  Sort-Object LastWriteTime | Select-Object -Last 1
+Get-Content $log.FullName -Wait
+
+# Uninstall
+.\target\release\meow.exe uninstall
+```
+
+Installation keeps using the configuration file at the path passed to `-f`,
+starts the service immediately, and configures it to start automatically with
+Windows. A relative `-f` follows the same rule as a direct run: it is resolved
+under `-d` when a home directory is given, otherwise under the current
+directory. Running `install` again updates the registered binary/configuration
+and restarts the service. When `-d` is omitted, the installer resolves and
+records the same default meow home used by a normal CLI launch (for example,
+`E:\test\meow` when launched from `E:\test`); the selected path is printed as
+`Home` after installation. The service runs as LocalSystem, so that account must
+have read/write access to the configuration path and the selected Home. After
+upgrading from an older service build, run `install` again to refresh the SCM
+launch arguments. Uninstalling preserves both the configuration and the logs.
+
+Security notes:
+
+- The service executes the binary at its install-time location as LocalSystem
+  on every boot. Copy `meow.exe` to a directory writable only by
+  administrators (for example, `C:\Program Files\meow`) and run `install` from
+  there, rather than registering a binary inside a user-writable directory.
+- `%ProgramData%\meow\logs` inherits the default ProgramData ACLs, so log
+  files (which include destination hosts of proxied connections) are readable
+  by all local users. Tighten the ACL on `%ProgramData%\meow` if that matters
+  on a shared machine.
+
 **macOS (launchd user agent):**
 
 ```bash

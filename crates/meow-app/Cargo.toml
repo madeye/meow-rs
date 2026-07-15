@@ -88,6 +88,11 @@ rustls = { workspace = true }
 libc = "0.2"
 dhat = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+tracing-appender = "0.2.5"
+windows-service = "0.8.1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
+
 [dev-dependencies]
 tempfile = "3"
 serde_yaml = { workspace = true }
