@@ -16,22 +16,21 @@ pub fn measure_rss(pid: u32) -> anyhow::Result<u64> {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // CSV format: "meow.exe","1234","Console","1","12,345 K","Running"
-        // Working Set Size is the 5th field (index 4), in KB with comma separators
+        // CSV format: "meow.exe","1234","Console","1","12,345 K"
+        // Every field is quoted, so split on the quoted separator `","` — the
+        // memory column itself contains a thousands-separator comma, which a
+        // bare split(',') would truncate ("12,345 K" → 12 KB).
+        let pid_str = pid.to_string();
         for line in stdout.lines() {
-            if line.contains(&pid.to_string()) {
-                let fields: Vec<&str> = line.split(',').collect();
-                if fields.len() >= 5 {
-                    let kb_str = fields[4]
-                        .trim()
-                        .trim_matches('"')
-                        .replace(" K", "")
-                        .replace(",", "");
-                    let rss_kb: u64 = kb_str
-                        .parse()
-                        .map_err(|e| anyhow::anyhow!("parse RSS: {e}"))?;
-                    return Ok(rss_kb * 1024);
-                }
+            let line = line.trim().trim_start_matches('"').trim_end_matches('"');
+            let fields: Vec<&str> = line.split("\",\"").collect();
+            if fields.len() >= 5 && fields[1] == pid_str {
+                let kb_str = fields[4].replace(" K", "").replace(',', "");
+                let rss_kb: u64 = kb_str
+                    .trim()
+                    .parse()
+                    .map_err(|e| anyhow::anyhow!("parse RSS: {e}"))?;
+                return Ok(rss_kb * 1024);
             }
         }
         anyhow::bail!("pid {pid} not found in tasklist output");
