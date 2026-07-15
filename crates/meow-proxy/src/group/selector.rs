@@ -234,6 +234,10 @@ impl ProxySelection for SelectorGroup {
     }
 
     fn force_set(&self, name: Option<&str>) {
+        // SelectorGroup is a manual-pick group with no automatic fallback.
+        // Clearing (None) is intentionally a no-op — a selector without a
+        // selection has no sensible routing target. Automatic groups (UrlTest,
+        // Fallback) handle None by reverting to auto mode.
         if let Some(name) = name {
             *self.selected.write() = Some(SmolStr::from(name));
             if let Some(store) = &self.store {

@@ -82,13 +82,9 @@ impl AppState {
     }
 }
 
-/// Bearer token middleware. Matches upstream mihomo contract:
-/// `Authorization: Bearer <secret>`. When the configured secret is empty or
-/// unset, the middleware is a no-op. Otherwise, requests without a matching
-/// header return `401 Unauthorized`.
-/// Auth middleware for WebSocket upgrade routes. Accepts `Authorization: Bearer <secret>`
-/// header OR `?token=<secret>` query param (browser WebSocket clients cannot set headers).
-/// `?token=` is accepted ONLY on this middleware — REST routes keep header-only auth.
+/// Auth middleware for all API routes. Accepts `Authorization: Bearer <secret>`
+/// header. For WebSocket upgrade requests, also accepts `?token=<secret>` query
+/// param (browser WebSocket clients cannot set custom headers).
 async fn require_auth_ws(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HashMap<String, String>>,
@@ -605,24 +601,28 @@ async fn update_configs(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> Response {
-    let mut raw = state.raw_config.write();
-    if let Some(mode_str) = body.mode {
-        match mode_str.parse::<TunnelMode>() {
-            Ok(mode) => {
-                state.tunnel.set_mode(mode);
-                raw.mode = Some(mode.to_string());
-                info!("Mode changed to {}", mode);
-            }
-            Err(_) => return msg_err(StatusCode::BAD_REQUEST, "Body invalid"),
-        }
+    // Validate both fields first so we never partially apply on error.
+    let mode = body.mode.map(|s| s.parse::<TunnelMode>());
+    if let Some(Err(_)) = mode {
+        return msg_err(StatusCode::BAD_REQUEST, "Body invalid");
     }
-    if let Some(level) = body.log_level {
+    if let Some(ref level) = body.log_level {
         if !matches!(
             level.to_ascii_lowercase().as_str(),
             "debug" | "info" | "warning" | "warn" | "error" | "silent"
         ) {
             return msg_err(StatusCode::BAD_REQUEST, "Body invalid");
         }
+    }
+
+    // Both valid — apply atomically.
+    let mut raw = state.raw_config.write();
+    if let Some(Ok(parsed_mode)) = mode {
+        state.tunnel.set_mode(parsed_mode);
+        raw.mode = Some(parsed_mode.to_string());
+        info!("Mode changed to {}", parsed_mode);
+    }
+    if let Some(level) = body.log_level {
         if let Err(e) = crate::log_stream::reload_log_level(&level) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1502,16 +1502,18 @@ async fn get_group_delay(
         return msg_err(StatusCode::NOT_FOUND, "resource not found");
     };
 
-    // mihomo clears a URLTest/Fallback user pin before every group-wide
-    // health check, even when query validation subsequently fails.
-    if let Some(selection) = group.selection().filter(|s| s.can_unfix()) {
-        selection.force_set(None);
-    }
-
     let timeout = match parse_delay_params(&params) {
         Ok(t) => t,
         Err(resp) => return *resp,
     };
+
+    // mihomo clears a URLTest/Fallback user pin before every group-wide
+    // health check. Moved after query validation so a malformed request
+    // does not silently clear user state.
+    if let Some(selection) = group.selection().filter(|s| s.can_unfix()) {
+        selection.force_set(None);
+    }
+
     let url = params.url.as_deref().unwrap_or("").to_string();
     let expected = params.expected.clone();
 
