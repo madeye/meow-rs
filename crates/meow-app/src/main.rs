@@ -242,7 +242,8 @@ fn init_logging(target: &LogTarget) -> Result<Logging> {
         LogTarget::Console => {
             let (tx, _) = broadcast::channel(128);
             let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
-            let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter());
+            let (filter_layer, reload_handle) =
+                tracing_subscriber::reload::Layer::new(env_filter());
             tracing_subscriber::registry()
                 .with(tracing_subscriber::fmt::layer().with_filter(filter_layer))
                 .with(log_layer)
@@ -282,7 +283,8 @@ fn init_logging(target: &LogTarget) -> Result<Logging> {
             let (writer, guard) = tracing_appender::non_blocking(appender);
             let (tx, _) = broadcast::channel(128);
             let log_layer = LogBroadcastLayer { tx: tx.clone() }.with_filter(LevelFilter::TRACE);
-            let (filter_layer, reload_handle) = tracing_subscriber::reload::Layer::new(env_filter());
+            let (filter_layer, reload_handle) =
+                tracing_subscriber::reload::Layer::new(env_filter());
             tracing_subscriber::registry()
                 .with(
                     tracing_subscriber::fmt::layer()
