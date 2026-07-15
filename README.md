@@ -108,7 +108,7 @@ Built-in web UI served at `http://<api-addr>/ui` with:
 ### REST API
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Health check |
+| `/` | GET | Greeting (`{"hello":"meow"}`) |
 | `/version` | GET | Version info |
 | `/proxies` | GET | List all proxies |
 | `/proxies/{name}` | GET/PUT/DELETE | Get, switch, or unfix proxy |
