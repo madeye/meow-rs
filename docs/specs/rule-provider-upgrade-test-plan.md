@@ -59,6 +59,12 @@ copies exist. Test G1 (structural guard) enforces this.
 
 ### P3 — ArcSwap not Arc<RwLock<Arc<>>>
 
+> **Superseded by [#327](https://github.com/madeye/meow-rs/issues/327)** —
+> `arc-swap` was dropped from the workspace over unproven memory-ordering
+> correctness on weak-memory ARM. The refresh slot should instead be
+> `parking_lot::RwLock<Arc<RuleSet>>` with guard-drop-before-await reads;
+> test F3's "no RwLock" grep no longer applies.
+
 The refresh path must use `arc_swap::ArcSwap`. Test F3 guards that no
 `RwLock` wraps the rule set on the read path. The double-Arc+RwLock pattern
 forces a lock acquisition on every rule match; `ArcSwap::load_full()` is

@@ -209,7 +209,16 @@ an unstructured string like `"N connections dropped"` — the count must be
 machine-readable.
 
 **AppState mutability**: `AppState` is currently `Arc`-shared and immutable.
-Reload requires atomic swap of the tunnel. Use `arc_swap::ArcSwap<Tunnel>`:
+Reload requires atomic swap of the tunnel.
+
+> **Superseded by [#327](https://github.com/madeye/meow-rs/issues/327)** —
+> `arc-swap` was dropped from the workspace over unproven memory-ordering
+> correctness on weak-memory ARM. Use
+> `parking_lot::RwLock<Arc<Tunnel>>` instead: handlers do
+> `Arc::clone(&state.tunnel.read())` (guard dropped immediately, `Arc` safe
+> to hold across `.await`). The original design below is kept for the record.
+
+Use `arc_swap::ArcSwap<Tunnel>`:
 
 ```rust
 // AppState

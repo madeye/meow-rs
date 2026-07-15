@@ -2,7 +2,6 @@ use crate::match_engine::{self, DomainIndex};
 use crate::rule_ir::{CompiledMatchResult, CompiledRuleSet, LazyMatchOutcome};
 use crate::statistics::Statistics;
 use crate::udp::{self, NatTable};
-use arc_swap::ArcSwap;
 use meow_common::{Metadata, Proxy, ProxyAdapter, Rule, TunnelMode};
 use meow_dns::Resolver;
 use meow_proxy::DirectAdapter;
@@ -13,12 +12,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info};
 
-/// Bundled rules + domain index + proxies map, atomically swapped on config
-/// reload via `ArcSwap`. Reads on the connection-setup hot path are lock-free
-/// — previously each `resolve_proxy` call acquired three `parking_lot::RwLock`
-/// guards (rules, domain_index, proxies). The atomic swap also guarantees
-/// rules + proxies are observed as a consistent snapshot, so a connection
-/// can no longer match a rule that points at a proxy not yet inserted.
+/// Bundled rules + domain index + proxies map, swapped as one `Arc` on
+/// config reload. Reads on the connection-setup hot path take a single
+/// short `RwLock` read (an `Arc` refcount bump) — previously each
+/// `resolve_proxy` call acquired three `parking_lot::RwLock` guards (rules,
+/// domain_index, proxies). Swapping the whole table also guarantees rules +
+/// proxies are observed as a consistent snapshot, so a connection can no
+/// longer match a rule that points at a proxy not yet inserted.
+///
+/// The slot is a `parking_lot::RwLock<Arc<RouteTable>>` rather than
+/// `arc_swap::ArcSwap`: `arc-swap`'s atomic-ordering correctness on
+/// weak-memory targets (ARM) has no formal proof and reproducible UAF /
+/// data-race reports exist upstream, so we prefer the well-understood lock
+/// (issue #327). Route reload is rare and the read critical section is a
+/// clone, so this is nowhere near a bottleneck.
 ///
 /// `rules` and `domain_index` are themselves `Arc`-wrapped so a partial
 /// update (e.g. `update_proxies` keeping the rules) is a refcount bump
@@ -43,8 +50,10 @@ impl RouteTable {
 
 pub struct TunnelInner {
     pub mode: RwLock<TunnelMode>,
-    /// Atomically-swapped route table (rules + domain index + proxies).
-    pub route: ArcSwap<RouteTable>,
+    /// Current route table (rules + domain index + proxies), replaced
+    /// wholesale on config reload. Readers clone the `Arc` and drop the
+    /// guard immediately; never hold the guard across an `.await`.
+    pub route: RwLock<Arc<RouteTable>>,
     pub resolver: Arc<Resolver>,
     /// Fallback DIRECT adapter used when no user-defined rule matches or
     /// when Direct/Global mode bypasses the proxies map. Pre-built with the
@@ -62,6 +71,12 @@ pub struct TunnelInner {
 }
 
 impl TunnelInner {
+    /// Snapshot the current route table: one short read lock + `Arc` clone.
+    /// The returned `Arc` is safe to hold across `.await` points.
+    pub fn route(&self) -> Arc<RouteTable> {
+        Arc::clone(&self.route.read())
+    }
+
     /// Rewrite a fake-IP destination back to its real hostname before rule
     /// matching. Mirrors upstream `preHandleMetadata` in
     /// `tunnel/tunnel.go`. Always called from `handle_tcp` / `handle_udp`
@@ -137,7 +152,7 @@ impl TunnelInner {
                 SmolStr::default(),
             )),
             TunnelMode::Global => {
-                let route = self.route.load();
+                let route = self.route();
                 if let Some(proxy) = route.proxies.get("GLOBAL") {
                     Some((
                         Arc::clone(proxy) as Arc<dyn ProxyAdapter>,
@@ -153,9 +168,9 @@ impl TunnelInner {
                 }
             }
             TunnelMode::Rule => {
-                // One ArcSwap load — rules + index + proxies all read from a
-                // consistent snapshot. Replaces three RwLock acquisitions.
-                let route = self.route.load();
+                // One route-table snapshot — rules + index + proxies all read
+                // from a consistent table. Replaces three RwLock acquisitions.
+                let route = self.route();
                 let needs_proc = self.needs_process_lookup.load(Ordering::Relaxed);
                 let enriched = if needs_proc {
                     match_engine::maybe_enrich_with_process(metadata)
@@ -190,9 +205,9 @@ impl TunnelInner {
             return self.resolve_proxy(metadata);
         }
 
-        // `load_full` (refcount bump) instead of `load`: the enrichment arm
-        // holds the snapshot across an `.await`.
-        let route = self.route.load_full();
+        // Owned `Arc` snapshot: the enrichment arm holds it across an
+        // `.await`, which a lock guard must never do.
+        let route = self.route();
         match route
             .compiled_rules
             .match_rules_lazy(metadata, route.rules.as_ref())
@@ -287,7 +302,7 @@ impl Tunnel {
         Self {
             inner: Arc::new(TunnelInner {
                 mode: RwLock::new(TunnelMode::Rule),
-                route: ArcSwap::from_pointee(RouteTable::empty()),
+                route: RwLock::new(Arc::new(RouteTable::empty())),
                 resolver,
                 direct,
                 nat_table: udp::new_nat_table(),
@@ -323,14 +338,18 @@ impl Tunnel {
         // Build a new route table on top of the current proxies map. The
         // current proxies are cloned (Arc bumps for adapter handles, one
         // HashMap clone) — paid only on config-reload, not the hot path.
-        let current = self.inner.route.load();
-        let new_route = RouteTable {
-            rules: Arc::new(rules),
-            domain_index: Arc::new(new_index),
-            compiled_rules: Arc::new(compiled_rules),
-            proxies: current.proxies.clone(),
-        };
-        self.inner.route.store(Arc::new(new_route));
+        // The write lock is held across the read-modify-write so a
+        // concurrent `update_proxies` cannot be lost.
+        {
+            let mut route = self.inner.route.write();
+            let new_route = RouteTable {
+                rules: Arc::new(rules),
+                domain_index: Arc::new(new_index),
+                compiled_rules: Arc::new(compiled_rules),
+                proxies: route.proxies.clone(),
+            };
+            *route = Arc::new(new_route);
+        }
         self.inner
             .needs_ip_resolution
             .store(needs_ip, Ordering::Relaxed);
@@ -344,15 +363,19 @@ impl Tunnel {
     }
 
     pub fn update_proxies(&self, proxies: HashMap<SmolStr, Arc<dyn Proxy>>) {
-        // Preserve the current rules + index via Arc refcount bumps.
-        let current = self.inner.route.load();
-        let new_route = RouteTable {
-            rules: Arc::clone(&current.rules),
-            domain_index: Arc::clone(&current.domain_index),
-            compiled_rules: Arc::clone(&current.compiled_rules),
-            proxies,
-        };
-        self.inner.route.store(Arc::new(new_route));
+        // Preserve the current rules + index via Arc refcount bumps. Held
+        // as a single write section so a concurrent `update_rules` cannot
+        // be lost.
+        {
+            let mut route = self.inner.route.write();
+            let new_route = RouteTable {
+                rules: Arc::clone(&route.rules),
+                domain_index: Arc::clone(&route.domain_index),
+                compiled_rules: Arc::clone(&route.compiled_rules),
+                proxies,
+            };
+            *route = Arc::new(new_route);
+        }
         info!("Proxies updated");
     }
 
@@ -366,15 +389,16 @@ impl Tunnel {
 
     /// Snapshot of the current route table (rules + domain index + proxies).
     ///
-    /// One atomic load + refcount bump; callers iterate `snapshot.proxies`
-    /// / `snapshot.rules` in place. Replaces the old `proxies()` accessor,
-    /// which cloned the whole proxy map on every call (audit #182).
+    /// One short read lock + refcount bump; callers iterate
+    /// `snapshot.proxies` / `snapshot.rules` in place. Replaces the old
+    /// `proxies()` accessor, which cloned the whole proxy map on every call
+    /// (audit #182).
     pub fn route_snapshot(&self) -> Arc<RouteTable> {
-        self.inner.route.load_full()
+        self.inner.route()
     }
 
     pub fn proxy(&self, name: &str) -> Option<Arc<dyn Proxy>> {
-        self.inner.route.load().proxies.get(name).cloned()
+        self.inner.route.read().proxies.get(name).cloned()
     }
 
     /// Spawn background tasks owned by the tunnel (currently just the UDP NAT

@@ -2,7 +2,7 @@
 //!
 //! Long-running proxies reload their rule/proxy tables repeatedly (subscription
 //! auto-refresh, REST `PUT /configs`, provider refresh). Each reload builds a
-//! fresh `RouteTable` and atomically swaps it in via `ArcSwap`; the previous
+//! fresh `RouteTable` and swaps it into the `RwLock<Arc<_>>` slot; the previous
 //! table must be released once no in-flight connection references it. A reload
 //! path that pins old `RouteTable`s (rules Vec + domain index) would grow the
 //! heap monotonically across reload cycles — a slow leak that only shows up
@@ -145,6 +145,6 @@ fn config_reload_does_not_leak_old_route_tables() {
     assert!(
         slope < MAX_SLOPE,
         "config reload retained {slope:.4} live allocs per reload over {RELOADS} reloads — \
-         old RouteTable (rules + domain index) is not being released by the ArcSwap swap"
+         old RouteTable (rules + domain index) is not being released by the route swap"
     );
 }

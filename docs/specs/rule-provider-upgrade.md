@@ -145,6 +145,15 @@ blindly from this spec; the upstream source is the authoritative format spec.
 
 ### Atomic refresh
 
+> **Superseded by [#327](https://github.com/madeye/meow-rs/issues/327)** —
+> `arc-swap` was dropped from the workspace: its atomic-ordering correctness
+> on weak-memory targets (ARM) has no formal proof and upstream has
+> reproducible UAF/data-race reports
+> ([arc-swap#200](https://github.com/vorner/arc-swap/issues/200)). Use
+> `parking_lot::RwLock<Arc<RuleSet>>` where the read path clones the `Arc`
+> and drops the guard immediately (see `meow-tunnel/src/tunnel.rs`
+> `TunnelInner::route`). The original rationale below is kept for the record.
+
 Use `ArcSwap<RuleSet>` (not `Arc<RwLock<Arc<RuleSet>>>`). The double-Arc+RwLock
 pattern forces every rule match to acquire a read lock on a read-mostly structure,
 and the `try_read().unwrap_or_else(stale)` fallback was dead code (there is no

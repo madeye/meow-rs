@@ -22,7 +22,6 @@ dashmap = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
-arc-swap = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 smol_str = { workspace = true }
