@@ -213,7 +213,7 @@ async fn handle_http_inner(
                     |n| {
                         inner
                             .stats
-                            .record_connection_download(_guard.id(), n as i64)
+                            .record_connection_download(_guard.id(), n as i64);
                     },
                 )
                 .await
@@ -337,7 +337,7 @@ async fn handle_http_inner(
                     |n| {
                         inner
                             .stats
-                            .record_connection_download(_guard.id(), n as i64)
+                            .record_connection_download(_guard.id(), n as i64);
                     },
                 )
                 .await
