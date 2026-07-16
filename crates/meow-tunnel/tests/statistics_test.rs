@@ -49,6 +49,41 @@ fn test_upload_and_download_independent() {
 }
 
 #[test]
+fn test_traffic_snapshot_rolls_rates_per_sample() {
+    let stats = Statistics::new();
+    stats.add_upload(100);
+    stats.add_download(200);
+
+    // Nothing published until the sampler ticks.
+    assert_eq!(stats.traffic_snapshot(), (0, 0, 0, 0));
+
+    stats.sample_traffic();
+    assert_eq!(stats.traffic_snapshot(), (100, 200, 100, 200));
+
+    // Next window: rates reset to the new window's bytes, totals accumulate.
+    stats.add_upload(30);
+    stats.sample_traffic();
+    assert_eq!(stats.traffic_snapshot(), (30, 0, 130, 200));
+}
+
+#[test]
+fn test_traffic_snapshot_totals_consistent_with_rates() {
+    // Issue #338: all four values come from the same sampling tick — traffic
+    // written after the tick must not leak into the snapshot until the next
+    // sample, so rates and totals stay mutually consistent.
+    let stats = Statistics::new();
+    stats.add_upload(100);
+    stats.sample_traffic();
+
+    stats.add_upload(999);
+    stats.add_download(999);
+    assert_eq!(stats.traffic_snapshot(), (100, 0, 100, 0));
+
+    // Live totals (used by `/connections`) still see the new bytes.
+    assert_eq!(stats.snapshot(), (1099, 999));
+}
+
+#[test]
 fn test_track_connection() {
     let stats = Statistics::new();
     let metadata = Metadata::default();
