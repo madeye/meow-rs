@@ -59,6 +59,26 @@ jobs:
             runner: windows-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
+          - target: x86_64-pc-windows-gnu
+            runner: windows-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+          - target: aarch64-pc-windows-gnu
+            runner: windows-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+          - target: i686-pc-windows-msvc
+            runner: windows-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+          - target: i686-unknown-linux-gnu
+            runner: ubuntu-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+          - target: i686-unknown-linux-musl
+            runner: ubuntu-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             minimal_budget_bytes: 0
