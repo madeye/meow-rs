@@ -1,0 +1,43 @@
+{
+ "rust": {
+  "target": "rust",
+  "binary_size_bytes": 8673008,
+  "rss_idle_bytes": 10420224,
+  "rss_load_bytes": 15253504,
+  "throughput": [
+   {
+    "label": "4 KB x 10000",
+    "total_bytes": 81920000,
+    "elapsed_secs": 0.291702,
+    "gbps": 2.246676402630081
+   },
+   {
+    "label": "1 MB x 10",
+    "total_bytes": 20971520,
+    "elapsed_secs": 0.009704914999999998,
+    "gbps": 17.287339456347638
+   },
+   {
+    "label": "64 MB x 1",
+    "total_bytes": 134217728,
+    "elapsed_secs": 0.061565333,
+    "gbps": 17.44068896695483
+   }
+  ],
+  "latency": {
+   "iterations": 1000,
+   "p50_us": 105.958,
+   "p95_us": 143.75,
+   "p99_us": 458.459,
+   "min_us": 89.917,
+   "max_us": 1099.875
+  },
+  "conn_rate": {
+   "duration_secs": 10.0,
+   "total_connections": 7025,
+   "connections_per_sec": 702.5
+  },
+  "dns": null
+ },
+ "go": null
+}

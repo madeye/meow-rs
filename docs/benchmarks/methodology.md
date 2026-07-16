@@ -39,6 +39,42 @@ Conn rate   :  762 conns/s (10 s, concurrency=32)
 
 Full JSON: `baseline-2026-04-18.json`
 
+## Developer baseline refresh (2026-07-15)
+
+Machine: same Apple Silicon developer laptop, macOS 25.5.0 (Darwin 25.5.0).
+**Still not the M2 reference host.** Median of 3 full harness runs (defaults:
+`--duration 10`, `--concurrency 64`, `--latency-iterations 1000`), 75 s gaps
+between runs for ephemeral-port recycling.
+
+Refreshed because the 2026-04-18 snapshot was no longer reproducible even by
+its own binary: an interleaved same-machine A/B (3 runs each) of the April
+commit's binary vs HEAD showed the April binary itself scoring 703–705 conns/s
+(recorded: 762, taken at `--concurrency 32`) and 13.2–14.1 MB load RSS
+(recorded: 12.3 MB), i.e. the old numbers reflect harness arguments and
+machine state that no longer exist. The one code-level regression that A/B
+did confirm — ~1 MB idle RSS from eager LRU-table preallocation in
+`DnsCache::new` / fake-ip `MemoryStore::new` — was fixed before this baseline
+was recorded (see `perf(dns): stop preallocating capacity-sized LRU tables`).
+
+```
+Binary size : 8.3 MB (stripped, release LTO)
+RSS idle    : 9.9 MB
+RSS load    : 14.5 MB (peak during conn-rate test, concurrency=64)
+Throughput  : 17.4 Gbps (64 MB single transfer, loopback)
+Latency p50 : 106 µs    (connect + 1 B echo, 1000 iters)
+Latency p99 : 458 µs
+Conn rate   : 702 conns/s (10 s, concurrency=64; client/OS-bound on
+              loopback — Go mihomo measures 703/s on the same harness)
+```
+
+Caveats for `bench/compare.py` against this file: single-run latency variance
+on a developer laptop exceeds the 5% threshold (p50 spread 106–116 µs across
+the three baseline runs themselves), and load RSS is a peak sample. Treat
+single-run failures in those two metrics as a signal to re-run per the
+three-run protocol, not as a regression by themselves.
+
+Full JSON: `baseline-2026-07-15.json`
+
 ## Workloads (from ADR-0006 §1)
 
 | # | Workload | Tool | Steady-state |
