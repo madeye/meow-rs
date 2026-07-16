@@ -116,6 +116,10 @@ jobs:
             build_std: true
             toolchain: nightly
             cargo_flags: --no-default-features --features full
+          - target: riscv64gc-unknown-linux-gnu
+            runner: ubuntu-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
           - target: riscv64gc-unknown-linux-musl
             runner: ubuntu-latest
             minimal_budget_bytes: 0
