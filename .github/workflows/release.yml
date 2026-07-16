@@ -55,6 +55,18 @@ jobs:
             runner: windows-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
+          - target: aarch64-pc-windows-msvc
+            runner: windows-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
           # mipsel-unknown-linux-musl: temporarily disabled — `rust-std` is no
           # longer published for this target on stable. Re-enable when stable
           # ships the component again, or when ADR-0007 §1 promotes it to a
