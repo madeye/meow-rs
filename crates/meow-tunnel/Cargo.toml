@@ -37,6 +37,10 @@ harness = false
 name = "rules_bench"
 harness = false
 
+[[bench]]
+name = "stats_bench"
+harness = false
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 meow-trie = { workspace = true }

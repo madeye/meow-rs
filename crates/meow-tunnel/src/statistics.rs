@@ -120,8 +120,9 @@ pub struct ConnectionInfo {
 
 /// Values exposed by the mihomo `/traffic` stream, captured together under
 /// one lock so a reader never mixes rates and totals from different sampling
-/// ticks (issue #338). Totals are as of the last `sample_traffic` tick, not
-/// live — [`Statistics::snapshot`] still reads the live atomics.
+/// ticks (issue #338). Totals are the cumulative sum of the sampled rates
+/// (issue #340) — derived, not read from a second counter, so `rate <= total`
+/// holds by construction and no interleaving can publish an impossible pair.
 #[derive(Default, Clone, Copy)]
 struct TrafficSnapshot {
     upload_rate: i64,
@@ -131,8 +132,10 @@ struct TrafficSnapshot {
 }
 
 pub struct Statistics {
-    pub upload_total: AtomicI64,
-    pub download_total: AtomicI64,
+    /// Bytes since the last sampler tick. The only global counters the relay
+    /// hot path touches (one relaxed `fetch_add` per direction per chunk);
+    /// totals are accumulated from these at sample time, never double-tracked
+    /// (issue #340).
     upload_temp: AtomicI64,
     download_temp: AtomicI64,
     traffic: Mutex<TrafficSnapshot>,
@@ -146,8 +149,6 @@ pub struct Statistics {
 impl Statistics {
     pub fn new() -> Self {
         Self {
-            upload_total: AtomicI64::new(0),
-            download_total: AtomicI64::new(0),
             upload_temp: AtomicI64::new(0),
             download_temp: AtomicI64::new(0),
             traffic: Mutex::new(TrafficSnapshot::default()),
@@ -158,15 +159,13 @@ impl Statistics {
 
     pub fn add_upload(&self, n: i64) {
         self.upload_temp.fetch_add(n, Ordering::Relaxed);
-        self.upload_total.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn add_download(&self, n: i64) {
         self.download_temp.fetch_add(n, Ordering::Relaxed);
-        self.download_total.fetch_add(n, Ordering::Relaxed);
     }
 
-    /// Per-chunk relay accounting: three relaxed atomic adds, no map lookup.
+    /// Per-chunk relay accounting: two relaxed atomic adds, no map lookup.
     /// Callers obtain the `ConnCounters` once at connection setup via
     /// [`Self::connection_counters`] (or `ConnectionGuard::counters`).
     pub fn record_upload(&self, counters: &ConnCounters, n: i64) {
@@ -190,20 +189,18 @@ impl Statistics {
 
     /// Roll the current one-second counters into the values exposed by the
     /// mihomo `/traffic` stream. All four values are published under one lock
-    /// so `traffic_snapshot` readers see a mutually consistent set; the hot
-    /// path stays lock-free, and the once-per-second ticker plus `/traffic`
-    /// pollers are the only contenders.
+    /// so `traffic_snapshot` readers see a mutually consistent set; totals are
+    /// accumulated from the swapped rates, so they can never disagree with
+    /// them (issue #340). The hot path stays lock-free — the once-per-second
+    /// ticker plus API readers are the only contenders. The swaps happen under
+    /// the lock so [`Self::snapshot`] never sees in-flight bytes in neither
+    /// (or both of) `_temp` and the accumulated total.
     pub fn sample_traffic(&self) {
-        let upload_rate = self.upload_temp.swap(0, Ordering::Relaxed);
-        let download_rate = self.download_temp.swap(0, Ordering::Relaxed);
-        let upload_total = self.upload_total.load(Ordering::Relaxed);
-        let download_total = self.download_total.load(Ordering::Relaxed);
-        *self.traffic.lock() = TrafficSnapshot {
-            upload_rate,
-            download_rate,
-            upload_total,
-            download_total,
-        };
+        let mut snap = self.traffic.lock();
+        snap.upload_rate = self.upload_temp.swap(0, Ordering::Relaxed);
+        snap.download_rate = self.download_temp.swap(0, Ordering::Relaxed);
+        snap.upload_total += snap.upload_rate;
+        snap.download_total += snap.download_rate;
     }
 
     /// `(upload_rate, download_rate, upload_total, download_total)` as of the
@@ -244,10 +241,16 @@ impl Statistics {
         self.connections.remove(&id);
     }
 
+    /// Live cumulative `(upload, download)` totals: bytes already rolled into
+    /// the traffic snapshot plus the not-yet-sampled remainder. Reading both
+    /// parts under the snapshot lock excludes a concurrent `sample_traffic`
+    /// from moving bytes between them mid-read, so the sum is exact and
+    /// monotonic.
     pub fn snapshot(&self) -> (i64, i64) {
+        let snap = self.traffic.lock();
         (
-            self.upload_total.load(Ordering::Relaxed),
-            self.download_total.load(Ordering::Relaxed),
+            snap.upload_total + self.upload_temp.load(Ordering::Relaxed),
+            snap.download_total + self.download_temp.load(Ordering::Relaxed),
         )
     }
 

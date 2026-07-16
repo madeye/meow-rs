@@ -84,6 +84,78 @@ fn test_traffic_snapshot_totals_consistent_with_rates() {
 }
 
 #[test]
+fn test_traffic_totals_derived_from_rates() {
+    // Issue #340: snapshot totals are accumulated from the sampled rates, so
+    // `total_n - total_{n-1} == rate_n` exactly and a snapshot can never show
+    // a rate that outruns its total.
+    let stats = Statistics::new();
+    let mut expected_total = 0;
+    for chunk in [7i64, 1024, 0, 3] {
+        stats.add_upload(chunk);
+        stats.sample_traffic();
+        expected_total += chunk;
+        let (rate, _, total, _) = stats.traffic_snapshot();
+        assert_eq!(rate, chunk);
+        assert_eq!(total, expected_total);
+    }
+}
+
+#[test]
+fn test_traffic_snapshot_invariants_under_concurrency() {
+    // Issue #340: sample while writers are mid-flight and assert the
+    // published pairs are always mutually consistent — totals monotonic and
+    // each tick's total delta equal to that tick's rate.
+    const WRITERS: usize = 4;
+    const ADDS_PER_WRITER: i64 = 50_000;
+
+    let stats = Arc::new(Statistics::new());
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|_| {
+            let stats = Arc::clone(&stats);
+            std::thread::spawn(move || {
+                for _ in 0..ADDS_PER_WRITER {
+                    stats.add_upload(1);
+                    stats.add_download(2);
+                }
+            })
+        })
+        .collect();
+
+    let sampler = {
+        let stats = Arc::clone(&stats);
+        std::thread::spawn(move || {
+            let (mut last_up, mut last_down) = (0i64, 0i64);
+            for _ in 0..1000 {
+                stats.sample_traffic();
+                let (up_rate, down_rate, up_total, down_total) = stats.traffic_snapshot();
+                assert_eq!(up_total - last_up, up_rate);
+                assert_eq!(down_total - last_down, down_rate);
+                (last_up, last_down) = (up_total, down_total);
+                // Live totals include the not-yet-sampled remainder, so they
+                // never trail the published totals.
+                let (live_up, live_down) = stats.snapshot();
+                assert!(live_up >= up_total);
+                assert!(live_down >= down_total);
+            }
+        })
+    };
+
+    for w in writers {
+        w.join().unwrap();
+    }
+    sampler.join().unwrap();
+
+    // Once everything is quiescent, one more tick drains the remainder and
+    // every view agrees on the exact byte counts.
+    stats.sample_traffic();
+    let expected_up = WRITERS as i64 * ADDS_PER_WRITER;
+    let (_, _, up_total, down_total) = stats.traffic_snapshot();
+    assert_eq!(up_total, expected_up);
+    assert_eq!(down_total, expected_up * 2);
+    assert_eq!(stats.snapshot(), (expected_up, expected_up * 2));
+}
+
+#[test]
 fn test_track_connection() {
     let stats = Statistics::new();
     let metadata = Metadata::default();
