@@ -63,6 +63,7 @@ jobs:
             runner: windows-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
+            cargo_flags: --no-default-features --features full
           - target: i686-pc-windows-msvc
             runner: windows-latest
             minimal_budget_bytes: 0
