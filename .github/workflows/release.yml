@@ -68,16 +68,6 @@ jobs:
             runner: windows-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
-          - target: i686-unknown-linux-gnu
-            runner: ubuntu-latest
-            minimal_budget_bytes: 0
-            minimal_soft_gate: true
-            cflags: -mno-avx512f
-          - target: i686-unknown-linux-musl
-            runner: ubuntu-latest
-            minimal_budget_bytes: 0
-            minimal_soft_gate: true
-            cflags: -mno-avx512f
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             minimal_budget_bytes: 0
@@ -98,23 +88,6 @@ jobs:
             runner: macos-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
-          # MIPS: tier 3, no prebuilt rust-std on stable — build std from source
-          # via nightly + -Zbuild-std. boring-tls is disabled (boring-sys
-          # cannot cross-compile for MIPS).
-          - target: mipsel-unknown-linux-musl
-            runner: ubuntu-latest
-            minimal_budget_bytes: 0
-            minimal_soft_gate: true
-            build_std: true
-            toolchain: nightly
-            cargo_flags: --no-default-features --features full
-          - target: mips-unknown-linux-musl
-            runner: ubuntu-latest
-            minimal_budget_bytes: 0
-            minimal_soft_gate: true
-            build_std: true
-            toolchain: nightly
-            cargo_flags: --no-default-features --features full
           - target: riscv64gc-unknown-linux-musl
             runner: ubuntu-latest
             minimal_budget_bytes: 0
