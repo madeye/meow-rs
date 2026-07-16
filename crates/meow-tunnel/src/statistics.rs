@@ -18,6 +18,7 @@
 
 use dashmap::DashMap;
 use meow_common::Metadata;
+use parking_lot::Mutex;
 use serde::Serialize;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
@@ -117,13 +118,24 @@ pub struct ConnectionInfo {
     pub rule_payload: SmolStr,
 }
 
+/// Values exposed by the mihomo `/traffic` stream, captured together under
+/// one lock so a reader never mixes rates and totals from different sampling
+/// ticks (issue #338). Totals are as of the last `sample_traffic` tick, not
+/// live — [`Statistics::snapshot`] still reads the live atomics.
+#[derive(Default, Clone, Copy)]
+struct TrafficSnapshot {
+    upload_rate: i64,
+    download_rate: i64,
+    upload_total: i64,
+    download_total: i64,
+}
+
 pub struct Statistics {
     pub upload_total: AtomicI64,
     pub download_total: AtomicI64,
     upload_temp: AtomicI64,
     download_temp: AtomicI64,
-    upload_rate: AtomicI64,
-    download_rate: AtomicI64,
+    traffic: Mutex<TrafficSnapshot>,
     /// Keyed by `Uuid` (16 B Copy) — formerly `String`, which heap-allocated a
     /// 36-byte hyphenated representation per insert.  REST handlers parse the
     /// query path back into a `Uuid` at lookup time.
@@ -138,8 +150,7 @@ impl Statistics {
             download_total: AtomicI64::new(0),
             upload_temp: AtomicI64::new(0),
             download_temp: AtomicI64::new(0),
-            upload_rate: AtomicI64::new(0),
-            download_rate: AtomicI64::new(0),
+            traffic: Mutex::new(TrafficSnapshot::default()),
             connections: DashMap::new(),
             rule_match: Arc::new(RuleMatchCounters::new()),
         }
@@ -178,24 +189,33 @@ impl Statistics {
     }
 
     /// Roll the current one-second counters into the values exposed by the
-    /// mihomo `/traffic` stream.
+    /// mihomo `/traffic` stream. All four values are published under one lock
+    /// so `traffic_snapshot` readers see a mutually consistent set; the hot
+    /// path stays lock-free, and the once-per-second ticker plus `/traffic`
+    /// pollers are the only contenders.
     pub fn sample_traffic(&self) {
-        self.upload_rate.store(
-            self.upload_temp.swap(0, Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        self.download_rate.store(
-            self.download_temp.swap(0, Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
+        let upload_rate = self.upload_temp.swap(0, Ordering::Relaxed);
+        let download_rate = self.download_temp.swap(0, Ordering::Relaxed);
+        let upload_total = self.upload_total.load(Ordering::Relaxed);
+        let download_total = self.download_total.load(Ordering::Relaxed);
+        *self.traffic.lock() = TrafficSnapshot {
+            upload_rate,
+            download_rate,
+            upload_total,
+            download_total,
+        };
     }
 
+    /// `(upload_rate, download_rate, upload_total, download_total)` as of the
+    /// last `sample_traffic` tick. Totals lag the live counters by up to one
+    /// tick, in exchange for being consistent with the rates.
     pub fn traffic_snapshot(&self) -> (i64, i64, i64, i64) {
+        let snap = *self.traffic.lock();
         (
-            self.upload_rate.load(Ordering::Relaxed),
-            self.download_rate.load(Ordering::Relaxed),
-            self.upload_total.load(Ordering::Relaxed),
-            self.download_total.load(Ordering::Relaxed),
+            snap.upload_rate,
+            snap.download_rate,
+            snap.upload_total,
+            snap.download_total,
         )
     }
 
