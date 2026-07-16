@@ -59,6 +59,18 @@ jobs:
             runner: windows-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+          - target: armv7-unknown-linux-gnueabihf
+            runner: ubuntu-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
           - target: x86_64-apple-darwin
             runner: macos-latest
             minimal_budget_bytes: 0
@@ -67,10 +79,9 @@ jobs:
             runner: macos-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
-          # mipsel-unknown-linux-musl: temporarily disabled — `rust-std` is no
-          # longer published for this target on stable. Re-enable when stable
-          # ships the component again, or when ADR-0007 §1 promotes it to a
-          # nightly/build-std path. Tracked separately from ADR-0007.
+          # MIPS targets (mipsel-unknown-linux-musl, mipsel-unknown-linux-gnu)
+          # are tier 3 — no prebuilt rust-std on stable. Would require nightly
+          # with -Zbuild-std or a custom Docker image. Tracked separately.
     steps:
       - uses: actions/checkout@v5
 
