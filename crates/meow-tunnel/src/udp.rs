@@ -56,6 +56,7 @@ impl UdpSession {
     pub fn idle_for(&self) -> Duration {
         let now = monotonic_ms() as meow_common::atomic::Uint;
         let last = self.last_activity_ms.load(Ordering::Relaxed);
+        #[allow(clippy::useless_conversion)]
         Duration::from_millis(u64::from(now.wrapping_sub(last)))
     }
 }
