@@ -85,7 +85,7 @@ impl RuleProvider {
     }
 
     pub fn updated_at_secs(&self) -> u64 {
-        self.updated_at.load(Ordering::Relaxed)
+        self.updated_at.load(Ordering::Relaxed).into()
     }
 
     /// Fetch a fresh payload from the HTTP URL and swap the rule set atomically.
@@ -116,7 +116,8 @@ impl RuleProvider {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
             .as_secs();
-        self.updated_at.store(now, Ordering::Relaxed);
+        self.updated_at
+            .store(now as meow_common::atomic::Uint, Ordering::Relaxed);
     }
 }
 
@@ -396,7 +397,7 @@ fn make_provider(
         behavior,
         vehicle,
         interval,
-        updated_at: AtomicU::new(now),
+        updated_at: AtomicU::new(now as meow_common::atomic::Uint),
         rules: RwLock::new(rules_arc),
         download_proxy,
     }

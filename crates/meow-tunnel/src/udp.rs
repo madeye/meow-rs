@@ -34,7 +34,7 @@ impl UdpSession {
         Self {
             conn,
             proxy_name,
-            last_activity_ms: AtomicU::new(monotonic_ms()),
+            last_activity_ms: AtomicU::new(monotonic_ms() as meow_common::atomic::Uint),
         }
     }
 
@@ -44,8 +44,10 @@ impl UdpSession {
     /// inbound read loop) can refresh the same clock on server→app traffic —
     /// otherwise a receive-active / send-quiet session is wrongly swept.
     pub fn touch(&self) {
-        self.last_activity_ms
-            .store(monotonic_ms(), Ordering::Relaxed);
+        self.last_activity_ms.store(
+            monotonic_ms() as meow_common::atomic::Uint,
+            Ordering::Relaxed,
+        );
     }
 
     /// Time since the last [`touch`](Self::touch). `pub` so an out-of-crate
@@ -54,7 +56,7 @@ impl UdpSession {
     pub fn idle_for(&self) -> Duration {
         let now = monotonic_ms();
         let last = self.last_activity_ms.load(Ordering::Relaxed);
-        Duration::from_millis(now.saturating_sub(last))
+        Duration::from_millis(now.saturating_sub(last.into()))
     }
 }
 

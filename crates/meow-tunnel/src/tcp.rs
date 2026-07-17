@@ -116,8 +116,16 @@ pub async fn handle_tcp(
                 &mut remote,
                 &mut buf_up,
                 &mut buf_dn,
-                |n| tunnel.stats.record_upload(&up, n as i64),
-                |n| tunnel.stats.record_download(&dn, n as i64),
+                |n| {
+                    tunnel
+                        .stats
+                        .record_upload(&up, n as meow_common::atomic::Int)
+                },
+                |n| {
+                    tunnel
+                        .stats
+                        .record_download(&dn, n as meow_common::atomic::Int)
+                },
             )
             .await
             {

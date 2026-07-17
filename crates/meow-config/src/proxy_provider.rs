@@ -241,7 +241,7 @@ impl ProxyProvider {
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
-                        .as_secs(),
+                        .as_secs() as meow_common::atomic::Uint,
                     Ordering::Relaxed,
                 );
                 Ok(())
@@ -258,7 +258,7 @@ impl ProxyProvider {
     }
 
     pub fn updated_at_secs(&self) -> u64 {
-        self.updated_at.load(Ordering::Relaxed)
+        self.updated_at.load(Ordering::Relaxed).into()
     }
 }
 
