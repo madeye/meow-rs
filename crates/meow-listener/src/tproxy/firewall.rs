@@ -19,7 +19,7 @@ impl FirewallGuard {
     /// Set up firewall rules to redirect local TCP traffic to the given port.
     ///
     /// Loop avoidance:
-    /// - **Linux**: `meta mark` matching ??DIRECT adapter sets SO_MARK on outbound sockets,
+    /// - **Linux**: `meta mark` matching — DIRECT adapter sets SO_MARK on outbound sockets,
     ///   nftables skips packets with that mark. Plus IP bypass for upstream proxy servers.
     /// - **macOS**: `user` UID matching (pf has no mark support) + IP bypass.
     pub fn setup(
@@ -63,12 +63,12 @@ struct PlatformGuard {
 /// Build the pf anchor ruleset that the macOS code path feeds to `pfctl`.
 ///
 /// Order matters, but NOT as first-match-wins: `pfctl` requires rules grouped
-/// by category ??options, normalization, queueing, **translation** (`rdr`),
-/// then **filtering** (`pass`/`block`) ??and rejects a file that interleaves
-/// them ("Rules must be in order??). So the `rdr` translation rule must come
+/// by category — options, normalization, queueing, **translation** (`rdr`),
+/// then **filtering** (`pass`/`block`) — and rejects a file that interleaves
+/// them ("Rules must be in order…"). So the `rdr` translation rule must come
 /// first, followed by the `pass` filter bypasses. (Translation and filtering
 /// are evaluated in separate passes regardless of file order, so the relative
-/// position of `rdr` vs `pass` does not change matching ??only validity.)
+/// position of `rdr` vs `pass` does not change matching — only validity.)
 ///
 /// Extracted as a pure function so the macOS-specific syntax can be unit
 /// tested without invoking `pfctl(8)`.
@@ -157,7 +157,7 @@ impl PlatformGuard {
 }
 
 // ── Linux (nftables) ────────────────────────────────────────────────────────
-// Uses SO_MARK matching ??DIRECT adapter marks its outbound sockets,
+// Uses SO_MARK matching — DIRECT adapter marks its outbound sockets,
 // nftables skips packets carrying that mark.
 
 #[cfg(target_os = "linux")]
@@ -169,7 +169,7 @@ struct PlatformGuard {
 /// Build the nftables ruleset that the Linux code path feeds to `nft -f -`.
 ///
 /// Order of chain rules (top-to-bottom, first match wins):
-///   1. Skip marked packets ??`meta mark` matches the SO_MARK that
+///   1. Skip marked packets — `meta mark` matches the SO_MARK that
 ///      `DirectAdapter` puts on its own outbound sockets, breaking the
 ///      "DIRECT redirects back into the tunnel" loop.
 ///   2. Loopback bypass (`127.0.0.0/8` and `::1`).
@@ -177,7 +177,7 @@ struct PlatformGuard {
 ///   4. Catch-all redirect to `:{listen_port}`.
 ///
 /// Extracted as a pure function so the syntactic shape of the ruleset can be
-/// unit tested without invoking `nft(8)` ??and a regression that drops, say,
+/// unit tested without invoking `nft(8)` — and a regression that drops, say,
 /// the mark-bypass rule (which would silently relay DIRECT traffic through
 /// the tunnel) gets caught in CI.
 #[cfg(any(target_os = "linux", test))]
@@ -331,7 +331,7 @@ mod tests {
         assert!(rs.contains("chain output {"));
         assert!(rs.contains("type nat hook output priority -100; policy accept;"));
         assert!(rs.contains("tcp dport 1-65535 redirect to :7893"));
-        // Loopback bypass is non-negotiable ??a regression here would
+        // Loopback bypass is non-negotiable — a regression here would
         // recurse the redirect into infinity.
         assert!(rs.contains("ip daddr 127.0.0.0/8 accept"));
         assert!(rs.contains("ip6 daddr ::1 accept"));
@@ -377,7 +377,7 @@ mod tests {
         ];
         let rs = build_nft_ruleset("t", 1, None, &bypass);
         assert!(rs.contains("ip daddr 1.2.3.4 accept"));
-        // IPv6 bypass IPs must use `ip6 daddr` ??`ip daddr <v6>` is a parse
+        // IPv6 bypass IPs must use `ip6 daddr` — `ip daddr <v6>` is a parse
         // error that aborts the whole `nft -f -` load.
         assert!(rs.contains("ip6 daddr 2001:db8::1 accept"));
         assert!(
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn pf_rdr_precedes_filter_rules() {
         // pfctl rejects a ruleset that places filtering (`pass`) before
-        // translation (`rdr`) ??"Rules must be in order: ?? translation,
+        // translation (`rdr`) — "Rules must be in order: …, translation,
         // filtering". The `rdr` must therefore come first, or the anchor fails
         // to load and the tproxy listener never starts (regression guard).
         let rs = build_pf_ruleset(501, 7893, &[]);

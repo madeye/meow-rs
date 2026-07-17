@@ -84,7 +84,7 @@ impl MixedListener {
         let mut warned_saturated = false;
 
         loop {
-            // Acquire a slot before accepting ??back-pressures the TCP listen
+            // Acquire a slot before accepting — back-pressures the TCP listen
             // queue when the cap is reached rather than spawning unbounded
             // tasks and bloating RSS.
             let permit = if let Some(sem) = &conn_limit {
@@ -104,7 +104,7 @@ impl MixedListener {
                         }
                         Some(p)
                     }
-                    Err(_) => return Ok(()), // semaphore closed ??shutdown
+                    Err(_) => return Ok(()), // semaphore closed → shutdown
                 }
             } else {
                 None

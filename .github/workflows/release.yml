@@ -284,3 +284,4 @@ jobs:
             dist/**/*.ipk
             dist/**/*.ipk.sha256
           generate_release_notes: true
+          fail_on_unmatched_files: true

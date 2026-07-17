@@ -115,7 +115,7 @@ async fn handle_socks5_inner(
             return Err("invalid auth sub-negotiation version".into());
         }
         // Borrow username/password from stack buffers; the username is only
-        // copied to the heap after a successful verify (audit #182 ??the
+        // copied to the heap after a successful verify (audit #182 — the
         // failure/empty path previously allocated two Strings regardless).
         let mut ulen = [0u8; 1];
         read_exact_before(stream, &mut ulen, deadline).await?;
@@ -218,16 +218,16 @@ async fn handle_socks5_inner(
 
     let inner = tunnel.inner();
 
-    // Fake-IP ??host rewrite (no-op outside fake-IP mode aside from the
+    // Fake-IP → host rewrite (no-op outside fake-IP mode aside from the
     // snooping-cache hostname fill-in). Without this, a fake-IP TCP flow
     // reaches rule matching still carrying the 28.x/198.18.x placeholder,
     // matches no DOMAIN/GEOSITE/GEOIP rule, and falls through to
-    // MATCH()/final ??so domain rules are silently bypassed for TCP under
+    // MATCH()/final — so domain rules are silently bypassed for TCP under
     // fake-IP. Mirrors `handle_tcp` (meow-tunnel/src/tcp.rs) and the UDP
     // ASSOCIATE path (socks5_udp.rs).
     inner.pre_handle_metadata(&mut metadata);
 
-    // Match rules with lazy enrichment: host ??real-IP resolution happens
+    // Match rules with lazy enrichment: host → real-IP resolution happens
     // inside only if the scan reaches an IP-based rule that demands it.
     let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy_lazy(&mut metadata).await
     else {
@@ -254,7 +254,7 @@ async fn handle_socks5_inner(
         smallvec![Arc::from(proxy.name())],
     );
 
-    // Relay buffers on the future's stack ??zero per-relay heap allocation (ADR-0011 T6).
+    // Relay buffers on the future's stack — zero per-relay heap allocation (ADR-0011 T6).
     let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];
     let mut relay_buf_dn = [0u8; RELAY_BUF_SIZE];
 

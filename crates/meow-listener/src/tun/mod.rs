@@ -1,7 +1,7 @@
-//! TUN inbound ??transparent proxying via an L3 device (issue #326).
+//! TUN inbound — transparent proxying via an L3 device (issue #326).
 //!
 //! This is the transparent-proxy path for platforms without a
-//! tproxy/REDIRECT firewall ??Windows first and foremost ??and works the
+//! tproxy/REDIRECT firewall — Windows first and foremost — and works the
 //! same on Linux and macOS. A `tun-rs` device receives raw IP packets; the
 //! `netstack-smoltcp` userspace TCP/IP stack (smoltcp-backed, the same
 //! netstack clash-rs uses) terminates them and hands us ordinary
@@ -18,7 +18,7 @@
 //!    DNS queries enter the tun and `dns-hijack` answers them with fake IPs.
 //! 2. Client connections to those fake IPs route into the tun; the fake-IP
 //!    rewrite recovers the hostname and rules match on domain.
-//! 3. Outbound dials ??proxy upstreams *and* DIRECT ??go to real IPs, which
+//! 3. Outbound dials — proxy upstreams *and* DIRECT — go to real IPs, which
 //!    are never inside the fake range, so they take the physical route and
 //!    cannot loop. No SO_MARK, interface binding, or bypass routes needed.
 //!
@@ -60,7 +60,7 @@ use route::RouteGuard;
 pub struct TunListenerConfig {
     /// Device name. `None` lets the platform pick (`utunN` on macOS).
     pub device: Option<String>,
-    /// Device MTU. The config layer enforces ??1280 (RFC 8200 §5).
+    /// Device MTU. The config layer enforces ≥ 1280 (RFC 8200 §5).
     pub mtu: u16,
     /// Address + prefix assigned to the device.
     pub inet4_address: Ipv4Net,
@@ -116,7 +116,7 @@ impl TunListener {
                 None => {
                     warn!(
                         "tun '{}': auto-route currently only routes the fake-IP range, but \
-                         DNS is not in fake-ip mode ??no routes installed. Add routes to \
+                         DNS is not in fake-ip mode — no routes installed. Add routes to \
                          '{dev_name}' manually (and make sure outbound traffic cannot loop \
                          back into the device).",
                         self.name

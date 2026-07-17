@@ -165,8 +165,8 @@ async fn handle_tproxy_conn(
     };
 
     // Recover hostname:
-    // 1. SnifferRuntime (TLS SNI or HTTP Host) ??replaces the old enable_sni path
-    // 2. Fall back to DNS snooping reverse lookup (IP ??domain from recent DNS queries)
+    // 1. SnifferRuntime (TLS SNI or HTTP Host) — replaces the old enable_sni path
+    // 2. Fall back to DNS snooping reverse lookup (IP → domain from recent DNS queries)
     if let Some(rt) = sniffer.as_deref() {
         rt.sniff(&stream, &mut metadata).await;
     }
@@ -214,7 +214,7 @@ async fn handle_tproxy_conn(
         smallvec![Arc::from(proxy.name())],
     );
 
-    // Relay buffers on the future's stack ??zero per-relay heap allocation (ADR-0011 T6).
+    // Relay buffers on the future's stack — zero per-relay heap allocation (ADR-0011 T6).
     let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];
     let mut relay_buf_dn = [0u8; RELAY_BUF_SIZE];
 

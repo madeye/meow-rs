@@ -32,7 +32,7 @@ impl RouteGuard {
                 }
                 Err(e) => warn!(
                     "tun auto-route: failed to add {net} via if_index {if_index}: {e} \
-                     (continuing ??the device subnet may already cover it)"
+                     (continuing — the device subnet may already cover it)"
                 ),
             }
         }

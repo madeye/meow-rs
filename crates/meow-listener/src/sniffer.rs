@@ -49,7 +49,7 @@ impl SnifferRuntime {
 
     /// Peek at the stream's first bytes and populate `metadata.sniff_host`.
     ///
-    /// Never returns an error ??all failure modes (IO error, timeout, parse
+    /// Never returns an error — all failure modes (IO error, timeout, parse
     /// failure, skip-domain discard) collapse to a silent no-op that leaves
     /// `metadata` unchanged.
     pub async fn sniff(&self, stream: &TcpStream, metadata: &mut Metadata) {
@@ -75,7 +75,7 @@ impl SnifferRuntime {
         // Bounded peek (8 KiB) with configurable timeout.
         let mut buf = [0u8; 8192];
         let Ok(Ok(n)) = tokio::time::timeout(self.cfg.timeout, stream.peek(&mut buf)).await else {
-            // Peek returned IO error or timed out ??leave metadata unchanged.
+            // Peek returned IO error or timed out — leave metadata unchanged.
             return;
         };
 
@@ -99,7 +99,7 @@ impl SnifferRuntime {
         if self.skip.search(host).is_some() {
             return;
         }
-        debug!("sniffer: {} ??{}", metadata, host);
+        debug!("sniffer: {} → {}", metadata, host);
         metadata.sniff_host = host.into();
         if self.cfg.override_destination {
             metadata.host = host.into();
@@ -208,7 +208,7 @@ mod tests {
             ..Default::default()
         };
         let rt = make_runtime(cfg);
-        // host is already a domain ??parse_pure_ip short-circuits
+        // host is already a domain → parse_pure_ip short-circuits
         let (_client, server) = make_stream_pair().await;
         let mut meta = make_metadata("example.com", 443);
         rt.sniff(&server, &mut meta).await;
@@ -217,7 +217,7 @@ mod tests {
 
     #[tokio::test]
     async fn sniffer_force_domain_overrides_pure_ip() {
-        // host is a subdomain matched by "+.example.com" in force_domain ??
+        // host is a subdomain matched by "+.example.com" in force_domain →
         // parse_pure_ip short-circuit is bypassed and the sniffer runs.
         let cfg = SnifferConfig {
             enable: true,
@@ -231,7 +231,7 @@ mod tests {
         let hello = build_client_hello("www.example.com");
         client.write_all(&hello).await.unwrap();
 
-        // host is already a domain, but "+.example.com" covers it ??sniff runs
+        // host is already a domain, but "+.example.com" covers it → sniff runs
         let mut meta = make_metadata("www.example.com", 443);
         rt.sniff(&server, &mut meta).await;
         assert_eq!(meta.sniff_host, "www.example.com");
@@ -330,7 +330,7 @@ mod tests {
         };
         let timeout = cfg.timeout;
         let rt = make_runtime(cfg);
-        // Connect but never send data ??simulates a silent client.
+        // Connect but never send data — simulates a silent client.
         let (_client, server) = make_stream_pair().await;
         let mut meta = make_metadata("", 443);
 
@@ -348,7 +348,7 @@ mod tests {
 
     #[tokio::test]
     async fn sniffer_parse_pure_ip_runs_on_ip_host() {
-        // host is a literal IP ??parse_pure_ip lets sniff proceed even with the
+        // host is a literal IP → parse_pure_ip lets sniff proceed even with the
         // gate enabled.
         let cfg = SnifferConfig {
             enable: true,
@@ -368,7 +368,7 @@ mod tests {
 
     #[tokio::test]
     async fn sniffer_parse_pure_ip_disabled_runs_on_domain_host() {
-        // parse_pure_ip = false ??the host-already-a-domain short-circuit is
+        // parse_pure_ip = false → the host-already-a-domain short-circuit is
         // skipped and sniffing runs normally.
         let cfg = SnifferConfig {
             enable: true,

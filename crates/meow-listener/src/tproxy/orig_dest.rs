@@ -40,7 +40,7 @@ mod macos {
     // pf address type
     const PF_ADDR_IPV4: u8 = 2; // AF_INET
 
-    /// pf address union ??we only handle IPv4 for now.
+    /// pf address union — we only handle IPv4 for now.
     #[repr(C)]
     #[derive(Copy, Clone)]
     union PfAddr {
@@ -62,10 +62,10 @@ mod macos {
     /// union pf_state_xport { u_int16_t port; u_int16_t call_id; u_int32_t spi; };
     /// ```
     ///
-    /// It is 4 bytes ??aligned to the `u32 spi` member. Representing ports as a
+    /// It is 4 bytes — aligned to the `u32 spi` member. Representing ports as a
     /// bare `u16` (2 bytes) shrinks `pfioc_natlook` to 76 bytes instead of 84,
     /// so the size the kernel reads/writes (encoded in the `DIOCNATLOOK` ioctl
-    /// number) no longer matches the buffer we pass ??an ABI mismatch that
+    /// number) no longer matches the buffer we pass — an ABI mismatch that
     /// corrupts the natlook result and reads/writes out of bounds.
     #[repr(C)]
     #[derive(Copy, Clone)]
@@ -125,7 +125,7 @@ mod macos {
 
         let listen_port = listen_addr.port();
 
-        // /dev/pf is opened once and cached for the process lifetime ??
+        // /dev/pf is opened once and cached for the process lifetime —
         // opening it per connection cost an open/close syscall pair on
         // every accepted tproxy connection (audit #182). Only success is
         // cached, so a transient failure (pf not loaded yet) can recover.

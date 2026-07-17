@@ -1,4 +1,4 @@
-//! SOCKS5 inbound `CMD UDP ASSOCIATE` (RFC 1928 §7) ??relays client UDP
+//! SOCKS5 inbound `CMD UDP ASSOCIATE` (RFC 1928 §7) — relays client UDP
 //! (incl. QUIC / HTTP/3) through the tunnel's routing engine.
 //!
 //! Lifecycle: the association is bound to the TCP control connection. We bind a
@@ -7,8 +7,8 @@
 //! which point this future returns and every per-destination outbound conn +
 //! reply task is dropped).
 //!
-//! Routing mirrors `meow_tunnel::udp::handle_udp`: fake-IP rewrite ??pre-resolve
-//! ??port-53 DIRECT bypass ??rule match ??`dial_udp`. A small per-association
+//! Routing mirrors `meow_tunnel::udp::handle_udp`: fake-IP rewrite → pre-resolve
+//! → port-53 DIRECT bypass → rule match → `dial_udp`. A small per-association
 //! NAT (`dst -> session`) dedups outbound conns; each session has a reply task
 //! that reads server→client datagrams and writes them back wrapped in the
 //! SOCKS5 UDP header.
@@ -135,7 +135,7 @@ pub async fn handle_udp_associate(
                 nat.retain(|_, session| {
                     #[allow(clippy::useless_conversion)]
                     let last: u64 = session.last_activity_ms.load(Ordering::Relaxed).into();
-                    now.saturating_sub(last) < idle_ms
+                    now.wrapping_sub(last) < idle_ms
                 });
             }
         }
@@ -292,12 +292,12 @@ async fn write_associate_reply(control: &mut TcpStream, bnd: SocketAddr) -> io::
 
 /// Parse a SOCKS5 UDP request header (RFC 1928 §7):
 /// `RSV(2) FRAG(1) ATYP DST.ADDR DST.PORT DATA`. Returns
-/// `(dst_ip, host, port, data_offset)` ??exactly one of `dst_ip`/`host` is set.
+/// `(dst_ip, host, port, data_offset)` — exactly one of `dst_ip`/`host` is set.
 fn parse_udp_request(buf: &[u8]) -> Result<(Option<IpAddr>, String, u16, usize), String> {
     if buf.len() < 4 {
         return Err("short UDP request".into());
     }
-    // RSV(2) ignored. FRAG must be 0 ??we don't reassemble fragments.
+    // RSV(2) ignored. FRAG must be 0 — we don't reassemble fragments.
     if buf[2] != 0 {
         return Err("fragmented UDP datagram not supported".into());
     }

@@ -1,17 +1,17 @@
 //! Per-flow UDP handling for the TUN inbound.
 //!
 //! `netstack-smoltcp` surfaces UDP as one packet-level socket yielding
-//! `(payload, src, dst)` tuples ??there are no per-flow streams and no
+//! `(payload, src, dst)` tuples — there are no per-flow streams and no
 //! built-in NAT, so this module owns the flow table: the reader loop
 //! dispatches datagrams to per-flow tasks keyed by the (src, dst) tuple,
 //! and each flow task dials the outbound once, pumps both directions, and
 //! evicts itself after `udp-timeout` of silence.
 //!
-//! Routing mirrors `meow_tunnel::udp::handle_udp`: fake-IP rewrite ??
-//! pre-resolve ??port-53 handling ??rule match ??`dial_udp`. Port 53 is
+//! Routing mirrors `meow_tunnel::udp::handle_udp`: fake-IP rewrite →
+//! pre-resolve → port-53 handling → rule match → `dial_udp`. Port 53 is
 //! special two ways: with `dns-hijack` enabled each query is answered
-//! in-process by `DnsServer::handle_query` ??statelessly, no flow entry
-//! (required for fake-IP mode ??point the OS resolver at any address
+//! in-process by `DnsServer::handle_query` — statelessly, no flow entry
+//! (required for fake-IP mode — point the OS resolver at any address
 //! inside the routed range); without it the flow bypasses rule matching to
 //! DIRECT, mirroring the tunnel-level DNS bypass.
 
@@ -31,7 +31,7 @@ use tracing::{debug, info};
 
 /// One datagram payload cap. UDP over IPv4 tops out below 64 KiB.
 const DATAGRAM_BUF: usize = 65535;
-/// Per-flow upstream queue ??buffers datagrams while the flow task is
+/// Per-flow upstream queue — buffers datagrams while the flow task is
 /// still routing/dialing; overflow is dropped (UDP semantics).
 const FLOW_QUEUE: usize = 64;
 /// Queue feeding the single stack-writer task (the netstack write half is
@@ -40,7 +40,7 @@ const REPLY_QUEUE: usize = 512;
 /// Sweep dead flow-table entries every this many datagrams.
 const SWEEP_INTERVAL: u32 = 256;
 
-/// `(payload, packet source, packet destination)` ??the netstack `UdpMsg`
+/// `(payload, packet source, packet destination)` — the netstack `UdpMsg`
 /// layout, so a reply to a flow is sent as `(payload, dst, src)`.
 type ReplyMsg = (Vec<u8>, SocketAddr, SocketAddr);
 
@@ -64,7 +64,7 @@ pub(super) async fn run_udp(
     });
 
     // Flow table, touched only by this loop. A flow task signals its own
-    // death by closing its queue; the entry is evicted lazily ??on the next
+    // death by closing its queue; the entry is evicted lazily — on the next
     // datagram for the tuple or by the periodic sweep below.
     let mut flows: HashMap<(SocketAddr, SocketAddr), mpsc::Sender<Vec<u8>>> = HashMap::new();
     let mut sweep_countdown = SWEEP_INTERVAL;
@@ -93,7 +93,7 @@ pub(super) async fn run_udp(
         let key = (src, dst);
         let data = match flows.get(&key) {
             Some(tx) => match tx.try_send(data) {
-                // Delivered ??or queue full: the flow is alive but slow,
+                // Delivered — or queue full: the flow is alive but slow,
                 // so the datagram is dropped (UDP semantics).
                 Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => continue,
                 // Flow task ended (idle timeout or error): evict and fall
@@ -161,7 +161,7 @@ async fn relay_flow(
     inner.pre_handle_metadata(&mut metadata);
     // UDP keeps the eager pre_resolve (no lazy enrichment): the outbound
     // packet API below needs a resolved dst_ip regardless of what the rules
-    // demand ??including after a fake-IP was rewritten back to a hostname.
+    // demand — including after a fake-IP was rewritten back to a hostname.
     inner.pre_resolve(&mut metadata).await;
     if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
         metadata.dst_ip = inner.resolver.resolve_ip_real(&metadata.host).await;
@@ -210,7 +210,7 @@ async fn relay_flow(
     // source addresses are not rewritten: the tun flow is locked to one
     // (src, dst) tuple, so every reply is delivered as coming from `dst`.
     // A downstream read cancelled by another branch may drop one datagram
-    // ??acceptable under UDP delivery semantics.
+    // — acceptable under UDP delivery semantics.
     let mut buf = vec![0u8; DATAGRAM_BUF];
     let idle = sleep(udp_timeout);
     tokio::pin!(idle);
@@ -224,12 +224,12 @@ async fn relay_flow(
                     }
                     idle.as_mut().reset(Instant::now() + udp_timeout);
                 }
-                None => break Ok(()), // reader loop gone ??listener shutdown
+                None => break Ok(()), // reader loop gone — listener shutdown
             },
             received = conn.read_packet(&mut buf) => match received {
                 Ok((n, _from)) => {
                     if reply_tx.send((buf[..n].to_vec(), dst, src)).await.is_err() {
-                        break Ok(()); // stack writer gone ??listener shutdown
+                        break Ok(()); // stack writer gone — listener shutdown
                     }
                     idle.as_mut().reset(Instant::now() + udp_timeout);
                 }

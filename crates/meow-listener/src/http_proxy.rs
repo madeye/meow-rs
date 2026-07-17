@@ -42,7 +42,7 @@ async fn handle_http_inner(
     in_name: &str,
     in_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Relay scratch buffers on the future's stack ??zero per-relay heap allocation
+    // Relay scratch buffers on the future's stack — zero per-relay heap allocation
     // (ADR-0011 T6). Declared up front so both the CONNECT and plain-HTTP paths share them.
     let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];
     let mut relay_buf_dn = [0u8; RELAY_BUF_SIZE];
@@ -67,7 +67,7 @@ async fn handle_http_inner(
                 );
             }
             // Overlap the previous tail by 3 bytes so a marker straddling two
-            // reads (e.g. "\r\n\r" then "\n??) is still detected.
+            // reads (e.g. "\r\n\r" then "\n…") is still detected.
             let search_start = request_buf.len().saturating_sub(3);
             request_buf.extend_from_slice(&chunk[..n]);
             if let Some(rel) = find_crlf_crlf(&request_buf[search_start..]) {
@@ -120,7 +120,7 @@ async fn handle_http_inner(
         None
     };
 
-    // Parse the request line from the buffer ??no heap allocation.
+    // Parse the request line from the buffer — no heap allocation.
     let request_str = String::from_utf8_lossy(&request_buf);
     let request_line = request_str.lines().next().ok_or("empty request")?;
 
@@ -146,7 +146,7 @@ async fn handle_http_inner(
             src_port: src_addr.port(),
             // When the CONNECT target is an IP literal (common for the Netflix
             // OCA video CDN and other SNI-less clients), populate dst_ip so
-            // IP-CIDR / GEOIP rules can match ??mirrors the SOCKS5 IPv4/IPv6
+            // IP-CIDR / GEOIP rules can match — mirrors the SOCKS5 IPv4/IPv6
             // ATYP path. Without this the connection falls through to MATCH.
             dst_ip: host_to_ip(host),
             host: Metadata::lower_host(host),
@@ -159,7 +159,7 @@ async fn handle_http_inner(
 
         debug!("HTTP CONNECT to {}:{}", host, port);
 
-        // Send 200 Connection Established ??the client will then send its
+        // Send 200 Connection Established — the client will then send its
         // application data (e.g., TLS ClientHello) which we can peek at.
         stream
             .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -199,7 +199,7 @@ async fn handle_http_inner(
             Ok(mut remote) => {
                 // Per RFC 7230 the client must wait for 200 OK before sending
                 // application data, but if a client pipelined bytes ahead of
-                // that we already read them ??forward before relaying.
+                // that we already read them — forward before relaying.
                 let up = Arc::clone(_guard.counters());
                 let dn = Arc::clone(_guard.counters());
                 if !leftover.is_empty() {
@@ -314,7 +314,7 @@ async fn handle_http_inner(
                     if line.is_empty() {
                         break;
                     }
-                    // Skip proxy-specific headers ??case-insensitive compare
+                    // Skip proxy-specific headers — case-insensitive compare
                     // on the slice, no per-line lowercased copy.
                     if starts_with_ignore_ascii_case(line, "proxy-connection")
                         || starts_with_ignore_ascii_case(line, "proxy-authorization")
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn host_to_ip_returns_none_for_hostname() {
-        // Hostnames stay None ??resolved later by the adapter / pre_resolve.
+        // Hostnames stay None — resolved later by the adapter / pre_resolve.
         assert_eq!(host_to_ip("www.netflix.com"), None);
         assert_eq!(host_to_ip("nflxvideo.net"), None);
     }

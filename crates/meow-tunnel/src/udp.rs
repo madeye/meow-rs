@@ -58,7 +58,7 @@ impl UdpSession {
         let last = self.last_activity_ms.load(Ordering::Relaxed);
         #[allow(clippy::useless_conversion)]
         let last_u64: u64 = last.into();
-        Duration::from_millis(now.saturating_sub(last_u64))
+        Duration::from_millis(now.wrapping_sub(last_u64))
     }
 }
 

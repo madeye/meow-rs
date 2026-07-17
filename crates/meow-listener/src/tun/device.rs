@@ -30,7 +30,7 @@ pub(super) fn spawn_pumps(
     (inbound, outbound)
 }
 
-/// device ??stack. The per-packet `to_vec` is imposed by the netstack's
+/// device → stack. The per-packet `to_vec` is imposed by the netstack's
 /// `Sink<Vec<u8>>` API; this path is not covered by the zero-alloc relay
 /// invariant (ADR-0008), which starts at the terminated TCP stream.
 async fn device_to_stack(
@@ -49,7 +49,7 @@ async fn device_to_stack(
     }
 }
 
-/// stack ??device.
+/// stack → device.
 async fn stack_to_device(
     device: Arc<AsyncDevice>,
     mut stream: SplitStream<Stack>,
