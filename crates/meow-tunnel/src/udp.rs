@@ -54,11 +54,9 @@ impl UdpSession {
     /// reply reader can gate its own idle backstop on the same bidirectional
     /// clock the sweeper uses, instead of a one-directional wall-clock timer.
     pub fn idle_for(&self) -> Duration {
-        let now = monotonic_ms();
+        let now = monotonic_ms() as meow_common::atomic::Uint;
         let last = self.last_activity_ms.load(Ordering::Relaxed);
-        #[allow(clippy::useless_conversion)]
-        let last_u64: u64 = last.into();
-        Duration::from_millis(now.wrapping_sub(last_u64))
+        Duration::from_millis(u64::from(now.wrapping_sub(last)))
     }
 }
 
