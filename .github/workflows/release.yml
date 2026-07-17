@@ -223,7 +223,7 @@ jobs:
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@v2
         with:
-          tool: cross
+          tool: cross@0.2.5
 
       - name: Build release binary
         shell: bash
