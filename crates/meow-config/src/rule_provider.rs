@@ -85,7 +85,10 @@ impl RuleProvider {
     }
 
     pub fn updated_at_secs(&self) -> u64 {
-        #[allow(clippy::useless_conversion)]
+        #[allow(
+            clippy::useless_conversion,
+            reason = "identity on 64-bit; widens u32 on targets without 64-bit atomics"
+        )]
         self.updated_at.load(Ordering::Relaxed).into()
     }
 

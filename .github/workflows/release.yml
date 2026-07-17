@@ -21,7 +21,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # MIPS: tier 3 — use cross (Docker) with -Zbuild-std
+          # MIPS: tier 3 — no prebuilt rust-std, so nightly + -Zbuild-std via
+          # cross (Docker images carry the soft-float musl toolchain).
+          # boring-tls is off (boring-sys cannot cross-compile for MIPS).
+          # Note: mips musl targets default to dynamically-linked musl
+          # (fine on OpenWrt); traffic counters wrap at 4 GiB on mips32
+          # (no 64-bit atomics — see meow-common/src/atomic.rs).
           - target: mipsel-unknown-linux-musl
             runner: ubuntu-latest
             minimal_budget_bytes: 0
@@ -41,20 +46,31 @@ jobs:
           # Linux musl
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
+            # x86_64: informational only, no size gate
             minimal_budget_bytes: 0
             minimal_soft_gate: true
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
+            # aarch64: hard gate — release fails if minimal binary exceeds 8 MiB
             minimal_budget_bytes: 8388608
             minimal_soft_gate: false
+            # Static musl binary → one build serves several OpenWrt arch
+            # labels; the .ipk differs only in the Architecture field (#284).
             openwrt_archs: >-
               aarch64_generic aarch64_cortex-a53 aarch64_cortex-a72
               aarch64_cortex-a76
           - target: armv7-unknown-linux-musleabihf
             runner: ubuntu-latest
+            # armv7: soft gate only for now (no ADR-0007 budget yet)
             minimal_budget_bytes: 0
             minimal_soft_gate: true
+            # boring-sys is broken on 32-bit musl (bindgen emits time64
+            # `time_t: i64` per musl 1.2, while boring passes i32), so build
+            # without the boring-tls default. Trade-off: no ECH/uTLS
+            # fingerprinting on armv7 — everything else in `full` is present.
             cargo_flags: --no-default-features --features full
+            # Rust's armv7 musleabihf baseline is vfpv3-d16 without NEON, so
+            # the same binary is safe on every core listed here (#284).
             openwrt_archs: >-
               arm_cortex-a7_neon-vfpv4 arm_cortex-a8_vfpv3
               arm_cortex-a9_vfpv3-d16 arm_cortex-a15_neon-vfpv4
@@ -71,6 +87,11 @@ jobs:
             runner: ubuntu-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
+          # i686: built via cross (Docker) — its images ship a coherent i686
+          # gcc toolchain. zig 0.13 mistranslates x86 AVX-512 features
+          # (evex512, breaks blake3), and host clang mixes glibc-2.39 headers
+          # with other libcs (__isoc23_* symbol drift). boring-tls off: the
+          # 32-bit-musl time64 bindgen mismatch (see armv7 above) applies.
           - target: i686-unknown-linux-gnu
             runner: ubuntu-latest
             minimal_budget_bytes: 0

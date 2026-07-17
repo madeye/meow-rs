@@ -477,9 +477,15 @@ async fn connections_json(state: &AppState) -> String {
     let stats = state.tunnel.statistics();
     let (up, down) = stats.snapshot();
     let memory = read_rss_bytes().await;
-    #[allow(clippy::unnecessary_cast)]
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "no-op on 64-bit; widens i32 on targets without 64-bit atomics"
+    )]
     let upload = up as i64;
-    #[allow(clippy::unnecessary_cast)]
+    #[allow(
+        clippy::unnecessary_cast,
+        reason = "no-op on 64-bit; widens i32 on targets without 64-bit atomics"
+    )]
     let download = down as i64;
     serde_json::to_string(&ConnectionsResponse {
         upload_total: upload,
@@ -651,7 +657,10 @@ struct TrafficResponse {
 
 fn traffic_json(state: &AppState) -> String {
     let (up, down, up_total, down_total) = state.tunnel.statistics().traffic_snapshot();
-    #[allow(clippy::useless_conversion)]
+    #[allow(
+        clippy::useless_conversion,
+        reason = "identity on 64-bit; widens i32 on targets without 64-bit atomics"
+    )]
     serde_json::to_string(&TrafficResponse {
         up: up.into(),
         down: down.into(),
