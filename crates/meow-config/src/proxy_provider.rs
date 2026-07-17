@@ -258,6 +258,7 @@ impl ProxyProvider {
     }
 
     pub fn updated_at_secs(&self) -> u64 {
+        #[allow(clippy::useless_conversion)]
         self.updated_at.load(Ordering::Relaxed).into()
     }
 }

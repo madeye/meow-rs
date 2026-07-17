@@ -119,12 +119,12 @@ pub async fn handle_tcp(
                 |n| {
                     tunnel
                         .stats
-                        .record_upload(&up, n as meow_common::atomic::Int)
+                        .record_upload(&up, n as meow_common::atomic::Int);
                 },
                 |n| {
                     tunnel
                         .stats
-                        .record_download(&dn, n as meow_common::atomic::Int)
+                        .record_download(&dn, n as meow_common::atomic::Int);
                 },
             )
             .await
