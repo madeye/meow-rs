@@ -216,12 +216,12 @@ async fn handle_http_inner(
                     |n| {
                         inner
                             .stats
-                            .record_upload(&up, n as meow_common::atomic::Int)
+                            .record_upload(&up, n as meow_common::atomic::Int);
                     },
                     |n| {
                         inner
                             .stats
-                            .record_download(&dn, n as meow_common::atomic::Int)
+                            .record_download(&dn, n as meow_common::atomic::Int);
                     },
                 )
                 .await
@@ -348,12 +348,12 @@ async fn handle_http_inner(
                     |n| {
                         inner
                             .stats
-                            .record_upload(&up, n as meow_common::atomic::Int)
+                            .record_upload(&up, n as meow_common::atomic::Int);
                     },
                     |n| {
                         inner
                             .stats
-                            .record_download(&dn, n as meow_common::atomic::Int)
+                            .record_download(&dn, n as meow_common::atomic::Int);
                     },
                 )
                 .await
