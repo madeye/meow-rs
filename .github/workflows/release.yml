@@ -80,6 +80,20 @@ jobs:
             runner: ubuntu-latest
             minimal_budget_bytes: 0
             minimal_soft_gate: true
+          # i686: use cross (Docker) — zig doesn't support i686 assembly,
+          # clang causes glibc header mismatch with zigbuild's 2.17 stubs
+          - target: i686-unknown-linux-gnu
+            runner: ubuntu-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+            cargo_flags: --no-default-features --features full
+            use_cross: true
+          - target: i686-unknown-linux-musl
+            runner: ubuntu-latest
+            minimal_budget_bytes: 0
+            minimal_soft_gate: true
+            cargo_flags: --no-default-features --features full
+            use_cross: true
           - target: x86_64-apple-darwin
             runner: macos-latest
             minimal_budget_bytes: 0
@@ -121,20 +135,22 @@ jobs:
       - run: cargo install --locked cargo-zigbuild
         if: runner.os == 'Linux'
 
+      - name: Install cross-compilation tools
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
       - name: Build release binary
         shell: bash
         run: |
-          BUILD_STD_FLAG=""
-          if [ "${{ matrix.build_std }}" = "true" ]; then
-            BUILD_STD_FLAG="-Zbuild-std=std,panic_abort"
-          fi
-          if [ "${{ runner.os }}" = "Linux" ] && [ "${{ matrix.build_std }}" != "true" ]; then
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} --bin meow
+          elif [ "${{ runner.os }}" = "Linux" ] && [ "${{ matrix.build_std }}" != "true" ]; then
             cargo zigbuild --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} --bin meow
           else
-            cargo build --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} $BUILD_STD_FLAG --bin meow
+            cargo build --release --locked ${{ matrix.cargo_flags }} --target ${{ matrix.target }} --bin meow
           fi
-        env:
-          CFLAGS: ${{ matrix.cflags || '' }}
 
       - name: Build minimal release binary (stripped, for size check)
         if: matrix.minimal_budget_bytes != 0 && runner.os == 'Linux'
@@ -256,4 +272,3 @@ jobs:
             dist/**/*.ipk
             dist/**/*.ipk.sha256
           generate_release_notes: true
-          fail_on_unmatched_files: true
