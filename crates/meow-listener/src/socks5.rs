@@ -267,8 +267,16 @@ async fn handle_socks5_inner(
                 &mut remote,
                 &mut relay_buf_up,
                 &mut relay_buf_dn,
-                |n| inner.stats.record_upload(&up, n as i64),
-                |n| inner.stats.record_download(&dn, n as i64),
+                |n| {
+                    inner
+                        .stats
+                        .record_upload(&up, n as meow_common::atomic::Int)
+                },
+                |n| {
+                    inner
+                        .stats
+                        .record_download(&dn, n as meow_common::atomic::Int)
+                },
             )
             .await
             {

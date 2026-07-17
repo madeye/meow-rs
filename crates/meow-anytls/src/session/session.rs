@@ -13,7 +13,7 @@ use tokio::sync::{Notify, RwLock, mpsc};
 use tokio::time::{self, Duration, Instant, MissedTickBehavior};
 use tracing::{field, info_span};
 
-static SESSION_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static SESSION_COUNTER: meow_common::atomic::AtomicU = meow_common::atomic::AtomicU::new(1);
 use tokio_util::codec::Decoder;
 
 /// Type alias for new stream callback channel
@@ -68,7 +68,7 @@ pub struct Session {
     peer_version: Arc<std::sync::atomic::AtomicU8>,
 
     // Session sequence number (for pool ordering)
-    seq: Arc<std::sync::atomic::AtomicU64>,
+    seq: Arc<meow_common::atomic::AtomicU>,
 
     // Buffering state
     buffering: Arc<std::sync::atomic::AtomicBool>,
@@ -140,7 +140,7 @@ impl Session {
             send_padding: true,
             pkt_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             peer_version: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            seq: Arc::new(meow_common::atomic::AtomicU::new(0)),
             buffering: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             buffer: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             on_new_stream: None,
@@ -174,7 +174,7 @@ impl Session {
             send_padding: false,
             pkt_counter: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             peer_version: Arc::new(std::sync::atomic::AtomicU8::new(0)),
-            seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            seq: Arc::new(meow_common::atomic::AtomicU::new(0)),
             buffering: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             buffer: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             on_new_stream: None,

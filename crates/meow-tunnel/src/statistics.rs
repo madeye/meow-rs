@@ -17,12 +17,13 @@
 // Breaking change permitted by ADR-0009.
 
 use dashmap::DashMap;
+use meow_common::atomic::{AtomicI, Int};
 use meow_common::Metadata;
 use parking_lot::Mutex;
 use serde::Serialize;
 use smallvec::SmallVec;
 use smol_str::SmolStr;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -64,16 +65,16 @@ impl Default for RuleMatchCounters {
 /// (ADR-0008 §3 scopes the zero-alloc rule to per-iteration counts).
 #[derive(Debug, Default)]
 pub struct ConnCounters {
-    pub upload: AtomicI64,
-    pub download: AtomicI64,
+    pub upload: AtomicI,
+    pub download: AtomicI,
 }
 
 impl ConnCounters {
-    pub fn upload_bytes(&self) -> i64 {
+    pub fn upload_bytes(&self) -> Int {
         self.upload.load(Ordering::Relaxed)
     }
 
-    pub fn download_bytes(&self) -> i64 {
+    pub fn download_bytes(&self) -> Int {
         self.download.load(Ordering::Relaxed)
     }
 }
@@ -125,10 +126,10 @@ pub struct ConnectionInfo {
 /// holds by construction and no interleaving can publish an impossible pair.
 #[derive(Default, Clone, Copy)]
 struct TrafficSnapshot {
-    upload_rate: i64,
-    download_rate: i64,
-    upload_total: i64,
-    download_total: i64,
+    upload_rate: Int,
+    download_rate: Int,
+    upload_total: Int,
+    download_total: Int,
 }
 
 pub struct Statistics {
@@ -136,8 +137,8 @@ pub struct Statistics {
     /// hot path touches (one relaxed `fetch_add` per direction per chunk);
     /// totals are accumulated from these at sample time, never double-tracked
     /// (issue #340).
-    upload_temp: AtomicI64,
-    download_temp: AtomicI64,
+    upload_temp: AtomicI,
+    download_temp: AtomicI,
     traffic: Mutex<TrafficSnapshot>,
     /// Keyed by `Uuid` (16 B Copy) — formerly `String`, which heap-allocated a
     /// 36-byte hyphenated representation per insert.  REST handlers parse the
@@ -149,32 +150,32 @@ pub struct Statistics {
 impl Statistics {
     pub fn new() -> Self {
         Self {
-            upload_temp: AtomicI64::new(0),
-            download_temp: AtomicI64::new(0),
+            upload_temp: AtomicI::new(0),
+            download_temp: AtomicI::new(0),
             traffic: Mutex::new(TrafficSnapshot::default()),
             connections: DashMap::new(),
             rule_match: Arc::new(RuleMatchCounters::new()),
         }
     }
 
-    pub fn add_upload(&self, n: i64) {
+    pub fn add_upload(&self, n: Int) {
         self.upload_temp.fetch_add(n, Ordering::Relaxed);
     }
 
-    pub fn add_download(&self, n: i64) {
+    pub fn add_download(&self, n: Int) {
         self.download_temp.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Per-chunk relay accounting: two relaxed atomic adds, no map lookup.
     /// Callers obtain the `ConnCounters` once at connection setup via
     /// [`Self::connection_counters`] (or `ConnectionGuard::counters`).
-    pub fn record_upload(&self, counters: &ConnCounters, n: i64) {
+    pub fn record_upload(&self, counters: &ConnCounters, n: Int) {
         counters.upload.fetch_add(n, Ordering::Relaxed);
         self.add_upload(n);
     }
 
     /// See [`Self::record_upload`].
-    pub fn record_download(&self, counters: &ConnCounters, n: i64) {
+    pub fn record_download(&self, counters: &ConnCounters, n: Int) {
         counters.download.fetch_add(n, Ordering::Relaxed);
         self.add_download(n);
     }
@@ -206,7 +207,7 @@ impl Statistics {
     /// `(upload_rate, download_rate, upload_total, download_total)` as of the
     /// last `sample_traffic` tick. Totals lag the live counters by up to one
     /// tick, in exchange for being consistent with the rates.
-    pub fn traffic_snapshot(&self) -> (i64, i64, i64, i64) {
+    pub fn traffic_snapshot(&self) -> (Int, Int, Int, Int) {
         let snap = *self.traffic.lock();
         (
             snap.upload_rate,
@@ -246,7 +247,7 @@ impl Statistics {
     /// parts under the snapshot lock excludes a concurrent `sample_traffic`
     /// from moving bytes between them mid-read, so the sum is exact and
     /// monotonic.
-    pub fn snapshot(&self) -> (i64, i64) {
+    pub fn snapshot(&self) -> (Int, Int) {
         let snap = self.traffic.lock();
         (
             snap.upload_total + self.upload_temp.load(Ordering::Relaxed),

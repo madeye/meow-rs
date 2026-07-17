@@ -21,9 +21,10 @@
 use crate::session::{Stream, StreamReader};
 use crate::util::{AnyTlsError, Result, resolve_host_with_cache};
 use bytes::{BufMut, Bytes, BytesMut};
+use meow_common::atomic::AtomicU;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::net::UdpSocket;
 use tracing::{field, info_span};
 
@@ -85,10 +86,10 @@ pub async fn handle_udp_over_tcp(stream: Arc<Stream>) -> Result<()> {
     tracing::debug!("[UDP] Created UDP socket on {}", local_addr);
     udp_span.record("local_udp", field::display(local_addr));
 
-    let packets_stream_to_udp = Arc::new(AtomicU64::new(0));
-    let bytes_stream_to_udp = Arc::new(AtomicU64::new(0));
-    let packets_udp_to_stream = Arc::new(AtomicU64::new(0));
-    let bytes_udp_to_stream = Arc::new(AtomicU64::new(0));
+    let packets_stream_to_udp = Arc::new(AtomicU::new(0));
+    let bytes_stream_to_udp = Arc::new(AtomicU::new(0));
+    let packets_udp_to_stream = Arc::new(AtomicU::new(0));
+    let bytes_udp_to_stream = Arc::new(AtomicU::new(0));
 
     // Step 3: Send handshake success (if needed, similar to Go's ReportHandshakeSuccess)
     // In our case, we can just start forwarding
@@ -266,8 +267,8 @@ async fn stream_to_udp(
     stream: &Stream,
     udp: &UdpSocket,
     target_addr: &SocketAddr,
-    packets_counter: Arc<AtomicU64>,
-    bytes_counter: Arc<AtomicU64>,
+    packets_counter: Arc<AtomicU>,
+    bytes_counter: Arc<AtomicU>,
 ) -> Result<()> {
     let stream_id = stream.id();
     let reader = stream.reader();
@@ -322,8 +323,8 @@ async fn udp_to_stream(
     stream: &Stream,
     udp: &UdpSocket,
     _target_addr: &SocketAddr,
-    packets_counter: Arc<AtomicU64>,
-    bytes_counter: Arc<AtomicU64>,
+    packets_counter: Arc<AtomicU>,
+    bytes_counter: Arc<AtomicU>,
 ) -> Result<()> {
     let stream_id = stream.id();
 

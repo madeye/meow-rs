@@ -26,6 +26,7 @@ name = "anytls_rs"
 path = "src/lib.rs"
 
 [dependencies]
+meow-common = { path = "../meow-common", version = "0.17.0" }
 tokio = { version = "1.48", features = [
     "macros",
     "rt-multi-thread",

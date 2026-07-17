@@ -304,7 +304,7 @@ impl Client {
         ));
 
         // Set sequence number for pool ordering (use timestamp-based counter)
-        static SEQ_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static SEQ_COUNTER: meow_common::atomic::AtomicU = meow_common::atomic::AtomicU::new(0);
         let seq = SEQ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         session.set_seq(seq);
         tracing::debug!("[Client] Session created with seq={}", seq);

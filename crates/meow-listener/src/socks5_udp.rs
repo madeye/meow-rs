@@ -13,10 +13,11 @@
 //! that reads server→client datagrams and writes them back wrapped in the
 //! SOCKS5 UDP header.
 
+use meow_common::atomic::AtomicU;
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -39,7 +40,7 @@ const NAT_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// Per-destination outbound session within one association.
 struct Session {
     conn: Arc<dyn ProxyPacketConn>,
-    last_activity_ms: Arc<AtomicU64>,
+    last_activity_ms: Arc<AtomicU>,
     /// Reply task (server→client); aborted when the session is dropped.
     reply_task: tokio::task::AbortHandle,
 }
@@ -132,7 +133,7 @@ pub async fn handle_udp_associate(
                 let now = monotonic_ms();
                 let idle_ms = meow_tunnel::udp::DEFAULT_UDP_IDLE.as_millis() as u64;
                 nat.retain(|_, session| {
-                    now.saturating_sub(session.last_activity_ms.load(Ordering::Relaxed)) < idle_ms
+                    now.saturating_sub(session.last_activity_ms.load(Ordering::Relaxed).into()) < idle_ms
                 });
             }
         }
@@ -197,9 +198,10 @@ async fn handle_client_datagram(
             .write_packet(payload, &dst_addr)
             .await
             .map_err(|e| format!("udp write {dst_addr}: {e}"))?;
-        session
-            .last_activity_ms
-            .store(monotonic_ms(), Ordering::Relaxed);
+        session.last_activity_ms.store(
+            monotonic_ms() as meow_common::atomic::Uint,
+            Ordering::Relaxed,
+        );
         return Ok(());
     }
 
@@ -233,7 +235,7 @@ async fn handle_client_datagram(
 
     // Reply task: server→client. Wraps each datagram in the SOCKS5 UDP header
     // and sends it back to the client's UDP source address.
-    let last_activity_ms = Arc::new(AtomicU64::new(monotonic_ms()));
+    let last_activity_ms = Arc::new(AtomicU::new(monotonic_ms() as meow_common::atomic::Uint));
     let reply_task = {
         let relay = Arc::clone(relay);
         let conn = Arc::clone(&conn);
@@ -247,7 +249,10 @@ async fn handle_client_datagram(
                 if relay.send_to(&out, client).await.is_err() {
                     break;
                 }
-                last_activity_ms.store(monotonic_ms(), Ordering::Relaxed);
+                last_activity_ms.store(
+                    monotonic_ms() as meow_common::atomic::Uint,
+                    Ordering::Relaxed,
+                );
             }
         })
         .abort_handle()

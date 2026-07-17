@@ -12,12 +12,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use meow_common::adapter::Proxy;
+use meow_common::atomic::AtomicU;
 use meow_rules::{
     build_rule_set, build_rule_set_from_mrs_with_behavior, is_mrs_bytes, ParserContext, RuleSet,
     RuleSetBehavior, RuleSetFormat,
 };
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use tracing::{debug, warn};
 
 use crate::internal_http;
@@ -56,7 +57,7 @@ pub struct RuleProvider {
     /// Refresh interval in seconds. `0` = no background refresh.
     pub interval: u64,
     /// Unix timestamp (seconds) of last successful load/refresh.
-    updated_at: AtomicU64,
+    updated_at: AtomicU,
     rules: RwLock<Arc<dyn RuleSet>>,
     /// Upstream proxy to route HTTP fetches through. `None` = direct.
     /// Captured at load time; reused on every periodic `refresh()`.
@@ -84,7 +85,7 @@ impl RuleProvider {
     }
 
     pub fn updated_at_secs(&self) -> u64 {
-        self.updated_at.load(Ordering::Relaxed)
+        self.updated_at.load(Ordering::Relaxed).into()
     }
 
     /// Fetch a fresh payload from the HTTP URL and swap the rule set atomically.
@@ -115,7 +116,8 @@ impl RuleProvider {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
             .as_secs();
-        self.updated_at.store(now, Ordering::Relaxed);
+        self.updated_at
+            .store(now as meow_common::atomic::Uint, Ordering::Relaxed);
     }
 }
 
@@ -395,7 +397,7 @@ fn make_provider(
         behavior,
         vehicle,
         interval,
-        updated_at: AtomicU64::new(now),
+        updated_at: AtomicU::new(now as meow_common::atomic::Uint),
         rules: RwLock::new(rules_arc),
         download_proxy,
     }

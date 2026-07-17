@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod adapter_type;
+pub mod atomic;
 pub mod auth;
 pub mod conn;
 pub mod dns_mode;

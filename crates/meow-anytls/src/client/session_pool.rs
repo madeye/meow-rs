@@ -1,9 +1,10 @@
 //! Session pool for connection reuse with configurable cleanup
 
 use crate::session::Session;
+use meow_common::atomic::AtomicU;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, Instant, interval};
@@ -45,7 +46,7 @@ pub struct SessionPool {
     idle_sessions: Arc<RwLock<BTreeMap<u64, PooledSession>>>,
 
     // Sequence counter (monotonically increasing)
-    next_seq: Arc<AtomicU64>,
+    next_seq: Arc<AtomicU>,
 
     // Configuration
     config: SessionPoolConfig,
@@ -70,7 +71,7 @@ impl SessionPool {
     pub fn with_config(config: SessionPoolConfig) -> Self {
         let pool = Self {
             idle_sessions: Arc::new(RwLock::new(BTreeMap::new())),
-            next_seq: Arc::new(AtomicU64::new(1)),
+            next_seq: Arc::new(AtomicU::new(1)),
             config,
             cleanup_task: Arc::new(Mutex::new(None)),
         };

@@ -4,9 +4,10 @@ use crate::protocol::{Command, Frame};
 use crate::session::{Session, Stream};
 use crate::util::{AnyTlsError, Result, configure_tcp_stream, resolve_host_with_cache};
 use bytes::Bytes;
+use meow_common::atomic::AtomicU;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
@@ -368,8 +369,8 @@ async fn proxy_tcp_connection_data_forwarding(
     // 直接克隆 Arc<Stream> 用于两个任务
     let stream_for_read = Arc::clone(&stream);
     let stream_for_write = Arc::clone(&stream);
-    let bytes_to_outbound = Arc::new(AtomicU64::new(0));
-    let bytes_to_client = Arc::new(AtomicU64::new(0));
+    let bytes_to_outbound = Arc::new(AtomicU::new(0));
+    let bytes_to_client = Arc::new(AtomicU::new(0));
 
     // Task 1: Stream -> Outbound（从 stream 读取，写入 outbound）
     tracing::debug!(

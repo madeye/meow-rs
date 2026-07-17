@@ -204,15 +204,25 @@ async fn handle_http_inner(
                 let dn = Arc::clone(_guard.counters());
                 if !leftover.is_empty() {
                     remote.write_all(&leftover).await?;
-                    inner.stats.record_upload(&up, leftover.len() as i64);
+                    inner
+                        .stats
+                        .record_upload(&up, leftover.len() as meow_common::atomic::Int);
                 }
                 match copy_bidirectional_buf_tracked(
                     stream,
                     &mut remote,
                     &mut relay_buf_up,
                     &mut relay_buf_dn,
-                    |n| inner.stats.record_upload(&up, n as i64),
-                    |n| inner.stats.record_download(&dn, n as i64),
+                    |n| {
+                        inner
+                            .stats
+                            .record_upload(&up, n as meow_common::atomic::Int)
+                    },
+                    |n| {
+                        inner
+                            .stats
+                            .record_download(&dn, n as meow_common::atomic::Int)
+                    },
                 )
                 .await
                 {
@@ -324,7 +334,9 @@ async fn handle_http_inner(
                 let dn = Arc::clone(_guard.counters());
                 if !leftover.is_empty() {
                     remote.write_all(&leftover).await?;
-                    inner.stats.record_upload(&up, leftover.len() as i64);
+                    inner
+                        .stats
+                        .record_upload(&up, leftover.len() as meow_common::atomic::Int);
                 }
 
                 // Relay bidirectionally
@@ -333,8 +345,16 @@ async fn handle_http_inner(
                     &mut remote,
                     &mut relay_buf_up,
                     &mut relay_buf_dn,
-                    |n| inner.stats.record_upload(&up, n as i64),
-                    |n| inner.stats.record_download(&dn, n as i64),
+                    |n| {
+                        inner
+                            .stats
+                            .record_upload(&up, n as meow_common::atomic::Int)
+                    },
+                    |n| {
+                        inner
+                            .stats
+                            .record_download(&dn, n as meow_common::atomic::Int)
+                    },
                 )
                 .await
                 {
