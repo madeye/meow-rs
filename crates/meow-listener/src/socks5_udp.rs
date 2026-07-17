@@ -134,6 +134,7 @@ pub async fn handle_udp_associate(
                 nat.retain(|_, session| {
                     let now = monotonic_ms() as meow_common::atomic::Uint;
                     let last = session.last_activity_ms.load(Ordering::Relaxed);
+                    #[allow(clippy::useless_conversion, reason = "identity on 64-bit; u32→u64 widening on mips32")]
                     u64::from(now.wrapping_sub(last)) < idle_ms
                 });
             }
