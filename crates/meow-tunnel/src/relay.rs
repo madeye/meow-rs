@@ -256,11 +256,21 @@ where
         // the directions instead of draining one to `Pending` before touching
         // the other. Loop while either direction reports `Progress`, up to
         // `RELAY_CYCLES_PER_POLL` progress cycles per poll.
+        //
+        // Once a direction returns `Pending` it is parked for the REST of this
+        // poll: it can only become ready again by waking the task (which
+        // re-enters this closure), so re-polling it every iteration would just
+        // burn a readiness check + waker re-registration per 4 KiB cycle of
+        // the busy direction. A readiness event that fires while we are still
+        // looping marks the task notified and triggers an immediate re-poll,
+        // so no wakeup is lost by parking.
         let mut cycles: u32 = 0;
+        let mut a_parked = false;
+        let mut b_parked = false;
         loop {
             let mut progressed = false;
 
-            if !a_done {
+            if !a_done && !a_parked {
                 let a_pin = Pin::new(&mut *a);
                 let b_pin = Pin::new(&mut *b);
                 match a_to_b.poll_cycle(cx, a_pin, b_pin, &mut on_a_to_b) {
@@ -269,12 +279,12 @@ where
                         progressed = true;
                         cycles += 1;
                     }
-                    Ok(Cycle::Pending) => {}
+                    Ok(Cycle::Pending) => a_parked = true,
                     Err(e) => return Poll::Ready(Err(e)),
                 }
             }
 
-            if !b_done {
+            if !b_done && !b_parked {
                 let a_pin = Pin::new(&mut *a);
                 let b_pin = Pin::new(&mut *b);
                 match b_to_a.poll_cycle(cx, b_pin, a_pin, &mut on_b_to_a) {
@@ -283,7 +293,7 @@ where
                         progressed = true;
                         cycles += 1;
                     }
-                    Ok(Cycle::Pending) => {}
+                    Ok(Cycle::Pending) => b_parked = true,
                     Err(e) => return Poll::Ready(Err(e)),
                 }
             }
