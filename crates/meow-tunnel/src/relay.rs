@@ -12,11 +12,23 @@
 //
 //   Public API: `copy_bidirectional_buf` and `RELAY_BUF_SIZE`.
 //   No new public types exposed — no M2 API break.
+//
+// Direction fairness (#345):
+//   The two directions are driven by ONE future, so they can never run on two
+//   cores at once — but they must not starve each other either. Each direction
+//   advances at most one buffer fill+drain cycle per turn, and turns strictly
+//   alternate a→b, b→a inside the poll loop. A busy direction therefore delays
+//   the other by at most one `RELAY_BUF_SIZE` cycle, instead of monopolizing
+//   the task until its reader runs dry (the pre-#345 behavior, where a→b was
+//   always polled first and drained to `Pending` before b→a ever ran).
+//   `RELAY_CYCLES_PER_POLL` additionally bounds total work per poll so the
+//   relay yields to sibling tasks even on streams that don't participate in
+//   tokio's coop budget.
 
 use std::future::{poll_fn, Future};
 use std::io;
 use std::pin::Pin;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
@@ -46,9 +58,31 @@ pub const RELAY_BUF_SIZE: usize = 4 * 1024;
 /// simultaneous close drains in microseconds, far inside the window.
 pub const RELAY_HALF_CLOSE_LINGER: Duration = Duration::from_secs(30);
 
+/// Upper bound on buffer fill+drain cycles executed per `poll_fn` invocation
+/// across both directions before the relay voluntarily yields back to the
+/// scheduler (self-waking first, so it is promptly re-polled).
+///
+/// Real sockets already hit tokio's per-task coop budget (128 ops) around the
+/// same magnitude, but coop is an implementation detail of tokio's leaf
+/// resources — custom `ProxyConn` stacks (or the in-memory streams used in
+/// tests) may never return `Pending` on their own. This cap makes the yield
+/// deterministic: at 4 KiB per cycle it bounds one poll at 256 KiB relayed.
+const RELAY_CYCLES_PER_POLL: u32 = 64;
+
 // ---------------------------------------------------------------------------
 // Internal copy-one-direction state (no heap allocation)
 // ---------------------------------------------------------------------------
+
+/// Outcome of one [`HalfCopy::poll_cycle`] turn.
+enum Cycle {
+    /// EOF reached, buffer fully flushed, writer shutdown complete.
+    Done,
+    /// The cycle moved data and the direction may have more work available —
+    /// give the peer direction a turn, then call again.
+    Progress,
+    /// Blocked on the reader or the writer; a waker is registered.
+    Pending,
+}
 
 struct HalfCopy<'buf> {
     buf: &'buf mut [u8],
@@ -71,69 +105,88 @@ impl<'buf> HalfCopy<'buf> {
         }
     }
 
-    fn poll_copy<R, W, F>(
+    /// Advance this direction by at most ONE buffer fill+drain cycle.
+    ///
+    /// The pre-#345 `poll_copy` looped read→write until `Pending`, so a busy
+    /// direction monopolized the poll while the peer direction waited. Capping
+    /// each turn at a single cycle lets the caller interleave the two
+    /// directions fairly; the caller loops as long as either side reports
+    /// [`Cycle::Progress`].
+    fn poll_cycle<R, W, F>(
         &mut self,
         cx: &mut Context<'_>,
         mut reader: Pin<&mut R>,
         mut writer: Pin<&mut W>,
         on_progress: &mut F,
-    ) -> Poll<io::Result<u64>>
+    ) -> io::Result<Cycle>
     where
         R: AsyncRead + ?Sized,
         W: AsyncWrite + ?Sized,
         F: FnMut(u64),
     {
-        loop {
-            // Fill buffer from reader when empty.
-            if self.pos == self.cap && !self.read_done {
-                let mut rb = ReadBuf::new(self.buf);
-                match reader.as_mut().poll_read(cx, &mut rb) {
-                    Poll::Ready(Ok(())) => {
-                        let filled = rb.filled().len();
-                        if filled == 0 {
-                            self.read_done = true;
-                        } else {
-                            self.pos = 0;
-                            self.cap = filled;
-                        }
-                    }
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Pending => {
-                        if self.need_flush {
-                            ready!(writer.as_mut().poll_flush(cx))?;
-                            self.need_flush = false;
-                        }
-                        return Poll::Pending;
+        // Refill the buffer when empty — at most one read per cycle.
+        if self.pos == self.cap && !self.read_done {
+            let mut rb = ReadBuf::new(self.buf);
+            match reader.as_mut().poll_read(cx, &mut rb) {
+                Poll::Ready(Ok(())) => {
+                    let filled = rb.filled().len();
+                    if filled == 0 {
+                        self.read_done = true;
+                    } else {
+                        self.pos = 0;
+                        self.cap = filled;
                     }
                 }
-            }
-
-            // Flush buffered data to writer.
-            while self.pos < self.cap {
-                let data = &self.buf[self.pos..self.cap];
-                match writer.as_mut().poll_write(cx, data) {
-                    Poll::Ready(Ok(0)) => {
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::WriteZero,
-                            "write zero bytes to writer",
-                        )));
+                Poll::Ready(Err(e)) => return Err(e),
+                Poll::Pending => {
+                    // Nothing buffered and the reader is idle: push written
+                    // bytes to the peer before parking this direction.
+                    if self.need_flush {
+                        match writer.as_mut().poll_flush(cx) {
+                            Poll::Ready(Ok(())) => self.need_flush = false,
+                            Poll::Ready(Err(e)) => return Err(e),
+                            Poll::Pending => return Ok(Cycle::Pending),
+                        }
                     }
-                    Poll::Ready(Ok(n)) => {
-                        self.pos += n;
-                        self.amt += n as u64;
-                        on_progress(n as u64);
-                        self.need_flush = true;
-                    }
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Pending => return Poll::Pending,
+                    return Ok(Cycle::Pending);
                 }
-            }
-
-            if self.read_done && self.pos == self.cap {
-                ready!(writer.as_mut().poll_shutdown(cx))?;
-                return Poll::Ready(Ok(self.amt));
             }
         }
+
+        // Drain buffered data to the writer.
+        while self.pos < self.cap {
+            let data = &self.buf[self.pos..self.cap];
+            match writer.as_mut().poll_write(cx, data) {
+                Poll::Ready(Ok(0)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "write zero bytes to writer",
+                    ));
+                }
+                Poll::Ready(Ok(n)) => {
+                    self.pos += n;
+                    self.amt += n as u64;
+                    on_progress(n as u64);
+                    self.need_flush = true;
+                }
+                Poll::Ready(Err(e)) => return Err(e),
+                // Blocked on the writer — retrying this direction cannot help
+                // until its waker fires, even though bytes may have moved.
+                Poll::Pending => return Ok(Cycle::Pending),
+            }
+        }
+
+        if self.read_done {
+            return match writer.as_mut().poll_shutdown(cx) {
+                Poll::Ready(Ok(())) => Ok(Cycle::Done),
+                Poll::Ready(Err(e)) => Err(e),
+                Poll::Pending => Ok(Cycle::Pending),
+            };
+        }
+
+        // Buffer drained and the reader has not hit EOF: more work may be
+        // immediately available next turn.
+        Ok(Cycle::Progress)
     }
 }
 
@@ -199,28 +252,66 @@ where
     let mut linger_progress: u64 = 0;
 
     poll_fn(move |cx| {
-        if !a_done {
-            let a_pin = Pin::new(&mut *a);
-            let b_pin = Pin::new(&mut *b);
-            match a_to_b.poll_copy(cx, a_pin, b_pin, &mut on_a_to_b) {
-                Poll::Ready(Ok(_)) => a_done = true,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => {}
-            }
-        }
+        // Fair interleave (#345): alternate single fill+drain cycles between
+        // the directions instead of draining one to `Pending` before touching
+        // the other. Loop while either direction reports `Progress`, up to
+        // `RELAY_CYCLES_PER_POLL` progress cycles per poll.
+        //
+        // Once a direction returns `Pending` it is parked for the REST of this
+        // poll: it can only become ready again by waking the task (which
+        // re-enters this closure), so re-polling it every iteration would just
+        // burn a readiness check + waker re-registration per 4 KiB cycle of
+        // the busy direction. A readiness event that fires while we are still
+        // looping marks the task notified and triggers an immediate re-poll,
+        // so no wakeup is lost by parking.
+        let mut cycles: u32 = 0;
+        let mut a_parked = false;
+        let mut b_parked = false;
+        loop {
+            let mut progressed = false;
 
-        if !b_done {
-            let a_pin = Pin::new(&mut *a);
-            let b_pin = Pin::new(&mut *b);
-            match b_to_a.poll_copy(cx, b_pin, a_pin, &mut on_b_to_a) {
-                Poll::Ready(Ok(_)) => b_done = true,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => {}
+            if !a_done && !a_parked {
+                let a_pin = Pin::new(&mut *a);
+                let b_pin = Pin::new(&mut *b);
+                match a_to_b.poll_cycle(cx, a_pin, b_pin, &mut on_a_to_b) {
+                    Ok(Cycle::Done) => a_done = true,
+                    Ok(Cycle::Progress) => {
+                        progressed = true;
+                        cycles += 1;
+                    }
+                    Ok(Cycle::Pending) => a_parked = true,
+                    Err(e) => return Poll::Ready(Err(e)),
+                }
             }
-        }
 
-        if a_done && b_done {
-            return Poll::Ready(Ok((a_to_b.amt, b_to_a.amt)));
+            if !b_done && !b_parked {
+                let a_pin = Pin::new(&mut *a);
+                let b_pin = Pin::new(&mut *b);
+                match b_to_a.poll_cycle(cx, b_pin, a_pin, &mut on_b_to_a) {
+                    Ok(Cycle::Done) => b_done = true,
+                    Ok(Cycle::Progress) => {
+                        progressed = true;
+                        cycles += 1;
+                    }
+                    Ok(Cycle::Pending) => b_parked = true,
+                    Err(e) => return Poll::Ready(Err(e)),
+                }
+            }
+
+            if a_done && b_done {
+                return Poll::Ready(Ok((a_to_b.amt, b_to_a.amt)));
+            }
+
+            if !progressed {
+                break;
+            }
+
+            if cycles >= RELAY_CYCLES_PER_POLL {
+                // Yield to sibling tasks; self-wake so the scheduler re-polls
+                // this relay promptly.
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
         }
 
         // Exactly one direction has finished while the other is still open.
@@ -368,6 +459,68 @@ mod tests {
             "every upstream byte must be relayed — the active transfer is not truncated"
         );
         assert_eq!(drained, 12, "client received the full upstream stream");
+    }
+
+    // Regression for #345: under symmetric load, neither direction may
+    // monopolize the relay. The old `poll_copy` drained the entire a→b
+    // direction to `Pending` before b→a was polled at all, so every a→b
+    // progress event fired before the first b→a event. The interleaved relay
+    // alternates one buffer cycle per direction, so both directions must show
+    // progress from the very start of the transfer.
+    #[tokio::test]
+    async fn directions_interleave_under_symmetric_load() {
+        use tokio::io::AsyncWriteExt;
+
+        // 8 relay-buffers of data queued in EACH direction before the relay
+        // starts, with enough duplex capacity that no write ever backpressures
+        // — progress order is then determined purely by relay poll order.
+        let total = RELAY_BUF_SIZE * 8;
+        let (mut client, mut a) = duplex(total * 2);
+        let (mut b, mut upstream) = duplex(total * 2);
+
+        client.write_all(&vec![1u8; total]).await.unwrap();
+        client.shutdown().await.unwrap();
+        upstream.write_all(&vec![2u8; total]).await.unwrap();
+        upstream.shutdown().await.unwrap();
+
+        let mut buf1 = [0u8; RELAY_BUF_SIZE];
+        let mut buf2 = [0u8; RELAY_BUF_SIZE];
+
+        // Record the order of write-progress events per direction.
+        let events = std::cell::RefCell::new(Vec::new());
+        let (up, down) = copy_bidirectional_buf_tracked(
+            &mut a,
+            &mut b,
+            &mut buf1,
+            &mut buf2,
+            |n| events.borrow_mut().push(('a', n)),
+            |n| events.borrow_mut().push(('b', n)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(up as usize, total, "a→b relayed everything");
+        assert_eq!(down as usize, total, "b→a relayed everything");
+
+        let events = events.into_inner();
+        let first_b = events
+            .iter()
+            .position(|e| e.0 == 'b')
+            .expect("b→a made progress");
+        let last_a = events
+            .iter()
+            .rposition(|e| e.0 == 'a')
+            .expect("a→b made progress");
+        assert!(
+            first_b < last_a,
+            "b→a must progress before a→b fully drains (first b event at \
+             index {first_b}, last a event at index {last_a})"
+        );
+        assert!(
+            first_b <= 2,
+            "with fair interleaving b→a's first progress arrives within the \
+             first few cycles, not at index {first_b}"
+        );
     }
 
     #[tokio::test]
