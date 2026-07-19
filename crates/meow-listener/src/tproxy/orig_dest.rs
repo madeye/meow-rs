@@ -116,6 +116,15 @@ mod macos {
     // must be exactly 84 bytes or the ioctl is rejected / corrupts memory.
     const _: () = assert!(mem::size_of::<PfiocNatlook>() == 84);
 
+    fn natlook_query() -> PfiocNatlook {
+        PfiocNatlook {
+            af: PF_ADDR_IPV4,
+            proto: libc::IPPROTO_TCP as u8,
+            direction: PF_OUT,
+            ..Default::default()
+        }
+    }
+
     pub fn get_original_dst(stream: &TcpStream, listen_addr: SocketAddr) -> io::Result<SocketAddr> {
         let peer = stream.peer_addr().map_err(io::Error::other)?;
 
@@ -149,12 +158,7 @@ mod macos {
             }
         };
 
-        let mut nl = PfiocNatlook {
-            af: PF_ADDR_IPV4,
-            proto: libc::IPPROTO_TCP as u8,
-            direction: PF_OUT,
-            ..Default::default()
-        };
+        let mut nl = natlook_query();
 
         // Source: the connecting client
         nl.saddr.v4 = libc::in_addr {
@@ -202,6 +206,12 @@ mod macos {
         fn struct_sizes_match_kernel() {
             assert_eq!(mem::size_of::<PfStateXport>(), 4);
             assert_eq!(mem::size_of::<PfiocNatlook>(), 84);
+        }
+
+        #[test]
+        fn redirected_lookup_uses_outbound_state() {
+            assert_eq!(natlook_query().direction, PF_OUT);
+            assert_eq!(PF_OUT, 2);
         }
 
         #[test]
