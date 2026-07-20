@@ -222,6 +222,13 @@ impl DnsClient {
         self
     }
 
+    /// Whether this client's exchanges are routed through a proxy adapter
+    /// (`with_proxy`). Exposed so config-layer tests can assert that
+    /// `#PROXY`-tagged nameserver entries actually got their adapter wired.
+    pub fn is_proxied(&self) -> bool {
+        self.proxy.is_some()
+    }
+
     /// Human-readable upstream identifier for API/UI surfaces.
     pub fn upstream_label(&self) -> String {
         let mut label = if let Some(label) = &self.label {
