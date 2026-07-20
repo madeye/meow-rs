@@ -69,7 +69,15 @@ pub async fn parse_dns(
             None
         } else {
             let bootstrap_clients = build_policy_bootstrap_clients(&default_ns_urls, &main_urls);
-            Some(build_nameserver_policy(nsp_map, geosite.as_ref(), &bootstrap_clients).await?)
+            Some(
+                build_nameserver_policy(
+                    nsp_map,
+                    geosite.as_ref(),
+                    &bootstrap_clients,
+                    proxy_registry,
+                )
+                .await?,
+            )
         }
     } else {
         None
@@ -213,6 +221,7 @@ async fn build_nameserver_policy(
     map: &HashMap<String, crate::raw::RawNspValue>,
     geosite: Option<&Arc<meow_rules::geosite::GeositeDB>>,
     bootstrap_clients: &[Arc<DnsClient>],
+    proxy_registry: &HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>>,
 ) -> Result<NameserverPolicy, anyhow::Error> {
     let mut policy = NameserverPolicy::new();
     let mut warned_unsupported_prefix = false;
@@ -267,7 +276,8 @@ async fn build_nameserver_policy(
             continue;
         }
 
-        let resolvers = build_policy_resolvers(key, value, bootstrap_clients).await?;
+        let resolvers =
+            build_policy_resolvers(key, value, bootstrap_clients, proxy_registry).await?;
 
         let entry = PolicyEntry {
             nameservers: resolvers,
@@ -339,19 +349,38 @@ async fn build_policy_resolvers(
     key: &str,
     value: &crate::raw::RawNspValue,
     bootstrap_clients: &[Arc<DnsClient>],
+    proxy_registry: &HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>>,
 ) -> Result<Vec<Arc<meow_dns::DnsClient>>, anyhow::Error> {
     let url_strs = value.as_urls();
     let empty_resolved = HashMap::new();
     let mut resolvers = Vec::new();
     for url_str in &url_strs {
-        match NameServerUrl::parse(url_str) {
-            Ok(url) => {
+        match NameServerEntry::parse(url_str) {
+            Ok(entry) => {
                 let Some(url) =
-                    resolve_policy_hostname_url(url, key, url_str, bootstrap_clients).await
+                    resolve_policy_hostname_url(entry.url, key, url_str, bootstrap_clients).await
                 else {
                     continue;
                 };
-                let resolver = Resolver::build_single_resolver(&url, &empty_resolved);
+                // `#PROXY` fragment: route this upstream's exchanges through
+                // the named adapter, matching the nameserver/fallback entry
+                // semantics (issue #67 phase 2, ADR-0012). An unknown name
+                // degrades to a direct dial like the main path does, but
+                // warn loudly — a policy upstream is usually proxied
+                // precisely because the direct path is untrusted.
+                let proxy = entry.proxy.as_deref().and_then(|name| {
+                    let handle = proxy_registry.get(name).cloned();
+                    if handle.is_none() {
+                        warn!(
+                            "nameserver-policy entry '{}': URL '{}' references unknown \
+                            proxy '{}'; dialing direct",
+                            key, url_str, name
+                        );
+                    }
+                    handle
+                });
+                let resolver =
+                    Resolver::build_single_resolver_with_proxy(&url, &empty_resolved, proxy);
                 resolvers.push(resolver);
             }
             Err(e) => {
@@ -785,7 +814,7 @@ mod tests {
             "geosite:cn".to_string(),
             RawNspValue::One("rcode://success".to_string()),
         );
-        let result = build_nameserver_policy(&map, None, &[]).await;
+        let result = build_nameserver_policy(&map, None, &[], &HashMap::new()).await;
         assert!(result.is_ok(), "geosite: prefix must not hard-error");
         let pol = result.unwrap();
         assert!(
@@ -807,7 +836,9 @@ mod tests {
             "geosite:cn,private".to_string(),
             RawNspValue::One("rcode://success".to_string()),
         );
-        let pol = build_nameserver_policy(&map, Some(&db), &[]).await.unwrap();
+        let pol = build_nameserver_policy(&map, Some(&db), &[], &HashMap::new())
+            .await
+            .unwrap();
         assert!(pol.lookup("example.cn").is_some());
         assert!(pol.lookup("lan").is_some());
         assert!(pol.lookup("example.com").is_none());
@@ -824,7 +855,7 @@ mod tests {
             "corp.example".to_string(),
             RawNspValue::Many(vec!["quic://bad.example".to_string()]),
         );
-        let result = build_nameserver_policy(&map, None, &[]).await;
+        let result = build_nameserver_policy(&map, None, &[], &HashMap::new()).await;
         assert!(
             result.is_err(),
             "policy entry with no valid servers must be a hard error"
@@ -840,7 +871,9 @@ mod tests {
             "+.corp.internal".to_string(),
             RawNspValue::One("192.168.1.53".to_string()),
         );
-        let pol = build_nameserver_policy(&map, None, &[]).await.unwrap();
+        let pol = build_nameserver_policy(&map, None, &[], &HashMap::new())
+            .await
+            .unwrap();
         assert!(pol.lookup("foo.corp.internal").is_some());
         assert!(pol.lookup("corp.internal").is_some());
         assert!(pol.lookup("other.example").is_none());
@@ -895,5 +928,112 @@ mod tests {
         assert_eq!(normalize_hosts_wildcard("*.example.com"), "+.example.com");
         assert_eq!(normalize_hosts_wildcard("+.example.com"), "+.example.com");
         assert_eq!(normalize_hosts_wildcard("example.com"), "example.com");
+    }
+
+    // --- nameserver-policy `#PROXY` fragments -----------------------------
+
+    /// Minimal `Proxy` stub for registry-wiring assertions. Dials error —
+    /// these tests only care whether the adapter handle reached the client.
+    struct PolicyStubProxy {
+        health: meow_common::ProxyHealth,
+    }
+
+    #[async_trait::async_trait]
+    impl meow_common::ProxyAdapter for PolicyStubProxy {
+        fn name(&self) -> &str {
+            "Proxy"
+        }
+        fn health(&self) -> &meow_common::ProxyHealth {
+            &self.health
+        }
+        fn adapter_type(&self) -> meow_common::AdapterType {
+            meow_common::AdapterType::Direct
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            false
+        }
+        async fn dial_tcp(
+            &self,
+            _m: &meow_common::Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyConn>> {
+            Err(meow_common::MeowError::NotSupported("stub".into()))
+        }
+        async fn dial_udp(
+            &self,
+            _m: &meow_common::Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyPacketConn>> {
+            Err(meow_common::MeowError::NotSupported("stub".into()))
+        }
+    }
+
+    impl meow_common::Proxy for PolicyStubProxy {
+        fn alive(&self) -> bool {
+            true
+        }
+        fn alive_for_url(&self, _url: &str) -> bool {
+            true
+        }
+        fn last_delay(&self) -> u16 {
+            0
+        }
+        fn last_delay_for_url(&self, _url: &str) -> u16 {
+            0
+        }
+        fn delay_history(&self) -> Vec<meow_common::DelayHistory> {
+            vec![]
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_resolver_attaches_registry_proxy_for_fragment() {
+        let mut registry: HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>> = HashMap::new();
+        registry.insert(
+            "Proxy".into(),
+            Arc::new(PolicyStubProxy {
+                health: meow_common::ProxyHealth::new(),
+            }),
+        );
+        let value = crate::raw::RawNspValue::One("tcp://8.8.8.8#Proxy".to_string());
+        let resolvers = build_policy_resolvers("geosite:gfw", &value, &[], &registry)
+            .await
+            .expect("proxy-tagged policy entry builds");
+        assert_eq!(resolvers.len(), 1);
+        assert!(
+            resolvers[0].is_proxied(),
+            "registry adapter must be wired into the policy client"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_resolver_unknown_proxy_name_degrades_to_direct() {
+        let registry: HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>> = HashMap::new();
+        let value = crate::raw::RawNspValue::Many(vec![
+            "tcp://8.8.8.8#NoSuchProxy".to_string(),
+            "1.1.1.1#NoSuchProxy".to_string(),
+        ]);
+        let resolvers = build_policy_resolvers("geosite:gfw", &value, &[], &registry)
+            .await
+            .expect("unknown proxy name must not fail the policy build");
+        assert_eq!(resolvers.len(), 2);
+        assert!(
+            resolvers.iter().all(|r| !r.is_proxied()),
+            "unknown names degrade to direct dials"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_resolver_tls_fragment_stays_sni() {
+        // For tls:// the fragment is SNI, not a proxy name — must keep
+        // parsing as before and never consult the registry.
+        let registry: HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>> = HashMap::new();
+        let value = crate::raw::RawNspValue::One("tls://8.8.4.4#dns.google".to_string());
+        let resolvers = build_policy_resolvers("example.com", &value, &[], &registry)
+            .await
+            .expect("tls entry with SNI fragment builds");
+        assert_eq!(resolvers.len(), 1);
+        assert!(!resolvers[0].is_proxied());
     }
 }
