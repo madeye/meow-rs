@@ -200,6 +200,12 @@ impl Drop for InflightGuard<'_> {
 /// wrap evictions.
 pub const DEFAULT_FAKE_IP_TTL: Duration = Duration::from_secs(1);
 
+/// TTL stamped on answers that have no upstream TTL to honor: hosts-trie
+/// mappings, and the (rare) fresh-lookup path where the just-written cache
+/// entry got evicted before it could be re-read. Matches the DNS server's
+/// pre-TTL-propagation default so hosts answers behave exactly as before.
+pub const HOSTS_ANSWER_TTL: Duration = Duration::from_secs(60);
+
 fn clamp_ttl(raw: Duration) -> Duration {
     const MIN_TTL: Duration = Duration::from_secs(10);
     const MAX_TTL: Duration = Duration::from_secs(3600);
@@ -817,9 +823,19 @@ impl Resolver {
     }
 
     pub async fn lookup_ipv4(&self, host: &str) -> Option<IpAddr> {
+        self.lookup_ipv4_with_ttl(host).await.map(|(ip, _)| ip)
+    }
+
+    /// Like [`Self::lookup_ipv4`], but also returns the TTL the answer should
+    /// carry: the fake-IP TTL for synthesised addresses, the entry's remaining
+    /// lifetime for cache hits, and the upstream's (clamped) TTL for fresh
+    /// lookups. Hosts-trie hits get [`HOSTS_ANSWER_TTL`] — static mappings
+    /// have no upstream TTL to honor.
+    pub async fn lookup_ipv4_with_ttl(&self, host: &str) -> Option<(IpAddr, Duration)> {
         if self.use_hosts {
             if let Some(ips) = self.hosts.search(host) {
-                return ips.iter().find(|ip| ip.is_ipv4()).copied();
+                let ip = ips.iter().find(|ip| ip.is_ipv4()).copied()?;
+                return Some((ip, HOSTS_ANSWER_TTL));
             }
         }
         // Fake-IP mode: synthesise from the v4 pool unless the skipper says
@@ -828,21 +844,24 @@ impl Resolver {
         if self.mode == DnsMode::FakeIp {
             if let Some(pool) = &self.fakeip_v4 {
                 if !self.skipper_bypasses(host) {
-                    return Some(pool.lookup(host));
+                    return Some((pool.lookup(host), self.fakeip_ttl));
                 }
             }
         }
-        if let Some(ips) = self.cache.get(host) {
-            return ips.iter().find(|ip| ip.is_ipv4()).copied();
-        }
-        let ips = self.lookup_actual_all(host).await?;
-        ips.into_iter().find(std::net::IpAddr::is_ipv4)
+        self.lookup_real_with_ttl(host, std::net::IpAddr::is_ipv4)
+            .await
     }
 
     pub async fn lookup_ipv6(&self, host: &str) -> Option<IpAddr> {
+        self.lookup_ipv6_with_ttl(host).await.map(|(ip, _)| ip)
+    }
+
+    /// AAAA counterpart of [`Self::lookup_ipv4_with_ttl`] — same TTL contract.
+    pub async fn lookup_ipv6_with_ttl(&self, host: &str) -> Option<(IpAddr, Duration)> {
         if self.use_hosts {
             if let Some(ips) = self.hosts.search(host) {
-                return ips.iter().find(|ip| ip.is_ipv6()).copied();
+                let ip = ips.iter().find(|ip| ip.is_ipv6()).copied()?;
+                return Some((ip, HOSTS_ANSWER_TTL));
             }
         }
         // Fake-IP mode for AAAA: synthesise from the v6 pool if configured.
@@ -852,18 +871,39 @@ impl Resolver {
         if self.mode == DnsMode::FakeIp {
             if let Some(pool) = &self.fakeip_v6 {
                 if !self.skipper_bypasses(host) {
-                    return Some(pool.lookup(host));
+                    return Some((pool.lookup(host), self.fakeip_ttl));
                 }
             } else if self.fakeip_v4.is_some() && !self.skipper_bypasses(host) {
                 // v4-only fake-ip config: suppress AAAA so clients fall back.
                 return None;
             }
         }
-        if let Some(ips) = self.cache.get(host) {
-            return ips.iter().find(|ip| ip.is_ipv6()).copied();
+        self.lookup_real_with_ttl(host, std::net::IpAddr::is_ipv6)
+            .await
+    }
+
+    /// Cache-then-upstream address lookup carrying the answer TTL. Cache hits
+    /// report the entry's remaining lifetime; upstream lookups re-read the
+    /// cache entry `do_lookup` just wrote, so the answer reflects the same
+    /// (clamped) TTL the cache will honor. The re-read can only miss on a
+    /// zero-capacity cache or an eviction race — fall back to the upstream
+    /// answer with [`HOSTS_ANSWER_TTL`] rather than dropping it.
+    async fn lookup_real_with_ttl(
+        &self,
+        host: &str,
+        family: fn(&IpAddr) -> bool,
+    ) -> Option<(IpAddr, Duration)> {
+        if let Some((ips, remaining)) = self.cache.get_with_ttl(host) {
+            let ip = ips.iter().find(|ip| family(ip)).copied()?;
+            return Some((ip, remaining));
         }
         let ips = self.lookup_actual_all(host).await?;
-        ips.into_iter().find(std::net::IpAddr::is_ipv6)
+        let ip = ips.into_iter().find(family)?;
+        let ttl = self
+            .cache
+            .get_with_ttl(host)
+            .map_or(HOSTS_ANSWER_TTL, |(_, remaining)| remaining);
+        Some((ip, ttl))
     }
 
     fn skipper_bypasses(&self, host: &str) -> bool {
@@ -999,6 +1039,26 @@ impl Resolver {
             return Some(result.ips);
         }
         None
+    }
+
+    /// Capture the live reverse (IP → host) table with remaining lifetimes,
+    /// for persistence across an engine restart. Fake-IP pool mappings are
+    /// not included — the pools have their own [`crate::fakeip::Store`]
+    /// persistence.
+    pub fn reverse_cache_snapshot(&self) -> Vec<crate::cache::ReverseSnapshotEntry> {
+        self.cache.reverse_snapshot()
+    }
+
+    /// Restore reverse (IP → host) entries captured by
+    /// [`Self::reverse_cache_snapshot`] in a previous run. Call at startup,
+    /// before traffic: in redir-host (Mapping) mode this is what lets
+    /// connections dialed from pre-restart DNS answers still recover their
+    /// hostname for rule matching.
+    pub fn restore_reverse_cache(
+        &self,
+        entries: impl IntoIterator<Item = crate::cache::ReverseSnapshotEntry>,
+    ) {
+        self.cache.restore_reverse(entries);
     }
 
     pub fn reverse_lookup(&self, ip: IpAddr) -> Option<SmolStr> {
@@ -1329,6 +1389,75 @@ mod tests {
         assert!(
             aaaa.is_some_and(|ip| ip.is_ipv6() && dual.is_fake_ip(ip)),
             "AAAA must return a v6 fake IP when a v6 pool is configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_with_ttl_reports_remaining_cache_lifetime() {
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Mapping, DomainTrie::new(), true);
+        let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        resolver
+            .cache
+            .put("cached.test", &[real], Duration::from_secs(300));
+        let (ip, ttl) = resolver
+            .lookup_ipv4_with_ttl("cached.test")
+            .await
+            .expect("cache hit");
+        assert_eq!(ip, real);
+        assert!(ttl <= Duration::from_secs(300));
+        assert!(
+            ttl > Duration::from_secs(295),
+            "ttl {ttl:?} should be the remaining lifetime, not a constant"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_with_ttl_uses_hosts_ttl_for_static_mappings() {
+        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let pinned = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        hosts.insert("pinned.test", vec![pinned]);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Mapping, hosts, true);
+        assert_eq!(
+            resolver.lookup_ipv4_with_ttl("pinned.test").await,
+            Some((pinned, HOSTS_ANSWER_TTL))
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_with_ttl_reports_fake_ip_ttl_for_synthesised_answers() {
+        use crate::fakeip::MemoryStore;
+        let mut resolver = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+        resolver.set_fakeip_v4(Arc::new(
+            Pool::new(
+                "198.18.0.0/16".parse().unwrap(),
+                Arc::new(MemoryStore::new(1024)),
+            )
+            .unwrap(),
+        ));
+        let (ip, ttl) = resolver
+            .lookup_ipv4_with_ttl("example.com")
+            .await
+            .expect("fake-IP synthesis");
+        assert!(resolver.is_fake_ip(ip));
+        assert_eq!(ttl, DEFAULT_FAKE_IP_TTL);
+    }
+
+    #[test]
+    fn reverse_cache_snapshot_restore_round_trips_via_resolver() {
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Mapping, DomainTrie::new(), true);
+        let ip = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        resolver
+            .cache
+            .put("persist.test", &[ip], Duration::from_secs(60));
+        let snap = resolver.reverse_cache_snapshot();
+        assert_eq!(snap.len(), 1);
+
+        let restarted = Resolver::new(vec![], vec![], DnsMode::Mapping, DomainTrie::new(), true);
+        assert!(restarted.reverse_lookup(ip).is_none());
+        restarted.restore_reverse_cache(snap);
+        assert_eq!(
+            restarted.reverse_lookup(ip).as_deref(),
+            Some("persist.test")
         );
     }
 

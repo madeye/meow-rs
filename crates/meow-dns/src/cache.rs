@@ -91,6 +91,21 @@ pub struct DnsCacheSnapshotEntry {
     pub source: Option<String>,
 }
 
+/// One live reverse (IP → host) mapping, as captured by
+/// [`DnsCache::reverse_snapshot`] and re-inserted by
+/// [`DnsCache::restore_reverse`]. `remaining` is the entry's lifetime left at
+/// snapshot time; the pair exists so an embedding process can persist the
+/// reverse table across an engine restart (redir-host mode loses IP → host
+/// recovery for every connection dialed from a pre-restart DNS answer
+/// otherwise). Wall-clock anchoring of `remaining` across the restart gap is
+/// the caller's job — `Instant` doesn't survive a process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReverseSnapshotEntry {
+    pub ip: IpAddr,
+    pub domain: String,
+    pub remaining: Duration,
+}
+
 /// FNV-1a 32-bit hash over the bytes of `s`. Inline so it can be used on
 /// `&str` or `&[u8]` without allocation. The cache only needs the result for
 /// shard selection — quality matters less than speed.
@@ -132,13 +147,24 @@ impl DnsCache {
     }
 
     pub fn get(&self, domain: &str) -> Option<IpList> {
+        self.get_with_ttl(domain).map(|(ips, _)| ips)
+    }
+
+    /// Like [`Self::get`], but also returns the entry's remaining lifetime, so
+    /// answers served from cache can carry the upstream's real TTL (decayed by
+    /// time already spent in cache) instead of a synthetic constant.
+    pub fn get_with_ttl(&self, domain: &str) -> Option<(IpList, Duration)> {
         let domain = normalize_domain(domain);
         let shard = &self.cache[shard_str(&domain)];
         let mut cache = shard.lock();
         let mut expired = false;
         if let Some(entry) = cache.get(domain.as_ref()) {
-            if entry.expire_at > Instant::now() {
-                return Some(SmallVec::from_slice(&entry.ips));
+            let now = Instant::now();
+            if entry.expire_at > now {
+                return Some((
+                    SmallVec::from_slice(&entry.ips),
+                    entry.expire_at.saturating_duration_since(now),
+                ));
             }
             // Expired — flag for eviction; can't pop while `entry` borrows.
             expired = true;
@@ -257,6 +283,60 @@ impl DnsCache {
         }
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
+    }
+
+    /// Capture every live reverse (IP → host) entry with its remaining
+    /// lifetime. Expired entries are evicted on the way through, mirroring
+    /// [`Self::snapshot`]. Output is sorted by IP so identical table states
+    /// serialize identically — callers persisting to disk can cheaply skip
+    /// rewrites when nothing changed.
+    pub fn reverse_snapshot(&self) -> Vec<ReverseSnapshotEntry> {
+        let now = Instant::now();
+        let mut entries = Vec::new();
+        for shard in &self.reverse {
+            let mut reverse = shard.lock();
+            let expired: Vec<IpAddr> = reverse
+                .iter()
+                .filter(|(_, entry)| entry.expire_at <= now)
+                .map(|(ip, _)| *ip)
+                .collect();
+            for ip in expired {
+                reverse.pop(&ip);
+            }
+            entries.extend(reverse.iter().map(|(ip, entry)| ReverseSnapshotEntry {
+                ip: *ip,
+                domain: entry.domain.to_string(),
+                remaining: entry.expire_at.saturating_duration_since(now),
+            }));
+        }
+        entries.sort_by_key(|e| e.ip);
+        entries
+    }
+
+    /// Re-insert reverse entries captured by [`Self::reverse_snapshot`] in a
+    /// previous run. Entries whose `remaining` has decayed to zero are
+    /// skipped; per-shard capacity is enforced as on the normal insert path.
+    /// Existing entries for the same IP are overwritten — call this before
+    /// live traffic populates the table (fresh answers would be clobbered by
+    /// stale persisted ones otherwise).
+    pub fn restore_reverse(&self, entries: impl IntoIterator<Item = ReverseSnapshotEntry>) {
+        let now = Instant::now();
+        for e in entries {
+            if e.remaining.is_zero() {
+                continue;
+            }
+            let mut reverse = self.reverse[shard_ip(e.ip)].lock();
+            reverse.put(
+                e.ip,
+                ReverseEntry {
+                    domain: Arc::from(e.domain.as_str()),
+                    expire_at: now + e.remaining,
+                },
+            );
+            if reverse.len() > self.rev_shard_cap {
+                reverse.pop_lru();
+            }
+        }
     }
 
     /// Insert a reverse entry with an explicit expiry. Test-only: lets unit
@@ -402,6 +482,92 @@ mod tests {
             c.reverse_lookup(ip).as_deref(),
             Some("short.example"),
             "reverse mapping must outlive the short forward TTL"
+        );
+    }
+
+    #[test]
+    fn get_with_ttl_returns_decaying_remaining() {
+        let c = DnsCache::new(64);
+        c.put("ttl.example", &[ipv4(1, 2, 3, 4)], Duration::from_secs(300));
+        let (ips, remaining) = c.get_with_ttl("ttl.example").expect("cache hit");
+        assert_eq!(ips.as_slice(), &[ipv4(1, 2, 3, 4)]);
+        assert!(remaining <= Duration::from_secs(300));
+        assert!(
+            remaining > Duration::from_secs(295),
+            "remaining {remaining:?} decayed implausibly fast"
+        );
+        assert!(c.get_with_ttl("miss.example").is_none());
+    }
+
+    #[test]
+    fn reverse_snapshot_restore_round_trips() {
+        let c = DnsCache::new(64);
+        c.put(
+            "snap.example",
+            &[ipv4(192, 0, 2, 10), ipv4(192, 0, 2, 11)],
+            Duration::from_secs(30),
+        );
+        let snap = c.reverse_snapshot();
+        assert_eq!(snap.len(), 2);
+        assert!(snap.iter().all(|e| e.domain == "snap.example"));
+        assert!(snap
+            .iter()
+            .all(|e| e.remaining > Duration::ZERO && e.remaining <= REVERSE_TTL_FLOOR));
+        // Sorted by IP for stable serialization.
+        assert!(snap.windows(2).all(|w| w[0].ip <= w[1].ip));
+
+        // "Restart": restore into a fresh cache, reverse lookups work again.
+        let fresh = DnsCache::new(64);
+        fresh.restore_reverse(snap);
+        assert_eq!(
+            fresh.reverse_lookup(ipv4(192, 0, 2, 10)).as_deref(),
+            Some("snap.example")
+        );
+        assert_eq!(
+            fresh.reverse_lookup(ipv4(192, 0, 2, 11)).as_deref(),
+            Some("snap.example")
+        );
+        assert_eq!(fresh.reverse_len(), 2);
+    }
+
+    #[test]
+    fn reverse_snapshot_evicts_and_omits_expired() {
+        let c = DnsCache::new(64);
+        let past = Instant::now() - Duration::from_secs(1);
+        c.put_reverse_with_expiry(ipv4(10, 0, 0, 9), "dead.example", past);
+        c.put(
+            "live.example",
+            &[ipv4(10, 0, 0, 10)],
+            Duration::from_secs(30),
+        );
+        let snap = c.reverse_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].domain, "live.example");
+        // The expired entry was evicted as a side-effect.
+        assert_eq!(c.reverse_len(), 1);
+    }
+
+    #[test]
+    fn restore_reverse_skips_zero_remaining_and_enforces_cap() {
+        let c = DnsCache::new(16); // rev per-shard cap = 16 → global ≤ 256
+        let mut entries = vec![ReverseSnapshotEntry {
+            ip: ipv4(10, 1, 0, 0),
+            domain: "expired.example".into(),
+            remaining: Duration::ZERO,
+        }];
+        for i in 0..2000u32 {
+            entries.push(ReverseSnapshotEntry {
+                ip: ipv4(10, (i >> 8) as u8, (i & 0xff) as u8, 1),
+                domain: format!("r{i}.example"),
+                remaining: Duration::from_secs(60),
+            });
+        }
+        c.restore_reverse(entries);
+        assert!(c.reverse_lookup(ipv4(10, 1, 0, 0)).is_none());
+        assert!(
+            c.reverse_len() <= 256,
+            "reverse_len {} exceeded global shard cap",
+            c.reverse_len()
         );
     }
 

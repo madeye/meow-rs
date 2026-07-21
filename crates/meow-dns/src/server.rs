@@ -125,23 +125,25 @@ impl DnsServer {
         }
 
         // Resolve using our resolver (cache + upstream + fake-IP synthesis).
+        // The resolver reports the TTL each answer should carry: the short
+        // fake-IP TTL for synthesised addresses (clients must re-query after
+        // pool eviction), and the upstream's real TTL — decayed by time spent
+        // in cache — for everything else, so redir-host / normal-mode clients
+        // expire their own caches on the upstream's schedule instead of a
+        // synthetic constant.
         let ip = if qtype == 1 {
-            resolver.lookup_ipv4(&domain).await
+            resolver.lookup_ipv4_with_ttl(&domain).await
         } else {
-            resolver.lookup_ipv6(&domain).await
+            resolver.lookup_ipv6_with_ttl(&domain).await
         };
 
-        // Synthesised fake-IP responses get a short TTL so clients re-query
-        // after pool eviction. Real upstream answers keep the default.
-        let ttl =
-            if resolver.mode() == DnsMode::FakeIp && ip.is_some_and(|i| resolver.is_fake_ip(i)) {
-                resolver.fake_ip_ttl().as_secs().clamp(1, u32::MAX as u64) as u32
-            } else {
-                DEFAULT_ANSWER_TTL_SECS
-            };
-
         Ok(match ip {
-            Some(addr) => Self::build_response(id, data, qtype, addr, ttl),
+            Some((addr, ttl)) => {
+                // Sub-second remainders round up to 1 — a 0-TTL answer means
+                // "never cache", which is stricter than the entry deserves.
+                let ttl_secs = ttl.as_secs().clamp(1, u64::from(u32::MAX)) as u32;
+                Self::build_response(id, data, qtype, addr, ttl_secs)
+            }
             // Fake-IP mode AAAA when only v4 pool is configured: return
             // NOERROR-empty so clients fall back to IPv4 cleanly. NXDOMAIN
             // would tell them "no such host" — wrong signal.
