@@ -7,10 +7,12 @@ on:
   push:
     paths:
       - "Cargo.lock"
+      - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   pull_request:
     paths:
       - "Cargo.lock"
+      - ".cargo/audit.toml"
       - ".github/workflows/audit.yml"
   workflow_dispatch:
 
