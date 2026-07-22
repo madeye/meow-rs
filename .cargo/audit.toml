@@ -1,7 +1,9 @@
 # cargo-audit configuration.
 #
-# Three advisories are ignored — all pulled transitively via the `anytls-rs`
-# fork's `trust-dns-resolver 0.23` dep, none applicable to this workspace:
+# Four advisories are ignored, none applicable to this workspace.
+#
+# Three are pulled transitively via the `anytls-rs` fork's
+# `trust-dns-resolver 0.23` dep:
 #
 # * RUSTSEC-2024-0421 (`idna` 0.4 — privilege escalation via URL hostname
 #   comparison). Our use is DNS resolution, not URL/origin comparison.
@@ -9,10 +11,21 @@
 #   pending upstream `anytls-rs` migration.
 # * RUSTSEC-2025-0134 (`rustls-pemfile` rolled into `rustls-pki-types`). Same,
 #   pending upstream `anytls-rs` migration.
+#
+# One is pulled transitively via the TUN inbound's Linux netlink stack
+# (`tun-rs`/`route_manager` → `netlink-packet-core`):
+#
+# * RUSTSEC-2024-0436 (`paste` — unmaintained, no vulnerability). Build-time
+#   proc-macro only, compiled solely for Linux targets behind the opt-in
+#   `listener-tun` feature. The latest `netlink-packet-core` (0.8.1, and its
+#   git main as of 2026-07) still depends on `paste`, so there is no upstream
+#   fix to take. Re-evaluate when rust-netlink migrates (e.g. to `pastey`).
+#   Tracked in issue #349.
 
 [advisories]
 ignore = [
     "RUSTSEC-2024-0421",
     "RUSTSEC-2025-0017",
     "RUSTSEC-2025-0134",
+    "RUSTSEC-2024-0436",
 ]
