@@ -40,6 +40,13 @@ mod macos {
     // pf address type
     const PF_ADDR_IPV4: u8 = 2; // AF_INET
 
+    // Lookup direction, from <net/pfvar.h>: PF_INOUT = 0, PF_IN = 1, PF_OUT = 2.
+    // An `rdr` state's pre-translation destination is keyed under PF_OUT —
+    // querying with PF_IN hits the wrong state tree and returns ENOENT for
+    // every connection (issue #248). Squid's pf interception and OpenBSD's
+    // ftp-proxy both use PF_OUT for this lookup.
+    const PF_OUT: u8 = 2;
+
     /// pf address union — we only handle IPv4 for now.
     #[repr(C)]
     #[derive(Copy, Clone)]
@@ -145,7 +152,7 @@ mod macos {
         let mut nl = PfiocNatlook {
             af: PF_ADDR_IPV4,
             proto: libc::IPPROTO_TCP as u8,
-            direction: 1, // PF_IN
+            direction: PF_OUT,
             ..Default::default()
         };
 
