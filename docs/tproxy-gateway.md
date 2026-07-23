@@ -368,4 +368,4 @@ rule — confirm the client's source IP appears:
   (`net.inet.ip.portrange.first`–65535, default 49152+) are not intercepted:
   the `rdr` exempts them so the listener's own replies — which target the
   client's ephemeral port and re-traverse `lo0` — aren't redirected back into
-  the listener (issue #354).
+  the listener (issue #354). Setup guide: [tproxy-macos.md](tproxy-macos.md).

@@ -16,7 +16,9 @@ root for the firewall (`nft` on Linux, `pfctl` on macOS).
 install — so the gateway scripts do.
 
 Full background (how meow's tproxy works, fake-ip vs redir-host, the non-loopback
-listener requirement) is in [`docs/tproxy-gateway.md`](../docs/tproxy-gateway.md).
+listener requirement) is in [`docs/tproxy-gateway.md`](../docs/tproxy-gateway.md);
+the macOS local-mode guide (pf anchor, `route-to lo0` recipe, limitations) is
+[`docs/tproxy-macos.md`](../docs/tproxy-macos.md).
 
 ---
 
