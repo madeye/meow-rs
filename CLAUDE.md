@@ -83,7 +83,7 @@ The workspace has 13 crates (see also [ADR-0009](docs/adr/0009-cleanup-scope.md)
 
 ### Transparent-proxy gateway
 
-The built-in TProxy listener firewall (`meow-listener/src/tproxy/firewall.rs`) is `output`-chain/REDIRECT-based and only covers the **host's own** traffic — it is *not* a forwarding LAN gateway. To proxy *other* devices' traffic you add prerouting rules + a DNS hijack yourself. Helper scripts automate this: `scripts/tproxy-gateway-linux.sh` (nftables) and `scripts/tproxy-gateway-macos.sh` (pf, experimental). Full setup, DNS-mode (fake-ip vs redir-host) trade-offs, and systemd wiring are in [docs/tproxy-gateway.md](docs/tproxy-gateway.md). Note: the top-level `tproxy-port` hard-binds `127.0.0.1`; a gateway must declare the listener via `listeners:` with a non-loopback `listen`.
+The built-in TProxy listener firewall (`meow-listener/src/tproxy/firewall.rs`) is `output`-chain/REDIRECT-based and only covers the **host's own** traffic — it is *not* a forwarding LAN gateway. To proxy *other* devices' traffic you add prerouting rules + a DNS hijack yourself. Helper scripts automate this: `scripts/tproxy-gateway-linux.sh` (nftables) and `scripts/tproxy-gateway-macos.sh` (pf, experimental). Full setup, DNS-mode (fake-ip vs redir-host) trade-offs, and systemd wiring are in [docs/tproxy-gateway.md](docs/tproxy-gateway.md). macOS *local* tproxy (managed pf anchor + manual `route-to lo0` for real outbound traffic, IPv4 TCP only) is documented in [docs/tproxy-macos.md](docs/tproxy-macos.md). Note: the top-level `tproxy-port` hard-binds `127.0.0.1`; a gateway must declare the listener via `listeners:` with a non-loopback `listen`.
 
 ### TUN inbound (Windows transparent proxy)
 
