@@ -72,11 +72,35 @@ struct PlatformGuard {
 ///
 /// Extracted as a pure function so the macOS-specific syntax can be unit
 /// tested without invoking `pfctl(8)`.
+///
+/// `ephemeral_first` is the low end of the client ephemeral port range
+/// (`net.inet.ip.portrange.first`); see the `no rdr` exemption below.
 #[cfg(any(target_os = "macos", test))]
-pub(crate) fn build_pf_ruleset(uid: u32, listen_port: u16, bypass_ips: &[IpAddr]) -> String {
+pub(crate) fn build_pf_ruleset(
+    uid: u32,
+    listen_port: u16,
+    ephemeral_first: u16,
+    bypass_ips: &[IpAddr],
+) -> String {
     // Translation first: redirect lo0 TCP to the local tproxy listener.
+    //
+    // Every lo0 packet traverses pf twice (out, then in). Without an
+    // exemption, the listener's own SYN-ACK — un-translated on the outbound
+    // pass — re-enters lo0 inbound, matches the broad `rdr` as a *new*
+    // connection, and is rewritten back into the listener: every intercepted
+    // handshake wedges in SYN_SENT (issue #354). `rdr` rules cannot match TCP
+    // flags, so the discriminator is the destination port: replies go to the
+    // client's ephemeral source port, fresh SYNs to service ports. Exempting
+    // ephemeral destination ports lets replies through; the trade-off is that
+    // destinations listening on ephemeral-range ports bypass the proxy (fail
+    // open) instead of wedging. Translation rules are first-match, so the
+    // `no rdr` must precede the `rdr`.
     let mut rules =
-        format!("rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {listen_port}\n");
+        format!("no rdr on lo0 proto tcp from any to any port {ephemeral_first}:65535\n");
+    let _ = writeln!(
+        rules,
+        "rdr pass on lo0 proto tcp from any to any -> 127.0.0.1 port {listen_port}"
+    );
     // Then filtering bypasses (our own uid, loopback, upstream proxy servers).
     let _ = writeln!(
         rules,
@@ -87,6 +111,30 @@ pub(crate) fn build_pf_ruleset(uid: u32, listen_port: u16, bypass_ips: &[IpAddr]
         let _ = writeln!(rules, "pass out quick on lo0 proto tcp from any to {ip}");
     }
     rules
+}
+
+/// Low end of the kernel's ephemeral (local) port range, used by `connect()`
+/// when picking source ports — replies to intercepted connections always
+/// target a port at or above it. Falls back to the macOS default (49152) if
+/// the sysctl is unreadable or out of range.
+#[cfg(target_os = "macos")]
+fn ephemeral_port_first() -> u16 {
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let ret = unsafe {
+        libc::sysctlbyname(
+            c"net.inet.ip.portrange.first".as_ptr(),
+            std::ptr::from_mut(&mut value).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret == 0 && (1..=65535).contains(&value) {
+        value as u16
+    } else {
+        49152
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -104,7 +152,7 @@ impl PlatformGuard {
         let anchor = "com.apple/com.meow.tproxy".to_string();
         let uid = unsafe { libc::getuid() };
 
-        let rules = build_pf_ruleset(uid, listen_port, bypass_ips);
+        let rules = build_pf_ruleset(uid, listen_port, ephemeral_port_first(), bypass_ips);
 
         let tmp_path = format!("/tmp/meow_tproxy_{pid}.conf", pid = std::process::id());
         std::fs::write(&tmp_path, &rules)?;
@@ -390,7 +438,7 @@ mod tests {
 
     #[test]
     fn pf_ruleset_contains_uid_bypass_and_redirect() {
-        let rs = build_pf_ruleset(501, 7893, &[]);
+        let rs = build_pf_ruleset(501, 7893, 49152, &[]);
         assert!(
             rs.contains("pass out quick on lo0 proto tcp from any to any user 501"),
             "UID bypass missing:\n{rs}"
@@ -405,16 +453,41 @@ mod tests {
         // translation (`rdr`) — "Rules must be in order: …, translation,
         // filtering". The `rdr` must therefore come first, or the anchor fails
         // to load and the tproxy listener never starts (regression guard).
-        let rs = build_pf_ruleset(501, 7893, &[]);
+        let rs = build_pf_ruleset(501, 7893, 49152, &[]);
         let rdr_pos = rs.find("rdr pass").unwrap();
         let uid_pos = rs.find("user 501").unwrap();
         assert!(rdr_pos < uid_pos, "rdr must precede filter rules:\n{rs}");
     }
 
     #[test]
+    fn pf_replies_to_ephemeral_ports_are_exempt_from_rdr() {
+        // Issue #354: on lo0 every packet traverses pf twice, so without this
+        // exemption the listener's own SYN-ACK (destined to the client's
+        // ephemeral port) re-matches the broad `rdr` inbound and is redirected
+        // back into the listener — every intercepted handshake wedges.
+        let rs = build_pf_ruleset(501, 7893, 49152, &[]);
+        assert!(
+            rs.contains("no rdr on lo0 proto tcp from any to any port 49152:65535"),
+            "ephemeral-port rdr exemption missing:\n{rs}"
+        );
+        // Translation rules are first-match: the exemption must precede the rdr.
+        let no_rdr_pos = rs.find("no rdr").unwrap();
+        let rdr_pos = rs.find("rdr pass").unwrap();
+        assert!(no_rdr_pos < rdr_pos, "no rdr must precede rdr:\n{rs}");
+    }
+
+    #[test]
+    fn pf_ephemeral_range_is_parameterized() {
+        // The exemption must track the kernel's actual ephemeral range
+        // (net.inet.ip.portrange.first), not a hardcoded default.
+        let rs = build_pf_ruleset(501, 7893, 10000, &[]);
+        assert!(rs.contains("no rdr on lo0 proto tcp from any to any port 10000:65535"));
+    }
+
+    #[test]
     fn pf_bypass_ips_are_emitted() {
         let bypass = [IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))];
-        let rs = build_pf_ruleset(501, 7893, &bypass);
+        let rs = build_pf_ruleset(501, 7893, 49152, &bypass);
         assert!(rs.contains("pass out quick on lo0 proto tcp from any to 1.1.1.1"));
     }
 }
