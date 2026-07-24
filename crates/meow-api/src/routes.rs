@@ -473,6 +473,28 @@ struct ConnectionsParams {
     interval: Option<String>,
 }
 
+/// Floor for the `/connections` WebSocket push interval. Each tick
+/// re-serializes the whole connection table while holding DashMap shard
+/// read-guards, so a sub-100ms interval is a self-DoS lever on the API
+/// worker rather than a useful refresh rate. Out-of-range values are
+/// clamped, not rejected: `0` stays a 400 (upstream contract), anything
+/// else is a well-formed request that just asked for too much.
+const MIN_CONNECTIONS_INTERVAL_MS: u64 = 100;
+
+/// Parse the `interval` query param: `None` on `0` / non-numeric input
+/// (rendered as `400 Body invalid` by the caller), otherwise the value in
+/// milliseconds, defaulted to 1000 and clamped to
+/// [`MIN_CONNECTIONS_INTERVAL_MS`].
+fn parse_connections_interval(raw: Option<&str>) -> Option<u64> {
+    match raw {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(0) | Err(_) => None,
+            Ok(value) => Some(value.max(MIN_CONNECTIONS_INTERVAL_MS)),
+        },
+        None => Some(1000),
+    }
+}
+
 async fn connections_json(state: &AppState) -> String {
     let stats = state.tunnel.statistics();
     let (up, down) = stats.snapshot();
@@ -503,12 +525,8 @@ async fn get_connections(
     Query(params): Query<ConnectionsParams>,
     MaybeWebSocket(ws): MaybeWebSocket,
 ) -> Response {
-    let interval_ms = match params.interval.as_deref() {
-        Some(raw) => match raw.parse::<u64>() {
-            Ok(0) | Err(_) => return msg_err(StatusCode::BAD_REQUEST, "Body invalid"),
-            Ok(value) => value,
-        },
-        None => 1000,
+    let Some(interval_ms) = parse_connections_interval(params.interval.as_deref()) else {
+        return msg_err(StatusCode::BAD_REQUEST, "Body invalid");
     };
 
     if let Some(ws) = ws {
@@ -2362,4 +2380,33 @@ async fn get_listeners(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         })
         .collect();
     Json(serde_json::json!(items))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connections_interval_rejects_zero_and_garbage() {
+        // `0` and non-numeric input stay a 400 at the handler — the parser
+        // signals both with `None`.
+        assert_eq!(parse_connections_interval(Some("0")), None);
+        assert_eq!(parse_connections_interval(Some("abc")), None);
+        assert_eq!(parse_connections_interval(Some("-1")), None);
+        assert_eq!(parse_connections_interval(Some("")), None);
+    }
+
+    #[test]
+    fn connections_interval_clamps_to_floor() {
+        assert_eq!(parse_connections_interval(Some("1")), Some(100));
+        assert_eq!(parse_connections_interval(Some("99")), Some(100));
+        assert_eq!(parse_connections_interval(Some("100")), Some(100));
+    }
+
+    #[test]
+    fn connections_interval_passes_through_above_floor() {
+        assert_eq!(parse_connections_interval(Some("101")), Some(101));
+        assert_eq!(parse_connections_interval(Some("5000")), Some(5000));
+        assert_eq!(parse_connections_interval(None), Some(1000));
+    }
 }
