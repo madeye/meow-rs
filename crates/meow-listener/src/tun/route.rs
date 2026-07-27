@@ -24,7 +24,7 @@ impl RouteGuard {
         let mut manager = RouteManager::new()?;
         let mut installed = Vec::with_capacity(nets.len());
         for net in nets {
-            let route = Route::new(net.addr(), net.prefix_len()).with_if_index(if_index);
+            let route = Route::new(net.network(), net.prefix_len()).with_if_index(if_index);
             match manager.add(&route) {
                 Ok(()) => {
                     debug!("tun auto-route: added {net} via if_index {if_index}");
