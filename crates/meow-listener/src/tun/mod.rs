@@ -33,6 +33,7 @@
 //! (CAP_NET_ADMIN).
 
 mod device;
+mod dns;
 mod route;
 mod udp;
 
@@ -183,6 +184,21 @@ impl TunListener {
                     None
                 }
             }
+        } else {
+            None
+        };
+
+        // When dns-hijack is on and we're in fake-IP mode, point the OS
+        // resolver at the fake-IP gateway (e.g. 198.18.0.1).  DNS queries
+        // will route into the TUN device, be answered with fake IPs, and
+        // client traffic to those fake IPs will be captured by the route
+        // guard above.  The guard restores the original resolver config
+        // when the listener exits.
+        let _dns_guard = if cfg.dns_hijack && cfg.auto_route {
+            self.tunnel
+                .resolver()
+                .fake_ip_v4_gateway()
+                .and_then(dns::DnsGuard::setup)
         } else {
             None
         };

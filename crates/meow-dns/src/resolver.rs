@@ -1137,6 +1137,13 @@ impl Resolver {
         self.fakeip_v4.as_ref().map(|p| p.ipnet())
     }
 
+    /// The v4 fake-IP pool gateway (network + 1, e.g. `198.18.0.1`). When
+    /// `dns-hijack` is active, the OS resolver should be pointed here so
+    /// that DNS queries enter the TUN and are answered with fake IPs.
+    pub fn fake_ip_v4_gateway(&self) -> Option<std::net::IpAddr> {
+        self.fakeip_v4.as_ref().map(|p| p.gateway())
+    }
+
     /// Install a v4 fake-IP pool. Caller wires this after `new_with_bootstrap`.
     pub fn set_fakeip_v4(&mut self, pool: Arc<Pool>) {
         self.fakeip_v4 = Some(pool);
