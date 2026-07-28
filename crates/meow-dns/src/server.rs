@@ -106,14 +106,24 @@ impl DnsServer {
         let id = u16::from_be_bytes([data[0], data[1]]);
         let flags = u16::from_be_bytes([data[2], data[3]]);
         let qdcount = u16::from_be_bytes([data[4], data[5]]);
+        let arcount = u16::from_be_bytes([data[10], data[11]]);
 
         if qdcount == 0 {
             return Err("No questions in DNS query".into());
         }
 
         // Parse the question name
-        let (domain, qtype, _offset) = Self::parse_question(&data[12..])?;
-        debug!("DNS query: {} type={}", domain, qtype);
+        let (domain, qtype, _offset) = Self::parse_question(&data[12..])
+            .map_err(|e| {
+                info!(
+                    "DNS query parse_question failed: {e} | bytes: {}",
+                    hex_prefix(&data[12..], 64)
+                );
+                e
+            })?;
+        info!(
+            "DNS query: id={id:#06x} flags={flags:#06x} qdcount={qdcount} arcount={arcount} domain={domain} qtype={qtype}"
+        );
 
         // Non-address queries (TXT, MX, SRV, HTTPS, SOA, PTR, …) go through
         // the same nameserver pipeline as A/AAAA — policy → main → fallback —
@@ -510,6 +520,15 @@ fn strip_svc_ip_hints(rec: &Record) -> Record {
         _ => return rec.clone(),
     };
     Record::from_rdata(rec.name.clone(), rec.ttl, new_rdata)
+}
+
+fn hex_prefix(data: &[u8], max: usize) -> String {
+    let n = data.len().min(max);
+    data[..n]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]

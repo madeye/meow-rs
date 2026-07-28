@@ -73,12 +73,22 @@ pub(super) async fn run_udp(
         if dns_hijack && dst.port() == 53 {
             let resolver = Arc::clone(tunnel.resolver());
             let reply_tx = reply_tx.clone();
+            let qhex = hex_prefix(&data, 48);
+            info!(
+                "tun dns-hijack: recv {} bytes from {src} to {dst} | {qhex}",
+                data.len(),
+            );
             tokio::spawn(async move {
                 match DnsServer::handle_query(&data, &resolver).await {
                     Ok(response) => {
+                        let rhex = hex_prefix(&response, 48);
+                        info!(
+                            "tun dns-hijack: reply {} bytes -> {src} | {rhex}",
+                            response.len(),
+                        );
                         let _ = reply_tx.send((response, dst, src)).await;
                     }
-                    Err(e) => debug!("tun dns-hijack: unanswerable query: {e}"),
+                    Err(e) => info!("tun dns-hijack: unanswerable query from {src}: {e}"),
                 }
             });
             continue;
@@ -240,4 +250,13 @@ async fn relay_flow(
 
     let _ = conn.close();
     result
+}
+
+fn hex_prefix(data: &[u8], max: usize) -> String {
+    let n = data.len().min(max);
+    data[..n]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
