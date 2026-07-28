@@ -68,8 +68,8 @@ pub struct TunnelInner {
     /// PROCESS-PATH / UID). Recomputed by `Tunnel::update_rules`. Avoids an
     /// O(n) virtual-dispatch scan of the rule list on every connection.
     pub needs_process_lookup: AtomicBool,
-    /// Handle to the running TUN listener (if any). Dropping or aborting it
-    /// stops TUN. Stored so `put_configs` can start/stop TUN at runtime.
+    /// Handle to the running TUN listener (if any). Abort + await it to
+    /// stop TUN. Stored so `put_configs` can start/stop TUN at runtime.
     pub tun_handle: RwLock<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -427,28 +427,34 @@ impl Tunnel {
     }
 
     /// Store a running TUN listener handle. If a previous TUN listener was
-    /// running, it is aborted first.
-    pub fn set_tun_handle(&self, handle: tokio::task::JoinHandle<()>) {
-        let mut slot = self.inner.tun_handle.write();
-        if let Some(prev) = slot.take() {
+    /// running, it is aborted and awaited so the old device is fully
+    /// released before the new one starts.
+    pub async fn set_tun_handle(&self, handle: tokio::task::JoinHandle<()>) {
+        let prev = self.inner.tun_handle.write().replace(handle);
+        // parking_lot RwLock write guard is dropped here — safe to .await
+        if let Some(prev) = prev {
             prev.abort();
+            // Await teardown: TaskGroup::drop aborts child tasks, and
+            // their Arc<AsyncDevice> refs are released. This prevents
+            // device-name collision on a disable→enable flip.
+            let _ = prev.await;
             info!("abandoned previous TUN listener");
         }
-        *slot = Some(handle);
         info!("TUN listener handle stored");
     }
 
-    /// Abort the running TUN listener, if any.
-    pub fn stop_tun(&self) {
-        let mut slot = self.inner.tun_handle.write();
-        if let Some(handle) = slot.take() {
+    /// Abort the running TUN listener, if any, and wait for teardown.
+    pub async fn stop_tun(&self) {
+        let handle = self.inner.tun_handle.write().take();
+        // parking_lot RwLock write guard is dropped here — safe to .await
+        if let Some(handle) = handle {
             handle.abort();
+            let _ = handle.await;
             info!("TUN listener stopped");
         }
     }
 
-    /// Returns `true` when a TUN listener handle is currently held (the
-    /// listener may still be winding down after abort).
+    /// Returns `true` when a TUN listener handle is currently held.
     pub fn has_tun(&self) -> bool {
         self.inner.tun_handle.read().is_some()
     }

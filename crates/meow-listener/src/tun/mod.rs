@@ -53,6 +53,41 @@ use tracing::{info, warn};
 
 use route::RouteGuard;
 
+/// Tracks all child `JoinHandle`s spawned by a TUN listener. On drop,
+/// aborts every tracked task — this guarantees the TUN device and all its
+/// resources are fully released even when the parent task is externally
+/// aborted.
+struct TaskGroup {
+    aborts: Vec<tokio::task::AbortHandle>,
+}
+
+impl TaskGroup {
+    fn new() -> Self {
+        Self { aborts: Vec::new() }
+    }
+
+    /// Track a `JoinHandle<T>` by recording its `AbortHandle`. Type-erased
+    /// via `AbortHandle` so heterogeneous task return types (e.g. `()`,
+    /// `io::Result<()>`) coexist in the same collection.
+    fn push<T>(&mut self, h: &tokio::task::JoinHandle<T>) {
+        self.aborts.push(h.abort_handle());
+    }
+
+    /// Spawn a future and automatically track its handle.
+    fn spawn(&mut self, f: impl std::future::Future<Output = ()> + Send + 'static) {
+        let h = tokio::spawn(f);
+        self.aborts.push(h.abort_handle());
+    }
+}
+
+impl Drop for TaskGroup {
+    fn drop(&mut self) {
+        for a in &self.aborts {
+            a.abort();
+        }
+    }
+}
+
 /// Listener-facing subset of the `tun:` config section, mapped from
 /// `meow_config::TunConfig` by the app layer (mirrors how the other
 /// listeners take plain ctor args rather than depending on meow-config).
@@ -76,14 +111,33 @@ pub struct TunListener {
     tunnel: Tunnel,
     cfg: TunListenerConfig,
     name: String,
+    /// Optional readiness signal: sent once after the device, stack, and
+    /// child tasks are fully initialized (before the accept loop).
+    /// Dropped on setup failure so callers can distinguish "not started"
+    /// from "briefly delayed".
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl TunListener {
     pub fn new(tunnel: Tunnel, cfg: TunListenerConfig, name: String) -> Self {
-        Self { tunnel, cfg, name }
+        Self {
+            tunnel,
+            cfg,
+            name,
+            ready: None,
+        }
     }
 
-    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Attach a readiness signal. The sender will fire after device
+    /// creation + stack init + child-task setup succeeds, and before the
+    /// accept loop starts. If `run()` fails before reaching that point,
+    /// the sender is dropped — the receiver sees a `RecvError`.
+    pub fn with_readiness_signal(mut self, tx: tokio::sync::oneshot::Sender<()>) -> Self {
+        self.ready = Some(tx);
+        self
+    }
+
+    pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let cfg = &self.cfg;
 
         let mut builder = tun_rs::DeviceBuilder::new().mtu(cfg.mtu).ipv4(
@@ -141,9 +195,15 @@ impl TunListener {
         let mut tcp_listener = tcp_listener.expect("netstack TCP listener (TCP enabled)");
         let udp_socket = udp_socket.expect("netstack UDP socket (UDP enabled)");
 
-        tokio::spawn(runner);
+        let mut tasks = TaskGroup::new();
+
+        tasks.spawn(async move {
+            let _ = runner.await;
+        });
         let (mut pump_in, mut pump_out) = device::spawn_pumps(device, stack);
-        tokio::spawn(udp::run_udp(
+        tasks.push(&pump_in);
+        tasks.push(&pump_out);
+        tasks.spawn(udp::run_udp(
             self.tunnel.clone(),
             udp_socket,
             cfg.dns_hijack,
@@ -157,13 +217,21 @@ impl TunListener {
             self.name, cfg.inet4_address, cfg.mtu, cfg.auto_route, cfg.dns_hijack
         );
 
+        // Signal readiness: device, stack, and child tasks are all up.
+        // If we return Err before this point the sender is dropped,
+        // which allows callers (put_configs / startup) to surface the
+        // failure instead of silently storing a dead JoinHandle.
+        if let Some(ready) = self.ready.take() {
+            let _ = ready.send(());
+        }
+
         loop {
             tokio::select! {
                 accepted = tcp_listener.next() => match accepted {
                     Some((stream, src, dst)) => {
                         let tunnel = self.tunnel.clone();
                         let name = self.name.clone();
-                        tokio::spawn(async move {
+                        tasks.spawn(async move {
                             handle_tcp_flow(tunnel, stream, src, dst, &name).await;
                         });
                     }

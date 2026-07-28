@@ -7,6 +7,8 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dashmap::DashMap;
+#[cfg(feature = "listener-tun")]
+use meow_api::tun_config_to_listener_config;
 use meow_api::ApiServer;
 use meow_config::load_config;
 use meow_config::proxy_provider::ProxyProvider;
@@ -17,7 +19,7 @@ use meow_listener::SnifferRuntime;
 #[cfg(feature = "listener-tproxy")]
 use meow_listener::TProxyListener;
 #[cfg(feature = "listener-tun")]
-use meow_listener::{TunListener, TunListenerConfig};
+use meow_listener::TunListener;
 use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
 use std::net::{IpAddr, SocketAddr};
@@ -985,24 +987,39 @@ async fn run(
     if config.tun.enable {
         #[cfg(feature = "listener-tun")]
         {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
             let listener = TunListener::new(
                 tunnel.clone(),
-                TunListenerConfig {
-                    device: config.tun.device.clone(),
-                    mtu: config.tun.mtu,
-                    inet4_address: config.tun.inet4_address,
-                    auto_route: config.tun.auto_route,
-                    dns_hijack: config.tun.dns_hijack,
-                    udp_timeout: config.tun.udp_timeout,
-                },
+                tun_config_to_listener_config(&config.tun),
                 "tun".to_string(),
-            );
+            )
+            .with_readiness_signal(ready_tx);
+
             let handle = tokio::spawn(async move {
                 if let Err(e) = listener.run().await {
                     error!("TUN listener error: {}", e);
                 }
             });
-            tunnel.set_tun_handle(handle);
+
+            // Await device readiness before treating TUN as "running".
+            // If device creation fails (permission denied, etc.), don't
+            // store a dead JoinHandle — the next reconcile will retry.
+            match tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx).await {
+                Ok(Ok(())) => {
+                    tunnel.set_tun_handle(handle).await;
+                }
+                Ok(Err(_)) => {
+                    error!(
+                        "TUN listener failed to start — check permissions / admin / \
+                         CAP_NET_ADMIN"
+                    );
+                    handle.abort();
+                }
+                Err(_) => {
+                    error!("TUN listener startup timed out after 5 s");
+                    handle.abort();
+                }
+            }
         }
         #[cfg(not(feature = "listener-tun"))]
         warn!("tun.enable is set but this build lacks the 'listener-tun' feature");
