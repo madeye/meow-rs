@@ -69,14 +69,19 @@ impl TaskGroup {
     /// Track a `JoinHandle<T>` by recording its `AbortHandle`. Type-erased
     /// via `AbortHandle` so heterogeneous task return types (e.g. `()`,
     /// `io::Result<()>`) coexist in the same collection.
+    ///
+    /// Reaps finished tasks first: an `AbortHandle` keeps its task's
+    /// allocation alive, so without the `retain` the group would grow
+    /// unboundedly with every accepted TCP flow.
     fn push<T>(&mut self, h: &tokio::task::JoinHandle<T>) {
+        self.aborts.retain(|a| !a.is_finished());
         self.aborts.push(h.abort_handle());
     }
 
     /// Spawn a future and automatically track its handle.
     fn spawn(&mut self, f: impl std::future::Future<Output = ()> + Send + 'static) {
         let h = tokio::spawn(f);
-        self.aborts.push(h.abort_handle());
+        self.push(&h);
     }
 }
 

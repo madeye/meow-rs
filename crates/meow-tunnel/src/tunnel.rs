@@ -427,16 +427,17 @@ impl Tunnel {
     }
 
     /// Store a running TUN listener handle. If a previous TUN listener was
-    /// running, it is aborted and awaited so the old device is fully
-    /// released before the new one starts.
+    /// running, it is aborted and awaited before the new handle is used.
     pub async fn set_tun_handle(&self, handle: tokio::task::JoinHandle<()>) {
         let prev = self.inner.tun_handle.write().replace(handle);
         // parking_lot RwLock write guard is dropped here — safe to .await
         if let Some(prev) = prev {
             prev.abort();
-            // Await teardown: TaskGroup::drop aborts child tasks, and
-            // their Arc<AsyncDevice> refs are released. This prevents
-            // device-name collision on a disable→enable flip.
+            // Await the parent: dropping its future drops the TaskGroup,
+            // which requests abort of the child tasks holding the device.
+            // The runtime completes those aborts asynchronously shortly
+            // after, so the old device is released promptly — though not
+            // strictly before this returns.
             let _ = prev.await;
             info!("abandoned previous TUN listener");
         }
@@ -454,9 +455,16 @@ impl Tunnel {
         }
     }
 
-    /// Returns `true` when a TUN listener handle is currently held.
+    /// Returns `true` when a TUN listener is currently running. A stored
+    /// handle whose task has already exited (e.g. a pump failure after a
+    /// successful start) counts as *not* running, so `GET /configs` never
+    /// reports a dead listener as enabled.
     pub fn has_tun(&self) -> bool {
-        self.inner.tun_handle.read().is_some()
+        self.inner
+            .tun_handle
+            .read()
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
     }
 }
 
@@ -465,5 +473,106 @@ impl Clone for Tunnel {
         Self {
             inner: Arc::clone(&self.inner),
         }
+    }
+}
+
+#[cfg(test)]
+mod tun_handle_tests {
+    use super::*;
+    use meow_common::DnsMode;
+    use meow_dns::Resolver;
+    use meow_trie::DomainTrie;
+
+    fn test_tunnel() -> Tunnel {
+        let resolver = Arc::new(Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            false,
+        ));
+        Tunnel::new(resolver)
+    }
+
+    /// Sends on drop, so a test can observe that an aborted listener task
+    /// was fully torn down (not merely signalled) before the store/stop
+    /// call returned.
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tun_handle_lifecycle() {
+        let tunnel = test_tunnel();
+        assert!(!tunnel.has_tun());
+
+        tunnel
+            .set_tun_handle(tokio::spawn(std::future::pending::<()>()))
+            .await;
+        assert!(tunnel.has_tun());
+
+        tunnel.stop_tun().await;
+        assert!(!tunnel.has_tun());
+
+        // Idempotent when no listener is running.
+        tunnel.stop_tun().await;
+        assert!(!tunnel.has_tun());
+    }
+
+    #[tokio::test]
+    async fn set_tun_handle_aborts_and_awaits_previous() {
+        let tunnel = test_tunnel();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let first = tokio::spawn(async move {
+            let _guard = DropSignal(Some(tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        // Make sure the first task is actually running (its drop guard is
+        // constructed) before it gets replaced.
+        started_rx.await.unwrap();
+        tunnel.set_tun_handle(first).await;
+
+        tunnel
+            .set_tun_handle(tokio::spawn(std::future::pending::<()>()))
+            .await;
+        // set_tun_handle awaited the first task, so its drop guard has
+        // already fired by the time it returns.
+        assert!(rx.try_recv().is_ok());
+        assert!(tunnel.has_tun());
+
+        tunnel.stop_tun().await;
+    }
+
+    #[tokio::test]
+    async fn has_tun_reports_dead_listener_as_stopped() {
+        let tunnel = test_tunnel();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tunnel
+            .set_tun_handle(tokio::spawn(async move {
+                let _ = rx.await;
+            }))
+            .await;
+        assert!(tunnel.has_tun());
+
+        // Let the task exit on its own (simulating a runtime crash of the
+        // listener) — has_tun must flip to false without stop_tun.
+        let _ = tx.send(());
+        for _ in 0..100 {
+            if !tunnel.has_tun() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!tunnel.has_tun());
     }
 }

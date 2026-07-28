@@ -1004,7 +1004,7 @@ async fn run(
             // Await device readiness before treating TUN as "running".
             // If device creation fails (permission denied, etc.), don't
             // store a dead JoinHandle — the next reconcile will retry.
-            match tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx).await {
+            match tokio::time::timeout(meow_api::TUN_STARTUP_TIMEOUT, ready_rx).await {
                 Ok(Ok(())) => {
                     tunnel.set_tun_handle(handle).await;
                 }
@@ -1016,7 +1016,10 @@ async fn run(
                     handle.abort();
                 }
                 Err(_) => {
-                    error!("TUN listener startup timed out after 5 s");
+                    error!(
+                        "TUN listener startup timed out after {} s",
+                        meow_api::TUN_STARTUP_TIMEOUT.as_secs()
+                    );
                     handle.abort();
                 }
             }

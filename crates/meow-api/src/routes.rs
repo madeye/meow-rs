@@ -971,37 +971,7 @@ async fn commit_raw_candidate(
     candidate: RawConfig,
 ) -> Result<(), (StatusCode, String)> {
     apply_raw_to_tunnel(candidate.clone(), state).await?;
-
-    // TUN reconcile: serialised by config_mutation_lock so concurrent
-    // mutations (from put_configs or provider-side commits) cannot
-    // interleave their TUN start/stop operations.
-    let _guard = state.config_mutation_lock.lock().await;
-
-    let new_enable = candidate.tun.as_ref().is_some_and(|t| t.enable);
-    let old_enable = {
-        let mut guard = state.raw_config.write();
-        let old = guard.tun.as_ref().is_some_and(|t| t.enable);
-        *guard = candidate;
-        old
-    };
-    // parking_lot guard dropped — safe to .await below
-
-    if old_enable != new_enable {
-        if new_enable {
-            // Clone RawConfig inside the read-lock scope so the
-            // parking_lot guard (!Send) is dropped before the
-            // first .await — axum 0.8 requires handler futures to
-            // be Send.
-            let raw_snapshot = state.raw_config.read().clone();
-            if let Some(handle) = spawn_tun_from_raw(&state.tunnel, &raw_snapshot).await {
-                state.tunnel.set_tun_handle(handle).await;
-                info!("TUN listener started via config reload");
-            }
-        } else {
-            state.tunnel.stop_tun().await;
-            info!("TUN listener stopped via config reload");
-        }
-    }
+    swap_config_and_reconcile_tun(state, candidate).await;
     Ok(())
 }
 
@@ -1655,11 +1625,9 @@ async fn spawn_tun_from_raw(
     });
 
     // Await the readiness signal so we don't store a dead JoinHandle when
-    // device creation fails (e.g. os error 5 / permission denied). A 30 s
-    // timeout guards against a genuinely stuck startup path.  Windows
-    // wintun adapter creation + smoltcp netstack init can be slow; 5 s was
-    // too aggressive.
-    match tokio::time::timeout(std::time::Duration::from_secs(30), ready_rx).await {
+    // device creation fails (e.g. os error 5 / permission denied). The
+    // timeout guards against a genuinely stuck startup path.
+    match tokio::time::timeout(crate::TUN_STARTUP_TIMEOUT, ready_rx).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
             tracing::error!(
@@ -1670,7 +1638,10 @@ async fn spawn_tun_from_raw(
             return None;
         }
         Err(_) => {
-            tracing::error!("TUN listener startup timed out after 30 s");
+            tracing::error!(
+                "TUN listener startup timed out after {} s",
+                crate::TUN_STARTUP_TIMEOUT.as_secs()
+            );
             handle.abort();
             return None;
         }
@@ -1688,6 +1659,41 @@ async fn spawn_tun_from_raw(
         tracing::warn!("tun.enable is set but this build lacks the 'listener-tun' feature");
     }
     None
+}
+
+/// Commit `candidate` as the new raw config and reconcile the TUN listener
+/// against the `tun.enable` transition. The whole sequence is serialised by
+/// `config_mutation_lock` so two concurrent mutations cannot interleave
+/// their TUN start/stop operations — without this a disable→stop could run
+/// before a sibling enable→start has stored its handle, leaving a running
+/// device behind an `enable=false` config.
+async fn swap_config_and_reconcile_tun(state: &AppState, candidate: RawConfig) {
+    let _guard = state.config_mutation_lock.lock().await;
+
+    let new_enable = candidate.tun.as_ref().is_some_and(|t| t.enable);
+    // Snapshot the candidate (only on an off→on transition, before it is
+    // moved into the lock) so the parking_lot write guard — which is
+    // !Send — is dropped before the first .await below.
+    let (old_enable, snapshot) = {
+        let mut guard = state.raw_config.write();
+        let old = guard.tun.as_ref().is_some_and(|t| t.enable);
+        let snapshot = (new_enable && !old).then(|| candidate.clone());
+        *guard = candidate;
+        (old, snapshot)
+    };
+
+    if old_enable == new_enable {
+        return;
+    }
+    if let Some(snapshot) = snapshot {
+        if let Some(handle) = spawn_tun_from_raw(&state.tunnel, &snapshot).await {
+            state.tunnel.set_tun_handle(handle).await;
+            info!("TUN listener started via config reload");
+        }
+    } else {
+        state.tunnel.stop_tun().await;
+        info!("TUN listener stopped via config reload");
+    }
 }
 
 #[derive(Deserialize)]
@@ -1809,41 +1815,7 @@ async fn put_configs(
         }
     }
 
-    // TUN reconcile: read old config, atomically swap, then start/stop
-    // the listener based on the tun.enable transition.  The entire
-    // sequence is serialised by config_mutation_lock so that two
-    // concurrent PUTs cannot interleave their TUN operations — without
-    // this a concurrent disable→stop could run before an enable→start
-    // has stored its handle, leaving a running device behind an
-    // enable=false config.
-    {
-        let _guard = state.config_mutation_lock.lock().await;
-        let new_enable = raw_config.tun.as_ref().is_some_and(|t| t.enable);
-        let old_enable = {
-            let mut guard = state.raw_config.write();
-            let old = guard.tun.as_ref().is_some_and(|t| t.enable);
-            *guard = raw_config;
-            old
-        };
-        // parking_lot guard dropped — safe to .await below
-
-        if old_enable != new_enable {
-            if new_enable {
-                // Clone RawConfig inside the read-lock scope so the
-                // parking_lot guard (!Send) is dropped before the
-                // first .await — axum 0.8 requires handler futures to
-                // be Send.
-                let raw_snapshot = state.raw_config.read().clone();
-                if let Some(handle) = spawn_tun_from_raw(&state.tunnel, &raw_snapshot).await {
-                    state.tunnel.set_tun_handle(handle).await;
-                    info!("TUN listener started via config reload");
-                }
-            } else {
-                state.tunnel.stop_tun().await;
-                info!("TUN listener stopped via config reload");
-            }
-        }
-    }
+    swap_config_and_reconcile_tun(&state, raw_config).await;
 
     StatusCode::NO_CONTENT.into_response()
 }
