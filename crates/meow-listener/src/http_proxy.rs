@@ -3,6 +3,7 @@ use base64::Engine;
 use meow_common::{AuthConfig, ConnType, Metadata, Network};
 use meow_tunnel::{copy_bidirectional_buf_tracked, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
 use smallvec::smallvec;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -62,36 +63,68 @@ async fn handle_http_inner(
         loop {
             let n = stream.read(&mut chunk).await?;
             if n == 0 {
-                return Err::<usize, Box<dyn std::error::Error + Send + Sync>>(
-                    "connection closed before headers complete".into(),
-                );
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed before headers complete",
+                ));
             }
             // Overlap the previous tail by 3 bytes so a marker straddling two
             // reads (e.g. "\r\n\r" then "\n…") is still detected.
             let search_start = request_buf.len().saturating_sub(3);
             request_buf.extend_from_slice(&chunk[..n]);
-            if let Some(rel) = find_crlf_crlf(&request_buf[search_start..]) {
-                return Ok(search_start + rel + 4);
+            let header_end = find_crlf_crlf(&request_buf[search_start..])
+                .map(|relative| search_start + relative + 4);
+            let bytes_to_validate = header_end.unwrap_or(request_buf.len());
+            if has_bare_line_ending(&request_buf[..bytes_to_validate]) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bare CR or LF in request headers",
+                ));
+            }
+            if let Some(header_end) = header_end {
+                if header_end > MAX_HEADERS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "request headers too large",
+                    ));
+                }
+                return Ok(header_end);
             }
             if request_buf.len() > MAX_HEADERS {
-                return Err::<usize, Box<dyn std::error::Error + Send + Sync>>(
-                    "request headers too large".into(),
-                );
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "request headers too large",
+                ));
             }
         }
     };
-    let header_end = tokio::time::timeout(crate::DEFAULT_HANDSHAKE_TIMEOUT, read_headers)
-        .await
-        .map_err(|_| "HTTP proxy handshake timed out")??;
+    let header_end =
+        match tokio::time::timeout(crate::DEFAULT_HANDSHAKE_TIMEOUT, read_headers).await {
+            Err(_) => return Err("HTTP proxy handshake timed out".into()),
+            Ok(Err(error)) if error.kind() == io::ErrorKind::InvalidData => {
+                write_bad_request(stream).await?;
+                return Err(error.into());
+            }
+            Ok(Err(error)) => return Err(error.into()),
+            Ok(Ok(header_end)) => header_end,
+        };
     let leftover: Vec<u8> = request_buf[header_end..].to_vec();
     request_buf.truncate(header_end);
+
+    let request = match parse_request_head(&request_buf) {
+        Ok(request) => request,
+        Err(error) => {
+            write_bad_request(stream).await?;
+            return Err(error.into());
+        }
+    };
 
     // Auth check: verify Proxy-Authorization before dispatching.
     let in_user: Option<String> = if let Some(auth) = auth
         .filter(|a| !a.credentials.is_empty())
         .filter(|a| !a.should_skip(&src_addr.ip()))
     {
-        match parse_proxy_authorization(&request_buf) {
+        match parse_proxy_authorization(&request.headers) {
             None => {
                 stream
                     .write_all(
@@ -120,20 +153,8 @@ async fn handle_http_inner(
         None
     };
 
-    // Parse the request line from the buffer — no heap allocation.
-    let request_str = String::from_utf8_lossy(&request_buf);
-    let request_line = request_str.lines().next().ok_or("empty request")?;
-
-    let mut parts = [""; 3];
-    for (i, part) in request_line.split_whitespace().take(3).enumerate() {
-        parts[i] = part;
-    }
-    if parts[2].is_empty() {
-        return Err("invalid HTTP request line".into());
-    }
-
-    let method = parts[0];
-    let target = parts[1];
+    let method = request.method;
+    let target = request.target;
 
     if method.eq_ignore_ascii_case("CONNECT") {
         // HTTPS CONNECT
@@ -300,36 +321,15 @@ async fn handle_http_inner(
         match proxy.dial_tcp(&metadata).await {
             Ok(mut remote) => {
                 // Rewrite the request line: remove the absolute URI scheme+host,
-                // keep the path. Rebuild headers without Proxy-* headers.
+                // keep the path. Rebuild headers without Proxy-* headers while
+                // preserving all other field bytes exactly.
                 let path = extract_path_from_url(url);
-                // Capacity hint: the rewrite never grows beyond the original
-                // request (the absolute URI shrinks to a path; headers only
-                // ever drop).
-                let mut rewritten = String::with_capacity(request_str.len());
-                {
-                    use std::fmt::Write as _;
-                    let _ = write!(rewritten, "{} {} {}\r\n", method, path, parts[2]);
-                }
-                for line in request_str.lines().skip(1) {
-                    if line.is_empty() {
-                        break;
-                    }
-                    // Skip proxy-specific headers — case-insensitive compare
-                    // on the slice, no per-line lowercased copy.
-                    if starts_with_ignore_ascii_case(line, "proxy-connection")
-                        || starts_with_ignore_ascii_case(line, "proxy-authorization")
-                    {
-                        continue;
-                    }
-                    rewritten.push_str(line);
-                    rewritten.push_str("\r\n");
-                }
-                rewritten.push_str("\r\n");
+                let rewritten = rewrite_plain_request(&request, path);
 
                 // Send the rewritten request to remote, then any body bytes
                 // that arrived in the same TCP segment as the headers (POST
                 // payloads typically do).
-                remote.write_all(rewritten.as_bytes()).await?;
+                remote.write_all(&rewritten).await?;
                 let up = Arc::clone(_guard.counters());
                 let dn = Arc::clone(_guard.counters());
                 if !leftover.is_empty() {
@@ -385,6 +385,225 @@ fn find_crlf_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+/// Return true once a CR or LF can no longer be part of a CRLF pair. A final
+/// CR is left undecided because its LF may arrive in the next socket read.
+fn has_bare_line_ending(buf: &[u8]) -> bool {
+    buf.iter().enumerate().any(|(index, byte)| match *byte {
+        b'\n' => index == 0 || buf[index - 1] != b'\r',
+        b'\r' => index + 1 < buf.len() && buf[index + 1] != b'\n',
+        _ => false,
+    })
+}
+
+#[derive(Debug)]
+struct HeaderField<'a> {
+    name: &'a [u8],
+    value: &'a [u8],
+    raw: &'a [u8],
+}
+
+#[derive(Debug)]
+struct RequestHead<'a> {
+    method: &'a str,
+    target: &'a str,
+    version: &'a str,
+    headers: Vec<HeaderField<'a>>,
+}
+
+fn parse_request_head(head: &[u8]) -> Result<RequestHead<'_>, &'static str> {
+    if !head.ends_with(b"\r\n\r\n") || has_bare_line_ending(head) {
+        return Err("invalid HTTP line ending");
+    }
+
+    let mut lines = Vec::new();
+    let mut remaining = &head[..head.len() - 4];
+    loop {
+        if let Some(end) = remaining.windows(2).position(|window| window == b"\r\n") {
+            lines.push(&remaining[..end]);
+            remaining = &remaining[end + 2..];
+        } else {
+            lines.push(remaining);
+            break;
+        }
+    }
+    let (request_line, header_lines) = lines.split_first().ok_or("empty HTTP request")?;
+    let request_line =
+        std::str::from_utf8(request_line).map_err(|_| "non-ASCII HTTP request line")?;
+    if !request_line.is_ascii() {
+        return Err("non-ASCII HTTP request line");
+    }
+    let mut parts = request_line.split(' ');
+    let method = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    let version = parts.next().unwrap_or_default();
+    if method.is_empty()
+        || target.is_empty()
+        || version.is_empty()
+        || parts.next().is_some()
+        || !method.as_bytes().iter().copied().all(is_tchar)
+        || !target.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+        || !matches!(version, "HTTP/1.0" | "HTTP/1.1")
+    {
+        return Err("invalid HTTP request line");
+    }
+
+    let mut headers = Vec::with_capacity(header_lines.len());
+    for &line in header_lines {
+        let colon = line
+            .iter()
+            .position(|byte| *byte == b':')
+            .ok_or("HTTP header missing colon")?;
+        let (name, value_with_colon) = line.split_at(colon);
+        if name.is_empty() || !name.iter().copied().all(is_tchar) {
+            return Err("invalid HTTP header name");
+        }
+        let value = &value_with_colon[1..];
+        if !value
+            .iter()
+            .all(|byte| *byte == b'\t' || (*byte >= 0x20 && *byte != 0x7f))
+        {
+            return Err("invalid HTTP header value");
+        }
+        headers.push(HeaderField {
+            name,
+            value,
+            raw: line,
+        });
+    }
+    validate_message_framing(&headers)?;
+
+    Ok(RequestHead {
+        method,
+        target,
+        version,
+        headers,
+    })
+}
+
+fn validate_message_framing(headers: &[HeaderField<'_>]) -> Result<(), &'static str> {
+    let mut content_length = None;
+    let mut has_content_length = false;
+    let mut transfer_codings: Vec<&[u8]> = Vec::new();
+
+    for header in headers {
+        if header.name.eq_ignore_ascii_case(b"content-length") {
+            has_content_length = true;
+            for value in header.value.split(|byte| *byte == b',') {
+                let value = trim_ows(value);
+                if value.is_empty() {
+                    return Err("invalid Content-Length");
+                }
+                let parsed = value.iter().try_fold(0u64, |length, byte| {
+                    byte.is_ascii_digit()
+                        .then(|| length.checked_mul(10)?.checked_add(u64::from(*byte - b'0')))
+                        .flatten()
+                });
+                let parsed = parsed.ok_or("invalid Content-Length")?;
+                if content_length.is_some_and(|length| length != parsed) {
+                    return Err("conflicting Content-Length values");
+                }
+                content_length = Some(parsed);
+            }
+        } else if header.name.eq_ignore_ascii_case(b"transfer-encoding") {
+            for coding in header.value.split(|byte| *byte == b',') {
+                let coding = trim_ows(coding);
+                if coding.is_empty() || !coding.iter().copied().all(is_tchar) {
+                    return Err("invalid Transfer-Encoding");
+                }
+                transfer_codings.push(coding);
+            }
+        }
+    }
+
+    if has_content_length && !transfer_codings.is_empty() {
+        return Err("Transfer-Encoding with Content-Length is ambiguous");
+    }
+    if !transfer_codings.is_empty() {
+        let chunked_count = transfer_codings
+            .iter()
+            .filter(|coding| coding.eq_ignore_ascii_case(b"chunked"))
+            .count();
+        if chunked_count != 1
+            || !transfer_codings
+                .last()
+                .is_some_and(|coding| coding.eq_ignore_ascii_case(b"chunked"))
+        {
+            return Err("invalid request Transfer-Encoding");
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_plain_request(request: &RequestHead<'_>, path: &str) -> Vec<u8> {
+    let mut rewritten = Vec::with_capacity(
+        request.method.len() + path.len() + request.version.len() + 4 + request.headers.len() * 2,
+    );
+    rewritten.extend_from_slice(request.method.as_bytes());
+    rewritten.push(b' ');
+    rewritten.extend_from_slice(path.as_bytes());
+    rewritten.push(b' ');
+    rewritten.extend_from_slice(request.version.as_bytes());
+    rewritten.extend_from_slice(b"\r\n");
+    for header in &request.headers {
+        if header.name.eq_ignore_ascii_case(b"proxy-connection")
+            || header.name.eq_ignore_ascii_case(b"proxy-authorization")
+        {
+            continue;
+        }
+        rewritten.extend_from_slice(header.raw);
+        rewritten.extend_from_slice(b"\r\n");
+    }
+    rewritten.extend_from_slice(b"\r\n");
+    rewritten
+}
+
+fn trim_ows(mut value: &[u8]) -> &[u8] {
+    while value
+        .first()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        value = &value[1..];
+    }
+    while value
+        .last()
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
+fn is_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+async fn write_bad_request(stream: &mut TcpStream) -> io::Result<()> {
+    stream
+        .write_all(
+            b"HTTP/1.1 400 Bad Request\r\n\
+              Connection: close\r\n\
+              Content-Length: 0\r\n\r\n",
+        )
+        .await
+}
+
 /// Parse an HTTP host token as an IP literal, returning `Some(ip)` when it is
 /// one. Strips the surrounding brackets of an IPv6 literal (`[2606:..]`) so it
 /// parses; returns `None` for hostnames, which are resolved later by the
@@ -431,27 +650,19 @@ fn extract_path_from_url(url: &str) -> &str {
         .map_or("/", |i| &without_scheme[i..])
 }
 
-/// Case-insensitive ASCII prefix test without allocating a lowercased copy.
-/// Byte-wise so a multi-byte UTF-8 char at the boundary can't panic a slice.
-fn starts_with_ignore_ascii_case(line: &str, prefix: &str) -> bool {
-    line.len() >= prefix.len()
-        && line.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
-}
-
-/// Parse `Proxy-Authorization: Basic <base64>` from raw request headers.
+/// Parse `Proxy-Authorization: Basic <base64>` from parsed request headers.
 /// Returns `(username, password)` on success.
-fn parse_proxy_authorization(headers: &[u8]) -> Option<(String, String)> {
-    const PROXY_AUTH_PREFIX: &str = "proxy-authorization:";
-
-    let headers_str = std::str::from_utf8(headers).ok()?;
-    for line in headers_str.lines() {
-        if !starts_with_ignore_ascii_case(line, PROXY_AUTH_PREFIX) {
+fn parse_proxy_authorization(headers: &[HeaderField<'_>]) -> Option<(String, String)> {
+    for header in headers {
+        if !header.name.eq_ignore_ascii_case(b"proxy-authorization") {
             continue;
         }
-        let value = line[PROXY_AUTH_PREFIX.len()..].trim();
-        let encoded = value
-            .strip_prefix("Basic ")
-            .or_else(|| value.strip_prefix("basic "))?;
+        let value = trim_ows(header.value);
+        let separator = value.iter().position(|byte| matches!(byte, b' ' | b'\t'))?;
+        if !value[..separator].eq_ignore_ascii_case(b"basic") {
+            return None;
+        }
+        let encoded = std::str::from_utf8(trim_ows(&value[separator..])).ok()?;
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .ok()?;
@@ -496,12 +707,59 @@ mod tests {
     }
 
     #[test]
-    fn parse_proxy_authorization_ignores_non_ascii_header_without_panic() {
-        let headers = concat!(
-            "GET http://example.com/ HTTP/1.1\r\n",
-            "aaaaaaaaaaaaaaaaaaaé: value\r\n",
-            "\r\n"
+    fn strict_parser_rejects_bare_lf_and_bare_cr() {
+        assert!(parse_request_head(
+            b"GET http://example.com/ HTTP/1.1\r\nX-A: 1\nContent-Length: 0\r\n\r\n"
+        )
+        .is_err());
+        assert!(parse_request_head(
+            b"GET http://example.com/ HTTP/1.1\r\nX-A: 1\rContent-Length: 0\r\n\r\n"
+        )
+        .is_err());
+        assert!(parse_request_head(
+            b"GET http://example.com/ HTTP/1.1\r\nX-A: 1\n\nX-Dropped: yes\r\n\r\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rewrite_preserves_obs_text_and_only_drops_proxy_headers() {
+        let request = parse_request_head(
+            b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\nX-Word: caf\xe9\r\nProxy-Connection: keep-alive\r\nProxy-Authorization: Basic dTpw\r\n\r\n",
+        )
+        .unwrap();
+        let rewritten = rewrite_plain_request(&request, "/path");
+        assert_eq!(
+            rewritten,
+            b"GET /path HTTP/1.1\r\nHost: example.com\r\nX-Word: caf\xe9\r\n\r\n"
         );
-        assert_eq!(parse_proxy_authorization(headers.as_bytes()), None);
+    }
+
+    #[test]
+    fn parser_rejects_ambiguous_message_framing() {
+        assert!(parse_request_head(
+            b"POST http://example.com/ HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 5\r\n\r\n"
+        )
+        .is_err());
+        assert!(parse_request_head(
+            b"POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n"
+        )
+        .is_err());
+        assert!(parse_request_head(
+            b"POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n"
+        )
+        .is_err());
+        assert!(parse_request_head(
+            b"POST http://example.com/ HTTP/1.1\r\nContent-Length: 5, 5\r\nContent-Length: 5\r\n\r\n"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn parse_proxy_authorization_ignores_obs_text_value_without_panic() {
+        let request =
+            parse_request_head(b"GET http://example.com/ HTTP/1.1\r\nX-Word: caf\xe9\r\n\r\n")
+                .unwrap();
+        assert_eq!(parse_proxy_authorization(&request.headers), None);
     }
 }
