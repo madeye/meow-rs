@@ -10,6 +10,21 @@ use tracing::{debug, error, info, warn};
 /// TTL stamped on regular (non-fake-IP) A/AAAA answers built by this server.
 const DEFAULT_ANSWER_TTL_SECS: u32 = 60;
 
+/// Minimal EDNS0 OPT pseudo-record (11 bytes) appended to responses when the
+/// query carried one in the additional section.  Windows DNS Client (used by
+/// `Resolve-DnsName` and `curl`) sends EDNS0 queries and may reject or time
+/// out on responses that strip the OPT record.
+///
+/// Layout: root name (1) + OPT type 41 (2) + UDP size 512 (2) + TTL 0 (4) +
+/// RDLENGTH 0 (2).
+const OPT_RECORD: &[u8] = &[
+    0x00,                   // NAME: root
+    0x00, 0x29,             // TYPE: OPT (41)
+    0x02, 0x00,             // CLASS: UDP payload size 512
+    0x00, 0x00, 0x00, 0x00, // TTL: ext-rcode=0, version=0, DO=0
+    0x00, 0x00,             // RDLENGTH: 0
+];
+
 /// Simple DNS server that handles queries by forwarding to our resolver.
 pub struct DnsServer {
     resolver: Arc<Resolver>,
@@ -89,6 +104,7 @@ impl DnsServer {
         }
 
         let id = u16::from_be_bytes([data[0], data[1]]);
+        let flags = u16::from_be_bytes([data[2], data[3]]);
         let qdcount = u16::from_be_bytes([data[4], data[5]]);
 
         if qdcount == 0 {
@@ -105,7 +121,7 @@ impl DnsServer {
         // We deliberately stop short of fake-IP synthesis here: only address
         // records ever get a synthetic answer.
         if qtype != 1 && qtype != 28 {
-            return Self::handle_generic_forward(id, data, &domain, qtype, resolver).await;
+            return Self::handle_generic_forward(id, data, flags, qdcount, &domain, qtype, resolver).await;
         }
 
         // Check hosts trie first. If the domain is present in the hosts table
@@ -119,8 +135,8 @@ impl DnsServer {
                 all_ips.iter().find(|ip| ip.is_ipv6()).copied()
             };
             return Ok(match ip {
-                Some(addr) => Self::build_response(id, data, qtype, addr, DEFAULT_ANSWER_TTL_SECS),
-                None => Self::build_noerror_empty(id, data),
+                Some(addr) => Self::build_response(id, data, flags, qdcount, qtype, addr, DEFAULT_ANSWER_TTL_SECS),
+                None => Self::build_noerror_empty(id, data, flags, qdcount),
             });
         }
 
@@ -142,15 +158,15 @@ impl DnsServer {
                 // Sub-second remainders round up to 1 — a 0-TTL answer means
                 // "never cache", which is stricter than the entry deserves.
                 let ttl_secs = ttl.as_secs().clamp(1, u64::from(u32::MAX)) as u32;
-                Self::build_response(id, data, qtype, addr, ttl_secs)
+                Self::build_response(id, data, flags, qdcount, qtype, addr, ttl_secs)
             }
             // Fake-IP mode AAAA when only v4 pool is configured: return
             // NOERROR-empty so clients fall back to IPv4 cleanly. NXDOMAIN
             // would tell them "no such host" — wrong signal.
             None if qtype == 28 && resolver.mode() == DnsMode::FakeIp => {
-                Self::build_noerror_empty(id, data)
+                Self::build_noerror_empty(id, data, flags, qdcount)
             }
-            None => Self::build_nxdomain(id, data),
+            None => Self::build_nxdomain(id, data, flags, qdcount),
         })
     }
 
@@ -161,6 +177,8 @@ impl DnsServer {
     async fn handle_generic_forward(
         id: u16,
         query: &[u8],
+        flags: u16,
+        qdcount: u16,
         domain: &str,
         qtype: u16,
         resolver: &Resolver,
@@ -173,7 +191,7 @@ impl DnsServer {
         // If parsing fails we fall back to the hand-rolled NXDOMAIN builder
         // rather than dropping the packet.
         let Ok(req) = Message::from_vec(query) else {
-            return Ok(Self::build_nxdomain(id, query));
+            return Ok(Self::build_nxdomain(id, query, flags, qdcount));
         };
 
         let mut resp = Message::new(id, MessageType::Response, OpCode::Query);
@@ -204,7 +222,7 @@ impl DnsServer {
 
         Ok(resp
             .to_vec()
-            .unwrap_or_else(|_| Self::build_nxdomain(id, query)))
+            .unwrap_or_else(|_| Self::build_nxdomain(id, query, flags, qdcount)))
     }
 
     fn parse_question(
@@ -254,32 +272,77 @@ impl DnsServer {
         Ok((domain, qtype, pos))
     }
 
+    /// Copy the full question section (all `qdcount` entries) from `query`
+    /// into `buf`. Returns the number of bytes copied.
+    fn copy_question_section(buf: &mut Vec<u8>, query: &[u8], qdcount: u16) -> usize {
+        let start = buf.len();
+        let mut pos: usize = 12; // skip 12-byte header
+        let end = query.len();
+        for _ in 0..qdcount {
+            // Walk over QNAME labels
+            while pos < end && query[pos] != 0 {
+                pos += 1 + query[pos] as usize;
+            }
+            if pos >= end {
+                break;
+            }
+            pos += 5; // null terminator + QTYPE(2) + QCLASS(2)
+            if pos > end {
+                break;
+            }
+        }
+        let question_end = pos.min(end);
+        buf.extend_from_slice(&query[12..question_end]);
+        buf.len() - start
+    }
+
+    /// Echo the query flags into response header bytes, preserving the
+    /// OPCODE, RD, and CD bits while setting QR=1 and RA=1.
+    fn response_flags(query_flags: u16) -> [u8; 2] {
+        let hi = (query_flags >> 8) as u8;
+        let lo = query_flags as u8;
+        // Byte 0: QR=1 | OPCODE(echo) | AA=0 | TC=0 | RD(echo)
+        let byte0: u8 = 0x80 | (hi & 0x79); // 0x79 = bits 6,5,4,3 (OPCODE) + bit 0 (RD)
+        // Byte 1: RA=1 | Z=0 | AD=0 | CD(echo) | RCODE=0
+        let byte1: u8 = 0x80 | (lo & 0x10); // 0x10 = bit 4 (CD)
+        [byte0, byte1]
+    }
+
+    /// Append the EDNS0 OPT record when the query had one (ARCOUNT > 0),
+    /// bumping the `arcount` field in the previously-written header.
+    fn append_opt_record(buf: &mut Vec<u8>, header_pos: usize) {
+        // Patch ARCOUNT at header_pos+10..12 from 0 to 1.
+        let len = buf.len();
+        buf[header_pos + 10] = 0x00;
+        buf[header_pos + 11] = 0x01;
+        buf.extend_from_slice(OPT_RECORD);
+        debug_assert_eq!(buf.len(), len + OPT_RECORD.len());
+    }
+
     fn build_response(
         id: u16,
         query: &[u8],
+        flags: u16,
+        qdcount: u16,
         qtype: u16,
         addr: std::net::IpAddr,
         ttl_secs: u32,
     ) -> Vec<u8> {
+        let arcount = u16::from_be_bytes([query[10], query[11]]);
         let mut response = Vec::with_capacity(512);
+
+        let header_pos = response.len();
 
         // Header
         response.extend_from_slice(&id.to_be_bytes()); // ID
-        response.extend_from_slice(&[0x81, 0x80]); // Flags: response, recursion available
-        response.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
+        response.extend_from_slice(&Self::response_flags(flags));
+        response.extend_from_slice(&qdcount.to_be_bytes()); // QDCOUNT
         response.extend_from_slice(&[0x00, 0x01]); // ANCOUNT = 1
         response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
-        response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0
+        response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0 (patched below)
 
-        // Copy question section from original query
-        let question_start = 12;
-        let mut pos = question_start;
-        // Skip over the question name
-        while pos < query.len() && query[pos] != 0 {
-            pos += 1 + query[pos] as usize;
-        }
-        pos += 5; // null terminator + QTYPE(2) + QCLASS(2)
-        response.extend_from_slice(&query[question_start..pos]);
+        // Copy full question section
+        Self::copy_question_section(&mut response, query, qdcount);
 
         // Answer: pointer to name in question
         response.extend_from_slice(&[0xc0, 0x0c]); // Name pointer to offset 12
@@ -298,29 +361,35 @@ impl DnsServer {
             }
         }
 
+        if arcount > 0 {
+            Self::append_opt_record(&mut response, header_pos);
+        }
+
         response
     }
 
-    fn build_nxdomain(id: u16, query: &[u8]) -> Vec<u8> {
+    fn build_nxdomain(id: u16, query: &[u8], flags: u16, qdcount: u16) -> Vec<u8> {
+        let arcount = u16::from_be_bytes([query[10], query[11]]);
         let mut response = Vec::with_capacity(512);
 
-        // Header
+        let header_pos = response.len();
+
+        // Header: NXDOMAIN (rcode=3), QR=1, RD=echo, RA=1
+        let [byte0, byte1] = Self::response_flags(flags);
+        let byte1_rcode = (byte1 & 0xF0) | 0x03; // NXDOMAIN
+
         response.extend_from_slice(&id.to_be_bytes());
-        response.extend_from_slice(&[0x81, 0x83]); // Flags: response, NXDOMAIN
-        response.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
+        response.extend_from_slice(&[byte0, byte1_rcode]);
+        response.extend_from_slice(&qdcount.to_be_bytes()); // QDCOUNT
         response.extend_from_slice(&[0x00, 0x00]); // ANCOUNT = 0
         response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
-        response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0
+        response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0 (patched below)
 
-        // Copy question section
-        let question_start = 12;
-        let mut pos = question_start;
-        while pos < query.len() && query[pos] != 0 {
-            pos += 1 + query[pos] as usize;
-        }
-        pos += 5;
-        if pos <= query.len() {
-            response.extend_from_slice(&query[question_start..pos]);
+        // Copy full question section
+        Self::copy_question_section(&mut response, query, qdcount);
+
+        if arcount > 0 {
+            Self::append_opt_record(&mut response, header_pos);
         }
 
         response
@@ -334,17 +403,17 @@ impl DnsServer {
         addr: std::net::IpAddr,
         ttl_secs: u32,
     ) -> Vec<u8> {
-        Self::build_response(id, query, qtype, addr, ttl_secs)
+        Self::build_response(id, query, 0x0100, 1, qtype, addr, ttl_secs)
     }
 
     #[cfg(test)]
     pub(crate) fn build_nxdomain_for_test(id: u16, query: &[u8]) -> Vec<u8> {
-        Self::build_nxdomain(id, query)
+        Self::build_nxdomain(id, query, 0x0100, 1)
     }
 
     #[cfg(test)]
     pub(crate) fn build_noerror_empty_for_test(id: u16, query: &[u8]) -> Vec<u8> {
-        Self::build_noerror_empty(id, query)
+        Self::build_noerror_empty(id, query, 0x0100, 1)
     }
 
     #[cfg(test)]
@@ -356,26 +425,27 @@ impl DnsServer {
 
     /// NOERROR with zero answers: hosts entry matched but no IPs of the queried
     /// address family. Clients must not retry on an empty-answer NOERROR.
-    fn build_noerror_empty(id: u16, query: &[u8]) -> Vec<u8> {
+    fn build_noerror_empty(id: u16, query: &[u8], flags: u16, qdcount: u16) -> Vec<u8> {
+        let arcount = u16::from_be_bytes([query[10], query[11]]);
         let mut response = Vec::with_capacity(512);
 
-        // Header: NOERROR (rcode=0), QR=1, RD=1, RA=1
+        let header_pos = response.len();
+
+        // Header: NOERROR (rcode=0), QR=1, RD=echo, RA=1
+        let flag_bytes = Self::response_flags(flags);
+
         response.extend_from_slice(&id.to_be_bytes());
-        response.extend_from_slice(&[0x81, 0x80]); // Flags: response, NOERROR
-        response.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
+        response.extend_from_slice(&flag_bytes);
+        response.extend_from_slice(&qdcount.to_be_bytes()); // QDCOUNT
         response.extend_from_slice(&[0x00, 0x00]); // ANCOUNT = 0
         response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
-        response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0
+        response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0 (patched below)
 
-        // Copy question section
-        let question_start = 12;
-        let mut pos = question_start;
-        while pos < query.len() && query[pos] != 0 {
-            pos += 1 + query[pos] as usize;
-        }
-        pos += 5;
-        if pos <= query.len() {
-            response.extend_from_slice(&query[question_start..pos]);
+        // Copy full question section
+        Self::copy_question_section(&mut response, query, qdcount);
+
+        if arcount > 0 {
+            Self::append_opt_record(&mut response, header_pos);
         }
 
         response
