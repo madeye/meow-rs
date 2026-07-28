@@ -988,8 +988,12 @@ async fn commit_raw_candidate(
 
     if old_enable != new_enable {
         if new_enable {
-            let raw = state.raw_config.read();
-            if let Some(handle) = spawn_tun_from_raw(&state.tunnel, &raw).await {
+            // Clone RawConfig inside the read-lock scope so the
+            // parking_lot guard (!Send) is dropped before the
+            // first .await — axum 0.8 requires handler futures to
+            // be Send.
+            let raw_snapshot = state.raw_config.read().clone();
+            if let Some(handle) = spawn_tun_from_raw(&state.tunnel, &raw_snapshot).await {
                 state.tunnel.set_tun_handle(handle).await;
                 info!("TUN listener started via config reload");
             }
@@ -1823,8 +1827,12 @@ async fn put_configs(
 
         if old_enable != new_enable {
             if new_enable {
-                let raw = state.raw_config.read();
-                if let Some(handle) = spawn_tun_from_raw(&state.tunnel, &raw).await {
+                // Clone RawConfig inside the read-lock scope so the
+                // parking_lot guard (!Send) is dropped before the
+                // first .await — axum 0.8 requires handler futures to
+                // be Send.
+                let raw_snapshot = state.raw_config.read().clone();
+                if let Some(handle) = spawn_tun_from_raw(&state.tunnel, &raw_snapshot).await {
                     state.tunnel.set_tun_handle(handle).await;
                     info!("TUN listener started via config reload");
                 }
