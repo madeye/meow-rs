@@ -132,54 +132,114 @@ mod windows {
     use std::net::IpAddr;
     use std::process::Command;
 
-    /// Back up current DNS on all IPv4 adapters.
-    ///
-    /// Returns a pipe-delimited encoding: one line per adapter as
-    /// `InterfaceAlias|server1,server2,...`. An empty server list means the
-    /// adapter uses DHCP.
-    pub(super) fn backup() -> std::io::Result<String> {
-        let output = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                // Enumerate IPv4 adapters that have DNS servers.
-                // Output format: InterfaceAlias|addr1,addr2
-                r#"Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {$_.ServerAddresses.Count -gt 0} | ForEach-Object { "$($_.InterfaceAlias)|$(($_.ServerAddresses -join ','))" }"#,
-            ])
-            .output()?;
+    const IPV6_SEPARATOR: &str = "---IPV6---";
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.trim().to_string())
+    /// Back up current DNS on all adapters (both IPv4 and IPv6).
+    ///
+    /// Returns a combined encoding:
+    ///   IPv4 lines (one per adapter: `InterfaceAlias|server1,server2,...`)
+    ///   `---IPV6---`
+    ///   IPv6 lines (same format)
+    ///
+    /// An empty server list means the adapter uses DHCP.
+    pub(super) fn backup() -> std::io::Result<String> {
+        let v4 = backup_family(4)?;
+        let v6 = backup_family(6)?;
+        Ok(format!("{v4}\n{IPV6_SEPARATOR}\n{v6}"))
     }
 
-    /// Set `dns_addr` on all IPv4 adapters that currently have DNS.
+    fn backup_family(family: u8) -> std::io::Result<String> {
+        let family_str = if family == 4 { "IPv4" } else { "IPv6" };
+        let script = format!(
+            r#"Get-DnsClientServerAddress -AddressFamily {family_str} -ErrorAction SilentlyContinue | Where-Object {{$_.ServerAddresses.Count -gt 0}} | ForEach-Object {{ "$($_.InterfaceAlias)|$(($_.ServerAddresses -join ','))" }}"#
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()?;
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .to_string())
+    }
+
+    /// Set IPv4 DNS to `dns_addr` and clear all IPv6 DNS servers on every
+    /// adapter.  Windows DNS Client prefers IPv6-resolved results when
+    /// IPv6 DNS servers are available; leaving them untouched means
+    /// queries bypass the TUN entirely.
     pub(super) fn set_all(dns_addr: IpAddr) -> std::io::Result<()> {
         let addr = dns_addr.to_string();
-        let cmd = format!(
+
+        // Step 1: set IPv4 DNS on every adapter that had DNS servers.
+        let cmd_v4 = format!(
             r#"Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object {{$_.ServerAddresses.Count -gt 0}} | ForEach-Object {{ Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ServerAddresses ('{addr}') -ErrorAction SilentlyContinue }}"#
         );
         let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &cmd])
+            .args(["-NoProfile", "-Command", &cmd_v4])
             .output()?;
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let trimmed = stderr.trim();
-            if !trimmed.is_empty() {
-                return Err(std::io::Error::other(
-                    trimmed.to_string(),
-                ));
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !stderr.is_empty() {
+                return Err(std::io::Error::other(stderr));
             }
         }
+
+        // Step 2: clear IPv6 DNS on every adapter that has them.
+        // Set-DnsClientServerAddress without -AddressFamily defaults to
+        // IPv4, so we must explicitly pass -AddressFamily IPv6.
+        let cmd_v6 =
+            r#"Get-DnsClientServerAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object {$_.ServerAddresses.Count -gt 0} | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ResetServerAddresses -ErrorAction SilentlyContinue }"#.to_string();
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &cmd_v6])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !stderr.is_empty() {
+                return Err(std::io::Error::other(stderr));
+            }
+        }
+
+        // Step 3: re-apply IPv4 DNS on adapters that were just reset
+        // by step 2 (ResetServerAddresses clears both families).
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &cmd_v4])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            if !stderr.is_empty() {
+                return Err(std::io::Error::other(stderr));
+            }
+        }
+
         Ok(())
     }
 
     /// Restore DNS from the backup string produced by `backup()`.
     ///
-    /// Each line is `InterfaceAlias|server1,server2,...`. If the server
-    /// list is empty, the adapter is reset to DHCP.
+    /// The string is split on `---IPV6---` into IPv4 and IPv6 sections.
+    /// Each line is `InterfaceAlias|server1,server2,...`. An empty server
+    /// list resets the adapter to DHCP.
     pub(super) fn restore(backup: &str) -> std::io::Result<()> {
         let mut had_error = false;
-        for line in backup.lines() {
+
+        let (v4_section, v6_section) = match backup.split_once(IPV6_SEPARATOR) {
+            Some((v4, v6)) => (v4.trim(), v6.trim()),
+            // Backward compat: pre-IPv6 backups have no separator.
+            None => (backup.trim(), ""),
+        };
+
+        restore_family(v4_section, 4, &mut had_error);
+        restore_family(v6_section, 6, &mut had_error);
+
+        if had_error {
+            Err(std::io::Error::other(
+                "one or more DNS restores failed",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn restore_family(section: &str, family: u8, had_error: &mut bool) {
+        for line in section.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -196,42 +256,62 @@ mod windows {
                 .collect();
 
             let result = if servers.is_empty() {
-                // Reset to DHCP
-                let cmd = format!(
-                    r#"Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue"#,
-                    escape_arg(iface)
-                );
-                Command::new("powershell")
-                    .args(["-NoProfile", "-Command", &cmd])
-                    .output()
+                reset_dns(iface)
             } else {
-                let addr_list = servers
-                    .iter()
-                    .map(|s| format!("'{}'", escape_arg(s)))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let cmd = format!(
-                    r#"Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses ({}) -ErrorAction SilentlyContinue"#,
-                    escape_arg(iface),
-                    addr_list
-                );
-                Command::new("powershell")
-                    .args(["-NoProfile", "-Command", &cmd])
-                    .output()
+                set_dns(iface, &servers, family)
             };
 
             if let Err(e) = result {
-                super::warn!("tun dns-guard: failed to restore DNS on '{iface}': {e}");
-                had_error = true;
+                super::warn!(
+                    "tun dns-guard: failed to restore AF{family} DNS on '{iface}': {e}"
+                );
+                *had_error = true;
             }
         }
-        if had_error {
-            Err(std::io::Error::other(
-                "one or more DNS restores failed",
-            ))
+    }
+
+    fn reset_dns(iface: &str) -> std::io::Result<()> {
+        let cmd = format!(
+            r#"Set-DnsClientServerAddress -InterfaceAlias '{}' -ResetServerAddresses -ErrorAction SilentlyContinue"#,
+            escape_arg(iface)
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &cmd])
+            .output()?;
+        check_ps_output(&output)
+    }
+
+    fn set_dns(iface: &str, servers: &[&str], family: u8) -> std::io::Result<()> {
+        let quoted: Vec<String> = servers
+            .iter()
+            .map(|s| format!("'{}'", escape_arg(s)))
+            .collect();
+        let family_arg = if family == 6 {
+            "-AddressFamily IPv6"
         } else {
-            Ok(())
+            ""
+        };
+        let cmd = format!(
+            r#"Set-DnsClientServerAddress -InterfaceAlias '{}' -ServerAddresses ({}) {} -ErrorAction SilentlyContinue"#,
+            escape_arg(iface),
+            quoted.join(","),
+            family_arg,
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &cmd])
+            .output()?;
+        check_ps_output(&output)
+    }
+
+    fn check_ps_output(output: &std::process::Output) -> std::io::Result<()> {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let trimmed = stderr.trim();
+            if !trimmed.is_empty() {
+                return Err(std::io::Error::other(trimmed.to_string()));
+            }
         }
+        Ok(())
     }
 
     /// Escape single quotes in a PowerShell string argument.
