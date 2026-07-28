@@ -483,7 +483,7 @@ fn parse_request_head(head: &[u8]) -> Result<RequestHead<'_>, &'static str> {
 fn validate_message_framing(headers: &[HeaderField<'_>]) -> Result<(), &'static str> {
     let mut content_length = None;
     let mut has_content_length = false;
-    let mut transfer_codings: Vec<&[u8]> = Vec::new();
+    let mut transfer_codings = Vec::new();
 
     for header in headers {
         if header.name.eq_ignore_ascii_case(b"content-length") {
@@ -505,13 +505,7 @@ fn validate_message_framing(headers: &[HeaderField<'_>]) -> Result<(), &'static 
                 content_length = Some(parsed);
             }
         } else if header.name.eq_ignore_ascii_case(b"transfer-encoding") {
-            for coding in header.value.split(|byte| *byte == b',') {
-                let coding = trim_ows(coding);
-                if coding.is_empty() || !coding.iter().copied().all(is_tchar) {
-                    return Err("invalid Transfer-Encoding");
-                }
-                transfer_codings.push(coding);
-            }
+            parse_transfer_codings(header.value, &mut transfer_codings)?;
         }
     }
 
@@ -521,17 +515,124 @@ fn validate_message_framing(headers: &[HeaderField<'_>]) -> Result<(), &'static 
     if !transfer_codings.is_empty() {
         let chunked_count = transfer_codings
             .iter()
-            .filter(|coding| coding.eq_ignore_ascii_case(b"chunked"))
+            .filter(|coding| coding.name.eq_ignore_ascii_case(b"chunked"))
             .count();
         if chunked_count != 1
-            || !transfer_codings
-                .last()
-                .is_some_and(|coding| coding.eq_ignore_ascii_case(b"chunked"))
+            || !transfer_codings.last().is_some_and(|coding| {
+                coding.name.eq_ignore_ascii_case(b"chunked") && !coding.has_parameters
+            })
         {
             return Err("invalid request Transfer-Encoding");
         }
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct TransferCoding<'a> {
+    name: &'a [u8],
+    has_parameters: bool,
+}
+
+/// Parse the RFC 9110 transfer-coding list without treating commas inside a
+/// quoted parameter value as list separators.
+fn parse_transfer_codings<'a>(
+    value: &'a [u8],
+    codings: &mut Vec<TransferCoding<'a>>,
+) -> Result<(), &'static str> {
+    let mut cursor = 0;
+    skip_ows(value, &mut cursor);
+
+    loop {
+        let name = parse_token(value, &mut cursor).ok_or("invalid Transfer-Encoding")?;
+        let mut has_parameters = false;
+
+        loop {
+            skip_ows(value, &mut cursor);
+            if value.get(cursor) != Some(&b';') {
+                break;
+            }
+            has_parameters = true;
+            cursor += 1;
+            skip_ows(value, &mut cursor);
+            parse_token(value, &mut cursor).ok_or("invalid Transfer-Encoding parameter")?;
+            skip_ows(value, &mut cursor);
+            if value.get(cursor) != Some(&b'=') {
+                return Err("invalid Transfer-Encoding parameter");
+            }
+            cursor += 1;
+            skip_ows(value, &mut cursor);
+            if value.get(cursor) == Some(&b'"') {
+                parse_quoted_string(value, &mut cursor)?;
+            } else {
+                parse_token(value, &mut cursor)
+                    .ok_or("invalid Transfer-Encoding parameter value")?;
+            }
+        }
+
+        codings.push(TransferCoding {
+            name,
+            has_parameters,
+        });
+        skip_ows(value, &mut cursor);
+        match value.get(cursor) {
+            None => return Ok(()),
+            Some(b',') => {
+                cursor += 1;
+                skip_ows(value, &mut cursor);
+                if cursor == value.len() {
+                    return Err("invalid Transfer-Encoding");
+                }
+            }
+            _ => return Err("invalid Transfer-Encoding"),
+        }
+    }
+}
+
+fn parse_token<'a>(value: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
+    let start = *cursor;
+    while value.get(*cursor).is_some_and(|byte| is_tchar(*byte)) {
+        *cursor += 1;
+    }
+    (*cursor != start).then_some(&value[start..*cursor])
+}
+
+fn parse_quoted_string(value: &[u8], cursor: &mut usize) -> Result<(), &'static str> {
+    debug_assert_eq!(value.get(*cursor), Some(&b'"'));
+    *cursor += 1;
+    loop {
+        match value.get(*cursor).copied() {
+            Some(b'"') => {
+                *cursor += 1;
+                return Ok(());
+            }
+            Some(b'\\') => {
+                *cursor += 1;
+                let escaped = value
+                    .get(*cursor)
+                    .copied()
+                    .ok_or("unterminated Transfer-Encoding quoted string")?;
+                if !matches!(escaped, b'\t' | b' '..=b'~' | 0x80..=0xff) {
+                    return Err("invalid Transfer-Encoding quoted pair");
+                }
+                *cursor += 1;
+            }
+            Some(b'\t' | b' ' | b'!' | b'#'..=b'[' | b']'..=b'~' | 0x80..=0xff) => {
+                *cursor += 1;
+            }
+            Some(_) => return Err("invalid Transfer-Encoding quoted string"),
+            None => return Err("unterminated Transfer-Encoding quoted string"),
+        }
+    }
+}
+
+fn skip_ows(value: &[u8], cursor: &mut usize) {
+    while value
+        .get(*cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
+        *cursor += 1;
+    }
 }
 
 fn rewrite_plain_request(request: &RequestHead<'_>, path: &str) -> Vec<u8> {
@@ -753,6 +854,40 @@ mod tests {
             b"POST http://example.com/ HTTP/1.1\r\nContent-Length: 5, 5\r\nContent-Length: 5\r\n\r\n"
         )
         .is_ok());
+    }
+
+    #[test]
+    fn parser_accepts_parameterized_transfer_codings() {
+        assert!(parse_request_head(
+            b"POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: gzip; level=1, chunked\r\n\r\n"
+        )
+        .is_ok());
+        assert!(parse_request_head(
+            b"POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: custom ; note = \"a,b\\\"c\", chunked\r\n\r\n"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn parser_rejects_malformed_transfer_coding_parameters() {
+        for value in [
+            b"gzip; level, chunked".as_slice(),
+            b"gzip; level=, chunked",
+            b"gzip; note=\"unterminated, chunked",
+            b"gzip; note=\"bad\\",
+            b"gzip,,chunked",
+            b"gzip,",
+        ] {
+            let mut codings = Vec::new();
+            assert!(
+                parse_transfer_codings(value, &mut codings).is_err(),
+                "unexpectedly accepted {value:?}"
+            );
+        }
+        assert!(parse_request_head(
+            b"POST http://example.com/ HTTP/1.1\r\nTransfer-Encoding: chunked; extension=yes\r\n\r\n"
+        )
+        .is_err());
     }
 
     #[test]
