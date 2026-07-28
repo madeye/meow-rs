@@ -8,6 +8,7 @@
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -470,6 +471,18 @@ fn ip_from_record(rec: &Record) -> Option<IpAddr> {
     }
 }
 
+fn canonical_name(name: &Name) -> Name {
+    let mut canonical = name.to_lowercase();
+    canonical.set_fqdn(true);
+    canonical
+}
+
+struct CnameLink {
+    target: Name,
+    ttl: u32,
+    ambiguous: bool,
+}
+
 fn relevant_ip_answers(message: &Message) -> (Vec<IpAddr>, Option<u32>) {
     let Some(question) = message.queries.first() else {
         return (Vec::new(), None);
@@ -478,39 +491,63 @@ fn relevant_ip_answers(message: &Message) -> (Vec<IpAddr>, Option<u32>) {
         return (Vec::new(), None);
     }
 
-    let mut reachable = vec![question.name.clone()];
+    // Index CNAME links once, then walk the single chain from QNAME. Besides
+    // making answer order irrelevant, this keeps hostile reverse-ordered
+    // chains linear instead of repeatedly rescanning every answer.
+    let mut cname_links = HashMap::new();
+    for record in &message.answers {
+        if record.dns_class != question.query_class {
+            continue;
+        }
+        let RData::CNAME(target) = &record.data else {
+            continue;
+        };
+        let owner = canonical_name(&record.name);
+        let target = canonical_name(&target.0);
+        match cname_links.entry(owner) {
+            Entry::Vacant(entry) => {
+                entry.insert(CnameLink {
+                    target,
+                    ttl: record.ttl,
+                    ambiguous: false,
+                });
+            }
+            Entry::Occupied(mut entry) => {
+                let link = entry.get_mut();
+                if link.target == target {
+                    link.ttl = link.ttl.min(record.ttl);
+                } else {
+                    // Multiple canonical names for one owner violate the
+                    // CNAME rules. Do not pick an attacker-controlled branch.
+                    link.ambiguous = true;
+                }
+            }
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut current = canonical_name(&question.name);
     let mut cname_ttl: Option<u32> = None;
     loop {
-        let mut changed = false;
-        for record in &message.answers {
-            if record.dns_class != question.query_class
-                || !reachable
-                    .iter()
-                    .any(|name| name.eq_ignore_root(&record.name))
-            {
-                continue;
-            }
-            let RData::CNAME(target) = &record.data else {
-                continue;
-            };
-            cname_ttl = Some(cname_ttl.map_or(record.ttl, |ttl| ttl.min(record.ttl)));
-            if !reachable.iter().any(|name| name.eq_ignore_root(&target.0)) {
-                reachable.push(target.0.clone());
-                changed = true;
-            }
+        if !reachable.insert(current.clone()) {
+            // A CNAME loop has no usable terminal address.
+            return (Vec::new(), None);
         }
-        if !changed {
+        let Some(link) = cname_links.get(&current) else {
             break;
+        };
+        if link.ambiguous {
+            return (Vec::new(), None);
         }
+        cname_ttl = Some(cname_ttl.map_or(link.ttl, |ttl| ttl.min(link.ttl)));
+        current = link.target.clone();
     }
 
     let mut addrs = Vec::new();
     let mut min_ttl = cname_ttl;
     for record in &message.answers {
         if record.dns_class != question.query_class
-            || !reachable
-                .iter()
-                .any(|name| name.eq_ignore_root(&record.name))
+            || !reachable.contains(&canonical_name(&record.name))
         {
             continue;
         }
@@ -827,6 +864,35 @@ mod tests {
             RecordType::A,
         ));
         message.add_answer(a_record("unrelated.example", 30, [6, 6, 6, 6]));
+
+        assert_eq!(relevant_ip_answers(&message), (Vec::new(), None));
+    }
+
+    #[test]
+    fn cname_loop_is_rejected() {
+        let mut message = Message::new(7, MessageType::Response, OpCode::Query);
+        message.add_query(Query::query(
+            "victim.example".parse().unwrap(),
+            RecordType::A,
+        ));
+        message.add_answer(cname_record("victim.example", 60, "alias.example"));
+        message.add_answer(cname_record("alias.example", 30, "victim.example"));
+        message.add_answer(a_record("alias.example", 300, [192, 0, 2, 10]));
+
+        assert_eq!(relevant_ip_answers(&message), (Vec::new(), None));
+    }
+
+    #[test]
+    fn conflicting_cname_targets_are_rejected() {
+        let mut message = Message::new(7, MessageType::Response, OpCode::Query);
+        message.add_query(Query::query(
+            "victim.example".parse().unwrap(),
+            RecordType::A,
+        ));
+        message.add_answer(cname_record("victim.example", 60, "first.example"));
+        message.add_answer(cname_record("victim.example", 30, "second.example"));
+        message.add_answer(a_record("first.example", 300, [192, 0, 2, 10]));
+        message.add_answer(a_record("second.example", 300, [192, 0, 2, 11]));
 
         assert_eq!(relevant_ip_answers(&message), (Vec::new(), None));
     }
