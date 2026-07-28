@@ -161,7 +161,7 @@ async fn body_line_feeds_in_a_later_read_are_not_header_errors() {
         .await
         .expect("origin did not receive the request")
         .unwrap();
-    assert!(captured.ends_with(b"Content-Length: 3\r\n\r\na\nb"));
+    assert!(captured.ends_with(b"Content-Length: 3\r\nConnection: close\r\n\r\na\nb"));
 
     let mut response = Vec::new();
     client_stream.read_to_end(&mut response).await.unwrap();
@@ -219,7 +219,7 @@ async fn valid_obs_text_is_preserved_and_body_line_feeds_are_not_header_errors()
     let expected_prefix =
         format!("POST /upload HTTP/1.1\r\nHost: {origin_addr}\r\nX-Word: caf").into_bytes();
     assert!(captured.starts_with(&expected_prefix));
-    assert!(captured.ends_with(b"\xe9\r\nContent-Length: 3\r\n\r\na\nb"));
+    assert!(captured.ends_with(b"\xe9\r\nContent-Length: 3\r\nConnection: close\r\n\r\na\nb"));
 
     let mut response = Vec::new();
     client_stream.read_to_end(&mut response).await.unwrap();
