@@ -1655,9 +1655,11 @@ async fn spawn_tun_from_raw(
     });
 
     // Await the readiness signal so we don't store a dead JoinHandle when
-    // device creation fails (e.g. os error 5 / permission denied). A 5 s
-    // timeout guards against a genuinely stuck startup path.
-    match tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx).await {
+    // device creation fails (e.g. os error 5 / permission denied). A 30 s
+    // timeout guards against a genuinely stuck startup path.  Windows
+    // wintun adapter creation + smoltcp netstack init can be slow; 5 s was
+    // too aggressive.
+    match tokio::time::timeout(std::time::Duration::from_secs(30), ready_rx).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {
             tracing::error!(
@@ -1668,7 +1670,7 @@ async fn spawn_tun_from_raw(
             return None;
         }
         Err(_) => {
-            tracing::error!("TUN listener startup timed out after 5 s");
+            tracing::error!("TUN listener startup timed out after 30 s");
             handle.abort();
             return None;
         }
