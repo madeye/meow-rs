@@ -1615,7 +1615,7 @@ async fn spawn_tun_from_raw(
     let listener = TunListener::new(
         tunnel.clone(),
         crate::tun_config_to_listener_config(&tun_cfg),
-        "tun".to_string(),
+        "meow-tun".to_string(),
     )
     .with_readiness_signal(ready_tx);
 

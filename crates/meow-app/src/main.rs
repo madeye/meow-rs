@@ -991,7 +991,7 @@ async fn run(
             let listener = TunListener::new(
                 tunnel.clone(),
                 tun_config_to_listener_config(&config.tun),
-                "tun".to_string(),
+                "meow-tun".to_string(),
             )
             .with_readiness_signal(ready_tx);
 
