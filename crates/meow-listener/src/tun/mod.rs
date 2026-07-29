@@ -147,6 +147,8 @@ impl ReadyNotifier {
     fn ready(mut self) {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(TunReady::Ready);
+        } else {
+            tracing::warn!("ReadyNotifier::ready called but tx was already None");
         }
     }
 }
@@ -332,8 +334,15 @@ impl TunListener {
         // Signal readiness: device, stack, and child tasks are all up.
         // Any `?` above would have dropped the notifier, sending
         // `TunReady::Failed` instead.
-        if let Some(notifier) = notifier {
-            notifier.ready();
+        match notifier {
+            Some(notifier) => {
+                info!("TUN listener '{}' signalling readiness...", self.name);
+                notifier.ready();
+                info!("TUN listener '{}' readiness signal sent", self.name);
+            }
+            None => {
+                info!("TUN listener '{}' has no readiness signal configured", self.name);
+            }
         }
 
         loop {
