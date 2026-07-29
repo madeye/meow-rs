@@ -127,11 +127,8 @@ impl Drop for DnsGuard {
         }
         #[cfg(target_os = "macos")]
         {
-            if let Err(e) = macos::restore(&self.backup) {
-                warn!("tun dns-guard: failed to restore DNS settings: {e}");
-            } else {
-                debug!("tun dns-guard: DNS settings restored");
-            }
+            macos::restore(&self.backup);
+            debug!("tun dns-guard: DNS settings restored");
         }
         #[cfg(target_os = "linux")]
         {
