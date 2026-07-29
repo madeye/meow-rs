@@ -233,9 +233,8 @@ impl TunListener {
             // Rotate IP after the first retry fails (attempt >= 2).
             // Each /30 subnet spans 4 addresses, so we step by 4.
             let addr = if attempt >= 2 {
-                let offset = (attempt as u32 - 1) * 4;
-                let new_ip = std::net::Ipv4Addr::from(u32::from(base_addr).wrapping_add(offset));
-                new_ip
+                let offset = (attempt - 1) * 4;
+                std::net::Ipv4Addr::from(u32::from(base_addr).wrapping_add(offset))
             } else {
                 base_addr
             };
@@ -281,8 +280,7 @@ impl TunListener {
             }
 
             if attempt + 1 >= MAX_TUN_RETRIES {
-                return Err(Box::new(io::Error::new(
-                    io::ErrorKind::Other,
+                return Err(Box::new(io::Error::other(
                     format!("failed to create TUN device after {MAX_TUN_RETRIES} attempts"),
                 )));
             }
