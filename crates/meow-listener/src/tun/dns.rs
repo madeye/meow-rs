@@ -16,7 +16,7 @@
 //! similarly non-fatal.
 
 use std::net::IpAddr;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// RAII guard that restores original DNS settings on drop.
 ///
@@ -118,7 +118,7 @@ impl Drop for DnsGuard {
                     backup_len
                 );
             } else {
-                info!(
+                tracing::info!(
                     "tun dns-guard: DNS settings restored (backup {} bytes)",
                     backup_len
                 );
@@ -136,7 +136,7 @@ impl Drop for DnsGuard {
         #[cfg(target_os = "linux")]
         {
             if let Some(backup) = self.backup.take() {
-                if let Err(e) = linux::restore(backup) {
+                if let Err(e) = linux::restore(&backup) {
                     warn!("tun dns-guard: failed to restore /etc/resolv.conf: {e}");
                 } else {
                     debug!("tun dns-guard: /etc/resolv.conf restored");
@@ -317,9 +317,9 @@ mod windows {
             match result {
                 Ok(()) => {
                     if servers.is_empty() {
-                        super::info!("tun dns-guard: reset DNS to DHCP on '{iface}'");
+                        tracing::info!("tun dns-guard: reset DNS to DHCP on '{iface}'");
                     } else {
-                        super::info!(
+                        tracing::info!(
                             "tun dns-guard: restored DNS on '{iface}' -> [{}]",
                             servers.join(", ")
                         );
@@ -491,7 +491,7 @@ mod linux {
         Ok(ResolvConfBackup { path, content })
     }
 
-    pub(super) fn restore(backup: ResolvConfBackup) -> io::Result<()> {
+    pub(super) fn restore(backup: &ResolvConfBackup) -> io::Result<()> {
         fs::write(&backup.path, &backup.content)
     }
 }

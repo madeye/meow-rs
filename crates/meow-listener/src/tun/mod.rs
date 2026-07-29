@@ -229,11 +229,6 @@ impl TunListener {
 
         let tun_create_ms = t0.elapsed().as_secs_f64() * 1000.0;
         info!("TUN device '{dev_name}' created in {tun_create_ms:.0}ms");
-        // safety-net: stderr fallback in case tracing subscriber drops events
-        // during a long blocking build_async() call.
-        eprintln!(
-            "[meow] TUN device '{dev_name}' created in {tun_create_ms:.0}ms"
-        );
 
         // auto-route v1: capture exactly the fake-IP range (see module docs).
         let _routes = if cfg.auto_route {
@@ -243,12 +238,7 @@ impl TunListener {
                     let t_route = Instant::now();
                     let guard = RouteGuard::setup(if_index, &[fake_net])?;
                     let route_ms = t_route.elapsed().as_secs_f64() * 1000.0;
-                    info!(
-                        "auto-route installed in {route_ms:.0}ms"
-                    );
-                    eprintln!(
-                        "[meow] auto-route installed in {route_ms:.0}ms"
-                    );
+                    info!("auto-route installed in {route_ms:.0}ms");
                     Some(guard)
                 }
                 None => {
@@ -282,7 +272,6 @@ impl TunListener {
             let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
             let dns_active = guard.is_some();
             info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
-            eprintln!("[meow] dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
             guard
         } else {
             None
@@ -304,7 +293,6 @@ impl TunListener {
 
         let stack_ms = t_stack.elapsed().as_secs_f64() * 1000.0;
         info!("netstack built in {stack_ms:.0}ms");
-        eprintln!("[meow] netstack built in {stack_ms:.0}ms");
 
         let mut tasks = TaskGroup::new();
 
@@ -338,11 +326,6 @@ impl TunListener {
         info!(
             "TUN listener '{}' started on device '{dev_name}' ({}, mtu {}, auto-route: {}, \
              dns-hijack: {}, total startup {total_ms:.0}ms)",
-            self.name, cfg.inet4_address, cfg.mtu, cfg.auto_route, cfg.dns_hijack
-        );
-        eprintln!(
-            "[meow] TUN listener '{}' started on device '{dev_name}' ({}, mtu {}, \
-             auto-route: {}, dns-hijack: {}, total startup {total_ms:.0}ms)",
             self.name, cfg.inet4_address, cfg.mtu, cfg.auto_route, cfg.dns_hijack
         );
 
