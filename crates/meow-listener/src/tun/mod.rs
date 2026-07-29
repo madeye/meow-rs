@@ -228,7 +228,7 @@ impl TunListener {
         let dev_name = device.name().unwrap_or_else(|_| "<unknown>".into());
 
         info!(
-            "TUN device '{dev_name}' created in {:.0}ms",
+            "TUN device created in {:.0}ms",
             t0.elapsed().as_secs_f64() * 1000.0
         );
 
