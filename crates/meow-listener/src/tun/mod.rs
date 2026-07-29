@@ -217,7 +217,7 @@ impl TunListener {
         // tokio worker forever.  Multiple attempts × per-attempt timeout must
         // fit inside the caller's overall TUN_STARTUP_TIMEOUT (120 s).
         const MAX_TUN_RETRIES: u32 = 5;
-        const TUN_CREATE_TIMEOUT_SECS: u64 = 8;
+        const TUN_CREATE_TIMEOUT_SECS: u64 = 30;
         let base_name = cfg.device.clone().unwrap_or_else(|| "meow-tun".into());
         let mut device: Option<Arc<tun_rs::AsyncDevice>> = None;
         let mut dev_name = String::new();
