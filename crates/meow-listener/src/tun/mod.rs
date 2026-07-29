@@ -208,40 +208,147 @@ impl TunListener {
 
         let cfg = &self.cfg;
 
-        let mut builder = tun_rs::DeviceBuilder::new().mtu(cfg.mtu).ipv4(
-            cfg.inet4_address.addr(),
-            cfg.inet4_address.prefix_len(),
-            None,
-        );
-        if let Some(name) = &cfg.device {
-            builder = builder.name(name);
-        }
-        info!("creating TUN device...");
-        let device = builder.build_async().map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!(
-                    "failed to create TUN device: {e} (requires root/CAP_NET_ADMIN on \
-                     Linux/macOS; elevation + wintun.dll on Windows)"
-                ),
+        // Try up to 5 device names in case the previous instance left a
+        // stale adapter that hasn't been cleaned up yet (common on Windows
+        // after an unclean shutdown).
+        //
+        // Each attempt runs on a blocking thread with a per-attempt timeout
+        // so a stuck `build_async()` (wintun init can hang) doesn't block the
+        // tokio worker forever.  Multiple attempts × per-attempt timeout must
+        // fit inside the caller's overall TUN_STARTUP_TIMEOUT (30 s).
+        const MAX_TUN_RETRIES: u32 = 5;
+        const TUN_CREATE_TIMEOUT_SECS: u64 = 8;
+        let base_name = cfg.device.clone().unwrap_or_else(|| "meow-tun".into());
+        let mut device: Option<Arc<tun_rs::AsyncDevice>> = None;
+        let mut dev_name = String::new();
+
+        for attempt in 0..MAX_TUN_RETRIES {
+            let name = if attempt == 0 {
+                base_name.clone()
+            } else {
+                format!("{}-{}", base_name, attempt)
+            };
+
+            // Copy the values we need inside `spawn_blocking` so we don't
+            // borrow `cfg` across the closure boundary.
+            let mtu = cfg.mtu;
+            let addr = cfg.inet4_address.addr();
+            let prefix = cfg.inet4_address.prefix_len();
+            let name_for_closure = name.clone();
+
+            info!(
+                "creating TUN device '{}' (attempt {}/{}, timeout {}s)...",
+                name,
+                attempt + 1,
+                MAX_TUN_RETRIES,
+                TUN_CREATE_TIMEOUT_SECS
+            );
+
+            let result = tokio::time::timeout(
+                Duration::from_secs(TUN_CREATE_TIMEOUT_SECS),
+                tokio::task::spawn_blocking(move || {
+                    tun_rs::DeviceBuilder::new()
+                        .mtu(mtu)
+                        .ipv4(addr, prefix, None)
+                        .name(&name_for_closure)
+                        .build_async()
+                }),
             )
-        })?;
-        let device = Arc::new(device);
-        let dev_name = device.name().unwrap_or_else(|_| "<unknown>".into());
+            .await;
+
+            match result {
+                // spawn_blocking ran, build_async returned Ok
+                Ok(Ok(Ok(d))) => {
+                    dev_name = d.name().unwrap_or_else(|_| name.clone());
+                    device = Some(Arc::new(d));
+                    break;
+                }
+                // spawn_blocking ran, build_async returned Err
+                Ok(Ok(Err(e))) => {
+                    warn!("failed to create TUN device '{}': {e}", name);
+                }
+                // spawn_blocking panicked or join error
+                Ok(Err(join_err)) => {
+                    warn!(
+                        "spawn_blocking for TUN device '{}' panicked: {join_err}",
+                        name
+                    );
+                }
+                // per-attempt timeout elapsed
+                Err(_elapsed) => {
+                    warn!(
+                        "creating TUN device '{}' timed out after {}s",
+                        name, TUN_CREATE_TIMEOUT_SECS
+                    );
+                }
+            }
+
+            if attempt + 1 >= MAX_TUN_RETRIES {
+                return Err(Box::new(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "failed to create TUN device after {MAX_TUN_RETRIES} attempts \
+                         ({MAX_TUN_RETRIES}×{TUN_CREATE_TIMEOUT_SECS}s timeout)"
+                    ),
+                )));
+            }
+        }
+        // SAFETY: the loop either breaks with `device = Some(...)` and
+        // `dev_name` set, or returns `Err` above.
+        let device = device.unwrap();
 
         let tun_create_ms = t0.elapsed().as_secs_f64() * 1000.0;
         info!("TUN device '{dev_name}' created in {tun_create_ms:.0}ms");
 
         // auto-route v1: capture exactly the fake-IP range (see module docs).
+        //
+        // RouteManager::add() calls into OS routing APIs that may block
+        // (PowerShell on Windows), so it runs on a blocking thread with a
+        // timeout so the outer startup guard can fire.
+        const ROUTE_SETUP_TIMEOUT_SECS: u64 = 5;
         let _routes = if cfg.auto_route {
             match self.tunnel.resolver().fake_ip_v4_net() {
                 Some(fake_net) => {
                     let if_index = device.if_index()?;
                     let t_route = Instant::now();
-                    let guard = RouteGuard::setup(if_index, &[fake_net])?;
-                    let route_ms = t_route.elapsed().as_secs_f64() * 1000.0;
-                    info!("auto-route installed in {route_ms:.0}ms");
-                    Some(guard)
+
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(ROUTE_SETUP_TIMEOUT_SECS),
+                        tokio::task::spawn_blocking(move || {
+                            RouteGuard::setup(if_index, &[fake_net])
+                        }),
+                    )
+                    .await;
+
+                    let guard = match result {
+                        Ok(Ok(Ok(g))) => {
+                            let route_ms = t_route.elapsed().as_secs_f64() * 1000.0;
+                            info!("auto-route installed in {route_ms:.0}ms");
+                            Some(g)
+                        }
+                        Ok(Ok(Err(e))) => {
+                            return Err(Box::new(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("failed to install auto-route: {e}"),
+                            )));
+                        }
+                        Ok(Err(join_err)) => {
+                            return Err(Box::new(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("auto-route spawn_blocking panicked: {join_err}"),
+                            )));
+                        }
+                        Err(_elapsed) => {
+                            return Err(Box::new(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!(
+                                    "auto-route setup timed out after {}s",
+                                    ROUTE_SETUP_TIMEOUT_SECS
+                                ),
+                            )));
+                        }
+                    };
+                    guard
                 }
                 None => {
                     warn!(
@@ -259,21 +366,45 @@ impl TunListener {
         };
 
         // When dns-hijack is on and we're in fake-IP mode, point the OS
-        // resolver at the fake-IP gateway (e.g. 198.18.0.1).  DNS queries
-        // will route into the TUN device, be answered with fake IPs, and
-        // client traffic to those fake IPs will be captured by the route
-        // guard above.  The guard restores the original resolver config
-        // when the listener exits.
+        // resolver at the loopback DNS server.  The backup + set calls into
+        // PowerShell (Get-DnsClientServerAddress / Set-DnsClientServerAddress)
+        // which can take tens of seconds on Windows, so run them on a
+        // blocking thread with a timeout.
+        const DNS_GUARD_TIMEOUT_SECS: u64 = 20;
         let _dns_guard = if cfg.dns_hijack && cfg.auto_route {
             let t_dns = Instant::now();
-            let guard = self
-                .tunnel
-                .resolver()
-                .fake_ip_v4_gateway()
-                .and_then(dns::DnsGuard::setup);
-            let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
-            let dns_active = guard.is_some();
-            info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
+            let guard = match self.tunnel.resolver().fake_ip_v4_gateway() {
+                Some(gateway) => {
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(DNS_GUARD_TIMEOUT_SECS),
+                        tokio::task::spawn_blocking(move || dns::DnsGuard::setup(gateway)),
+                    )
+                    .await;
+
+                    match result {
+                        Ok(Ok(g)) => {
+                            let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
+                            let dns_active = g.is_some();
+                            info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
+                            g
+                        }
+                        Ok(Err(_join_err)) => {
+                            warn!(
+                                "dns-guard spawn_blocking panicked, continuing without DNS hijack"
+                            );
+                            None
+                        }
+                        Err(_elapsed) => {
+                            warn!(
+                                "dns-guard setup timed out after {}s, continuing without DNS hijack",
+                                DNS_GUARD_TIMEOUT_SECS
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
             guard
         } else {
             None
@@ -341,7 +472,10 @@ impl TunListener {
                 info!("TUN listener '{}' readiness signal sent", self.name);
             }
             None => {
-                info!("TUN listener '{}' has no readiness signal configured", self.name);
+                info!(
+                    "TUN listener '{}' has no readiness signal configured",
+                    self.name
+                );
             }
         }
 
