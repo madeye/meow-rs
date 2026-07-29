@@ -1002,17 +1002,22 @@ async fn run(
             });
 
             // Await device readiness before treating TUN as "running".
-            // If device creation fails (permission denied, etc.), don't
-            // store a dead JoinHandle — the next reconcile will retry.
+            // If device creation fails (permission denied, etc.) the
+            // notifier sends `TunReady::Failed` immediately — no timeout
+            // wait.  Only a genuinely stuck setup hits the timeout.
             match tokio::time::timeout(meow_api::TUN_STARTUP_TIMEOUT, ready_rx).await {
-                Ok(Ok(())) => {
+                Ok(Ok(meow_listener::TunReady::Ready)) => {
                     tunnel.set_tun_handle(handle).await;
                 }
-                Ok(Err(_)) => {
+                Ok(Ok(meow_listener::TunReady::Failed(msg))) => {
                     error!(
-                        "TUN listener failed to start — check permissions / admin / \
-                         CAP_NET_ADMIN"
+                        "TUN listener failed to start: {msg} — \
+                         check permissions / admin / CAP_NET_ADMIN"
                     );
+                    handle.abort();
+                }
+                Ok(Err(_)) => {
+                    error!("TUN listener readiness signal dropped unexpectedly");
                     handle.abort();
                 }
                 Err(_) => {

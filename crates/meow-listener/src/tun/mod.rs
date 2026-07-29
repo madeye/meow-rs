@@ -34,6 +34,8 @@
 
 mod device;
 mod dns;
+#[cfg(target_os = "windows")]
+mod local_dns;
 mod route;
 mod udp;
 
@@ -42,7 +44,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use ipnet::Ipv4Net;
@@ -113,15 +115,62 @@ pub struct TunListenerConfig {
     pub udp_timeout: Duration,
 }
 
+/// Outcome of TUN listener startup, sent through the readiness channel.
+/// Allows callers to distinguish immediate setup failure from a timeout
+/// without waiting for the full `TUN_STARTUP_TIMEOUT`.
+pub enum TunReady {
+    /// Device + stack + child tasks are fully initialized.
+    Ready,
+    /// Setup failed before reaching the accept loop.  The String carries
+    /// the underlying error message so callers can surface it directly.
+    Failed(String),
+}
+
+/// RAII helper that guarantees the readiness oneshot is always fired.
+///
+/// If `ready()` is called, the sender sends `TunReady::Ready` and is
+/// consumed (no drop-side-effect).  If the notifier is dropped without
+/// a prior `ready()` call — e.g. because `run()` hit a `?` and the
+/// local variable goes out of scope — the sender fires
+/// `TunReady::Failed(...)` so the caller gets an immediate,
+/// descriptive error instead of a bare `RecvError`.
+struct ReadyNotifier {
+    tx: Option<tokio::sync::oneshot::Sender<TunReady>>,
+}
+
+impl ReadyNotifier {
+    fn new(tx: tokio::sync::oneshot::Sender<TunReady>) -> Self {
+        Self { tx: Some(tx) }
+    }
+
+    /// Consume the notifier and send `TunReady::Ready`.
+    fn ready(mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(TunReady::Ready);
+        }
+    }
+}
+
+impl Drop for ReadyNotifier {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(TunReady::Failed(
+                "listener setup failed before reaching readiness".into(),
+            ));
+        }
+    }
+}
+
 pub struct TunListener {
     tunnel: Tunnel,
     cfg: TunListenerConfig,
     name: String,
     /// Optional readiness signal: sent once after the device, stack, and
     /// child tasks are fully initialized (before the accept loop).
-    /// Dropped on setup failure so callers can distinguish "not started"
-    /// from "briefly delayed".
-    ready: Option<tokio::sync::oneshot::Sender<()>>,
+    /// If the listener fails before reaching that point the notifier's
+    /// `Drop` impl sends `TunReady::Failed`, giving callers an immediate
+    /// error without waiting for a timeout.
+    ready: Option<tokio::sync::oneshot::Sender<TunReady>>,
 }
 
 impl TunListener {
@@ -134,16 +183,27 @@ impl TunListener {
         }
     }
 
-    /// Attach a readiness signal. The sender will fire after device
-    /// creation + stack init + child-task setup succeeds, and before the
-    /// accept loop starts. If `run()` fails before reaching that point,
-    /// the sender is dropped — the receiver sees a `RecvError`.
-    pub fn with_readiness_signal(mut self, tx: tokio::sync::oneshot::Sender<()>) -> Self {
+    /// Attach a readiness signal. The sender will fire `TunReady::Ready`
+    /// after device creation + stack init + child-task setup succeeds,
+    /// and before the accept loop starts.  If `run()` fails before
+    /// reaching that point the notifier's `Drop` impl sends
+    /// `TunReady::Failed(msg)`, giving callers an immediate error without
+    /// waiting for a timeout.
+    pub fn with_readiness_signal(mut self, tx: tokio::sync::oneshot::Sender<TunReady>) -> Self {
         self.ready = Some(tx);
         self
     }
 
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let t0 = Instant::now();
+        info!("TUN listener '{}' starting...", self.name);
+
+        // Extract the readiness sender into a notifier that will
+        // automatically fire `TunReady::Failed(...)` on drop, so a `?`
+        // early-return immediately notifies the caller with the fact
+        // that setup did not complete — no 30 s timeout needed.
+        let notifier = self.ready.take().map(ReadyNotifier::new);
+
         let cfg = &self.cfg;
 
         let mut builder = tun_rs::DeviceBuilder::new().mtu(cfg.mtu).ipv4(
@@ -154,6 +214,7 @@ impl TunListener {
         if let Some(name) = &cfg.device {
             builder = builder.name(name);
         }
+        info!("creating TUN device...");
         let device = builder.build_async().map_err(|e| {
             io::Error::new(
                 e.kind(),
@@ -166,12 +227,23 @@ impl TunListener {
         let device = Arc::new(device);
         let dev_name = device.name().unwrap_or_else(|_| "<unknown>".into());
 
+        info!(
+            "TUN device '{dev_name}' created in {:.0}ms",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+
         // auto-route v1: capture exactly the fake-IP range (see module docs).
         let _routes = if cfg.auto_route {
             match self.tunnel.resolver().fake_ip_v4_net() {
                 Some(fake_net) => {
                     let if_index = device.if_index()?;
-                    Some(RouteGuard::setup(if_index, &[fake_net])?)
+                    let t_route = Instant::now();
+                    let guard = RouteGuard::setup(if_index, &[fake_net])?;
+                    info!(
+                        "auto-route installed in {:.0}ms",
+                        t_route.elapsed().as_secs_f64() * 1000.0
+                    );
+                    Some(guard)
                 }
                 None => {
                     warn!(
@@ -195,10 +267,18 @@ impl TunListener {
         // guard above.  The guard restores the original resolver config
         // when the listener exits.
         let _dns_guard = if cfg.dns_hijack && cfg.auto_route {
-            self.tunnel
+            let t_dns = Instant::now();
+            let guard = self
+                .tunnel
                 .resolver()
                 .fake_ip_v4_gateway()
-                .and_then(dns::DnsGuard::setup)
+                .and_then(dns::DnsGuard::setup);
+            info!(
+                "dns-guard setup took {:.0}ms (active: {})",
+                t_dns.elapsed().as_secs_f64() * 1000.0,
+                guard.is_some()
+            );
+            guard
         } else {
             None
         };
@@ -206,6 +286,7 @@ impl TunListener {
         // ICMP rides on the TCP interface (echo replies are answered by
         // smoltcp itself), hence tcp+icmp+udp; with tcp and udp enabled the
         // runner/listener/socket options are always populated.
+        let t_stack = Instant::now();
         let (stack, runner, udp_socket, tcp_listener) = StackBuilder::default()
             .mtu(usize::from(cfg.mtu))
             .enable_tcp(true)
@@ -216,7 +297,24 @@ impl TunListener {
         let mut tcp_listener = tcp_listener.expect("netstack TCP listener (TCP enabled)");
         let udp_socket = udp_socket.expect("netstack UDP socket (UDP enabled)");
 
+        info!(
+            "netstack built in {:.0}ms",
+            t_stack.elapsed().as_secs_f64() * 1000.0
+        );
+
         let mut tasks = TaskGroup::new();
+
+        // Windows: start local DNS server on 127.0.0.1:53 and [::1]:53.
+        // DnsGuard has already set system DNS to these loopback addresses;
+        // the server answers queries using the same DnsServer::handle_query
+        // pipeline as the TUN dns-hijack path, returning fake IPs.
+        #[cfg(target_os = "windows")]
+        if _dns_guard.is_some() {
+            let resolver = Arc::clone(self.tunnel.resolver());
+            tasks.spawn(async move {
+                local_dns::run(resolver).await;
+            });
+        }
 
         tasks.spawn(async move {
             let _ = runner.await;
@@ -234,16 +332,20 @@ impl TunListener {
 
         info!(
             "TUN listener '{}' started on device '{dev_name}' ({}, mtu {}, auto-route: {}, \
-             dns-hijack: {})",
-            self.name, cfg.inet4_address, cfg.mtu, cfg.auto_route, cfg.dns_hijack
+             dns-hijack: {}, total startup {:.0}ms)",
+            self.name,
+            cfg.inet4_address,
+            cfg.mtu,
+            cfg.auto_route,
+            cfg.dns_hijack,
+            t0.elapsed().as_secs_f64() * 1000.0
         );
 
         // Signal readiness: device, stack, and child tasks are all up.
-        // If we return Err before this point the sender is dropped,
-        // which allows callers (put_configs / startup) to surface the
-        // failure instead of silently storing a dead JoinHandle.
-        if let Some(ready) = self.ready.take() {
-            let _ = ready.send(());
+        // Any `?` above would have dropped the notifier, sending
+        // `TunReady::Failed` instead.
+        if let Some(notifier) = notifier {
+            notifier.ready();
         }
 
         loop {

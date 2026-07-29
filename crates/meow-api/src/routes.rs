@@ -1626,14 +1626,21 @@ async fn spawn_tun_from_raw(
 
     // Await the readiness signal so we don't store a dead JoinHandle when
     // device creation fails (e.g. os error 5 / permission denied). The
-    // timeout guards against a genuinely stuck startup path.
+    // timeout guards against a genuinely stuck startup path; immediate
+    // failures are reported through `TunReady::Failed` without delay.
     match tokio::time::timeout(crate::TUN_STARTUP_TIMEOUT, ready_rx).await {
-        Ok(Ok(())) => {}
-        Ok(Err(_)) => {
+        Ok(Ok(meow_listener::TunReady::Ready)) => {}
+        Ok(Ok(meow_listener::TunReady::Failed(msg))) => {
             tracing::error!(
-                "TUN listener failed to start (device creation failed — \
-                 check permissions / admin / CAP_NET_ADMIN)"
+                "TUN listener failed to start: {msg} \
+                 (check permissions / admin / CAP_NET_ADMIN)"
             );
+            handle.abort();
+            return None;
+        }
+        Ok(Err(_)) => {
+            // Should not happen with ReadyNotifier, but handle defensively.
+            tracing::error!("TUN listener readiness signal dropped unexpectedly");
             handle.abort();
             return None;
         }

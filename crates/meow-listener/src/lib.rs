@@ -21,4 +21,4 @@ pub use sniffer::SnifferRuntime;
 #[cfg(feature = "listener-tproxy")]
 pub use tproxy::TProxyListener;
 #[cfg(feature = "listener-tun")]
-pub use tun::{TunListener, TunListenerConfig};
+pub use tun::{TunListener, TunListenerConfig, TunReady};

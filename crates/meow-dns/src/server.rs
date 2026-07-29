@@ -18,11 +18,11 @@ const DEFAULT_ANSWER_TTL_SECS: u32 = 60;
 /// Layout: root name (1) + OPT type 41 (2) + UDP size 512 (2) + TTL 0 (4) +
 /// RDLENGTH 0 (2).
 const OPT_RECORD: &[u8] = &[
-    0x00,                   // NAME: root
-    0x00, 0x29,             // TYPE: OPT (41)
-    0x02, 0x00,             // CLASS: UDP payload size 512
+    0x00, // NAME: root
+    0x00, 0x29, // TYPE: OPT (41)
+    0x02, 0x00, // CLASS: UDP payload size 512
     0x00, 0x00, 0x00, 0x00, // TTL: ext-rcode=0, version=0, DO=0
-    0x00, 0x00,             // RDLENGTH: 0
+    0x00, 0x00, // RDLENGTH: 0
 ];
 
 /// Simple DNS server that handles queries by forwarding to our resolver.
@@ -113,14 +113,13 @@ impl DnsServer {
         }
 
         // Parse the question name
-        let (domain, qtype, _offset) = Self::parse_question(&data[12..])
-            .map_err(|e| {
-                info!(
-                    "DNS query parse_question failed: {e} | bytes: {}",
-                    hex_prefix(&data[12..], 64)
-                );
-                e
-            })?;
+        let (domain, qtype, _offset) = Self::parse_question(&data[12..]).map_err(|e| {
+            info!(
+                "DNS query parse_question failed: {e} | bytes: {}",
+                hex_prefix(&data[12..], 64)
+            );
+            e
+        })?;
         info!(
             "DNS query: id={id:#06x} flags={flags:#06x} qdcount={qdcount} arcount={arcount} domain={domain} qtype={qtype}"
         );
@@ -131,7 +130,10 @@ impl DnsServer {
         // We deliberately stop short of fake-IP synthesis here: only address
         // records ever get a synthetic answer.
         if qtype != 1 && qtype != 28 {
-            return Self::handle_generic_forward(id, data, flags, qdcount, &domain, qtype, resolver).await;
+            return Self::handle_generic_forward(
+                id, data, flags, qdcount, &domain, qtype, resolver,
+            )
+            .await;
         }
 
         // Check hosts trie first. If the domain is present in the hosts table
@@ -145,7 +147,15 @@ impl DnsServer {
                 all_ips.iter().find(|ip| ip.is_ipv6()).copied()
             };
             return Ok(match ip {
-                Some(addr) => Self::build_response(id, data, flags, qdcount, qtype, addr, DEFAULT_ANSWER_TTL_SECS),
+                Some(addr) => Self::build_response(
+                    id,
+                    data,
+                    flags,
+                    qdcount,
+                    qtype,
+                    addr,
+                    DEFAULT_ANSWER_TTL_SECS,
+                ),
                 None => Self::build_noerror_empty(id, data, flags, qdcount),
             });
         }
@@ -313,7 +323,7 @@ impl DnsServer {
         let lo = query_flags as u8;
         // Byte 0: QR=1 | OPCODE(echo) | AA=0 | TC=0 | RD(echo)
         let byte0: u8 = 0x80 | (hi & 0x79); // 0x79 = bits 6,5,4,3 (OPCODE) + bit 0 (RD)
-        // Byte 1: RA=1 | Z=0 | AD=0 | CD(echo) | RCODE=0
+                                            // Byte 1: RA=1 | Z=0 | AD=0 | CD(echo) | RCODE=0
         let byte1: u8 = 0x80 | (lo & 0x10); // 0x10 = bit 4 (CD)
         [byte0, byte1]
     }
