@@ -973,7 +973,7 @@ async fn commit_raw_candidate(
     apply_raw_to_tunnel(candidate.clone(), state).await?;
     swap_config_and_reconcile_tun(state, candidate)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(())
 }
 
@@ -1854,7 +1854,7 @@ async fn put_configs(
 
     if let Err(e) = swap_config_and_reconcile_tun(&state, raw_config).await {
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"message": e})),
         )
             .into_response();
