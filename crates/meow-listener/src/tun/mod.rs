@@ -227,9 +227,12 @@ impl TunListener {
         let device = Arc::new(device);
         let dev_name = device.name().unwrap_or_else(|_| "<unknown>".into());
 
-        info!(
-            "TUN device created in {:.0}ms",
-            t0.elapsed().as_secs_f64() * 1000.0
+        let tun_create_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        info!("TUN device '{dev_name}' created in {tun_create_ms:.0}ms");
+        // safety-net: stderr fallback in case tracing subscriber drops events
+        // during a long blocking build_async() call.
+        eprintln!(
+            "[meow] TUN device '{dev_name}' created in {tun_create_ms:.0}ms"
         );
 
         // auto-route v1: capture exactly the fake-IP range (see module docs).
@@ -239,9 +242,12 @@ impl TunListener {
                     let if_index = device.if_index()?;
                     let t_route = Instant::now();
                     let guard = RouteGuard::setup(if_index, &[fake_net])?;
+                    let route_ms = t_route.elapsed().as_secs_f64() * 1000.0;
                     info!(
-                        "auto-route installed in {:.0}ms",
-                        t_route.elapsed().as_secs_f64() * 1000.0
+                        "auto-route installed in {route_ms:.0}ms"
+                    );
+                    eprintln!(
+                        "[meow] auto-route installed in {route_ms:.0}ms"
                     );
                     Some(guard)
                 }
@@ -273,11 +279,10 @@ impl TunListener {
                 .resolver()
                 .fake_ip_v4_gateway()
                 .and_then(dns::DnsGuard::setup);
-            info!(
-                "dns-guard setup took {:.0}ms (active: {})",
-                t_dns.elapsed().as_secs_f64() * 1000.0,
-                guard.is_some()
-            );
+            let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
+            let dns_active = guard.is_some();
+            info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
+            eprintln!("[meow] dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
             guard
         } else {
             None
@@ -297,10 +302,9 @@ impl TunListener {
         let mut tcp_listener = tcp_listener.expect("netstack TCP listener (TCP enabled)");
         let udp_socket = udp_socket.expect("netstack UDP socket (UDP enabled)");
 
-        info!(
-            "netstack built in {:.0}ms",
-            t_stack.elapsed().as_secs_f64() * 1000.0
-        );
+        let stack_ms = t_stack.elapsed().as_secs_f64() * 1000.0;
+        info!("netstack built in {stack_ms:.0}ms");
+        eprintln!("[meow] netstack built in {stack_ms:.0}ms");
 
         let mut tasks = TaskGroup::new();
 
@@ -330,15 +334,16 @@ impl TunListener {
             self.name.clone(),
         ));
 
+        let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
         info!(
             "TUN listener '{}' started on device '{dev_name}' ({}, mtu {}, auto-route: {}, \
-             dns-hijack: {}, total startup {:.0}ms)",
-            self.name,
-            cfg.inet4_address,
-            cfg.mtu,
-            cfg.auto_route,
-            cfg.dns_hijack,
-            t0.elapsed().as_secs_f64() * 1000.0
+             dns-hijack: {}, total startup {total_ms:.0}ms)",
+            self.name, cfg.inet4_address, cfg.mtu, cfg.auto_route, cfg.dns_hijack
+        );
+        eprintln!(
+            "[meow] TUN listener '{}' started on device '{dev_name}' ({}, mtu {}, \
+             auto-route: {}, dns-hijack: {}, total startup {total_ms:.0}ms)",
+            self.name, cfg.inet4_address, cfg.mtu, cfg.auto_route, cfg.dns_hijack
         );
 
         // Signal readiness: device, stack, and child tasks are all up.
