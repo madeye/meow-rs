@@ -208,9 +208,10 @@ impl TunListener {
 
         let cfg = &self.cfg;
 
-        // Try up to 5 device names in case the previous instance left a
-        // stale adapter that hasn't been cleaned up yet (common on Windows
-        // after an unclean shutdown).
+        // Try up to 5 device names and IPs in case the previous instance
+        // left a stale adapter that hasn't been cleaned up yet (common on
+        // Windows after an unclean shutdown).  After the first retry fails,
+        // we also rotate the TUN IP to work around address conflicts.
         //
         // Each attempt runs on a blocking thread with a per-attempt timeout
         // so a stuck `build_async()` (wintun init can hang) doesn't block the
@@ -219,8 +220,11 @@ impl TunListener {
         const MAX_TUN_RETRIES: u32 = 5;
         const TUN_CREATE_TIMEOUT_SECS: u64 = 30;
         let base_name = cfg.device.clone().unwrap_or_else(|| "meow-tun".into());
+        let base_addr = cfg.inet4_address.addr();
+        let prefix = cfg.inet4_address.prefix_len();
         let mut device: Option<Arc<tun_rs::AsyncDevice>> = None;
         let mut dev_name = String::new();
+        let mut used_addr = base_addr;
 
         for attempt in 0..MAX_TUN_RETRIES {
             let name = if attempt == 0 {
@@ -229,16 +233,27 @@ impl TunListener {
                 format!("{base_name}-{attempt}")
             };
 
+            // Rotate IP after the first retry fails (attempt >= 2).
+            // Each /30 subnet spans 4 addresses, so we step by 4.
+            let addr = if attempt >= 2 {
+                let offset = (attempt as u32 - 1) * 4;
+                let new_ip =
+                    std::net::Ipv4Addr::from(u32::from(base_addr).wrapping_add(offset));
+                new_ip
+            } else {
+                base_addr
+            };
+            let ip_display = format!("{addr}/{prefix}");
+
             // Copy the values we need inside `spawn_blocking` so we don't
             // borrow `cfg` across the closure boundary.
             let mtu = cfg.mtu;
-            let addr = cfg.inet4_address.addr();
-            let prefix = cfg.inet4_address.prefix_len();
             let name_for_closure = name.clone();
 
             info!(
-                "creating TUN device '{}' (attempt {}/{}, timeout {}s)...",
+                "creating TUN device '{}' with {} (attempt {}/{}, timeout {}s)...",
                 name,
+                ip_display,
                 attempt + 1,
                 MAX_TUN_RETRIES,
                 TUN_CREATE_TIMEOUT_SECS
@@ -260,6 +275,7 @@ impl TunListener {
                 // spawn_blocking ran, build_async returned Ok
                 Ok(Ok(Ok(d))) => {
                     dev_name = d.name().unwrap_or_else(|_| name.clone());
+                    used_addr = addr;
                     device = Some(Arc::new(d));
                     break;
                 }
@@ -454,9 +470,9 @@ impl TunListener {
 
         let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
         info!(
-            "TUN listener '{}' started on device '{dev_name}' ({}, mtu {}, auto-route: {}, \
+            "TUN listener '{}' started on device '{dev_name}' ({}/{}, mtu {}, auto-route: {}, \
              dns-hijack: {}, total startup {total_ms:.0}ms)",
-            self.name, cfg.inet4_address, cfg.mtu, cfg.auto_route, cfg.dns_hijack
+            self.name, used_addr, prefix, cfg.mtu, cfg.auto_route, cfg.dns_hijack
         );
 
         // Signal readiness: device, stack, and child tasks are all up.
