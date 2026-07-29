@@ -226,7 +226,7 @@ impl TunListener {
             let name = if attempt == 0 {
                 base_name.clone()
             } else {
-                format!("{}-{}", base_name, attempt)
+                format!("{base_name}-{attempt}")
             };
 
             // Copy the values we need inside `spawn_blocking` so we don't
@@ -327,23 +327,20 @@ impl TunListener {
                             Some(g)
                         }
                         Ok(Ok(Err(e))) => {
-                            return Err(Box::new(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("failed to install auto-route: {e}"),
-                            )));
+                            return Err(Box::new(io::Error::other(format!(
+                                "failed to install auto-route: {e}"
+                            ))));
                         }
                         Ok(Err(join_err)) => {
-                            return Err(Box::new(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("auto-route spawn_blocking panicked: {join_err}"),
-                            )));
+                            return Err(Box::new(io::Error::other(format!(
+                                "auto-route spawn_blocking panicked: {join_err}"
+                            ))));
                         }
                         Err(_elapsed) => {
                             return Err(Box::new(io::Error::new(
                                 io::ErrorKind::TimedOut,
                                 format!(
-                                    "auto-route setup timed out after {}s",
-                                    ROUTE_SETUP_TIMEOUT_SECS
+                                    "auto-route setup timed out after {ROUTE_SETUP_TIMEOUT_SECS}s"
                                 ),
                             )));
                         }
@@ -389,17 +386,15 @@ impl TunListener {
                             g
                         }
                         Ok(Err(join_err)) => {
-                            return Err(Box::new(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("dns-guard spawn_blocking panicked: {join_err}"),
-                            )));
+                            return Err(Box::new(io::Error::other(format!(
+                                "dns-guard spawn_blocking panicked: {join_err}"
+                            ))));
                         }
                         Err(_elapsed) => {
                             return Err(Box::new(io::Error::new(
                                 io::ErrorKind::TimedOut,
                                 format!(
-                                    "dns-guard setup timed out after {}s",
-                                    DNS_GUARD_TIMEOUT_SECS
+                                    "dns-guard setup timed out after {DNS_GUARD_TIMEOUT_SECS}s"
                                 ),
                             )));
                         }
