@@ -213,12 +213,9 @@ impl TunListener {
         // Windows after an unclean shutdown).  After the first retry fails,
         // we also rotate the TUN IP to work around address conflicts.
         //
-        // Each attempt runs on a blocking thread with a per-attempt timeout
-        // so a stuck `build_async()` (wintun init can hang) doesn't block the
-        // tokio worker forever.  Multiple attempts × per-attempt timeout must
-        // fit inside the caller's overall TUN_STARTUP_TIMEOUT (120 s).
+        // Each attempt runs on a blocking thread; the outer caller's
+        // TUN_STARTUP_TIMEOUT guards the overall time spent here.
         const MAX_TUN_RETRIES: u32 = 5;
-        const TUN_CREATE_TIMEOUT_SECS: u64 = 30;
         let base_name = cfg.device.clone().unwrap_or_else(|| "meow-tun".into());
         let base_addr = cfg.inet4_address.addr();
         let prefix = cfg.inet4_address.prefix_len();
@@ -237,8 +234,7 @@ impl TunListener {
             // Each /30 subnet spans 4 addresses, so we step by 4.
             let addr = if attempt >= 2 {
                 let offset = (attempt as u32 - 1) * 4;
-                let new_ip =
-                    std::net::Ipv4Addr::from(u32::from(base_addr).wrapping_add(offset));
+                let new_ip = std::net::Ipv4Addr::from(u32::from(base_addr).wrapping_add(offset));
                 new_ip
             } else {
                 base_addr
@@ -251,61 +247,43 @@ impl TunListener {
             let name_for_closure = name.clone();
 
             info!(
-                "creating TUN device '{}' with {} (attempt {}/{}, timeout {}s)...",
+                "creating TUN device '{}' with {} (attempt {}/{})...",
                 name,
                 ip_display,
                 attempt + 1,
                 MAX_TUN_RETRIES,
-                TUN_CREATE_TIMEOUT_SECS
             );
 
-            let result = tokio::time::timeout(
-                Duration::from_secs(TUN_CREATE_TIMEOUT_SECS),
-                tokio::task::spawn_blocking(move || {
-                    tun_rs::DeviceBuilder::new()
-                        .mtu(mtu)
-                        .ipv4(addr, prefix, None)
-                        .name(&name_for_closure)
-                        .build_async()
-                }),
-            )
-            .await;
-
-            match result {
-                // spawn_blocking ran, build_async returned Ok
-                Ok(Ok(Ok(d))) => {
+            match tokio::task::spawn_blocking(move || {
+                tun_rs::DeviceBuilder::new()
+                    .mtu(mtu)
+                    .ipv4(addr, prefix, None)
+                    .name(&name_for_closure)
+                    .build_async()
+            })
+            .await
+            {
+                Ok(Ok(d)) => {
                     dev_name = d.name().unwrap_or_else(|_| name.clone());
                     used_addr = addr;
                     device = Some(Arc::new(d));
                     break;
                 }
-                // spawn_blocking ran, build_async returned Err
-                Ok(Ok(Err(e))) => {
+                Ok(Err(e)) => {
                     warn!("failed to create TUN device '{}': {e}", name);
                 }
-                // spawn_blocking panicked or join error
-                Ok(Err(join_err)) => {
+                Err(join_err) => {
                     warn!(
                         "spawn_blocking for TUN device '{}' panicked: {join_err}",
                         name
-                    );
-                }
-                // per-attempt timeout elapsed
-                Err(_elapsed) => {
-                    warn!(
-                        "creating TUN device '{}' timed out after {}s",
-                        name, TUN_CREATE_TIMEOUT_SECS
                     );
                 }
             }
 
             if attempt + 1 >= MAX_TUN_RETRIES {
                 return Err(Box::new(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!(
-                        "failed to create TUN device after {MAX_TUN_RETRIES} attempts \
-                         ({MAX_TUN_RETRIES}×{TUN_CREATE_TIMEOUT_SECS}s timeout)"
-                    ),
+                    io::ErrorKind::Other,
+                    format!("failed to create TUN device after {MAX_TUN_RETRIES} attempts"),
                 )));
             }
         }

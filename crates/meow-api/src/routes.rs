@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "listener-tun")]
 use meow_listener::TunListener;
@@ -971,9 +971,7 @@ async fn commit_raw_candidate(
     candidate: RawConfig,
 ) -> Result<(), (StatusCode, String)> {
     apply_raw_to_tunnel(candidate.clone(), state).await?;
-    swap_config_and_reconcile_tun(state, candidate)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    swap_config_and_reconcile_tun(state, candidate).await;
     Ok(())
 }
 
@@ -1680,11 +1678,9 @@ async fn spawn_tun_from_raw(
 /// On an off→on transition, if the TUN listener fails to start the stored
 /// config is rolled back (`tun.enable` set to `false`) to prevent state
 /// inconsistency (the HTTP API would report TUN as enabled but nothing is
-/// actually running).
-async fn swap_config_and_reconcile_tun(
-    state: &AppState,
-    candidate: RawConfig,
-) -> Result<(), String> {
+/// actually running).  The HTTP response is still 204 — the error is
+/// logged but not surfaced to the caller.
+async fn swap_config_and_reconcile_tun(state: &AppState, candidate: RawConfig) {
     let _guard = state.config_mutation_lock.lock().await;
 
     let new_enable = candidate.tun.as_ref().is_some_and(|t| t.enable);
@@ -1700,7 +1696,7 @@ async fn swap_config_and_reconcile_tun(
     };
 
     if old_enable == new_enable {
-        return Ok(());
+        return;
     }
     if let Some(snapshot) = snapshot {
         // off → on
@@ -1708,28 +1704,25 @@ async fn swap_config_and_reconcile_tun(
             Ok(Some(handle)) => {
                 state.tunnel.set_tun_handle(handle).await;
                 info!("TUN listener started via config reload");
-                Ok(())
             }
             Ok(None) => {
                 // enable=true but spawn returned no handle — should not
                 // happen for this transition, but treat as success.
-                Ok(())
             }
             Err(e) => {
                 // TUN failed to start — roll back tun.enable to false so
                 // nyanpasu / the dashboard don't show TUN as active when
                 // nothing is actually running.
+                warn!("TUN listener failed to start: {e} (config rolled back)");
                 if let Some(ref mut tun) = state.raw_config.write().tun {
                     tun.enable = false;
                 }
-                Err(e)
             }
         }
     } else {
         // on → off
         state.tunnel.stop_tun().await;
         info!("TUN listener stopped via config reload");
-        Ok(())
     }
 }
 
@@ -1852,13 +1845,7 @@ async fn put_configs(
         }
     }
 
-    if let Err(e) = swap_config_and_reconcile_tun(&state, raw_config).await {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"message": e})),
-        )
-            .into_response();
-    }
+    swap_config_and_reconcile_tun(&state, raw_config).await;
 
     StatusCode::NO_CONTENT.into_response()
 }
