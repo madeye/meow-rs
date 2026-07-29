@@ -971,7 +971,9 @@ async fn commit_raw_candidate(
     candidate: RawConfig,
 ) -> Result<(), (StatusCode, String)> {
     apply_raw_to_tunnel(candidate.clone(), state).await?;
-    swap_config_and_reconcile_tun(state, candidate).await;
+    swap_config_and_reconcile_tun(state, candidate)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(())
 }
 
@@ -1591,23 +1593,22 @@ async fn get_group_delay(
 // always return 400 even with force=true; NOT upstream silent broken-config apply.
 
 /// Spawn a TUN listener from a raw config and wait for device readiness.
-/// Returns `None` when the `listener-tun` feature is not compiled in,
-/// when `tun.enable` is false, or when the listener fails to start
-/// (permission denied, device-name conflict, etc.).
+/// Returns `Ok(Some(handle))` on success, `Ok(None)` when `tun.enable` is
+/// false or the feature is not compiled in, or `Err(msg)` when startup fails
+/// (permission denied, device-name conflict, timeout, etc.).
 #[cfg(feature = "listener-tun")]
 async fn spawn_tun_from_raw(
     tunnel: &Tunnel,
     raw: &RawConfig,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Result<Option<tokio::task::JoinHandle<()>>, String> {
     let tun_cfg = match meow_config::parse_tun_config(raw.tun.as_ref()) {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!("tun config parse error: {e}");
-            return None;
+            return Err(format!("tun config parse error: {e}"));
         }
     };
     if !tun_cfg.enable {
-        return None;
+        return Ok(None);
     }
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -1636,36 +1637,37 @@ async fn spawn_tun_from_raw(
                  (check permissions / admin / CAP_NET_ADMIN)"
             );
             handle.abort();
-            return None;
+            return Err(msg);
         }
         Ok(Err(_)) => {
             // Should not happen with ReadyNotifier, but handle defensively.
             tracing::error!("TUN listener readiness signal dropped unexpectedly");
             handle.abort();
-            return None;
+            return Err("TUN listener readiness signal dropped unexpectedly".into());
         }
         Err(_) => {
-            tracing::error!(
+            let msg = format!(
                 "TUN listener startup timed out after {} s",
                 crate::TUN_STARTUP_TIMEOUT.as_secs()
             );
+            tracing::error!("{msg}");
             handle.abort();
-            return None;
+            return Err(msg);
         }
     }
 
-    Some(handle)
+    Ok(Some(handle))
 }
 
 #[cfg(not(feature = "listener-tun"))]
 async fn spawn_tun_from_raw(
     _tunnel: &Tunnel,
     raw: &RawConfig,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Result<Option<tokio::task::JoinHandle<()>>, String> {
     if raw.tun.as_ref().is_some_and(|t| t.enable) {
         tracing::warn!("tun.enable is set but this build lacks the 'listener-tun' feature");
     }
-    None
+    Ok(None)
 }
 
 /// Commit `candidate` as the new raw config and reconcile the TUN listener
@@ -1674,7 +1676,15 @@ async fn spawn_tun_from_raw(
 /// their TUN start/stop operations — without this a disable→stop could run
 /// before a sibling enable→start has stored its handle, leaving a running
 /// device behind an `enable=false` config.
-async fn swap_config_and_reconcile_tun(state: &AppState, candidate: RawConfig) {
+///
+/// On an off→on transition, if the TUN listener fails to start the stored
+/// config is rolled back (`tun.enable` set to `false`) to prevent state
+/// inconsistency (the HTTP API would report TUN as enabled but nothing is
+/// actually running).
+async fn swap_config_and_reconcile_tun(
+    state: &AppState,
+    candidate: RawConfig,
+) -> Result<(), String> {
     let _guard = state.config_mutation_lock.lock().await;
 
     let new_enable = candidate.tun.as_ref().is_some_and(|t| t.enable);
@@ -1690,16 +1700,36 @@ async fn swap_config_and_reconcile_tun(state: &AppState, candidate: RawConfig) {
     };
 
     if old_enable == new_enable {
-        return;
+        return Ok(());
     }
     if let Some(snapshot) = snapshot {
-        if let Some(handle) = spawn_tun_from_raw(&state.tunnel, &snapshot).await {
-            state.tunnel.set_tun_handle(handle).await;
-            info!("TUN listener started via config reload");
+        // off → on
+        match spawn_tun_from_raw(&state.tunnel, &snapshot).await {
+            Ok(Some(handle)) => {
+                state.tunnel.set_tun_handle(handle).await;
+                info!("TUN listener started via config reload");
+                Ok(())
+            }
+            Ok(None) => {
+                // enable=true but spawn returned no handle — should not
+                // happen for this transition, but treat as success.
+                Ok(())
+            }
+            Err(e) => {
+                // TUN failed to start — roll back tun.enable to false so
+                // nyanpasu / the dashboard don't show TUN as active when
+                // nothing is actually running.
+                if let Some(ref mut tun) = state.raw_config.write().tun {
+                    tun.enable = false;
+                }
+                Err(e)
+            }
         }
     } else {
+        // on → off
         state.tunnel.stop_tun().await;
         info!("TUN listener stopped via config reload");
+        Ok(())
     }
 }
 
@@ -1822,7 +1852,13 @@ async fn put_configs(
         }
     }
 
-    swap_config_and_reconcile_tun(&state, raw_config).await;
+    if let Err(e) = swap_config_and_reconcile_tun(&state, raw_config).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"message": e})),
+        )
+            .into_response();
+    }
 
     StatusCode::NO_CONTENT.into_response()
 }
