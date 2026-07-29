@@ -280,9 +280,9 @@ impl TunListener {
             }
 
             if attempt + 1 >= MAX_TUN_RETRIES {
-                return Err(Box::new(io::Error::other(
-                    format!("failed to create TUN device after {MAX_TUN_RETRIES} attempts"),
-                )));
+                return Err(Box::new(io::Error::other(format!(
+                    "failed to create TUN device after {MAX_TUN_RETRIES} attempts"
+                ))));
             }
         }
         // SAFETY: the loop either breaks with `device = Some(...)` and
