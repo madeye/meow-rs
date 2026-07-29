@@ -361,7 +361,7 @@ impl TunListener {
         // PowerShell (Get-DnsClientServerAddress / Set-DnsClientServerAddress)
         // which can take tens of seconds on Windows, so run them on a
         // blocking thread with a timeout.
-        const DNS_GUARD_TIMEOUT_SECS: u64 = 20;
+        const DNS_GUARD_TIMEOUT_SECS: u64 = 120;
         let _dns_guard = if cfg.dns_hijack && cfg.auto_route {
             let t_dns = Instant::now();
             let guard = match self.tunnel.resolver().fake_ip_v4_gateway() {

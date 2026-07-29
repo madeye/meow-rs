@@ -22,7 +22,7 @@ use tracing::{info, warn};
 /// config-reload path (`routes.rs::spawn_tun_from_raw`) so the two don't
 /// drift. Windows wintun adapter creation plus smoltcp netstack init can
 /// take tens of seconds on slow machines; 5 s proved too aggressive.
-pub const TUN_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+pub const TUN_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Map a parsed `TunConfig` onto a `TunListenerConfig`. Shared between the
 /// startup path (`meow-app/src/main.rs`) and the config-reload path
