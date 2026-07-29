@@ -215,7 +215,7 @@ impl TunListener {
         // Each attempt runs on a blocking thread with a per-attempt timeout
         // so a stuck `build_async()` (wintun init can hang) doesn't block the
         // tokio worker forever.  Multiple attempts × per-attempt timeout must
-        // fit inside the caller's overall TUN_STARTUP_TIMEOUT (30 s).
+        // fit inside the caller's overall TUN_STARTUP_TIMEOUT (120 s).
         const MAX_TUN_RETRIES: u32 = 5;
         const TUN_CREATE_TIMEOUT_SECS: u64 = 8;
         let base_name = cfg.device.clone().unwrap_or_else(|| "meow-tun".into());
@@ -388,18 +388,20 @@ impl TunListener {
                             info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
                             g
                         }
-                        Ok(Err(_join_err)) => {
-                            warn!(
-                                "dns-guard spawn_blocking panicked, continuing without DNS hijack"
-                            );
-                            None
+                        Ok(Err(join_err)) => {
+                            return Err(Box::new(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("dns-guard spawn_blocking panicked: {join_err}"),
+                            )));
                         }
                         Err(_elapsed) => {
-                            warn!(
-                                "dns-guard setup timed out after {}s, continuing without DNS hijack",
-                                DNS_GUARD_TIMEOUT_SECS
-                            );
-                            None
+                            return Err(Box::new(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                format!(
+                                    "dns-guard setup timed out after {}s",
+                                    DNS_GUARD_TIMEOUT_SECS
+                                ),
+                            )));
                         }
                     }
                 }
