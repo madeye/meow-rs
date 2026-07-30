@@ -13,14 +13,15 @@ use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use netstack_smoltcp::Stack;
 use tokio::task::JoinHandle;
-use tun_rs::AsyncDevice;
+
+use super::TunDevice;
 
 /// One IP packet. UDP/TCP over IPv4/v6 tops out below 64 KiB regardless of
 /// the device MTU, and a fixed buffer sidesteps MTU-change races.
 const PACKET_BUF: usize = 65535;
 
 pub(super) fn spawn_pumps(
-    device: Arc<AsyncDevice>,
+    device: Arc<TunDevice>,
     stack: Stack,
 ) -> (JoinHandle<io::Result<()>>, JoinHandle<io::Result<()>>) {
     let (stack_sink, stack_stream) = stack.split();
@@ -34,12 +35,12 @@ pub(super) fn spawn_pumps(
 /// `Sink<Vec<u8>>` API; this path is not covered by the zero-alloc relay
 /// invariant (ADR-0008), which starts at the terminated TCP stream.
 async fn device_to_stack(
-    device: Arc<AsyncDevice>,
+    device: Arc<TunDevice>,
     mut sink: SplitSink<Stack, Vec<u8>>,
 ) -> io::Result<()> {
     let mut buf = vec![0u8; PACKET_BUF];
     loop {
-        let n = device.recv(&mut buf).await?;
+        let n = device.device.recv(&mut buf).await?;
         if n == 0 {
             continue;
         }
@@ -50,12 +51,9 @@ async fn device_to_stack(
 }
 
 /// stack → device.
-async fn stack_to_device(
-    device: Arc<AsyncDevice>,
-    mut stream: SplitStream<Stack>,
-) -> io::Result<()> {
+async fn stack_to_device(device: Arc<TunDevice>, mut stream: SplitStream<Stack>) -> io::Result<()> {
     while let Some(pkt) = stream.next().await {
-        device.send(&pkt?).await?;
+        device.device.send(&pkt?).await?;
     }
     Err(io::Error::other("netstack egress closed"))
 }
