@@ -163,6 +163,20 @@ impl Drop for ReadyNotifier {
     }
 }
 
+/// Wraps [`tun_rs::AsyncDevice`] together with its [`RouteGuard`] in a
+/// single `Arc` so they share one reference-counted lifetime. Field
+/// declaration order guarantees `route_guard` is dropped (routes deleted)
+/// **before** `device` (adapter destroyed) when the last `Arc` clone goes
+/// away — ensuring route deletion always succeeds because the adapter is
+/// still alive.
+struct TunDevice {
+    /// Held only for its `Drop` side effect — routes are deleted when
+    /// this field is dropped, before `device` is destroyed.
+    #[allow(dead_code)]
+    route_guard: Option<RouteGuard>,
+    pub(super) device: tun_rs::AsyncDevice,
+}
+
 pub struct TunListener {
     tunnel: Tunnel,
     cfg: TunListenerConfig,
@@ -219,7 +233,7 @@ impl TunListener {
         let base_name = cfg.device.clone().unwrap_or_else(|| "meow-tun".into());
         let base_addr = cfg.inet4_address.addr();
         let prefix = cfg.inet4_address.prefix_len();
-        let mut device: Option<Arc<tun_rs::AsyncDevice>> = None;
+        let mut device: Option<tun_rs::AsyncDevice> = None;
         let mut dev_name = String::new();
         let mut used_addr = base_addr;
 
@@ -265,7 +279,7 @@ impl TunListener {
                 Ok(Ok(d)) => {
                     dev_name = d.name().unwrap_or_else(|_| name.clone());
                     used_addr = addr;
-                    device = Some(Arc::new(d));
+                    device = Some(d);
                     break;
                 }
                 Ok(Err(e)) => {
@@ -292,52 +306,41 @@ impl TunListener {
         let tun_create_ms = t0.elapsed().as_secs_f64() * 1000.0;
         info!("TUN device '{dev_name}' created in {tun_create_ms:.0}ms");
 
+        // Obtain the interface index before moving `device` into `TunDevice`.
+        let if_index = device.if_index()?;
+
         // auto-route v1: capture exactly the fake-IP range (see module docs).
         //
         // RouteManager::add() calls into OS routing APIs that may block
-        // (PowerShell on Windows), so it runs on a blocking thread with a
-        // timeout so the outer startup guard can fire.
-        const ROUTE_SETUP_TIMEOUT_SECS: u64 = 5;
-        let _routes = if cfg.auto_route {
+        // (PowerShell on Windows), so it runs on a blocking thread. The
+        // outer TUN_STARTUP_TIMEOUT guards the overall startup.
+        let route_guard = if cfg.auto_route {
             match self.tunnel.resolver().fake_ip_v4_net() {
                 Some(fake_net) => {
-                    let if_index = device.if_index()?;
                     let t_route = Instant::now();
 
-                    let result = tokio::time::timeout(
-                        Duration::from_secs(ROUTE_SETUP_TIMEOUT_SECS),
-                        tokio::task::spawn_blocking(move || {
-                            RouteGuard::setup(if_index, &[fake_net])
-                        }),
-                    )
+                    let result = tokio::task::spawn_blocking(move || {
+                        RouteGuard::setup(if_index, &[fake_net])
+                    })
                     .await;
 
-                    let guard = match result {
-                        Ok(Ok(Ok(g))) => {
+                    match result {
+                        Ok(Ok(g)) => {
                             let route_ms = t_route.elapsed().as_secs_f64() * 1000.0;
                             info!("auto-route installed in {route_ms:.0}ms");
                             Some(g)
                         }
-                        Ok(Ok(Err(e))) => {
+                        Ok(Err(e)) => {
                             return Err(Box::new(io::Error::other(format!(
                                 "failed to install auto-route: {e}"
                             ))));
                         }
-                        Ok(Err(join_err)) => {
+                        Err(join_err) => {
                             return Err(Box::new(io::Error::other(format!(
                                 "auto-route spawn_blocking panicked: {join_err}"
                             ))));
                         }
-                        Err(_elapsed) => {
-                            return Err(Box::new(io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                format!(
-                                    "auto-route setup timed out after {ROUTE_SETUP_TIMEOUT_SECS}s"
-                                ),
-                            )));
-                        }
-                    };
-                    guard
+                    }
                 }
                 None => {
                     warn!(
@@ -354,43 +357,37 @@ impl TunListener {
             None
         };
 
+        // Wrap the device and its route guard in a single `Arc` so they share
+        // one reference-counted lifetime. Field order guarantees `route_guard`
+        // is dropped (routes deleted) **before** `device` (adapter destroyed)
+        // when the last `Arc` clone goes away — ensuring route deletion always
+        // succeeds because the adapter is still alive.
+        let device = Arc::new(TunDevice {
+            route_guard,
+            device,
+        });
+
         // When dns-hijack is on and we're in fake-IP mode, point the OS
         // resolver at the loopback DNS server.  The backup + set calls into
         // PowerShell (Get-DnsClientServerAddress / Set-DnsClientServerAddress)
         // which can take tens of seconds on Windows, so run them on a
-        // blocking thread with a timeout.
-        const DNS_GUARD_TIMEOUT_SECS: u64 = 120;
+        // blocking thread. The outer TUN_STARTUP_TIMEOUT guards the overall
+        // startup.
         let _dns_guard = if cfg.dns_hijack && cfg.auto_route {
             let t_dns = Instant::now();
             let guard = match self.tunnel.resolver().fake_ip_v4_gateway() {
                 Some(gateway) => {
-                    let result = tokio::time::timeout(
-                        Duration::from_secs(DNS_GUARD_TIMEOUT_SECS),
-                        tokio::task::spawn_blocking(move || dns::DnsGuard::setup(gateway)),
-                    )
-                    .await;
-
-                    match result {
-                        Ok(Ok(g)) => {
-                            let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
-                            let dns_active = g.is_some();
-                            info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
-                            g
-                        }
-                        Ok(Err(join_err)) => {
-                            return Err(Box::new(io::Error::other(format!(
+                    let g = tokio::task::spawn_blocking(move || dns::DnsGuard::setup(gateway))
+                        .await
+                        .map_err(|join_err| {
+                            Box::new(io::Error::other(format!(
                                 "dns-guard spawn_blocking panicked: {join_err}"
-                            ))));
-                        }
-                        Err(_elapsed) => {
-                            return Err(Box::new(io::Error::new(
-                                io::ErrorKind::TimedOut,
-                                format!(
-                                    "dns-guard setup timed out after {DNS_GUARD_TIMEOUT_SECS}s"
-                                ),
-                            )));
-                        }
-                    }
+                            )))
+                        })?;
+                    let dns_ms = t_dns.elapsed().as_secs_f64() * 1000.0;
+                    let dns_active = g.is_some();
+                    info!("dns-guard setup took {dns_ms:.0}ms (active: {dns_active})");
+                    g
                 }
                 None => None,
             };
