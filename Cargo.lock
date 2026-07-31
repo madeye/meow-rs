@@ -2601,6 +2601,7 @@ dependencies = [
  "crc32fast",
  "ctr",
  "futures",
+ "h2",
  "h3",
  "h3-quinn",
  "hex",
