@@ -13,6 +13,8 @@ use meow_proxy::{
 };
 #[cfg(feature = "vless")]
 use meow_proxy::{TransportChain, VlessAdapter, VlessFlow};
+#[cfg(feature = "xhttp")]
+use meow_proxy::XhttpAdapter;
 use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -201,6 +203,11 @@ pub fn parse_proxy(
         #[cfg(feature = "snell")]
         "snell" => {
             let adapter = parse_snell(name, config)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
+        #[cfg(feature = "xhttp")]
+        "xhttp" => {
+            let adapter = parse_xhttp(name, config)?;
             Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
         }
         _ => Err(format!("unsupported proxy type: {proxy_type}")),
@@ -1877,6 +1884,55 @@ fn parse_relay_group(
     Ok(Arc::new(RelayGroup::new(name, proxies)))
 }
 
+/// Parse a `type: xhttp` proxy block into an [`XhttpAdapter`].
+///
+/// Required fields: `server`, `port`. Optional: `path`, `host`, `headers`, `udp`.
+///
+/// XHTTP is an HTTP/2-based transport protocol that tunnels proxy traffic over
+/// HTTP/2 streams. It supports three modes (stream-one, stream-up, packet-up)
+/// but only stream-one is implemented in this initial version.
+///
+/// upstream: mihomo transport/xhttp
+#[cfg(feature = "xhttp")]
+fn parse_xhttp(
+    name: &str,
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<meow_proxy::XhttpAdapter, String> {
+    let server = config
+        .get("server")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("xhttp[{name}]: missing server"))?;
+    let port = required_port(config, &format!("xhttp[{name}]"))?;
+    let path = config
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let host = config
+        .get("host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let udp = config
+        .get("udp")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
+
+    let headers: Vec<(String, String)> = config
+        .get("headers")
+        .and_then(|v| v.as_mapping())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(XhttpAdapter::new(
+        name, server, port, &path, &host, headers, udp,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2547,5 +2603,46 @@ tls: true
             "name: sn\ntype: snell\nserver: 1.2.3.4\nport: 8388\npsk: s\nobfs-opts:\n  mode: http\n",
         );
         assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[cfg(feature = "xhttp")]
+    #[test]
+    fn parse_xhttp_minimal() {
+        let cfg = proxy_config("name: xh\ntype: xhttp\nserver: 1.2.3.4\nport: 443\n");
+        let proxy = parse_proxy(&cfg).expect("xhttp minimal config must parse");
+        assert_eq!(proxy.name(), "xh");
+        assert_eq!(proxy.adapter_type(), AdapterType::Xhttp);
+        assert_eq!(proxy.addr(), "1.2.3.4:443");
+    }
+
+    #[cfg(feature = "xhttp")]
+    #[test]
+    fn parse_xhttp_with_path_and_host() {
+        let cfg = proxy_config(
+            "name: xh\ntype: xhttp\nserver: example.com\nport: 8443\npath: /xhttp\nhost: my.example.com\n",
+        );
+        let proxy = parse_proxy(&cfg).expect("xhttp with path and host must parse");
+        assert_eq!(proxy.name(), "xh");
+        assert_eq!(proxy.adapter_type(), AdapterType::Xhttp);
+    }
+
+    #[cfg(feature = "xhttp")]
+    #[test]
+    fn parse_xhttp_rejects_missing_server() {
+        let cfg = proxy_config("name: xh\ntype: xhttp\nport: 443\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("xhttp without server must hard-error");
+        };
+        assert!(err.contains("missing server"), "msg: {err}");
+    }
+
+    #[cfg(feature = "xhttp")]
+    #[test]
+    fn parse_xhttp_rejects_missing_port() {
+        let cfg = proxy_config("name: xh\ntype: xhttp\nserver: 1.2.3.4\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("xhttp without port must hard-error");
+        };
+        assert!(err.contains("port"), "msg: {err}");
     }
 }

@@ -44,6 +44,7 @@ hysteria2 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:blake2"]
 # (https://github.com/shadowsocks/ech-tls-tunnel). Requires ECH on rustls,
 # which pulls aws-lc-rs in via meow-transport.
 ech-tls-tunnel = ["ss", "meow-transport/ech"]
+xhttp = ["meow-transport/xhttp"]
 
 [dependencies]
 meow-common = { workspace = true }

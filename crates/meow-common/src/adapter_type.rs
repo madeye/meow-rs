@@ -20,6 +20,7 @@ pub enum AdapterType {
     Hysteria2,
     Anytls,
     Snell,
+    Xhttp,
 }
 
 impl fmt::Display for AdapterType {
@@ -42,6 +43,7 @@ impl fmt::Display for AdapterType {
             AdapterType::Hysteria2 => write!(f, "Hysteria2"),
             AdapterType::Anytls => write!(f, "AnyTLS"),
             AdapterType::Snell => write!(f, "Snell"),
+            AdapterType::Xhttp => write!(f, "Xhttp"),
         }
     }
 }
@@ -62,6 +64,7 @@ pub enum ConnType {
     Tunnel,
     Tuic,
     Hysteria2,
+    Xhttp,
     Inner,
 }
 
@@ -82,6 +85,7 @@ impl fmt::Display for ConnType {
             ConnType::Tunnel => write!(f, "Tunnel"),
             ConnType::Tuic => write!(f, "Tuic"),
             ConnType::Hysteria2 => write!(f, "Hysteria2"),
+            ConnType::Xhttp => write!(f, "Xhttp"),
             ConnType::Inner => write!(f, "Inner"),
         }
     }

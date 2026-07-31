@@ -46,6 +46,9 @@ pub mod vless_adapter;
 #[cfg(feature = "vmess")]
 pub mod vmess;
 
+#[cfg(feature = "xhttp")]
+pub mod xhttp_adapter;
+
 pub use direct::DirectAdapter;
 pub use group::dialer_proxy::DialerProxyAdapter;
 pub use group::fallback::FallbackGroup;
@@ -72,6 +75,9 @@ pub use vless::encryption::{parse_client_encryption, ClientInstance as VlessEncr
 #[cfg(feature = "vmess")]
 pub use vmess::VmessAdapter;
 
+#[cfg(feature = "xhttp")]
+pub use xhttp_adapter::XhttpAdapter;
+
 // ─── Error bridge ────────────────────────────────────────────────────────────
 
 /// Convert a `TransportError` into a `MeowError`.
@@ -84,7 +90,7 @@ pub use vmess::VmessAdapter;
 /// ADR-0001 §1 invariants still hold:
 /// - No adapter constructs `TransportError` variants by hand.
 /// - No `anyhow::Error` crosses the `meow-transport` boundary.
-#[cfg(any(feature = "ss", feature = "trojan", feature = "vless"))]
+#[cfg(any(feature = "ss", feature = "trojan", feature = "vless", feature = "xhttp"))]
 #[allow(clippy::needless_pass_by_value)] // used as map_err(fn) callback — must take by value
 pub(crate) fn transport_to_proxy_err(e: meow_transport::TransportError) -> meow_common::MeowError {
     meow_common::MeowError::Proxy(e.to_string())

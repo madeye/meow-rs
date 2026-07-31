@@ -57,6 +57,11 @@ h2 = [
 httpupgrade = [
     "dep:httparse",
 ]
+xhttp = [
+    "dep:h2",
+    "dep:http",
+    "dep:rand",
+]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -106,6 +111,8 @@ webpki-root-certs  = { version = "1", optional = true }
 tokio        = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls       = { workspace = true }
+futures      = { workspace = true }
+h2           = { version = "0.4", features = ["stream"] }
 rcgen        = "0.13"
 md5          = "0.8"
 # Log-capture strategy: home-rolled MakeWriter in tests/support/log_capture.rs using

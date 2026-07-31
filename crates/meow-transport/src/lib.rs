@@ -46,6 +46,9 @@ pub mod h2;
 #[cfg(feature = "httpupgrade")]
 pub mod httpupgrade;
 
+#[cfg(feature = "xhttp")]
+pub mod xhttp;
+
 /// A duplex byte stream — the currency passed between transport layers.
 ///
 /// Blanket-implemented for every `T: AsyncRead + AsyncWrite + Unpin + Send + Sync`,
