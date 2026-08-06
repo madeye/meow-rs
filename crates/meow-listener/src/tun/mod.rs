@@ -230,7 +230,6 @@ impl TunListener {
         // Each attempt runs on a blocking thread; the outer caller's
         // TUN_STARTUP_TIMEOUT guards the overall time spent here.
         const MAX_TUN_RETRIES: u32 = 5;
-        let base_name = cfg.device.clone().unwrap_or_else(|| "meow-tun".into());
         let base_addr = cfg.inet4_address.addr();
         let prefix = cfg.inet4_address.prefix_len();
         let mut device: Option<tun_rs::AsyncDevice> = None;
@@ -238,10 +237,21 @@ impl TunListener {
         let mut used_addr = base_addr;
 
         for attempt in 0..MAX_TUN_RETRIES {
-            let name = if attempt == 0 {
-                base_name.clone()
+            // macOS only accepts `utunN` device names and picks one itself
+            // when none is given, so never invent a name there — pass the
+            // configured name through unchanged (suffix rotation would
+            // produce an invalid `utunN-1`). Elsewhere default to
+            // "meow-tun" and rotate the suffix to sidestep stale adapters
+            // from unclean shutdowns.
+            let name: Option<String> = if cfg!(target_os = "macos") {
+                cfg.device.clone()
             } else {
-                format!("{base_name}-{attempt}")
+                let base = cfg.device.as_deref().unwrap_or("meow-tun");
+                Some(if attempt == 0 {
+                    base.to_string()
+                } else {
+                    format!("{base}-{attempt}")
+                })
             };
 
             // Rotate IP after the first retry fails (attempt >= 2).
@@ -259,36 +269,41 @@ impl TunListener {
             let mtu = cfg.mtu;
             let name_for_closure = name.clone();
 
+            let display_name = name.as_deref().unwrap_or("<platform default>");
             info!(
                 "creating TUN device '{}' with {} (attempt {}/{})...",
-                name,
+                display_name,
                 ip_display,
                 attempt + 1,
                 MAX_TUN_RETRIES,
             );
 
             match tokio::task::spawn_blocking(move || {
-                tun_rs::DeviceBuilder::new()
+                let mut builder = tun_rs::DeviceBuilder::new()
                     .mtu(mtu)
-                    .ipv4(addr, prefix, None)
-                    .name(&name_for_closure)
-                    .build_async()
+                    .ipv4(addr, prefix, None);
+                if let Some(n) = &name_for_closure {
+                    builder = builder.name(n);
+                }
+                builder.build_async()
             })
             .await
             {
                 Ok(Ok(d)) => {
-                    dev_name = d.name().unwrap_or_else(|_| name.clone());
+                    dev_name = d
+                        .name()
+                        .unwrap_or_else(|_| name.clone().unwrap_or_default());
                     used_addr = addr;
                     device = Some(d);
                     break;
                 }
                 Ok(Err(e)) => {
-                    warn!("failed to create TUN device '{}': {e}", name);
+                    warn!("failed to create TUN device '{}': {e}", display_name);
                 }
                 Err(join_err) => {
                     warn!(
                         "spawn_blocking for TUN device '{}' panicked: {join_err}",
-                        name
+                        display_name
                     );
                 }
             }
@@ -367,6 +382,22 @@ impl TunListener {
             device,
         });
 
+        // Windows: bind the loopback DNS sockets *before* DnsGuard repoints
+        // the OS resolver at them. If port 53 is already taken (ICS, Docker,
+        // another resolver), this fails startup loudly instead of silently
+        // leaving the whole machine with DNS aimed at a dead address.
+        #[cfg(target_os = "windows")]
+        let local_dns_sockets = if cfg.dns_hijack
+            && cfg.auto_route
+            && self.tunnel.resolver().fake_ip_v4_gateway().is_some()
+        {
+            Some(local_dns::bind().await.map_err(|e| {
+                io::Error::other(format!("loopback DNS server startup failed: {e}"))
+            })?)
+        } else {
+            None
+        };
+
         // When dns-hijack is on and we're in fake-IP mode, point the OS
         // resolver at the loopback DNS server.  The backup + set calls into
         // PowerShell (Get-DnsClientServerAddress / Set-DnsClientServerAddress)
@@ -415,15 +446,15 @@ impl TunListener {
 
         let mut tasks = TaskGroup::new();
 
-        // Windows: start local DNS server on 127.0.0.1:53 and [::1]:53.
-        // DnsGuard has already set system DNS to these loopback addresses;
-        // the server answers queries using the same DnsServer::handle_query
+        // Windows: start the local DNS server on the sockets bound earlier
+        // (before DnsGuard repointed system DNS at 127.0.0.1 / ::1). The
+        // server answers queries using the same DnsServer::handle_query
         // pipeline as the TUN dns-hijack path, returning fake IPs.
         #[cfg(target_os = "windows")]
-        if _dns_guard.is_some() {
+        if let Some(sockets) = local_dns_sockets {
             let resolver = Arc::clone(self.tunnel.resolver());
             tasks.spawn(async move {
-                local_dns::run(resolver).await;
+                local_dns::run(sockets, resolver).await;
             });
         }
 

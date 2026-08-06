@@ -11,8 +11,14 @@
 //! requires complex routing), we run a real UDP socket that the OS can
 //! reach via loopback.  Both IPv4 and IPv6 queries are handled, returning
 //! fake IPs that route through the TUN device.
+//!
+//! Binding is split from serving: `bind()` must be called (and must
+//! succeed) *before* `DnsGuard` repoints the OS resolver at loopback.
+//! If port 53 is already taken (ICS, Docker, another resolver), startup
+//! fails loudly instead of leaving the whole machine with its DNS aimed
+//! at an address nothing listens on.
 
-use std::net::SocketAddr;
+use std::io;
 use std::sync::Arc;
 
 use meow_dns::server::DnsServer;
@@ -22,30 +28,47 @@ use tracing::{info, warn};
 
 const RECV_BUF_SIZE: usize = 4096;
 
-/// Run local DNS servers on `127.0.0.1:53` and `[::1]:53`.
+/// The pre-bound loopback DNS sockets. Produced by [`bind`], consumed by
+/// [`run`].
+pub struct Sockets {
+    v4: UdpSocket,
+    v6: UdpSocket,
+}
+
+/// Bind the loopback DNS sockets on `127.0.0.1:53` and `[::1]:53`.
+///
+/// Errors if either bind fails — the caller must treat that as a fatal
+/// startup error and must NOT repoint the system DNS at loopback.
+pub async fn bind() -> io::Result<Sockets> {
+    let v4 = UdpSocket::bind("127.0.0.1:53")
+        .await
+        .map_err(|e| io::Error::new(e.kind(), format!("bind 127.0.0.1:53: {e}")))?;
+    let v6 = UdpSocket::bind("[::1]:53")
+        .await
+        .map_err(|e| io::Error::new(e.kind(), format!("bind [::1]:53: {e}")))?;
+    Ok(Sockets { v4, v6 })
+}
+
+/// Serve DNS on the pre-bound sockets until both are closed.
 ///
 /// Each socket runs concurrently; queries are handled in independent
-/// tasks.  The function runs until both sockets are closed.
-pub async fn run(resolver: Arc<Resolver>) {
-    let v4 = serve_socket(
-        "127.0.0.1:53".parse::<SocketAddr>().unwrap(),
-        Arc::clone(&resolver),
-    );
-    let v6 = serve_socket("[::1]:53".parse::<SocketAddr>().unwrap(), resolver);
+/// tasks.
+pub async fn run(sockets: Sockets, resolver: Arc<Resolver>) {
+    let Sockets { v4, v6 } = sockets;
+    let v4 = serve_socket(v4, Arc::clone(&resolver));
+    let v6 = serve_socket(v6, resolver);
     let _ = tokio::join!(v4, v6);
 }
 
-async fn serve_socket(addr: SocketAddr, resolver: Arc<Resolver>) {
-    let socket = match UdpSocket::bind(addr).await {
-        Ok(s) => {
-            info!("tun local-dns: listening on {addr}");
-            s
-        }
+async fn serve_socket(socket: UdpSocket, resolver: Arc<Resolver>) {
+    let addr = match socket.local_addr() {
+        Ok(a) => a,
         Err(e) => {
-            warn!("tun local-dns: bind {addr} failed: {e}");
+            warn!("tun local-dns: local_addr failed: {e}");
             return;
         }
     };
+    info!("tun local-dns: listening on {addr}");
 
     let socket = Arc::new(socket);
     let mut buf = vec![0u8; RECV_BUF_SIZE];
