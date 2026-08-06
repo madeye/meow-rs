@@ -42,7 +42,15 @@ impl DnsServer {
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let socket = Arc::new(UdpSocket::bind(self.listen_addr).await?);
         info!("DNS server listening on {}", self.listen_addr);
+        Self::serve(socket, Arc::clone(&self.resolver)).await;
+        Ok(())
+    }
 
+    /// Serve DNS on a pre-bound socket until the socket is closed. Shared by
+    /// the main DNS server ([`Self::run`]) and the TUN loopback DNS servers
+    /// (Windows `dns-hijack`), so both inherit the same worker pool,
+    /// backpressure, and hardening.
+    pub async fn serve(socket: Arc<UdpSocket>, resolver: Arc<Resolver>) {
         // Worker pool: pre-spawn N workers and round-robin packets to them via
         // bounded mpsc channels. Replaces the previous `tokio::spawn`-per-packet
         // pattern (one task allocation per query under W4 load).
@@ -52,7 +60,7 @@ impl DnsServer {
             Vec::with_capacity(N_WORKERS);
         for _ in 0..N_WORKERS {
             let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr)>(CHANNEL_DEPTH);
-            let resolver = Arc::clone(&self.resolver);
+            let resolver = Arc::clone(&resolver);
             let sock = Arc::clone(&socket);
             tokio::spawn(async move {
                 while let Some((data, src)) = rx.recv().await {
@@ -111,17 +119,24 @@ impl DnsServer {
         if qdcount == 0 {
             return Err("No questions in DNS query".into());
         }
+        // The hand-rolled response builders answer exactly one question, and
+        // multi-question queries are wire-legal but unsupported by essentially
+        // every real resolver. Answer FORMERR instead of emitting a response
+        // whose header counts don't match its body.
+        if qdcount != 1 {
+            return Ok(Self::build_formerr(id, flags));
+        }
 
         // Parse the question name
-        let (domain, qtype, _offset) = Self::parse_question(&data[12..]).map_err(|e| {
-            info!(
+        let (domain, qtype, question_len) = Self::parse_question(&data[12..]).map_err(|e| {
+            debug!(
                 "DNS query parse_question failed: {e} | bytes: {}",
                 hex_prefix(&data[12..], 64)
             );
             e
         })?;
-        info!(
-            "DNS query: id={id:#06x} flags={flags:#06x} qdcount={qdcount} arcount={arcount} domain={domain} qtype={qtype}"
+        debug!(
+            "DNS query: id={id:#06x} flags={flags:#06x} arcount={arcount} domain={domain} qtype={qtype}"
         );
 
         // Non-address queries (TXT, MX, SRV, HTTPS, SOA, PTR, …) go through
@@ -131,7 +146,13 @@ impl DnsServer {
         // records ever get a synthetic answer.
         if qtype != 1 && qtype != 28 {
             return Self::handle_generic_forward(
-                id, data, flags, qdcount, &domain, qtype, resolver,
+                id,
+                data,
+                flags,
+                question_len,
+                &domain,
+                qtype,
+                resolver,
             )
             .await;
         }
@@ -151,12 +172,12 @@ impl DnsServer {
                     id,
                     data,
                     flags,
-                    qdcount,
+                    question_len,
                     qtype,
                     addr,
                     DEFAULT_ANSWER_TTL_SECS,
                 ),
-                None => Self::build_noerror_empty(id, data, flags, qdcount),
+                None => Self::build_noerror_empty(id, data, flags, question_len),
             });
         }
 
@@ -178,15 +199,15 @@ impl DnsServer {
                 // Sub-second remainders round up to 1 — a 0-TTL answer means
                 // "never cache", which is stricter than the entry deserves.
                 let ttl_secs = ttl.as_secs().clamp(1, u64::from(u32::MAX)) as u32;
-                Self::build_response(id, data, flags, qdcount, qtype, addr, ttl_secs)
+                Self::build_response(id, data, flags, question_len, qtype, addr, ttl_secs)
             }
             // Fake-IP mode AAAA when only v4 pool is configured: return
             // NOERROR-empty so clients fall back to IPv4 cleanly. NXDOMAIN
             // would tell them "no such host" — wrong signal.
             None if qtype == 28 && resolver.mode() == DnsMode::FakeIp => {
-                Self::build_noerror_empty(id, data, flags, qdcount)
+                Self::build_noerror_empty(id, data, flags, question_len)
             }
-            None => Self::build_nxdomain(id, data, flags, qdcount),
+            None => Self::build_nxdomain(id, data, flags, question_len),
         })
     }
 
@@ -198,7 +219,7 @@ impl DnsServer {
         id: u16,
         query: &[u8],
         flags: u16,
-        qdcount: u16,
+        question_len: usize,
         domain: &str,
         qtype: u16,
         resolver: &Resolver,
@@ -211,7 +232,7 @@ impl DnsServer {
         // If parsing fails we fall back to the hand-rolled NXDOMAIN builder
         // rather than dropping the packet.
         let Ok(req) = Message::from_vec(query) else {
-            return Ok(Self::build_nxdomain(id, query, flags, qdcount));
+            return Ok(Self::build_nxdomain(id, query, flags, question_len));
         };
 
         let mut resp = Message::new(id, MessageType::Response, OpCode::Query);
@@ -242,7 +263,7 @@ impl DnsServer {
 
         Ok(resp
             .to_vec()
-            .unwrap_or_else(|_| Self::build_nxdomain(id, query, flags, qdcount)))
+            .unwrap_or_else(|_| Self::build_nxdomain(id, query, flags, question_len)))
     }
 
     fn parse_question(
@@ -292,28 +313,13 @@ impl DnsServer {
         Ok((domain, qtype, pos))
     }
 
-    /// Copy the full question section (all `qdcount` entries) from `query`
-    /// into `buf`. Returns the number of bytes copied.
-    fn copy_question_section(buf: &mut Vec<u8>, query: &[u8], qdcount: u16) -> usize {
-        let start = buf.len();
-        let mut pos: usize = 12; // skip 12-byte header
-        let end = query.len();
-        for _ in 0..qdcount {
-            // Walk over QNAME labels
-            while pos < end && query[pos] != 0 {
-                pos += 1 + query[pos] as usize;
-            }
-            if pos >= end {
-                break;
-            }
-            pos += 5; // null terminator + QTYPE(2) + QCLASS(2)
-            if pos > end {
-                break;
-            }
-        }
-        let question_end = pos.min(end);
-        buf.extend_from_slice(&query[12..question_end]);
-        buf.len() - start
+    /// Copy the single question (validated by `parse_question`, which
+    /// returned its wire length) from `query` into `buf`. `handle_query`
+    /// rejects `qdcount != 1` with FORMERR before any builder runs, so the
+    /// hardcoded `QDCOUNT=1` in the response headers always matches the body.
+    fn copy_question(buf: &mut Vec<u8>, query: &[u8], question_len: usize) {
+        let end = (12 + question_len).min(query.len());
+        buf.extend_from_slice(&query[12..end]);
     }
 
     /// Echo the query flags into response header bytes, preserving the
@@ -343,7 +349,7 @@ impl DnsServer {
         id: u16,
         query: &[u8],
         flags: u16,
-        qdcount: u16,
+        question_len: usize,
         qtype: u16,
         addr: std::net::IpAddr,
         ttl_secs: u32,
@@ -356,13 +362,13 @@ impl DnsServer {
         // Header
         response.extend_from_slice(&id.to_be_bytes()); // ID
         response.extend_from_slice(&Self::response_flags(flags));
-        response.extend_from_slice(&qdcount.to_be_bytes()); // QDCOUNT
+        response.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
         response.extend_from_slice(&[0x00, 0x01]); // ANCOUNT = 1
         response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
         response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0 (patched below)
 
-        // Copy full question section
-        Self::copy_question_section(&mut response, query, qdcount);
+        // Copy the question
+        Self::copy_question(&mut response, query, question_len);
 
         // Answer: pointer to name in question
         response.extend_from_slice(&[0xc0, 0x0c]); // Name pointer to offset 12
@@ -388,7 +394,7 @@ impl DnsServer {
         response
     }
 
-    fn build_nxdomain(id: u16, query: &[u8], flags: u16, qdcount: u16) -> Vec<u8> {
+    fn build_nxdomain(id: u16, query: &[u8], flags: u16, question_len: usize) -> Vec<u8> {
         let arcount = u16::from_be_bytes([query[10], query[11]]);
         let mut response = Vec::with_capacity(512);
 
@@ -400,19 +406,40 @@ impl DnsServer {
 
         response.extend_from_slice(&id.to_be_bytes());
         response.extend_from_slice(&[byte0, byte1_rcode]);
-        response.extend_from_slice(&qdcount.to_be_bytes()); // QDCOUNT
+        response.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
         response.extend_from_slice(&[0x00, 0x00]); // ANCOUNT = 0
         response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
         response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0 (patched below)
 
-        // Copy full question section
-        Self::copy_question_section(&mut response, query, qdcount);
+        // Copy the question
+        Self::copy_question(&mut response, query, question_len);
 
         if arcount > 0 {
             Self::append_opt_record(&mut response, header_pos);
         }
 
         response
+    }
+
+    /// Header-only FORMERR (rcode=1) for queries the hand-rolled builders
+    /// cannot answer coherently (e.g. `qdcount > 1`). No question section is
+    /// echoed — clients match the response on ID.
+    fn build_formerr(id: u16, flags: u16) -> Vec<u8> {
+        let [byte0, byte1] = Self::response_flags(flags);
+        let byte1_rcode = (byte1 & 0xF0) | 0x01; // FORMERR
+
+        let mut response = Vec::with_capacity(12);
+        response.extend_from_slice(&id.to_be_bytes());
+        response.extend_from_slice(&[byte0, byte1_rcode]);
+        response.extend_from_slice(&[0x00; 8]); // QD/AN/NS/AR = 0
+        response
+    }
+
+    #[cfg(test)]
+    fn question_len_for_test(query: &[u8]) -> usize {
+        Self::parse_question(&query[12..])
+            .expect("valid test query")
+            .2
     }
 
     #[cfg(test)]
@@ -423,17 +450,25 @@ impl DnsServer {
         addr: std::net::IpAddr,
         ttl_secs: u32,
     ) -> Vec<u8> {
-        Self::build_response(id, query, 0x0100, 1, qtype, addr, ttl_secs)
+        Self::build_response(
+            id,
+            query,
+            0x0100,
+            Self::question_len_for_test(query),
+            qtype,
+            addr,
+            ttl_secs,
+        )
     }
 
     #[cfg(test)]
     pub(crate) fn build_nxdomain_for_test(id: u16, query: &[u8]) -> Vec<u8> {
-        Self::build_nxdomain(id, query, 0x0100, 1)
+        Self::build_nxdomain(id, query, 0x0100, Self::question_len_for_test(query))
     }
 
     #[cfg(test)]
     pub(crate) fn build_noerror_empty_for_test(id: u16, query: &[u8]) -> Vec<u8> {
-        Self::build_noerror_empty(id, query, 0x0100, 1)
+        Self::build_noerror_empty(id, query, 0x0100, Self::question_len_for_test(query))
     }
 
     #[cfg(test)]
@@ -445,7 +480,7 @@ impl DnsServer {
 
     /// NOERROR with zero answers: hosts entry matched but no IPs of the queried
     /// address family. Clients must not retry on an empty-answer NOERROR.
-    fn build_noerror_empty(id: u16, query: &[u8], flags: u16, qdcount: u16) -> Vec<u8> {
+    fn build_noerror_empty(id: u16, query: &[u8], flags: u16, question_len: usize) -> Vec<u8> {
         let arcount = u16::from_be_bytes([query[10], query[11]]);
         let mut response = Vec::with_capacity(512);
 
@@ -456,13 +491,13 @@ impl DnsServer {
 
         response.extend_from_slice(&id.to_be_bytes());
         response.extend_from_slice(&flag_bytes);
-        response.extend_from_slice(&qdcount.to_be_bytes()); // QDCOUNT
+        response.extend_from_slice(&[0x00, 0x01]); // QDCOUNT = 1
         response.extend_from_slice(&[0x00, 0x00]); // ANCOUNT = 0
         response.extend_from_slice(&[0x00, 0x00]); // NSCOUNT = 0
         response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT = 0 (patched below)
 
-        // Copy full question section
-        Self::copy_question_section(&mut response, query, qdcount);
+        // Copy the question
+        Self::copy_question(&mut response, query, question_len);
 
         if arcount > 0 {
             Self::append_opt_record(&mut response, header_pos);
@@ -532,7 +567,10 @@ fn strip_svc_ip_hints(rec: &Record) -> Record {
     Record::from_rdata(rec.name.clone(), rec.ttl, new_rdata)
 }
 
-fn hex_prefix(data: &[u8], max: usize) -> String {
+/// Hex-dump the first `max` bytes of `data` for diagnostics. Allocates —
+/// only call it from inside a `debug!`/`trace!` macro invocation so the cost
+/// is paid exclusively when that level is enabled.
+pub fn hex_prefix(data: &[u8], max: usize) -> String {
     let n = data.len().min(max);
     data[..n]
         .iter()
@@ -839,5 +877,45 @@ mod tests {
         let resolver = empty_resolver();
         let err = DnsServer::handle_query(&q, &resolver).await;
         assert!(err.is_err(), "must reject queries with no question");
+    }
+
+    #[tokio::test]
+    async fn handle_query_answers_formerr_for_multi_question() {
+        // The hand-rolled builders answer exactly one question; a qdcount=2
+        // query must get a FORMERR, never a response whose header counts
+        // contradict its body.
+        let mut q = sample_query(0x77aa, 1);
+        q[5] = 2; // QDCOUNT = 2 (only one question actually present)
+        let resolver = empty_resolver();
+        let resp = DnsServer::handle_query(&q, &resolver)
+            .await
+            .expect("FORMERR response, not an error");
+        assert_eq!(&resp[0..2], &[0x77, 0xaa], "ID echoed");
+        assert_eq!(resp[2] & 0x80, 0x80, "QR=1");
+        assert_eq!(resp[3] & 0x0F, 1, "RCODE=FORMERR");
+        assert!(
+            resp[4..12].iter().all(|&b| b == 0),
+            "all header counts zero — no body follows"
+        );
+        assert_eq!(resp.len(), 12, "header-only response");
+    }
+
+    #[test]
+    fn build_response_echoes_single_question_verbatim() {
+        let q = sample_query(9, 1);
+        let resp = DnsServer::build_response_for_test(
+            9,
+            &q,
+            1,
+            std::net::IpAddr::V4(Ipv4Addr::new(198, 18, 0, 5)),
+            60,
+        );
+        assert_eq!(&resp[4..6], &[0x00, 0x01], "QDCOUNT always 1");
+        let qlen = q.len() - 12;
+        assert_eq!(
+            &resp[12..12 + qlen],
+            &q[12..],
+            "question section copied byte-for-byte"
+        );
     }
 }

@@ -20,9 +20,16 @@ use tracing::{info, warn};
 /// init + child-task setup) before treating the listener as failed to
 /// start. Shared between the startup path (`meow-app/src/main.rs`) and the
 /// config-reload path (`routes.rs::spawn_tun_from_raw`) so the two don't
-/// drift. Windows wintun adapter creation plus smoltcp netstack init can
-/// take tens of seconds on slow machines; 5 s proved too aggressive.
-pub const TUN_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// drift.
+///
+/// Setup *failures* return immediately via `TunReady::Failed` — this bound
+/// only covers genuine hangs and legitimately slow startups: wintun adapter
+/// creation, first-time driver install, and the PowerShell DNS backup can
+/// together take tens of seconds on slow Windows machines (5 s and 30 s both
+/// proved too aggressive there). Keep the bound tight-ish regardless: the
+/// config-reload path awaits it while holding `config_mutation_lock`, so a
+/// hung startup blocks every config-mutation API call for the full duration.
+pub const TUN_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Map a parsed `TunConfig` onto a `TunListenerConfig`. Shared between the
 /// startup path (`meow-app/src/main.rs`) and the config-reload path

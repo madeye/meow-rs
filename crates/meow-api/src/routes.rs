@@ -1663,7 +1663,10 @@ async fn spawn_tun_from_raw(
     raw: &RawConfig,
 ) -> Result<Option<tokio::task::JoinHandle<()>>, String> {
     if raw.tun.as_ref().is_some_and(|t| t.enable) {
-        tracing::warn!("tun.enable is set but this build lacks the 'listener-tun' feature");
+        // Err (not Ok(None)) so the off→on reconcile path rolls
+        // `tun.enable` back — otherwise the stored config would claim TUN
+        // is enabled while nothing can ever run.
+        return Err("this build lacks the 'listener-tun' feature".into());
     }
     Ok(None)
 }

@@ -16,13 +16,14 @@
 //! DIRECT, mirroring the tunnel-level DNS bypass.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
+use ipnet::Ipv4Net;
 use meow_common::{ConnType, Metadata, Network, ProxyAdapter};
-use meow_dns::server::DnsServer;
+use meow_dns::server::{hex_prefix, DnsServer};
 use meow_tunnel::Tunnel;
 use netstack_smoltcp::UdpSocket;
 use tokio::sync::mpsc;
@@ -50,6 +51,7 @@ pub(super) async fn run_udp(
     dns_hijack: bool,
     udp_timeout: Duration,
     in_name: String,
+    tun_net: Ipv4Net,
 ) {
     let (mut read_half, mut write_half) = socket.split();
 
@@ -73,24 +75,29 @@ pub(super) async fn run_udp(
         if dns_hijack && dst.port() == 53 {
             let resolver = Arc::clone(tunnel.resolver());
             let reply_tx = reply_tx.clone();
-            let qhex = hex_prefix(&data, 48);
-            info!(
-                "tun dns-hijack: recv {} bytes from {src} to {dst} | {qhex}",
+            debug!(
+                "tun dns-hijack: recv {} bytes from {src} to {dst} | {}",
                 data.len(),
+                hex_prefix(&data, 48),
             );
             tokio::spawn(async move {
                 match DnsServer::handle_query(&data, &resolver).await {
                     Ok(response) => {
-                        let rhex = hex_prefix(&response, 48);
-                        info!(
-                            "tun dns-hijack: reply {} bytes -> {src} | {rhex}",
+                        debug!(
+                            "tun dns-hijack: reply {} bytes -> {src} | {}",
                             response.len(),
+                            hex_prefix(&response, 48),
                         );
                         let _ = reply_tx.send((response, dst, src)).await;
                     }
-                    Err(e) => info!("tun dns-hijack: unanswerable query from {src}: {e}"),
+                    Err(e) => debug!("tun dns-hijack: unanswerable query from {src}: {e}"),
                 }
             });
+            continue;
+        }
+
+        if is_looping_dst(dst.ip(), tun_net) {
+            debug!("tun UDP: dropping non-routable dst {dst} (from {src})");
             continue;
         }
 
@@ -252,11 +259,56 @@ async fn relay_flow(
     result
 }
 
-fn hex_prefix(data: &[u8], max: usize) -> String {
-    let n = data.len().min(max);
-    data[..n]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// True when a dial to `dst` could only route back into the TUN device —
+/// its own subnet (on-link, including the device address and the subnet
+/// broadcast), the IPv4 limited broadcast, or multicast. Relaying such a
+/// destination re-enters the device and spawns a fresh flow from a new
+/// source port each round: an amplification loop. Windows NetBIOS
+/// name-service broadcasts to the subnet broadcast address (e.g.
+/// `172.19.0.3:137` for the default `172.19.0.1/30`) trigger exactly this,
+/// exhausting ephemeral ports within seconds of TUN start.
+pub(super) fn is_looping_dst(dst: std::net::IpAddr, tun_net: Ipv4Net) -> bool {
+    match dst {
+        IpAddr::V4(v4) => v4.is_broadcast() || v4.is_multicast() || tun_net.contains(&v4),
+        IpAddr::V6(v6) => v6.is_multicast(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_looping_dst;
+    use ipnet::Ipv4Net;
+    use std::net::IpAddr;
+
+    fn net() -> Ipv4Net {
+        "172.19.0.1/30".parse().unwrap()
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn drops_tun_subnet_broadcast_and_multicast() {
+        // The NetBIOS storm case: subnet broadcast of the /30.
+        assert!(is_looping_dst(ip("172.19.0.3"), net()));
+        // The device's own address and anything else on-link.
+        assert!(is_looping_dst(ip("172.19.0.1"), net()));
+        assert!(is_looping_dst(ip("172.19.0.2"), net()));
+        // Limited broadcast and multicast (mDNS/SSDP/LLMNR).
+        assert!(is_looping_dst(ip("255.255.255.255"), net()));
+        assert!(is_looping_dst(ip("224.0.0.251"), net()));
+        assert!(is_looping_dst(ip("ff02::fb"), net()));
+    }
+
+    #[test]
+    fn keeps_routable_destinations() {
+        // Fake-IP range traffic — the whole point of the TUN.
+        assert!(!is_looping_dst(ip("198.18.0.5"), net()));
+        // Ordinary unicast, v4 and v6.
+        assert!(!is_looping_dst(ip("8.8.8.8"), net()));
+        assert!(!is_looping_dst(ip("2001:db8::1"), net()));
+        // Just outside the /30.
+        assert!(!is_looping_dst(ip("172.19.0.4"), net()));
+    }
 }

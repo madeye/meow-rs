@@ -1,10 +1,12 @@
 //! Local DNS server for TUN mode (seeker-style).
 //!
 //! Binds UDP sockets to `127.0.0.1:53` and `[::1]:53`, answering DNS
-//! queries using the same `DnsServer::handle_query` pipeline as the TUN
-//! dns-hijack path.  System DNS is set to `127.0.0.1` / `::1` by
-//! `DnsGuard`, so all DNS queries from the OS DNS Client arrive at these
-//! sockets directly — no TUN netstack traversal needed.
+//! queries via `DnsServer::serve` — the same hardened serve loop (bounded
+//! worker pool with backpressure) and `handle_query` pipeline used by the
+//! main DNS server and the TUN dns-hijack path.  System DNS is set to
+//! `127.0.0.1` / `::1` by `DnsGuard`, so all DNS queries from the OS DNS
+//! Client arrive at these sockets directly — no TUN netstack traversal
+//! needed.
 //!
 //! This is the seeker approach: instead of relying on DNS queries
 //! traversing the TUN userspace IP stack (which only handles IPv4 and
@@ -24,9 +26,7 @@ use std::sync::Arc;
 use meow_dns::server::DnsServer;
 use meow_dns::Resolver;
 use tokio::net::UdpSocket;
-use tracing::{info, warn};
-
-const RECV_BUF_SIZE: usize = 4096;
+use tracing::info;
 
 /// The pre-bound loopback DNS sockets. Produced by [`bind`], consumed by
 /// [`run`].
@@ -50,54 +50,10 @@ pub async fn bind() -> io::Result<Sockets> {
 }
 
 /// Serve DNS on the pre-bound sockets until both are closed.
-///
-/// Each socket runs concurrently; queries are handled in independent
-/// tasks.
 pub async fn run(sockets: Sockets, resolver: Arc<Resolver>) {
     let Sockets { v4, v6 } = sockets;
-    let v4 = serve_socket(v4, Arc::clone(&resolver));
-    let v6 = serve_socket(v6, resolver);
-    let _ = tokio::join!(v4, v6);
-}
-
-async fn serve_socket(socket: UdpSocket, resolver: Arc<Resolver>) {
-    let addr = match socket.local_addr() {
-        Ok(a) => a,
-        Err(e) => {
-            warn!("tun local-dns: local_addr failed: {e}");
-            return;
-        }
-    };
-    info!("tun local-dns: listening on {addr}");
-
-    let socket = Arc::new(socket);
-    let mut buf = vec![0u8; RECV_BUF_SIZE];
-
-    loop {
-        match socket.recv_from(&mut buf).await {
-            Ok((len, peer)) => {
-                if len == 0 {
-                    continue;
-                }
-                let query = buf[..len].to_vec();
-                let sock = Arc::clone(&socket);
-                let res = Arc::clone(&resolver);
-                tokio::spawn(async move {
-                    match DnsServer::handle_query(&query, &res).await {
-                        Ok(response) => {
-                            if let Err(e) = sock.send_to(&response, peer).await {
-                                warn!("tun local-dns: send_to {peer} failed: {e}");
-                            }
-                        }
-                        Err(e) => {
-                            warn!("tun local-dns: query from {peer} failed: {e}");
-                        }
-                    }
-                });
-            }
-            Err(e) => {
-                warn!("tun local-dns: recv on {addr} failed: {e}");
-            }
-        }
-    }
+    info!("tun local-dns: serving on 127.0.0.1:53 and [::1]:53");
+    let v4 = DnsServer::serve(Arc::new(v4), Arc::clone(&resolver));
+    let v6 = DnsServer::serve(Arc::new(v6), resolver);
+    tokio::join!(v4, v6);
 }

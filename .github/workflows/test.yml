@@ -256,6 +256,15 @@ jobs:
             --test ws_test \
             -- --nocapture
 
+      # TUN inbound tests: `listener-tun` is not a default feature, so the
+      # workspace --lib leg above never compiles or runs the tun module's
+      # tests. This leg covers the Windows-only DnsGuard logic (backup
+      # filtering, batched restore-script generation, and a read-only smoke
+      # test of the real PowerShell/registry backup path) plus the
+      # platform-neutral TUN routing-loop guard.
+      - name: meow-listener TUN tests (listener-tun)
+        run: cargo test -p meow-listener --features listener-tun --lib -- --nocapture
+
   macos:
     runs-on: macos-latest
     needs: lint
@@ -283,6 +292,12 @@ jobs:
             --test tls_test \
             --test ws_test \
             -- --nocapture
+
+      # `listener-tun` is not a default feature; this leg runs the tun
+      # module's tests — notably the macOS regression guard that an unset
+      # `tun.device` never invents a name (tun-rs rejects non-`utunN`).
+      - name: meow-listener TUN tests (listener-tun)
+        run: cargo test -p meow-listener --features listener-tun --lib -- --nocapture
 
   tproxy:
     runs-on: ubuntu-latest

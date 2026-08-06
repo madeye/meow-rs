@@ -52,7 +52,7 @@ use meow_common::{ConnType, Metadata, Network, ProxyConn};
 use meow_tunnel::Tunnel;
 use netstack_smoltcp::{StackBuilder, TcpStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use route::RouteGuard;
 
@@ -151,6 +151,15 @@ impl ReadyNotifier {
             tracing::warn!("ReadyNotifier::ready called but tx was already None");
         }
     }
+
+    /// Consume the notifier and send `TunReady::Failed` carrying the real
+    /// setup error, so callers surface the underlying cause instead of the
+    /// generic drop-time message.
+    fn fail(mut self, msg: String) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(TunReady::Failed(msg));
+        }
+    }
 }
 
 impl Drop for ReadyNotifier {
@@ -211,14 +220,27 @@ impl TunListener {
     }
 
     pub async fn run(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Extract the readiness sender into a notifier so setup failures
+        // reach the caller immediately: an `Err` from `run_inner` sends
+        // `TunReady::Failed` with the real error message, and if the future
+        // is dropped mid-setup the notifier's `Drop` impl sends a generic
+        // failure — either way no timeout wait.
+        let mut notifier = self.ready.take().map(ReadyNotifier::new);
+        let result = self.run_inner(&mut notifier).await;
+        if let Err(e) = &result {
+            if let Some(n) = notifier.take() {
+                n.fail(e.to_string());
+            }
+        }
+        result
+    }
+
+    async fn run_inner(
+        &self,
+        notifier: &mut Option<ReadyNotifier>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let t0 = Instant::now();
         info!("TUN listener '{}' starting...", self.name);
-
-        // Extract the readiness sender into a notifier that will
-        // automatically fire `TunReady::Failed(...)` on drop, so a `?`
-        // early-return immediately notifies the caller with the fact
-        // that setup did not complete — no 30 s timeout needed.
-        let notifier = self.ready.take().map(ReadyNotifier::new);
 
         let cfg = &self.cfg;
 
@@ -237,22 +259,7 @@ impl TunListener {
         let mut used_addr = base_addr;
 
         for attempt in 0..MAX_TUN_RETRIES {
-            // macOS only accepts `utunN` device names and picks one itself
-            // when none is given, so never invent a name there — pass the
-            // configured name through unchanged (suffix rotation would
-            // produce an invalid `utunN-1`). Elsewhere default to
-            // "meow-tun" and rotate the suffix to sidestep stale adapters
-            // from unclean shutdowns.
-            let name: Option<String> = if cfg!(target_os = "macos") {
-                cfg.device.clone()
-            } else {
-                let base = cfg.device.as_deref().unwrap_or("meow-tun");
-                Some(if attempt == 0 {
-                    base.to_string()
-                } else {
-                    format!("{base}-{attempt}")
-                })
-            };
+            let name = device_name_for_attempt(cfg.device.as_deref(), attempt);
 
             // Rotate IP after the first retry fails (attempt >= 2).
             // Each /30 subnet spans 4 addresses, so we step by 4.
@@ -470,6 +477,7 @@ impl TunListener {
             cfg.dns_hijack,
             cfg.udp_timeout,
             self.name.clone(),
+            cfg.inet4_address,
         ));
 
         let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -480,26 +488,25 @@ impl TunListener {
         );
 
         // Signal readiness: device, stack, and child tasks are all up.
-        // Any `?` above would have dropped the notifier, sending
-        // `TunReady::Failed` instead.
-        match notifier {
-            Some(notifier) => {
-                info!("TUN listener '{}' signalling readiness...", self.name);
-                notifier.ready();
-                info!("TUN listener '{}' readiness signal sent", self.name);
-            }
-            None => {
-                info!(
-                    "TUN listener '{}' has no readiness signal configured",
-                    self.name
-                );
-            }
+        // An `Err` return from this function sends `TunReady::Failed`
+        // (with the real error) from `run` instead.
+        if let Some(notifier) = notifier.take() {
+            notifier.ready();
+            debug!("TUN listener '{}' readiness signalled", self.name);
         }
 
+        let tun_net = cfg.inet4_address;
         loop {
             tokio::select! {
                 accepted = tcp_listener.next() => match accepted {
                     Some((stream, src, dst)) => {
+                        // Same loop guard as the UDP path: a dial to the
+                        // TUN's own subnet routes back into the device.
+                        if udp::is_looping_dst(dst.ip(), tun_net) {
+                            debug!("tun TCP: dropping non-routable dst {dst} (from {src})");
+                            drop(stream);
+                            continue;
+                        }
                         let tunnel = self.tunnel.clone();
                         let name = self.name.clone();
                         tasks.spawn(async move {
@@ -516,6 +523,26 @@ impl TunListener {
                 }
             }
         }
+    }
+}
+
+/// Device name to try on creation `attempt` (0-based).
+///
+/// macOS only accepts `utunN` device names and picks one itself when none is
+/// given, so never invent a name there — pass the configured name through
+/// unchanged (suffix rotation would produce an invalid `utunN-1`). Elsewhere
+/// default to "meow-tun" and rotate a numeric suffix to sidestep stale
+/// adapters from unclean shutdowns (common with wintun).
+fn device_name_for_attempt(configured: Option<&str>, attempt: u32) -> Option<String> {
+    if cfg!(target_os = "macos") {
+        configured.map(str::to_string)
+    } else {
+        let base = configured.unwrap_or("meow-tun");
+        Some(if attempt == 0 {
+            base.to_string()
+        } else {
+            format!("{base}-{attempt}")
+        })
     }
 }
 
@@ -583,3 +610,41 @@ impl AsyncWrite for TunTcpConn {
 }
 
 impl ProxyConn for TunTcpConn {}
+
+#[cfg(test)]
+mod tests {
+    use super::device_name_for_attempt;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_never_invents_a_device_name() {
+        // Regression: passing a non-`utun` name to tun-rs fails device
+        // creation on macOS ("device name must start with utun"), so an
+        // unset `tun.device` must stay unset — the platform picks `utunN`.
+        for attempt in 0..5 {
+            assert_eq!(device_name_for_attempt(None, attempt), None);
+            assert_eq!(
+                device_name_for_attempt(Some("utun7"), attempt),
+                Some("utun7".to_string()),
+                "configured name passes through without suffix rotation"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn default_name_rotates_suffix_on_retries() {
+        assert_eq!(
+            device_name_for_attempt(None, 0),
+            Some("meow-tun".to_string())
+        );
+        assert_eq!(
+            device_name_for_attempt(None, 2),
+            Some("meow-tun-2".to_string())
+        );
+        assert_eq!(
+            device_name_for_attempt(Some("mytun"), 1),
+            Some("mytun-1".to_string())
+        );
+    }
+}
