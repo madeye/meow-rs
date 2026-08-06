@@ -8,10 +8,9 @@
 # and confirms the anchor came up. To forward OTHER devices' traffic, use
 # tproxy-gateway-macos.sh instead.
 #
-# NOTE (see GitHub issue on macOS tproxy): macOS interception is currently
-# loopback-only and the redirected connection's handshake does not complete, so
-# this does not yet proxy real outbound traffic. The wrapper still demonstrates
-# that the listener + pf anchor are installed correctly.
+# NOTE: out of the box, interception covers only traffic that traverses lo0.
+# To proxy this host's real outbound traffic you additionally load a manual
+# `route-to lo0` anchor — recipe and limitations in docs/tproxy-macos.md.
 #
 # Usage:
 #   sudo ./tproxy-local-macos.sh up [--config FILE] [--meow PATH]

@@ -1,9 +1,11 @@
 use crate::resolver::Resolver;
+use futures::FutureExt;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Record, RecordType};
 use meow_common::DnsMode;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::panic::AssertUnwindSafe;
+use std::sync::{Arc, Weak};
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
 
@@ -39,67 +41,28 @@ impl DnsServer {
         }
     }
 
-    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Bind the listen socket eagerly and return a [`BoundDnsServer`] ready to
+    /// [`BoundDnsServer::run`]. Splitting bind from serve lets embedders treat
+    /// a bind failure (EADDRINUSE, missing address, sandbox denial) as a hard
+    /// startup error instead of discovering it as a silently dead resolver:
+    /// with the old `run()`-binds-internally shape, a caller that spawned
+    /// `run()` fire-and-forget had no way to distinguish "listening" from
+    /// "bind failed, every query will be dropped".
+    pub async fn bind(&self) -> std::io::Result<BoundDnsServer> {
         let socket = Arc::new(UdpSocket::bind(self.listen_addr).await?);
         info!("DNS server listening on {}", self.listen_addr);
-        Self::serve(socket, Arc::clone(&self.resolver)).await;
-        Ok(())
+        Ok(BoundDnsServer {
+            resolver: Arc::clone(&self.resolver),
+            socket,
+        })
     }
 
-    /// Serve DNS on a pre-bound socket until the socket is closed. Shared by
-    /// the main DNS server ([`Self::run`]) and the TUN loopback DNS servers
-    /// (Windows `dns-hijack`), so both inherit the same worker pool,
-    /// backpressure, and hardening.
-    pub async fn serve(socket: Arc<UdpSocket>, resolver: Arc<Resolver>) {
-        // Worker pool: pre-spawn N workers and round-robin packets to them via
-        // bounded mpsc channels. Replaces the previous `tokio::spawn`-per-packet
-        // pattern (one task allocation per query under W4 load).
-        const N_WORKERS: usize = 4;
-        const CHANNEL_DEPTH: usize = 256;
-        let mut senders: Vec<tokio::sync::mpsc::Sender<(Vec<u8>, SocketAddr)>> =
-            Vec::with_capacity(N_WORKERS);
-        for _ in 0..N_WORKERS {
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr)>(CHANNEL_DEPTH);
-            let resolver = Arc::clone(&resolver);
-            let sock = Arc::clone(&socket);
-            tokio::spawn(async move {
-                while let Some((data, src)) = rx.recv().await {
-                    match Self::handle_query(&data, &resolver).await {
-                        Ok(response) => {
-                            if let Err(e) = sock.send_to(&response, src).await {
-                                warn!("DNS send error: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            debug!("DNS query handling error: {}", e);
-                        }
-                    }
-                }
-            });
-            senders.push(tx);
-        }
-
-        let mut buf = vec![0u8; 4096];
-        let mut rr: usize = 0;
-        loop {
-            let (len, src) = match socket.recv_from(&mut buf).await {
-                Ok(v) => v,
-                Err(e) => {
-                    error!("DNS recv error: {}", e);
-                    continue;
-                }
-            };
-
-            let data = buf[..len].to_vec();
-            // Round-robin to a worker. If the channel is full we drop the
-            // query (DNS is best-effort UDP — better to drop one packet
-            // than block the recv loop and stall all queries).
-            let worker = rr % N_WORKERS;
-            rr = rr.wrapping_add(1);
-            if senders[worker].try_send((data, src)).is_err() {
-                debug!("DNS worker {} backpressure; dropping query", worker);
-            }
-        }
+    /// Bind and serve in one call. Kept for callers that await `run()`
+    /// directly and can observe its error; embedders that spawn the serve
+    /// loop should use [`DnsServer::bind`] + [`BoundDnsServer::run`] so bind
+    /// failures surface at startup.
+    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.bind().await?.run().await
     }
 
     pub async fn handle_query(
@@ -504,6 +467,113 @@ impl DnsServer {
         }
 
         response
+    }
+}
+
+/// A [`DnsServer`] whose listen socket is already bound. Produced by
+/// [`DnsServer::bind`]; consumed by [`Self::run`].
+pub struct BoundDnsServer {
+    resolver: Arc<Resolver>,
+    socket: Arc<UdpSocket>,
+}
+
+impl BoundDnsServer {
+    /// Wrap an externally bound socket so embedders reuse this hardened serve
+    /// loop (bounded worker pool, backpressure, panic-guarded workers)
+    /// instead of hand-rolling their own — e.g. the TUN loopback DNS servers
+    /// on Windows, which must bind `127.0.0.1:53`/`[::1]:53` *before* the OS
+    /// resolver is repointed at them.
+    pub fn from_socket(socket: UdpSocket, resolver: Arc<Resolver>) -> Self {
+        Self {
+            resolver,
+            socket: Arc::new(socket),
+        }
+    }
+
+    /// Local address of the bound listen socket (useful with a port-0 bind).
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+
+    /// Serve queries until the future is dropped.
+    ///
+    /// Ownership contract: the serve loop holds the ONLY strong `Arc` to the
+    /// listen socket — workers hold `Weak` refs and upgrade per reply. When an
+    /// embedder aborts the task running this future, the socket drops with the
+    /// future's frame and the port is released immediately, even while a worker
+    /// is still parked inside `handle_query` awaiting an upstream (previously
+    /// the workers' strong clones kept the port bound for up to the ~5 s query
+    /// timeout after an abort, so an immediate stop→start rebind of a fixed
+    /// port hit EADDRINUSE).
+    pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let BoundDnsServer { resolver, socket } = self;
+
+        // Worker pool: pre-spawn N workers and round-robin packets to them via
+        // bounded mpsc channels. Replaces the previous `tokio::spawn`-per-packet
+        // pattern (one task allocation per query under W4 load).
+        const N_WORKERS: usize = 4;
+        const CHANNEL_DEPTH: usize = 256;
+        let mut senders: Vec<tokio::sync::mpsc::Sender<(Vec<u8>, SocketAddr)>> =
+            Vec::with_capacity(N_WORKERS);
+        for worker_id in 0..N_WORKERS {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr)>(CHANNEL_DEPTH);
+            let resolver = Arc::clone(&resolver);
+            let sock: Weak<UdpSocket> = Arc::downgrade(&socket);
+            tokio::spawn(async move {
+                while let Some((data, src)) = rx.recv().await {
+                    // Panic guard: a panic inside query handling must not kill
+                    // the worker — a dead worker silently blackholes its
+                    // round-robin share of ALL queries for the server's
+                    // remaining lifetime (try_send to a dropped rx reads as
+                    // ordinary backpressure at the accept loop).
+                    let outcome = AssertUnwindSafe(DnsServer::handle_query(&data, &resolver))
+                        .catch_unwind()
+                        .await;
+                    match outcome {
+                        Ok(Ok(response)) => {
+                            // Upgrade per reply; hold the strong ref only across
+                            // the send so the serve loop stays the socket owner.
+                            let Some(sock) = sock.upgrade() else {
+                                // Server dropped — exit so the port stays free.
+                                break;
+                            };
+                            if let Err(e) = sock.send_to(&response, src).await {
+                                warn!("DNS send error: {}", e);
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            debug!("DNS query handling error: {}", e);
+                        }
+                        Err(_) => {
+                            error!("DNS worker {} survived a query panic", worker_id);
+                        }
+                    }
+                }
+            });
+            senders.push(tx);
+        }
+
+        let mut buf = vec![0u8; 4096];
+        let mut rr: usize = 0;
+        loop {
+            let (len, src) = match socket.recv_from(&mut buf).await {
+                Ok(v) => v,
+                Err(e) => {
+                    error!("DNS recv error: {}", e);
+                    continue;
+                }
+            };
+
+            let data = buf[..len].to_vec();
+            // Round-robin to a worker. If the channel is full we drop the
+            // query (DNS is best-effort UDP — better to drop one packet
+            // than block the recv loop and stall all queries).
+            let worker = rr % N_WORKERS;
+            rr = rr.wrapping_add(1);
+            if senders[worker].try_send((data, src)).is_err() {
+                debug!("DNS worker {} backpressure; dropping query", worker);
+            }
+        }
     }
 }
 
@@ -916,6 +986,57 @@ mod tests {
             &resp[12..12 + qlen],
             &q[12..],
             "question section copied byte-for-byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_propagates_addr_in_use() {
+        // Occupy a loopback port, then DnsServer::bind on the same address
+        // must surface the error instead of deferring it to a spawned run().
+        let holder = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = holder.local_addr().unwrap();
+        let server = DnsServer::new(Arc::new(empty_resolver()), addr);
+        let err = server.bind().await;
+        assert!(err.is_err(), "bind on an in-use port must error eagerly");
+    }
+
+    /// The embedder contract behind `BoundDnsServer::run`: aborting the serve
+    /// task releases the listen port immediately, even while a worker is still
+    /// parked in `handle_query` awaiting an unresponsive upstream. Regression
+    /// test for the stop→start EADDRINUSE window (workers used to hold strong
+    /// socket clones for up to the ~5 s query timeout past an abort).
+    #[tokio::test]
+    async fn port_released_on_abort_with_inflight_query() {
+        // Resolver whose only upstream is TEST-NET-1: handle_query for any
+        // uncached name parks in the UDP client until its 5 s timeout.
+        let resolver = Arc::new(crate::resolver::Resolver::new(
+            vec!["192.0.2.1:53".parse().unwrap()],
+            Vec::new(),
+            DnsMode::Normal,
+            meow_trie::DomainTrie::new(),
+            false,
+        ));
+        let server = DnsServer::new(resolver, "127.0.0.1:0".parse().unwrap());
+        let bound = server.bind().await.unwrap();
+        let addr = bound.local_addr().unwrap();
+        let serve = tokio::spawn(bound.run());
+
+        // Park a worker: send a real A query and give the pipeline a moment
+        // to hand it into handle_query.
+        let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(&sample_query(7, 1), addr).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        serve.abort();
+        let _ = serve.await;
+
+        // The port must be immediately rebindable — the aborted serve future
+        // held the only strong Arc to the socket.
+        let rebind = tokio::net::UdpSocket::bind(addr).await;
+        assert!(
+            rebind.is_ok(),
+            "port must be released at abort, got {:?}",
+            rebind.err()
         );
     }
 }

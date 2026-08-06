@@ -8,6 +8,7 @@
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -274,9 +275,9 @@ impl DnsClient {
     }
 
     /// Send a query for `(name, record_type)` and return the parsed response
-    /// `Message`. ID is randomised internally and the response's ID is not
-    /// checked against the request — DoT/DoH/UDP-connected guarantee a 1:1
-    /// pairing on the socket so spoofing a different ID would be a no-op.
+    /// `Message`. The response transaction ID, message type, opcode, and
+    /// question must match the request before any response flags or records
+    /// are used.
     pub async fn query(&self, name: &str, record_type: RecordType) -> Result<Message, ClientError> {
         let id: u16 = rand::random();
         let mut msg = Message::new(id, MessageType::Query, OpCode::Query);
@@ -293,13 +294,12 @@ impl DnsClient {
             resp.add_query(query);
             return Ok(resp);
         }
-        msg.add_query(query);
+        msg.add_query(query.clone());
         let wire = msg.to_bytes()?;
-        let resp_bytes = tokio::time::timeout(self.timeout, self.exchange(&wire))
+        let expected = ExpectedResponse { id, query };
+        tokio::time::timeout(self.timeout, self.exchange(&wire, &expected))
             .await
-            .map_err(|_| ClientError::Timeout(self.timeout))??;
-        let resp = Message::from_bytes(&resp_bytes)?;
-        Ok(resp)
+            .map_err(|_| ClientError::Timeout(self.timeout))?
     }
 
     /// Convenience: query `A` and `AAAA` in parallel, merge addresses, return
@@ -318,11 +318,10 @@ impl DnsClient {
             match r {
                 Ok(msg) => {
                     had_any_ok = true;
-                    for rec in &msg.answers {
-                        if let Some(ip) = ip_from_record(rec) {
-                            addrs.push(ip);
-                            min_ttl = Some(min_ttl.map_or(rec.ttl, |t| t.min(rec.ttl)));
-                        }
+                    let (response_addrs, response_ttl) = relevant_ip_answers(&msg);
+                    addrs.extend(response_addrs);
+                    if let Some(ttl) = response_ttl {
+                        min_ttl = Some(min_ttl.map_or(ttl, |current| current.min(ttl)));
                     }
                 }
                 Err(e) => {
@@ -336,7 +335,11 @@ impl DnsClient {
         Ok((addrs, Duration::from_secs(u64::from(min_ttl.unwrap_or(0)))))
     }
 
-    async fn exchange(&self, wire: &[u8]) -> Result<Vec<u8>, ClientError> {
+    async fn exchange(
+        &self,
+        wire: &[u8],
+        expected: &ExpectedResponse,
+    ) -> Result<Message, ClientError> {
         if let Some(proxy) = self.proxy.as_ref() {
             let addr = match &self.transport {
                 Transport::Udp { addr } | Transport::Tcp { addr } => *addr,
@@ -360,17 +363,22 @@ impl DnsClient {
                     ));
                 }
             };
-            return proxy_tcp_exchange(proxy, addr, wire).await;
+            let response = proxy_tcp_exchange(proxy, addr, wire).await?;
+            return decode_validated_response(&response, expected);
         }
         match &self.transport {
-            Transport::Udp { addr } => udp_exchange(*addr, wire).await,
-            Transport::Tcp { addr } => tcp_exchange(*addr, wire).await,
+            Transport::Udp { addr } => udp_exchange(*addr, wire, expected).await,
+            Transport::Tcp { addr } => {
+                let response = tcp_exchange(*addr, wire).await?;
+                decode_validated_response(&response, expected)
+            }
             Transport::RCode { .. } => Err(ClientError::Protocol(
                 "rcode transport should not perform network exchange",
             )),
             #[cfg(feature = "encrypted")]
             Transport::Dot { addr, sni, tls } => {
-                dot_exchange(*addr, sni, Arc::clone(tls), wire).await
+                let response = dot_exchange(*addr, sni, Arc::clone(tls), wire).await?;
+                decode_validated_response(&response, expected)
             }
             #[cfg(feature = "encrypted")]
             Transport::Doh {
@@ -378,9 +386,51 @@ impl DnsClient {
                 sni,
                 path,
                 tls,
-            } => doh_exchange(*addr, sni, path, Arc::clone(tls), wire).await,
+            } => {
+                let response = doh_exchange(*addr, sni, path, Arc::clone(tls), wire).await?;
+                decode_validated_response(&response, expected)
+            }
         }
     }
+}
+
+struct ExpectedResponse {
+    id: u16,
+    query: Query,
+}
+
+fn decode_validated_response(
+    wire: &[u8],
+    expected: &ExpectedResponse,
+) -> Result<Message, ClientError> {
+    let response = Message::from_bytes(wire)?;
+    validate_response(&response, expected)?;
+    Ok(response)
+}
+
+fn validate_response(response: &Message, expected: &ExpectedResponse) -> Result<(), ClientError> {
+    if response.metadata.id != expected.id {
+        return Err(ClientError::Protocol("response ID mismatch"));
+    }
+    if response.metadata.message_type != MessageType::Response {
+        return Err(ClientError::Protocol("received DNS query as response"));
+    }
+    if response.metadata.op_code != OpCode::Query {
+        return Err(ClientError::Protocol("response opcode mismatch"));
+    }
+    let [question] = response.queries.as_slice() else {
+        return Err(ClientError::Protocol("response question count mismatch"));
+    };
+    if !question.name.eq_ignore_root(&expected.query.name) {
+        return Err(ClientError::Protocol("response question name mismatch"));
+    }
+    if question.query_type != expected.query.query_type {
+        return Err(ClientError::Protocol("response question type mismatch"));
+    }
+    if question.query_class != expected.query.query_class {
+        return Err(ClientError::Protocol("response question class mismatch"));
+    }
+    Ok(())
 }
 
 fn socket_label(addr: SocketAddr, default_port: u16) -> String {
@@ -421,22 +471,121 @@ fn ip_from_record(rec: &Record) -> Option<IpAddr> {
     }
 }
 
-async fn udp_exchange(addr: SocketAddr, wire: &[u8]) -> Result<Vec<u8>, ClientError> {
+fn canonical_name(name: &Name) -> Name {
+    let mut canonical = name.to_lowercase();
+    canonical.set_fqdn(true);
+    canonical
+}
+
+struct CnameLink {
+    target: Name,
+    ttl: u32,
+    ambiguous: bool,
+}
+
+fn relevant_ip_answers(message: &Message) -> (Vec<IpAddr>, Option<u32>) {
+    let Some(question) = message.queries.first() else {
+        return (Vec::new(), None);
+    };
+    if !matches!(question.query_type, RecordType::A | RecordType::AAAA) {
+        return (Vec::new(), None);
+    }
+
+    // Index CNAME links once, then walk the single chain from QNAME. Besides
+    // making answer order irrelevant, this keeps hostile reverse-ordered
+    // chains linear instead of repeatedly rescanning every answer.
+    let mut cname_links = HashMap::new();
+    for record in &message.answers {
+        if record.dns_class != question.query_class {
+            continue;
+        }
+        let RData::CNAME(target) = &record.data else {
+            continue;
+        };
+        let owner = canonical_name(&record.name);
+        let target = canonical_name(&target.0);
+        match cname_links.entry(owner) {
+            Entry::Vacant(entry) => {
+                entry.insert(CnameLink {
+                    target,
+                    ttl: record.ttl,
+                    ambiguous: false,
+                });
+            }
+            Entry::Occupied(mut entry) => {
+                let link = entry.get_mut();
+                if link.target == target {
+                    link.ttl = link.ttl.min(record.ttl);
+                } else {
+                    // Multiple canonical names for one owner violate the
+                    // CNAME rules. Do not pick an attacker-controlled branch.
+                    link.ambiguous = true;
+                }
+            }
+        }
+    }
+
+    let mut reachable = HashSet::new();
+    let mut current = canonical_name(&question.name);
+    let mut cname_ttl: Option<u32> = None;
+    loop {
+        if !reachable.insert(current.clone()) {
+            // A CNAME loop has no usable terminal address.
+            return (Vec::new(), None);
+        }
+        let Some(link) = cname_links.get(&current) else {
+            break;
+        };
+        if link.ambiguous {
+            return (Vec::new(), None);
+        }
+        cname_ttl = Some(cname_ttl.map_or(link.ttl, |ttl| ttl.min(link.ttl)));
+        current = link.target.clone();
+    }
+
+    let mut addrs = Vec::new();
+    let mut min_ttl = cname_ttl;
+    for record in &message.answers {
+        if record.dns_class != question.query_class
+            || !reachable.contains(&canonical_name(&record.name))
+        {
+            continue;
+        }
+        let matches_query = matches!(
+            (&record.data, question.query_type),
+            (RData::A(_), RecordType::A) | (RData::AAAA(_), RecordType::AAAA)
+        );
+        if matches_query {
+            addrs.extend(ip_from_record(record));
+            min_ttl = Some(min_ttl.map_or(record.ttl, |ttl| ttl.min(record.ttl)));
+        }
+    }
+    (addrs, min_ttl)
+}
+
+async fn udp_exchange(
+    addr: SocketAddr,
+    wire: &[u8],
+    expected: &ExpectedResponse,
+) -> Result<Message, ClientError> {
     let sock = factory().bind_udp().await?;
     sock.connect(addr).await?;
     sock.send(wire).await?;
     let mut buf = vec![0u8; 4096];
-    let n = sock.recv(&mut buf).await?;
-    buf.truncate(n);
-    if n < 12 {
-        return Err(ClientError::Protocol("udp response shorter than header"));
+    loop {
+        let n = sock.recv(&mut buf).await?;
+        let Ok(response) = decode_validated_response(&buf[..n], expected) else {
+            // A connected UDP socket only filters the peer tuple. Ignore
+            // malformed or unrelated datagrams and keep waiting under the
+            // query's original overall timeout.
+            continue;
+        };
+        if response.metadata.truncation {
+            let response = tcp_exchange(addr, wire).await?;
+            return decode_validated_response(&response, expected);
+        }
+        return Ok(response);
     }
-    // RFC 6891 / RFC 7766 — handle TC=1 by retrying over TCP. Bit is byte 2
-    // bit 1 (0x02).
-    if buf[2] & 0x02 != 0 {
-        return tcp_exchange(addr, wire).await;
-    }
-    Ok(buf)
 }
 
 async fn tcp_exchange(addr: SocketAddr, wire: &[u8]) -> Result<Vec<u8>, ClientError> {
@@ -580,6 +729,38 @@ fn tls_client_config(alpn: &str) -> Arc<rustls::ClientConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hickory_proto::rr::rdata::{A, CNAME};
+    use hickory_proto::rr::DNSClass;
+    use std::net::Ipv4Addr;
+
+    fn expected(name: &str, record_type: RecordType, id: u16) -> ExpectedResponse {
+        ExpectedResponse {
+            id,
+            query: Query::query(name.parse().unwrap(), record_type),
+        }
+    }
+
+    fn response_for(request: &Message, id: u16) -> Message {
+        let mut response = Message::new(id, MessageType::Response, OpCode::Query);
+        response.add_queries(request.queries.iter().cloned());
+        response
+    }
+
+    fn a_record(name: &str, ttl: u32, octets: [u8; 4]) -> Record {
+        Record::from_rdata(
+            name.parse().unwrap(),
+            ttl,
+            RData::A(A(Ipv4Addr::from(octets))),
+        )
+    }
+
+    fn cname_record(name: &str, ttl: u32, target: &str) -> Record {
+        Record::from_rdata(
+            name.parse().unwrap(),
+            ttl,
+            RData::CNAME(CNAME(target.parse().unwrap())),
+        )
+    }
 
     #[cfg(feature = "encrypted")]
     #[test]
@@ -605,6 +786,197 @@ mod tests {
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
         assert!(resp.answers.is_empty());
         assert_eq!(resp.queries.len(), 1);
+    }
+
+    #[test]
+    fn response_validation_rejects_mismatched_metadata_and_question() {
+        let expected = expected("victim.example", RecordType::A, 0x1234);
+        let mut response = Message::new(0x1234, MessageType::Response, OpCode::Query);
+        response.add_query(expected.query.clone());
+        assert!(validate_response(&response, &expected).is_ok());
+
+        response.metadata.id = 0x4321;
+        assert!(matches!(
+            validate_response(&response, &expected),
+            Err(ClientError::Protocol("response ID mismatch"))
+        ));
+        response.metadata.id = expected.id;
+
+        response.metadata.message_type = MessageType::Query;
+        assert!(matches!(
+            validate_response(&response, &expected),
+            Err(ClientError::Protocol("received DNS query as response"))
+        ));
+        response.metadata.message_type = MessageType::Response;
+
+        response.metadata.op_code = OpCode::Status;
+        assert!(matches!(
+            validate_response(&response, &expected),
+            Err(ClientError::Protocol("response opcode mismatch"))
+        ));
+        response.metadata.op_code = OpCode::Query;
+
+        response.queries[0].name = "other.example".parse().unwrap();
+        assert!(matches!(
+            validate_response(&response, &expected),
+            Err(ClientError::Protocol("response question name mismatch"))
+        ));
+        response.queries[0].name = expected.query.name.clone();
+
+        response.queries[0].query_type = RecordType::AAAA;
+        assert!(matches!(
+            validate_response(&response, &expected),
+            Err(ClientError::Protocol("response question type mismatch"))
+        ));
+        response.queries[0].query_type = expected.query.query_type;
+
+        response.queries[0].query_class = DNSClass::CH;
+        assert!(matches!(
+            validate_response(&response, &expected),
+            Err(ClientError::Protocol("response question class mismatch"))
+        ));
+    }
+
+    #[test]
+    fn address_answers_are_limited_to_the_valid_cname_chain() {
+        let mut message = Message::new(7, MessageType::Response, OpCode::Query);
+        message.add_query(Query::query(
+            "victim.example".parse().unwrap(),
+            RecordType::A,
+        ));
+        // Deliberately put the terminal address and second CNAME before the
+        // first link to prove answer ordering is irrelevant.
+        message.add_answer(a_record("target.example", 300, [192, 0, 2, 10]));
+        message.add_answer(cname_record("alias.example", 120, "target.example"));
+        message.add_answer(a_record("unrelated.example", 1, [6, 6, 6, 6]));
+        message.add_answer(cname_record("victim.example", 60, "alias.example"));
+
+        let (addrs, ttl) = relevant_ip_answers(&message);
+        assert_eq!(addrs, vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]);
+        assert_eq!(ttl, Some(60));
+    }
+
+    #[test]
+    fn unrelated_address_answer_is_not_returned() {
+        let mut message = Message::new(7, MessageType::Response, OpCode::Query);
+        message.add_query(Query::query(
+            "victim.example".parse().unwrap(),
+            RecordType::A,
+        ));
+        message.add_answer(a_record("unrelated.example", 30, [6, 6, 6, 6]));
+
+        assert_eq!(relevant_ip_answers(&message), (Vec::new(), None));
+    }
+
+    #[test]
+    fn cname_loop_is_rejected() {
+        let mut message = Message::new(7, MessageType::Response, OpCode::Query);
+        message.add_query(Query::query(
+            "victim.example".parse().unwrap(),
+            RecordType::A,
+        ));
+        message.add_answer(cname_record("victim.example", 60, "alias.example"));
+        message.add_answer(cname_record("alias.example", 30, "victim.example"));
+        message.add_answer(a_record("alias.example", 300, [192, 0, 2, 10]));
+
+        assert_eq!(relevant_ip_answers(&message), (Vec::new(), None));
+    }
+
+    #[test]
+    fn conflicting_cname_targets_are_rejected() {
+        let mut message = Message::new(7, MessageType::Response, OpCode::Query);
+        message.add_query(Query::query(
+            "victim.example".parse().unwrap(),
+            RecordType::A,
+        ));
+        message.add_answer(cname_record("victim.example", 60, "first.example"));
+        message.add_answer(cname_record("victim.example", 30, "second.example"));
+        message.add_answer(a_record("first.example", 300, [192, 0, 2, 10]));
+        message.add_answer(a_record("second.example", 300, [192, 0, 2, 11]));
+
+        assert_eq!(relevant_ip_answers(&message), (Vec::new(), None));
+    }
+
+    #[tokio::test]
+    async fn udp_ignores_wrong_id_before_valid_response() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = server.recv_from(&mut buf).await.unwrap();
+            let request = Message::from_bytes(&buf[..len]).unwrap();
+
+            let wrong = response_for(&request, request.metadata.id.wrapping_add(1));
+            server
+                .send_to(&wrong.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+            let valid = response_for(&request, request.metadata.id);
+            server
+                .send_to(&valid.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+
+        let response = DnsClient::udp(addr)
+            .with_timeout(Duration::from_secs(1))
+            .query("victim.example", RecordType::A)
+            .await
+            .unwrap();
+        assert_eq!(response.queries[0].query_type, RecordType::A);
+    }
+
+    #[tokio::test]
+    async fn wrong_id_truncated_udp_response_does_not_trigger_tcp_fallback() {
+        let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = server.recv_from(&mut buf).await.unwrap();
+            let request = Message::from_bytes(&buf[..len]).unwrap();
+
+            let mut wrong = response_for(&request, request.metadata.id.wrapping_add(1));
+            wrong.metadata.truncation = true;
+            server
+                .send_to(&wrong.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+            let valid = response_for(&request, request.metadata.id);
+            server
+                .send_to(&valid.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+
+        DnsClient::udp(addr)
+            .with_timeout(Duration::from_secs(1))
+            .query("victim.example", RecordType::A)
+            .await
+            .expect("the valid UDP response must win without a TCP connection");
+    }
+
+    #[tokio::test]
+    async fn tcp_rejects_mismatched_framed_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = read_lp(&mut stream).await.unwrap();
+            let request = Message::from_bytes(&request).unwrap();
+            let wrong = response_for(&request, request.metadata.id.wrapping_add(1));
+            write_lp(&mut stream, &wrong.to_bytes().unwrap())
+                .await
+                .unwrap();
+        });
+
+        let result = DnsClient::tcp(addr)
+            .with_timeout(Duration::from_secs(1))
+            .query("victim.example", RecordType::A)
+            .await;
+        assert!(matches!(
+            result,
+            Err(ClientError::Protocol("response ID mismatch"))
+        ));
     }
 
     #[cfg(feature = "encrypted")]

@@ -1,9 +1,10 @@
 //! Local DNS server for TUN mode (seeker-style).
 //!
 //! Binds UDP sockets to `127.0.0.1:53` and `[::1]:53`, answering DNS
-//! queries via `DnsServer::serve` — the same hardened serve loop (bounded
-//! worker pool with backpressure) and `handle_query` pipeline used by the
-//! main DNS server and the TUN dns-hijack path.  System DNS is set to
+//! queries via `BoundDnsServer::run` — the same hardened serve loop
+//! (bounded worker pool with backpressure, panic-guarded workers) and
+//! `handle_query` pipeline used by the main DNS server and the TUN
+//! dns-hijack path.  System DNS is set to
 //! `127.0.0.1` / `::1` by `DnsGuard`, so all DNS queries from the OS DNS
 //! Client arrive at these sockets directly — no TUN netstack traversal
 //! needed.
@@ -23,7 +24,7 @@
 use std::io;
 use std::sync::Arc;
 
-use meow_dns::server::DnsServer;
+use meow_dns::server::BoundDnsServer;
 use meow_dns::Resolver;
 use tokio::net::UdpSocket;
 use tracing::info;
@@ -49,11 +50,11 @@ pub async fn bind() -> io::Result<Sockets> {
     Ok(Sockets { v4, v6 })
 }
 
-/// Serve DNS on the pre-bound sockets until both are closed.
+/// Serve DNS on the pre-bound sockets until both serve loops end.
 pub async fn run(sockets: Sockets, resolver: Arc<Resolver>) {
     let Sockets { v4, v6 } = sockets;
     info!("tun local-dns: serving on 127.0.0.1:53 and [::1]:53");
-    let v4 = DnsServer::serve(Arc::new(v4), Arc::clone(&resolver));
-    let v6 = DnsServer::serve(Arc::new(v6), resolver);
-    tokio::join!(v4, v6);
+    let v4 = BoundDnsServer::from_socket(v4, Arc::clone(&resolver)).run();
+    let v6 = BoundDnsServer::from_socket(v6, resolver).run();
+    let _ = tokio::join!(v4, v6);
 }
