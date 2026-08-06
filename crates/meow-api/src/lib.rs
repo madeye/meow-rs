@@ -24,12 +24,13 @@ use tracing::{info, warn};
 ///
 /// Setup *failures* return immediately via `TunReady::Failed` — this bound
 /// only covers genuine hangs and legitimately slow startups: wintun adapter
-/// creation, first-time driver install, and the PowerShell DNS backup can
-/// together take tens of seconds on slow Windows machines (5 s and 30 s both
-/// proved too aggressive there). Trade-off to be aware of: the config-reload
-/// path awaits this while holding `config_mutation_lock`, so a hung startup
-/// blocks every config-mutation API call for the full duration.
-pub const TUN_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// creation, first-time driver install, and the PowerShell DNS backup/set
+/// can together take minutes on slow Windows machines (5 s and 30 s both
+/// proved too aggressive there; 300 s measured comfortable in practice).
+/// Trade-off to be aware of: the config-reload path awaits this while
+/// holding `config_mutation_lock`, so a hung startup blocks every
+/// config-mutation API call for the full duration.
+pub const TUN_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Map a parsed `TunConfig` onto a `TunListenerConfig`. Shared between the
 /// startup path (`meow-app/src/main.rs`) and the config-reload path
