@@ -29,6 +29,83 @@ pub struct ProxyProvider {
     pub health_check: Option<HealthCheckConfig>,
     updated_at: AtomicU,
     header: HashMap<String, String>,
+    /// Group-level filtered views of `slot` (issue #358), re-populated on
+    /// every refresh. Weak: each view is kept alive by the group built from
+    /// it, so views belonging to dropped or rebuilt groups get pruned here.
+    derived: RwLock<Vec<(GroupFilter, WeakSlot)>>,
+}
+
+/// Weak counterpart of [`ProviderSlot`].
+type WeakSlot = std::sync::Weak<RwLock<Vec<Arc<dyn Proxy>>>>;
+
+/// Compiled group-level member filter (issue #358): the `filter`,
+/// `exclude-filter`, and `exclude-type` fields declared on a proxy-group
+/// apply to the proxies that group pulls from providers (`use:` /
+/// `include-all`), mirroring mihomo. Static `proxies:` members bypass the
+/// filter, also matching upstream (compatible providers are not filtered).
+#[derive(Clone, Debug)]
+pub struct GroupFilter {
+    filter: Option<regex::Regex>,
+    exclude_filter: Option<regex::Regex>,
+    exclude_type: Vec<String>,
+}
+
+impl GroupFilter {
+    /// Compile the filter fields of a raw proxy-group. Returns `Ok(None)`
+    /// when the group declares no filtering at all.
+    pub fn from_raw_group(raw: &crate::raw::RawProxyGroup) -> Result<Option<Self>, String> {
+        let filter = compile_opt_regex(&raw.filter, "filter")?;
+        let exclude_filter = compile_opt_regex(&raw.exclude_filter, "exclude-filter")?;
+        let exclude_type = split_exclude_types(raw.exclude_type.as_deref());
+        if filter.is_none() && exclude_filter.is_none() && exclude_type.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            filter,
+            exclude_filter,
+            exclude_type,
+        }))
+    }
+
+    fn keep(&self, proxy: &dyn Proxy) -> bool {
+        let name = proxy.name();
+        if let Some(re) = &self.filter {
+            if !re.is_match(name) {
+                return false;
+            }
+        }
+        if let Some(re) = &self.exclude_filter {
+            if re.is_match(name) {
+                return false;
+            }
+        }
+        !self
+            .exclude_type
+            .iter()
+            .any(|t| adapter_type_matches(t, proxy.adapter_type()))
+    }
+}
+
+/// Match an `exclude-type` token against a parsed adapter's type. Accepts
+/// both the adapter display name ("Shadowsocks") and the config-file alias
+/// ("ss") so either spelling works, case-insensitively.
+fn adapter_type_matches(token: &str, adapter_type: meow_common::AdapterType) -> bool {
+    if token.eq_ignore_ascii_case(&adapter_type.to_string()) {
+        return true;
+    }
+    matches!(adapter_type, meow_common::AdapterType::Shadowsocks)
+        && token.eq_ignore_ascii_case("ss")
+}
+
+/// `exclude-type` accepts a YAML list or a mihomo-style `|`-separated string
+/// ("ss|http"); flatten both into lowercase tokens.
+fn split_exclude_types(raw: Option<&[String]>) -> Vec<String> {
+    raw.unwrap_or(&[])
+        .iter()
+        .flat_map(|s| s.split('|'))
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 enum Vehicle {
@@ -88,13 +165,7 @@ impl ProxyProvider {
 
         let filter = compile_opt_regex(&raw.filter, "filter")?;
         let exclude_filter = compile_opt_regex(&raw.exclude_filter, "exclude-filter")?;
-        let exclude_type: Vec<String> = raw
-            .exclude_type
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|s| s.to_lowercase())
-            .collect();
+        let exclude_type = split_exclude_types(raw.exclude_type.as_deref());
 
         let health_check = build_health_check_config(raw.health_check.as_ref());
         let header = raw.header.clone().unwrap_or_default();
@@ -110,7 +181,41 @@ impl ProxyProvider {
             health_check,
             updated_at: AtomicU::new(0),
             header,
+            derived: RwLock::new(Vec::new()),
         })
+    }
+
+    /// Create a live filtered view of this provider's proxies for one group
+    /// (issue #358). The view is seeded from the current slot contents and
+    /// re-populated on every [`refresh`](Self::refresh).
+    pub fn derived_slot(&self, filter: &GroupFilter) -> ProviderSlot {
+        let seeded: Vec<Arc<dyn Proxy>> = self
+            .slot
+            .read()
+            .iter()
+            .filter(|p| filter.keep(p.as_ref()))
+            .map(Arc::clone)
+            .collect();
+        let slot: ProviderSlot = Arc::new(RwLock::new(seeded));
+        self.derived
+            .write()
+            .push((filter.clone(), Arc::downgrade(&slot)));
+        slot
+    }
+
+    fn update_derived(&self, proxies: &[Arc<dyn Proxy>]) {
+        let mut derived = self.derived.write();
+        derived.retain(|(filter, weak)| {
+            let Some(slot) = weak.upgrade() else {
+                return false;
+            };
+            *slot.write() = proxies
+                .iter()
+                .filter(|p| filter.keep(p.as_ref()))
+                .map(Arc::clone)
+                .collect();
+            true
+        });
     }
 
     async fn fetch_content(&self) -> Result<String, String> {
@@ -236,6 +341,7 @@ impl ProxyProvider {
             Ok(content) => {
                 let proxies = self.parse_proxies(&content).await;
                 info!(provider = %self.name, count = proxies.len(), "proxy-provider refreshed");
+                self.update_derived(&proxies);
                 *self.slot.write() = proxies;
                 self.updated_at.store(
                     SystemTime::now()
@@ -255,6 +361,11 @@ impl ProxyProvider {
 
     pub fn proxies(&self) -> Vec<Arc<dyn Proxy>> {
         self.slot.read().clone()
+    }
+
+    #[cfg(test)]
+    fn derived_len(&self) -> usize {
+        self.derived.read().len()
     }
 
     pub fn updated_at_secs(&self) -> u64 {
@@ -291,9 +402,15 @@ fn compile_opt_regex(
     field: &str,
 ) -> Result<Option<regex::Regex>, String> {
     match pattern.as_deref() {
-        Some(p) => regex::Regex::new(p)
-            .map(Some)
-            .map_err(|e| format!("{field} regex error: {e}")),
+        Some(p) => regex::Regex::new(p).map(Some).map_err(|e| {
+            let hint = if ["(?!", "(?=", "(?<"].iter().any(|la| p.contains(la)) {
+                "; look-around assertions are not supported — split the pattern \
+                 into `filter` + `exclude-filter` instead"
+            } else {
+                ""
+            };
+            format!("{field} regex error: {e}{hint}")
+        }),
         None => Ok(None),
     }
 }
@@ -394,5 +511,124 @@ header:
         assert!(raw.header.is_none());
         let p = ProxyProvider::new("p", &raw, None).unwrap();
         assert!(p.header.is_empty());
+    }
+
+    fn group_filter(
+        filter: Option<&str>,
+        exclude_filter: Option<&str>,
+        exclude_type: Option<&[&str]>,
+    ) -> GroupFilter {
+        let raw = crate::raw::RawProxyGroup {
+            name: "g".to_string(),
+            group_type: "select".to_string(),
+            filter: filter.map(str::to_string),
+            exclude_filter: exclude_filter.map(str::to_string),
+            exclude_type: exclude_type.map(|v| v.iter().map(|s| (*s).to_string()).collect()),
+            ..Default::default()
+        };
+        GroupFilter::from_raw_group(&raw).unwrap().unwrap()
+    }
+
+    fn write_provider_file(path: &std::path::Path, entries: &[(&str, &str)]) {
+        use std::fmt::Write as _;
+        let mut yaml = String::from("proxies:\n");
+        for (name, ty) in entries {
+            writeln!(
+                yaml,
+                "  - {{name: \"{name}\", type: {ty}, server: 127.0.0.1, port: 443, \
+                 cipher: aes-128-gcm, password: pass}}"
+            )
+            .unwrap();
+        }
+        std::fs::write(path, yaml).unwrap();
+    }
+
+    fn slot_names(slot: &ProviderSlot) -> Vec<String> {
+        slot.read().iter().map(|p| p.name().to_string()).collect()
+    }
+
+    async fn file_provider(path: &std::path::Path) -> ProxyProvider {
+        let raw = raw_file_provider(path.to_str().unwrap());
+        let p = ProxyProvider::new("airport", &raw, None).unwrap();
+        p.refresh().await.unwrap();
+        p
+    }
+
+    #[tokio::test]
+    async fn derived_slot_applies_group_filter() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        write_provider_file(
+            tmp.path(),
+            &[("US 1", "ss"), ("US 2", "ss"), ("HK 1", "ss")],
+        );
+        let provider = file_provider(tmp.path()).await;
+
+        let f = group_filter(Some("(?i)us"), Some("2"), None);
+        let derived = provider.derived_slot(&f);
+        assert_eq!(slot_names(&derived), ["US 1"]);
+        // The provider's own slot stays unfiltered.
+        assert_eq!(provider.proxies().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn derived_slot_updates_on_refresh_and_prunes_dropped_views() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        write_provider_file(tmp.path(), &[("US 1", "ss"), ("HK 1", "ss")]);
+        let provider = file_provider(tmp.path()).await;
+
+        let f = group_filter(Some("US"), None, None);
+        let derived = provider.derived_slot(&f);
+        assert_eq!(slot_names(&derived), ["US 1"]);
+
+        write_provider_file(
+            tmp.path(),
+            &[("US 1", "ss"), ("US 9", "ss"), ("HK 2", "ss")],
+        );
+        provider.refresh().await.unwrap();
+        assert_eq!(slot_names(&derived), ["US 1", "US 9"]);
+
+        drop(derived);
+        provider.refresh().await.unwrap();
+        assert_eq!(provider.derived_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn derived_slot_exclude_type_accepts_alias_and_display_name() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        write_provider_file(tmp.path(), &[("US ss", "ss"), ("US direct", "direct")]);
+        let provider = file_provider(tmp.path()).await;
+
+        // Note: parse_direct keeps DirectAdapter's hardcoded "DIRECT" name.
+        let by_alias = provider.derived_slot(&group_filter(None, None, Some(&["ss"])));
+        assert_eq!(slot_names(&by_alias), ["DIRECT"]);
+
+        let by_display = provider.derived_slot(&group_filter(None, None, Some(&["Shadowsocks"])));
+        assert_eq!(slot_names(&by_display), ["DIRECT"]);
+
+        // mihomo-style `|`-separated string form.
+        let piped = provider.derived_slot(&group_filter(None, None, Some(&["ss|direct"])));
+        assert!(slot_names(&piped).is_empty());
+    }
+
+    #[test]
+    fn group_filter_absent_fields_yield_none() {
+        let raw = crate::raw::RawProxyGroup {
+            name: "g".to_string(),
+            group_type: "select".to_string(),
+            ..Default::default()
+        };
+        assert!(GroupFilter::from_raw_group(&raw).unwrap().is_none());
+    }
+
+    #[test]
+    fn group_filter_lookahead_error_carries_hint() {
+        let raw = crate::raw::RawProxyGroup {
+            name: "g".to_string(),
+            group_type: "select".to_string(),
+            filter: Some("^(?!.*expat).*US".to_string()),
+            ..Default::default()
+        };
+        let err = GroupFilter::from_raw_group(&raw).unwrap_err();
+        assert!(err.contains("look-around"), "unexpected error: {err}");
     }
 }

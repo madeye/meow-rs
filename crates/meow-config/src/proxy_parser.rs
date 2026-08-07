@@ -1742,9 +1742,19 @@ fn parse_proxy_group_inner(
         }
     }
 
+    // Group-level filter/exclude-filter/exclude-type (issue #358): applies to
+    // provider-sourced members only, mirroring mihomo (static `proxies:`
+    // members bypass it — upstream never filters compatible providers).
+    let group_filter = crate::proxy_provider::GroupFilter::from_raw_group(config)
+        .map_err(|e| format!("group '{}': {e}", config.name))?;
+    let provider_slot = |p: &Arc<crate::proxy_provider::ProxyProvider>| match &group_filter {
+        Some(f) => p.derived_slot(f),
+        None => Arc::clone(&p.slot),
+    };
+
     // Collect provider slots: include_all wires every provider; use: wires specific ones.
     let slots: Vec<meow_common::ProviderSlot> = if config.include_all.unwrap_or(false) {
-        providers.values().map(|p| Arc::clone(&p.slot)).collect()
+        providers.values().map(&provider_slot).collect()
     } else {
         config
             .use_providers
@@ -1753,7 +1763,7 @@ fn parse_proxy_group_inner(
             .iter()
             .filter_map(|pname| {
                 if let Some(p) = providers.get(pname.as_str()) {
-                    Some(Arc::clone(&p.slot))
+                    Some(provider_slot(p))
                 } else {
                     tracing::warn!(
                         "proxy-provider '{}' not found for group '{}', skipping",
@@ -2378,6 +2388,94 @@ tls: true
         };
         parse_proxy_group(&config, &existing, &Default::default())
             .expect("relay with url+interval must not hard-error");
+    }
+
+    // ─── group-level filter on provider members (issue #358) ────────────────
+
+    #[cfg(feature = "ss")]
+    async fn file_provider_with(
+        path: &std::path::Path,
+        entries: &str,
+    ) -> HashMap<String, Arc<crate::proxy_provider::ProxyProvider>> {
+        std::fs::write(path, entries).unwrap();
+        let raw = crate::raw::RawProxyProvider {
+            provider_type: "file".to_string(),
+            url: None,
+            path: Some(path.to_str().unwrap().to_string()),
+            interval: None,
+            filter: None,
+            exclude_filter: None,
+            exclude_type: None,
+            health_check: None,
+            header: None,
+        };
+        let provider = crate::proxy_provider::ProxyProvider::new("airport", &raw, None).unwrap();
+        provider.refresh().await.unwrap();
+        let mut providers = HashMap::new();
+        providers.insert("airport".to_string(), Arc::new(provider));
+        providers
+    }
+
+    #[cfg(feature = "ss")]
+    const PROVIDER_YAML: &str = "proxies:\n\
+        - {name: \"US 1\", type: ss, server: 127.0.0.1, port: 443, cipher: aes-128-gcm, password: p}\n\
+        - {name: \"US 2 expat\", type: ss, server: 127.0.0.1, port: 443, cipher: aes-128-gcm, password: p}\n\
+        - {name: \"HK 1\", type: ss, server: 127.0.0.1, port: 443, cipher: aes-128-gcm, password: p}\n";
+
+    #[cfg(feature = "ss")]
+    #[tokio::test]
+    async fn group_filter_applies_to_provider_members() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let providers = file_provider_with(tmp.path(), PROVIDER_YAML).await;
+
+        let config = crate::raw::RawProxyGroup {
+            name: "US".to_string(),
+            group_type: "url-test".to_string(),
+            use_providers: Some(vec!["airport".to_string()]),
+            filter: Some("(?i)^us".to_string()),
+            exclude_filter: Some("expat".to_string()),
+            ..Default::default()
+        };
+        let group = parse_proxy_group(&config, &HashMap::new(), &providers).unwrap();
+        assert_eq!(group.members().unwrap(), ["US 1"]);
+    }
+
+    #[cfg(feature = "ss")]
+    #[tokio::test]
+    async fn group_without_filter_sees_all_provider_members() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let providers = file_provider_with(tmp.path(), PROVIDER_YAML).await;
+
+        let config = crate::raw::RawProxyGroup {
+            name: "ALL".to_string(),
+            group_type: "select".to_string(),
+            use_providers: Some(vec!["airport".to_string()]),
+            ..Default::default()
+        };
+        let group = parse_proxy_group(&config, &HashMap::new(), &providers).unwrap();
+        assert_eq!(group.members().unwrap(), ["US 1", "US 2 expat", "HK 1"]);
+    }
+
+    #[cfg(feature = "ss")]
+    #[tokio::test]
+    async fn group_filter_invalid_regex_errors_with_group_name() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let providers = file_provider_with(tmp.path(), PROVIDER_YAML).await;
+
+        let config = crate::raw::RawProxyGroup {
+            name: "US".to_string(),
+            group_type: "select".to_string(),
+            use_providers: Some(vec!["airport".to_string()]),
+            filter: Some("(".to_string()),
+            ..Default::default()
+        };
+        let err = parse_proxy_group(&config, &HashMap::new(), &providers)
+            .err()
+            .expect("invalid filter regex must error");
+        assert!(
+            err.contains("group 'US'") && err.contains("filter regex error"),
+            "unexpected error: {err}"
+        );
     }
 
     // ─── snell proxy parser ───────────────────────────────────────────────────

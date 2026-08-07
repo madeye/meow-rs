@@ -279,9 +279,9 @@ Missing: `respect-rules`, `prefer-h3`, `cache-algorithm`.
 
 ### Proxy group sub-keys
 
-Supported: `name`, `type`, `proxies`, `url`, `interval`, `tolerance`.
+Supported: `name`, `type`, `proxies`, `url`, `interval`, `tolerance`, `expected-status`, `strategy` (for load-balance), `use` (proxy-provider reference), `include-all`, `include-all-proxies`, `filter`, `exclude-filter`, `exclude-type` (group-level, applied to provider-sourced members; issue #358).
 
-Missing: `lazy`, `disable-udp`, `filter`, `exclude-filter`, `exclude-type`, `hidden`, `icon`, `strategy` (for load-balance), `use` (proxy-provider reference), `include-all`, `include-all-proxies`, `include-all-providers`, `expected-status`.
+Missing: `lazy`, `disable-udp`, `hidden`, `icon`, `include-all-providers`.
 
 ---
 

@@ -170,9 +170,9 @@ proxy-groups:
 | `use` | `[]string` | no | `[]` | Provider names to merge into this group's proxy list. Unknown provider name = warn-once at load (not a hard error — the provider may not be defined in all config variants). |
 | `include-all` | bool | no | `false` | If true, merge proxies from all defined providers. Equivalent to listing every provider name in `use:`. |
 | `include-all-proxies` | bool | no | `false` | Upstream alias for `include-all`; accepted, warn-once "use include-all:", treated identically. |
-| `filter` | string | no | `""` | Applied to all proxies in the group (both explicit and from providers). |
-| `exclude-filter` | string | no | `""` | Applied after `filter`. |
-| `exclude-type` | string | no | `""` | Applied after `filter`/`exclude-filter`. |
+| `filter` | string | no | `""` | Applied to provider-sourced members only (`use:` / `include-all`), matching upstream mihomo — explicit `proxies:` entries are never filtered (otherwise `proxies: [DIRECT]` + `filter: "^HK"` would drop DIRECT). |
+| `exclude-filter` | string | no | `""` | Applied after `filter`. Provider-sourced members only. |
+| `exclude-type` | string | no | `""` | Applied after `filter`/`exclude-filter`. Provider-sourced members only. |
 
 ### Override
 
