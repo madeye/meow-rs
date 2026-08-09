@@ -730,6 +730,7 @@ const MAX_CHUNK_LINE: usize = 8192;
 const MAX_TRAILERS: usize = 8192;
 const CLIENT_DISCARD_BUFFER_SIZE: usize = 1024;
 const MAX_DISCARDED_CLIENT_BYTES: usize = 64 * 1024;
+const MAX_HELD_UPGRADE_BYTES: usize = 64 * 1024;
 
 /// Preserve the upstream write half when the client finishes its request.
 ///
@@ -796,6 +797,8 @@ struct SingleRequestClient<'stream, 'buffered, 'gate> {
     client_eof: bool,
     discarded_client_bytes: usize,
     discard_buf: [u8; CLIENT_DISCARD_BUFFER_SIZE],
+    held: Vec<u8>,
+    held_pos: usize,
     response_done: bool,
     response_buf: [u8; RESPONSE_BUFFER_SIZE],
     response_len: usize,
@@ -822,6 +825,8 @@ impl<'stream, 'buffered, 'gate> SingleRequestClient<'stream, 'buffered, 'gate> {
             client_eof: false,
             discarded_client_bytes: 0,
             discard_buf: [0; CLIENT_DISCARD_BUFFER_SIZE],
+            held: Vec::new(),
+            held_pos: 0,
             response_done: false,
             response_buf: [0; RESPONSE_BUFFER_SIZE],
             response_len: 0,
@@ -978,6 +983,44 @@ impl<'stream, 'buffered, 'gate> SingleRequestClient<'stream, 'buffered, 'gate> {
             Poll::Pending => Poll::Pending,
         }
     }
+
+    /// Consume early client protocol bytes into a bounded hold while the
+    /// origin decides the Upgrade. Reading them (rather than leaving them in
+    /// the kernel receive queue) keeps the client's FIN observable, so an
+    /// abandoned handshake still completes the upload relay direction and
+    /// arms the half-close linger instead of pinning the connection on a
+    /// silent origin forever. The held bytes are replayed by `poll_read` only
+    /// after a validated `101`; a declined upgrade drops them unforwarded.
+    fn poll_hold_before_upgrade(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.client_eof {
+            return Poll::Ready(Ok(()));
+        }
+        let capacity = MAX_HELD_UPGRADE_BYTES - self.held.len();
+        if capacity == 0 {
+            return Poll::Ready(Err(invalid_data(
+                "too many client bytes before the upgrade decision",
+            )));
+        }
+
+        let available = capacity.min(self.discard_buf.len());
+        let mut staged = ReadBuf::new(&mut self.discard_buf[..available]);
+        match Pin::new(&mut *self.client).poll_read(cx, &mut staged) {
+            Poll::Ready(Ok(())) if staged.filled().is_empty() => {
+                self.client_eof = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Ok(())) => {
+                self.held.extend_from_slice(staged.filled());
+                // The socket returned data rather than registering our waker.
+                // Re-poll on a fresh task turn to keep the FIN observable
+                // without an unbounded loop in one `poll_read` call.
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 impl AsyncRead for SingleRequestClient<'_, '_, '_> {
@@ -999,6 +1042,12 @@ impl AsyncRead for SingleRequestClient<'_, '_, '_> {
                         &this.buffered[this.buffered_pos..this.buffered_pos + available],
                     );
                     this.buffered_pos += available;
+                    return Poll::Ready(Ok(()));
+                }
+                if this.held_pos < this.held.len() {
+                    let available = destination.remaining().min(this.held.len() - this.held_pos);
+                    destination.put_slice(&this.held[this.held_pos..this.held_pos + available]);
+                    this.held_pos += available;
                     return Poll::Ready(Ok(()));
                 }
                 return Pin::new(&mut *this.client).poll_read(cx, destination);
@@ -1028,7 +1077,7 @@ impl AsyncRead for SingleRequestClient<'_, '_, '_> {
                             | ResponseWriteState::UpgradePending
                     )
                 {
-                    return Poll::Pending;
+                    return this.poll_hold_before_upgrade(cx);
                 }
                 return this.poll_discard_after_body(cx);
             }

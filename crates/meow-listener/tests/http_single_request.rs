@@ -669,3 +669,71 @@ async fn declined_upgrade_closes_without_forwarding_protocol_bytes() {
     origin_task.await.unwrap();
     handler.await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn abandoned_upgrade_is_reaped_by_the_half_close_linger() {
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let (request_seen_tx, request_seen_rx) = oneshot::channel();
+    let origin_task = tokio::spawn(async move {
+        let (mut stream, _) = origin.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0u8; 1024];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0, "proxy closed before forwarding the upgrade");
+            request.extend_from_slice(&chunk[..count]);
+        }
+        request_seen_tx.send(()).unwrap();
+
+        // Never send a response. The held client protocol bytes must not
+        // reach this origin, and the proxy must still reap the connection.
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            stream.read(&mut byte).await.unwrap(),
+            0,
+            "held protocol bytes were forwarded without a 101 response"
+        );
+    });
+
+    let (server_stream, mut client) = loopback_pair().await;
+    let mut handler = spawn_proxy_handler(server_stream).await;
+    let request = format!(
+        "GET ws://{origin_addr}/chat HTTP/1.1\r\n\
+         Host: {origin_addr}\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\r\n"
+    );
+    client.write_all(request.as_bytes()).await.unwrap();
+    // Early protocol bytes exercise the bounded hold: the client FIN behind
+    // them must still be observed while the upgrade decision is pending.
+    client.write_all(b"early-protocol-bytes").await.unwrap();
+    request_seen_rx.await.unwrap();
+    // Keep the client write half open until the origin has received the
+    // request, mirroring client_eof_reaps_a_silent_origin: the paused clock
+    // must not auto-advance to the relay timer before the handshake lands.
+    client.shutdown().await.unwrap();
+
+    // Drive the hold reads and the relay before moving the paused clock; the
+    // linger deadline is created only after the upload direction reports Done.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !handler.is_finished(),
+        "client EOF closed the connection before the half-close linger"
+    );
+    tokio::time::advance(meow_tunnel::relay::RELAY_HALF_CLOSE_LINGER - Duration::from_millis(1))
+        .await;
+    tokio::task::yield_now().await;
+    assert!(
+        !handler.is_finished(),
+        "the silent origin was reaped before the half-close linger"
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::time::timeout(Duration::from_secs(1), &mut handler)
+        .await
+        .expect("an abandoned upgrade handshake did not arm the half-close linger")
+        .unwrap();
+    origin_task.await.unwrap();
+}
