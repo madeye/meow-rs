@@ -670,6 +670,94 @@ async fn declined_upgrade_closes_without_forwarding_protocol_bytes() {
     handler.await.unwrap();
 }
 
+#[tokio::test]
+async fn rejected_response_head_becomes_a_502() {
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut stream, _) = origin.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0u8; 1024];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0, "proxy closed before forwarding the request");
+            request.extend_from_slice(&chunk[..count]);
+        }
+        // A response head larger than the proxy's cap, never terminated.
+        // The proxy may drop the connection mid-write; ignore write errors.
+        let huge = format!("HTTP/1.1 200 OK\r\nX-Big: {}\r\n", "p".repeat(16 * 1024));
+        let _ = stream.write_all(huge.as_bytes()).await;
+    });
+
+    let (server_stream, mut client) = loopback_pair().await;
+    let handler = spawn_proxy_handler(server_stream).await;
+    client
+        .write_all(
+            format!("GET http://{origin_addr}/ HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let response = read_response_and_wait_for_close(&mut client).await;
+    assert_eq!(
+        response, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        "a rejected upstream response head must yield an explicit 502, not a silent close"
+    );
+    origin_task.await.unwrap();
+    handler.await.unwrap();
+}
+
+#[tokio::test]
+async fn interim_response_hop_by_hop_headers_are_stripped() {
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin_addr = origin.local_addr().unwrap();
+    let origin_task = tokio::spawn(async move {
+        let (mut stream, _) = origin.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0u8; 1024];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0, "proxy closed before forwarding the request");
+            request.extend_from_slice(&chunk[..count]);
+        }
+        stream
+            .write_all(
+                b"HTTP/1.1 103 Early Hints\r\n\
+                  Connection: keep-alive, X-Hop\r\n\
+                  Keep-Alive: timeout=99\r\n\
+                  X-Hop: secret\r\n\
+                  Link: </style.css>; rel=preload\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            .await
+            .unwrap();
+    });
+
+    let (server_stream, mut client) = loopback_pair().await;
+    let handler = spawn_proxy_handler(server_stream).await;
+    client
+        .write_all(
+            format!("GET http://{origin_addr}/ HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    let response = read_response_and_wait_for_close(&mut client).await;
+    assert_eq!(
+        response,
+        b"HTTP/1.1 103 Early Hints\r\n\
+          Link: </style.css>; rel=preload\r\n\r\n\
+          HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+            .as_slice(),
+        "interim hop-by-hop headers must not reach the client"
+    );
+    origin_task.await.unwrap();
+    handler.await.unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn abandoned_upgrade_is_reaped_by_the_half_close_linger() {
     let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();

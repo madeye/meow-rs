@@ -308,13 +308,7 @@ async fn handle_http_inner(
         inner.pre_handle_metadata(&mut metadata);
         let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy_lazy(&mut metadata).await
         else {
-            stream
-                .write_all(
-                    b"HTTP/1.1 502 Bad Gateway\r\n\
-                      Connection: close\r\n\
-                      Content-Length: 0\r\n\r\n",
-                )
-                .await?;
+            write_bad_gateway(stream).await?;
             return Err("no matching rule".into());
         };
 
@@ -388,18 +382,25 @@ async fn handle_http_inner(
                     Ok((up, down)) => {
                         debug!("HTTP single-request relay closed: up={up} down={down}");
                     }
-                    Err(e) => debug!("HTTP single-request relay error: {}", e),
+                    Err(e) => {
+                        debug!("HTTP single-request relay error: {}", e);
+                        // A response head the proxy rejects (oversized,
+                        // malformed, invalid status line) aborts the relay
+                        // before anything reached the client. Turn that into
+                        // an explicit 502 rather than a silent connection
+                        // close; once response bytes have flowed, appending
+                        // an error would corrupt the stream instead.
+                        let sent_response_bytes = client.sent_response_bytes;
+                        drop(client);
+                        if !sent_response_bytes {
+                            let _ = write_bad_gateway(stream).await;
+                        }
+                    }
                 }
             }
             Err(e) => {
                 warn!("{}:{} HTTP dial error: {}", host, port, e);
-                stream
-                    .write_all(
-                        b"HTTP/1.1 502 Bad Gateway\r\n\
-                          Connection: close\r\n\
-                          Content-Length: 0\r\n\r\n",
-                    )
-                    .await?;
+                write_bad_gateway(stream).await?;
             }
         }
         // _guard drops here, removing the entry from Statistics.
@@ -784,7 +785,12 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for ShutdownGate<'_, T> {
         if this.pass_shutdown.load(Ordering::Acquire) {
             Pin::new(&mut this.inner).poll_shutdown(cx)
         } else {
-            Poll::Ready(Ok(()))
+            // Withholding the protocol-level close must not also withhold the
+            // flush that `poll_shutdown` implies. The relay goes straight from
+            // reader EOF to `poll_shutdown` without flushing, so a buffering
+            // transport (TLS, WebSocket) may still hold tail request-body
+            // bytes that would otherwise be silently discarded.
+            Pin::new(&mut this.inner).poll_flush(cx)
         }
     }
 }
@@ -804,6 +810,7 @@ struct SingleRequestClient<'stream, 'buffered, 'gate> {
     response_len: usize,
     response_pos: usize,
     response_state: ResponseWriteState,
+    sent_response_bytes: bool,
     upgrade_requested: bool,
     upgrade_declined: bool,
     pass_upstream_shutdown: &'gate AtomicBool,
@@ -832,6 +839,7 @@ impl<'stream, 'buffered, 'gate> SingleRequestClient<'stream, 'buffered, 'gate> {
             response_len: 0,
             response_pos: 0,
             response_state: ResponseWriteState::Head,
+            sent_response_bytes: false,
             upgrade_requested,
             upgrade_declined: false,
             pass_upstream_shutdown,
@@ -849,7 +857,10 @@ impl<'stream, 'buffered, 'gate> SingleRequestClient<'stream, 'buffered, 'gate> {
                         "write zero bytes to HTTP proxy client",
                     )));
                 }
-                Poll::Ready(Ok(written)) => self.response_pos += written,
+                Poll::Ready(Ok(written)) => {
+                    self.response_pos += written;
+                    self.sent_response_bytes = true;
+                }
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
             }
@@ -892,6 +903,14 @@ impl<'stream, 'buffered, 'gate> SingleRequestClient<'stream, 'buffered, 'gate> {
         let status = parse_response_status(&self.response_buf[..self.response_len])?;
         self.response_pos = 0;
         if (100..200).contains(&status) && status != 101 {
+            // Interim heads previously passed through verbatim, leaking
+            // origin hop-by-hop fields (Connection, Keep-Alive, nominated
+            // headers) that contradict the close semantics of the final head.
+            self.response_len = rewrite_response_head_in_place(
+                &mut self.response_buf,
+                self.response_len,
+                ResponseConnection::Interim,
+            )?;
             self.response_state = ResponseWriteState::InterimPending;
             return Ok(());
         }
@@ -1090,16 +1109,10 @@ impl AsyncRead for SingleRequestClient<'_, '_, '_> {
                     .remaining()
                     .min(this.buffered.len() - this.buffered_pos);
                 let source = &this.buffered[this.buffered_pos..this.buffered_pos + available];
-                let mut consumed = 0;
-                for &byte in source {
-                    if let Err(error) = this.body.consume(byte) {
-                        return Poll::Ready(Err(error));
-                    }
-                    consumed += 1;
-                    if this.body.is_done() {
-                        break;
-                    }
-                }
+                let consumed = match this.body.consume_slice(source) {
+                    Ok(consumed) => consumed,
+                    Err(error) => return Poll::Ready(Err(error)),
+                };
                 destination.put_slice(&source[..consumed]);
                 this.buffered_pos += consumed;
                 continue;
@@ -1116,16 +1129,10 @@ impl AsyncRead for SingleRequestClient<'_, '_, '_> {
                 Poll::Ready(Ok(())) => {
                     let initialized = socket_read.initialized().len();
                     let filled = socket_read.filled().len();
-                    let mut consumed = 0;
-                    for &byte in socket_read.filled() {
-                        if let Err(error) = this.body.consume(byte) {
-                            return Poll::Ready(Err(error));
-                        }
-                        consumed += 1;
-                        if this.body.is_done() {
-                            break;
-                        }
-                    }
+                    let consumed = match this.body.consume_slice(socket_read.filled()) {
+                        Ok(consumed) => consumed,
+                        Err(error) => return Poll::Ready(Err(error)),
+                    };
                     let discarded = filled - consumed;
                     // `take` does not propagate the child ReadBuf's initialized
                     // length back to its parent. Record it before advancing so
@@ -1294,6 +1301,29 @@ impl RequestBodyDecoder {
                 "bytes arrived after the request body boundary",
             )),
         }
+    }
+
+    /// Consume body bytes from `bytes`, stopping at the framing boundary.
+    /// Returns how many bytes belong to the body. Content-Length bodies
+    /// advance in bulk; only chunked framing needs the per-byte state machine.
+    fn consume_slice(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if let Self::ContentLength(remaining) = self {
+            let consumed = u64::min(*remaining, bytes.len() as u64) as usize;
+            *remaining -= consumed as u64;
+            if *remaining == 0 {
+                *self = Self::Done;
+            }
+            return Ok(consumed);
+        }
+        let mut consumed = 0;
+        for &byte in bytes {
+            self.consume(byte)?;
+            consumed += 1;
+            if self.is_done() {
+                break;
+            }
+        }
+        Ok(consumed)
     }
 }
 
@@ -1471,24 +1501,25 @@ fn parse_response_status(head: &[u8]) -> io::Result<u16> {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ResponseConnection {
+    Interim,
     Close,
     Upgrade,
 }
 
-fn rewrite_response_head_in_place(
-    buf: &mut [u8],
-    head_len: usize,
-    connection: ResponseConnection,
-) -> io::Result<usize> {
-    let status_end = buf[..head_len]
+/// Walk the CRLF-delimited header lines of a response head, yielding the
+/// byte ranges of each field name and value. Returns the status-line end
+/// (the index of its CR) once the walk completes.
+fn for_each_response_header<F>(head: &[u8], mut visit: F) -> io::Result<usize>
+where
+    F: FnMut(std::ops::Range<usize>, std::ops::Range<usize>) -> io::Result<()>,
+{
+    let status_end = head
         .windows(2)
         .position(|window| window == b"\r\n")
         .ok_or_else(|| invalid_data("upstream response is missing a status line"))?;
-    let mut drop_lines = [0u8; MAX_RESPONSE_HEADERS.div_ceil(8)];
     let mut read = status_end + 2;
-
-    while read + 2 <= head_len {
-        let relative_end = buf[read..head_len]
+    while read + 2 <= head.len() {
+        let relative_end = head[read..]
             .windows(2)
             .position(|window| window == b"\r\n")
             .ok_or_else(|| invalid_data("malformed upstream response header"))?;
@@ -1496,19 +1527,71 @@ fn rewrite_response_head_in_place(
         if line_end == read {
             break;
         }
-        let colon = buf[read..line_end]
+        let colon = head[read..line_end]
             .iter()
             .position(|byte| *byte == b':')
             .ok_or_else(|| invalid_data("upstream response header is missing a colon"))?;
-        let name = &buf[read..read + colon];
+        visit(read..read + colon, read + colon + 1..line_end)?;
+        read = line_end + 2;
+    }
+    Ok(status_end)
+}
+
+/// Byte ranges (into the response head) of every non-empty Connection option,
+/// collected in one pass so drop checks stay linear in the head size.
+type NominatedOptions = smallvec::SmallVec<[(u16, u16); 8]>;
+
+fn collect_connection_options(head: &[u8]) -> io::Result<NominatedOptions> {
+    let mut nominated = NominatedOptions::new();
+    for_each_response_header(head, |name, value| {
+        if head[name].eq_ignore_ascii_case(b"connection") {
+            let mut option_start = value.start;
+            for index in value.start..=value.end {
+                if index != value.end && head[index] != b',' {
+                    continue;
+                }
+                let mut start = option_start;
+                let mut end = index;
+                while start < end && matches!(head[start], b' ' | b'\t') {
+                    start += 1;
+                }
+                while end > start && matches!(head[end - 1], b' ' | b'\t') {
+                    end -= 1;
+                }
+                if start < end {
+                    nominated.push((start as u16, end as u16));
+                }
+                option_start = index + 1;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(nominated)
+}
+
+fn rewrite_response_head_in_place(
+    buf: &mut [u8],
+    head_len: usize,
+    connection: ResponseConnection,
+) -> io::Result<usize> {
+    let nominated = collect_connection_options(&buf[..head_len])?;
+    let mut drop_lines = [0u8; MAX_RESPONSE_HEADERS.div_ceil(8)];
+
+    let head = &buf[..head_len];
+    let status_end = for_each_response_header(head, |name_range, value_range| {
+        let read = name_range.start;
+        let name = &head[name_range];
         if name.is_empty() || !name.iter().copied().all(is_tchar) {
             return Err(invalid_data("invalid upstream response header name"));
         }
         if name.eq_ignore_ascii_case(b"connection") {
-            validate_response_connection_options(&buf[read + colon + 1..line_end])?;
+            validate_response_connection_options(&head[value_range])?;
         }
         let preserve_upgrade =
             connection == ResponseConnection::Upgrade && name.eq_ignore_ascii_case(b"upgrade");
+        let is_nominated = nominated
+            .iter()
+            .any(|&(start, end)| head[start as usize..end as usize].eq_ignore_ascii_case(name));
         let drop = name.eq_ignore_ascii_case(b"connection")
             || name.eq_ignore_ascii_case(b"proxy-connection")
             || name.eq_ignore_ascii_case(b"keep-alive")
@@ -1516,12 +1599,13 @@ fn rewrite_response_head_in_place(
             || (connection == ResponseConnection::Upgrade
                 && (name.eq_ignore_ascii_case(b"content-length")
                     || name.eq_ignore_ascii_case(b"transfer-encoding")))
-            || (response_connection_nominates(&buf[..head_len], name)? && !preserve_upgrade);
+            || (is_nominated && !preserve_upgrade);
         if drop {
             drop_lines[read / 8] |= 1 << (read % 8);
         }
-        read = line_end + 2;
-    }
+        Ok(())
+    })?;
+    let mut read;
 
     let mut write = status_end + 2;
     read = status_end + 2;
@@ -1541,7 +1625,10 @@ fn rewrite_response_head_in_place(
         read = line_end + 2;
     }
 
-    let connection_header = match connection {
+    let connection_header: &[u8] = match connection {
+        // An interim response never carries connection semantics of its own;
+        // the final response head states them.
+        ResponseConnection::Interim => b"",
         ResponseConnection::Close => CONNECTION_CLOSE_HEADER,
         ResponseConnection::Upgrade => CONNECTION_UPGRADE_HEADER,
     };
@@ -1564,31 +1651,14 @@ fn validate_upgrade_response(head: &[u8]) -> io::Result<()> {
         ));
     }
 
-    let status_end = head
-        .windows(2)
-        .position(|window| window == b"\r\n")
-        .ok_or_else(|| invalid_data("upstream response is missing a status line"))?;
-    let mut read = status_end + 2;
     let mut saw_protocol = false;
-    while read + 2 <= head.len() {
-        let relative_end = head[read..]
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .ok_or_else(|| invalid_data("malformed upstream response header"))?;
-        let line_end = read + relative_end;
-        if line_end == read {
-            break;
-        }
-        let colon = head[read..line_end]
-            .iter()
-            .position(|byte| *byte == b':')
-            .ok_or_else(|| invalid_data("upstream response header is missing a colon"))?;
-        if head[read..read + colon].eq_ignore_ascii_case(b"upgrade") {
-            validate_upgrade_protocol_list(&head[read + colon + 1..line_end], &mut saw_protocol)
+    for_each_response_header(head, |name, value| {
+        if head[name].eq_ignore_ascii_case(b"upgrade") {
+            validate_upgrade_protocol_list(&head[value], &mut saw_protocol)
                 .map_err(invalid_data)?;
         }
-        read = line_end + 2;
-    }
+        Ok(())
+    })?;
     if !saw_protocol {
         return Err(invalid_data(
             "upstream 101 response is missing an Upgrade protocol",
@@ -1598,35 +1668,19 @@ fn validate_upgrade_response(head: &[u8]) -> io::Result<()> {
 }
 
 fn response_connection_nominates(head: &[u8], candidate: &[u8]) -> io::Result<bool> {
-    let status_end = head
-        .windows(2)
-        .position(|window| window == b"\r\n")
-        .ok_or_else(|| invalid_data("upstream response is missing a status line"))?;
-    let mut read = status_end + 2;
-    while read + 2 <= head.len() {
-        let relative_end = head[read..]
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .ok_or_else(|| invalid_data("malformed upstream response header"))?;
-        let line_end = read + relative_end;
-        if line_end == read {
-            return Ok(false);
-        }
-        let colon = head[read..line_end]
-            .iter()
-            .position(|byte| *byte == b':')
-            .ok_or_else(|| invalid_data("upstream response header is missing a colon"))?;
-        if head[read..read + colon].eq_ignore_ascii_case(b"connection") {
-            for option in head[read + colon + 1..line_end].split(|byte| *byte == b',') {
+    let mut nominates = false;
+    for_each_response_header(head, |name, value| {
+        if head[name].eq_ignore_ascii_case(b"connection") {
+            for option in head[value].split(|byte| *byte == b',') {
                 let option = trim_ows(option);
                 if !option.is_empty() && option.eq_ignore_ascii_case(candidate) {
-                    return Ok(true);
+                    nominates = true;
                 }
             }
         }
-        read = line_end + 2;
-    }
-    Ok(false)
+        Ok(())
+    })?;
+    Ok(nominates)
 }
 
 fn validate_response_connection_options(value: &[u8]) -> io::Result<()> {
@@ -1849,6 +1903,16 @@ async fn write_bad_request(stream: &mut TcpStream) -> io::Result<()> {
         .await
 }
 
+async fn write_bad_gateway(stream: &mut TcpStream) -> io::Result<()> {
+    stream
+        .write_all(
+            b"HTTP/1.1 502 Bad Gateway\r\n\
+              Connection: close\r\n\
+              Content-Length: 0\r\n\r\n",
+        )
+        .await
+}
+
 /// Parse an HTTP host token as an IP literal, returning `Some(ip)` when it is
 /// one. Strips the surrounding brackets of an IPv6 literal (`[2606:..]`) so it
 /// parses; returns `None` for hostnames, which are resolved later by the
@@ -1924,6 +1988,56 @@ fn parse_proxy_authorization(headers: &[HeaderField<'_>]) -> Option<(String, Str
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::task::Waker;
+
+    #[derive(Default)]
+    struct FlushProbe {
+        flushed: bool,
+        shutdown: bool,
+    }
+
+    impl AsyncWrite for FlushProbe {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            source: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(source.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.get_mut().flushed = true;
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.get_mut().shutdown = true;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn shutdown_gate_flushes_while_withholding_the_close() {
+        // The relay goes straight from reader EOF to poll_shutdown without a
+        // flush; a gated shutdown must still drain a buffering transport or
+        // tail request-body bytes are lost.
+        let pass_shutdown = AtomicBool::new(false);
+        let mut gate = ShutdownGate::new(FlushProbe::default(), &pass_shutdown);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(Pin::new(&mut gate).poll_shutdown(&mut cx).is_ready());
+        assert!(
+            gate.inner.flushed,
+            "gated shutdown must flush the transport"
+        );
+        assert!(
+            !gate.inner.shutdown,
+            "gated shutdown must not close the transport"
+        );
+
+        pass_shutdown.store(true, Ordering::Release);
+        assert!(Pin::new(&mut gate).poll_shutdown(&mut cx).is_ready());
+        assert!(gate.inner.shutdown, "open gate must pass the shutdown");
+    }
 
     #[test]
     fn host_to_ip_parses_ipv4_literal() {
