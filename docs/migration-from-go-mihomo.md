@@ -58,7 +58,7 @@ cause problems; items marked ~ work with caveats; items marked ✓ work.
 | `proxies:` — SOCKS5 outbound | ✓ | Full parity (M1.B-4). |
 | `proxies:` — Snell | ✓ | v3/v4/v5, UDP-over-TCP, optional HTTP/TLS obfs. |
 | `proxies:` — Hysteria2 | ✓ | QUIC TCP/UDP, Salamander obfs, port hopping, bandwidth hints. |
-| `proxies:` — AnyTLS | ~ | Implemented behind the opt-in `anytls` feature, not in the default app bundle. |
+| `proxies:` — AnyTLS | ✓ | In the `full` bundle, and therefore in the release binaries; excluded from `minimal`. |
 | `proxies:` — TUIC / WireGuard / SSH | ✗ | Not implemented. |
 | `proxy-groups:` — selector, url-test, fallback | ✓ | Fully supported. |
 | `proxy-groups:` — load-balance | ✓ | round-robin + consistent-hashing (M1.C-1). |
@@ -273,8 +273,8 @@ otherwise:
 - **TUIC** — not implemented.
 - **WireGuard** — niche; deferred.
 - **SSH** — niche; deferred.
-- **AnyTLS** — implemented behind the opt-in `anytls` feature, not compiled
-  into the default `meow-app` bundle.
+- **AnyTLS** — supported. Part of the `full` bundle, so the published release
+  binaries carry it; `minimal` builds leave it out (ADR-0007 binary-size caps).
 
 ---
 
@@ -538,7 +538,7 @@ meow-rs uses Cargo feature flags where Go mihomo uses build tags:
 | BoringSSL-backed uTLS/ECH paths | `meow-app/boring-tls` | on for `meow-app` |
 | Full app bundle | `meow-app/full` | on |
 | Minimal app bundle | `meow-app/minimal` | off |
-| AnyTLS outbound | non-default build enabling `meow-config/anytls` and `meow-proxy/anytls` | off |
+| AnyTLS outbound | `meow-app/anytls` (in `full`, not in `minimal`) | on |
 
 To build without encrypted DNS (smaller binary):
 
@@ -555,9 +555,9 @@ cargo build --release --no-default-features -p meow-dns
 Most common format from public providers. Typical issues:
 
 1. **Unsupported proxy types** — TUIC, WireGuard, SSH, ShadowsocksR, and other
-   niche upstream protocols still need replacement or removal. AnyTLS requires
-   a non-default build enabling the `meow-config/anytls` and `meow-proxy/anytls`
-   features.
+   niche upstream protocols still need replacement or removal. AnyTLS works
+   out of the box in the release binaries; a `minimal` build needs
+   `--features anytls`.
 2. **`enhanced-mode: fake-ip`** — supported. Migration from a prior
    meow-rs release that warned-and-fell-back to `normal` is automatic;
    no config change required.
@@ -628,8 +628,8 @@ The following are unsupported or intentionally rejected:
 
 - **`quic://` nameservers** — hard error; replace with `tls://` or `https://`.
 - **TUIC / WireGuard / SSH / ShadowsocksR proxies** — hard error; no default-build adapter.
-- **AnyTLS proxies in the default app build** — hard error unless the binary is
-  built with the opt-in `anytls` feature wiring.
+- **AnyTLS proxies in a `minimal` build** — hard error; the `full` bundle and
+  the release binaries support them.
 - **Snell v1/v2** — hard error; use Snell v3/v4/v5.
 - **`vless` with `flow: xtls-rprx-direct`** — hard error; use `xtls-rprx-vision`.
 - **External dashboard auto-download** (`external-ui-url`) — not performed.

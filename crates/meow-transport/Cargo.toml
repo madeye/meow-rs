@@ -25,11 +25,23 @@ tls = [
 # TlsConfig.ech returns TransportError::Config at construction time.
 boring-tls = [
     "tls",
+    "reality",
     "dep:boring",
     "dep:tokio-boring",
     "dep:boring-sys",
     "dep:rand",
     "dep:webpki-root-certs",
+]
+# reality: xray REALITY client handshake (issue #377). The record layer, the
+# X25519 / HKDF / AES-GCM crypto and the ClientHello builder are all in-tree
+# (`reality_tls.rs`) on top of the always-present aes-gcm/hmac/sha2 deps, so
+# this is independent of `boring-tls` — REALITY has to keep working on the
+# targets where boring-sys cannot be built (armv7/i686 musl time64, MIPS,
+# windows-gnu, iOS). `boring-tls` implies it for backwards compatibility.
+reality = [
+    "tls",
+    "dep:rand",
+    "dep:x25519-dalek",
 ]
 ws = [
     "dep:tokio-tungstenite",
@@ -85,6 +97,10 @@ rand = { workspace = true, optional = true }
 
 # httpupgrade feature
 httparse = { version = "1", optional = true }
+
+# reality feature — pure-Rust X25519 so the REALITY handshake does not need
+# BoringSSL's `X25519` FFI (boring-sys does not build on every release target).
+x25519-dalek = { workspace = true, optional = true }
 
 # boring-tls feature
 boring             = { workspace = true, optional = true }

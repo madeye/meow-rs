@@ -11,6 +11,7 @@
 //! | D2 | `h2_host_selection_is_uniform`    — 1000 connections × 4 hosts, every host seen |
 //! | D3 | `h2_single_host_no_randomness_needed` — single host, 10 conns, no panic |
 //! | D4 | `h2_path_forwarded`               — `:path` pseudo-header matches config |
+//! | D5 | `h2_round_trip_with_deferred_response` — server withholds response HEADERS until the first client DATA frame (issue #377) |
 
 mod support;
 
@@ -19,7 +20,7 @@ use std::time::Duration;
 use meow_transport::h2::{H2Config, H2Layer};
 use meow_transport::Transport;
 use meow_transport::TransportError;
-use support::loopback::spawn_h2_server;
+use support::loopback::{spawn_h2_server, spawn_h2_server_deferred_response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn assert_h2_config_error(config: H2Config, expected: &str) {
@@ -234,4 +235,43 @@ async fn h2_rejects_invalid_request_config_before_handshake() {
         "invalid request config",
     )
     .await;
+}
+
+// ─── D5: Response HEADERS withheld until the first client DATA frame ──────────
+
+/// D5: `h2_round_trip_with_deferred_response`
+///
+/// Regression test for issue #377 (h2 half of the gRPC deadlock). The peer's
+/// handler reads the client's first DATA frame before writing anything, so
+/// `H2Layer::connect` must not await the response — it has to return once the
+/// request HEADERS are queued and resolve the response on the first read.
+#[tokio::test]
+async fn h2_round_trip_with_deferred_response() {
+    let (addr, _info_rx) = spawn_h2_server_deferred_response(1).await;
+
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("tcp connect");
+
+    let layer = H2Layer::new(H2Config {
+        path: "/".into(),
+        hosts: vec!["example.com".into()],
+    });
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), layer.connect(Box::new(tcp)))
+        .await
+        .expect("connect must not block on the server's response")
+        .expect("h2 connect");
+
+    stream.write_all(b"ping").await.expect("write");
+    stream.flush().await.expect("flush");
+
+    let mut got = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut got))
+        .await
+        .expect("echo must arrive once the server answers")
+        .expect("read_exact");
+    assert_eq!(
+        &got, b"ping",
+        "round-trip bytes must survive the deferred response"
+    );
 }

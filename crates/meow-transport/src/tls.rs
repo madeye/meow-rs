@@ -197,7 +197,7 @@ pub struct ClientCert {
 
 enum TlsBackend {
     Rustls(RustlsInner),
-    #[cfg(feature = "boring-tls")]
+    #[cfg(feature = "reality")]
     Reality(crate::reality_tls::RealityTlsLayer),
     #[cfg(feature = "boring-tls")]
     Boring(Box<LazyBoringInner>),
@@ -261,16 +261,16 @@ impl TlsLayer {
     /// * [`TransportError::Config`] — `client_cert` PEM is unparseable (rustls path).
     /// * [`TransportError::Tls`] — client cert + key don't match (rustls path).
     pub fn new(config: &TlsConfig) -> Result<Self> {
-        #[cfg(not(feature = "boring-tls"))]
+        #[cfg(not(feature = "reality"))]
         if config.reality.is_some() {
             return Err(TransportError::Config(
-                "reality-opts requires the `boring-tls` Cargo feature in this build; \
-                 recompile with `--features boring-tls`."
+                "reality-opts requires the `reality` Cargo feature in this build; \
+                 recompile with `--features reality`."
                     .into(),
             ));
         }
 
-        #[cfg(feature = "boring-tls")]
+        #[cfg(feature = "reality")]
         if config.reality.is_some() {
             return Ok(Self {
                 backend: TlsBackend::Reality(crate::reality_tls::RealityTlsLayer::new(config)?),
@@ -326,7 +326,7 @@ impl Transport for TlsLayer {
     async fn connect(&self, inner: Box<dyn Stream>) -> Result<Box<dyn Stream>> {
         match &self.backend {
             TlsBackend::Rustls(r) => r.connect(inner).await,
-            #[cfg(feature = "boring-tls")]
+            #[cfg(feature = "reality")]
             TlsBackend::Reality(r) => r.connect(inner).await,
             #[cfg(feature = "boring-tls")]
             TlsBackend::Boring(lazy) => lazy.connect(inner).await,

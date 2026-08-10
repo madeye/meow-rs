@@ -1202,22 +1202,17 @@ fn clamp_x25519_private(private: &mut [u8; 32]) {
 }
 
 fn x25519_public_from_private(private: &[u8; 32]) -> [u8; 32] {
-    let mut public = [0u8; 32];
-    unsafe {
-        boring_sys::X25519_public_from_private(public.as_mut_ptr(), private.as_ptr());
-    }
-    public
+    x25519_dalek::x25519(*private, x25519_dalek::X25519_BASEPOINT_BYTES)
 }
 
 fn x25519(private: &[u8; 32], peer_public: &[u8; 32]) -> Result<[u8; 32]> {
-    let mut out = [0u8; 32];
-    let ok =
-        unsafe { boring_sys::X25519(out.as_mut_ptr(), private.as_ptr(), peer_public.as_ptr()) };
-    if ok == 1 {
-        Ok(out)
-    } else {
-        Err(TransportError::Tls("X25519 ECDH failed".into()))
+    let out = x25519_dalek::x25519(*private, *peer_public);
+    // An all-zero shared secret means the peer sent a low-order point; BoringSSL's
+    // `X25519` reports that as a failure and RFC 7748 §6.1 requires rejecting it.
+    if out == [0u8; 32] {
+        return Err(TransportError::Tls("X25519 ECDH failed".into()));
     }
+    Ok(out)
 }
 
 fn take<'a>(input: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8]> {

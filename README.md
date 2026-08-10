@@ -17,7 +17,7 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 - **HTTP** -- HTTP CONNECT outbound proxy with optional TLS and basic auth
 - **SOCKS5** -- SOCKS5 outbound proxy with optional TLS and auth
 - **Snell** -- v3/v4/v5 TCP, UDP-over-TCP, optional HTTP/TLS obfs; v4/v5 connection reuse
-- **AnyTLS** -- Optional AnyTLS outbound (`anytls` feature)
+- **AnyTLS** -- AnyTLS outbound (`anytls` feature; in the `full` bundle, so the release binaries include it)
 - **Direct** -- Direct connection to destination
 - **Reject** -- Drop connections (with configurable behavior)
 

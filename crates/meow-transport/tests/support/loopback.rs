@@ -197,6 +197,31 @@ pub async fn spawn_grpc_server() -> (
     std::net::SocketAddr,
     tokio::sync::oneshot::Receiver<GrpcConnInfo>,
 ) {
+    spawn_grpc_server_inner(false).await
+}
+
+/// Same as [`spawn_grpc_server`] but withholds the response HEADERS until the
+/// client's first DATA frame arrives.
+///
+/// This is how the real peers behave: xray's `Tun` handler reads the first hunk
+/// before writing, and grpc-go only flushes response headers on the first
+/// `SendMsg`. A client that awaits the response inside `connect()` deadlocks
+/// against this server (issue #377).
+#[cfg(feature = "grpc")]
+pub async fn spawn_grpc_server_deferred_response() -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<GrpcConnInfo>,
+) {
+    spawn_grpc_server_inner(true).await
+}
+
+#[cfg(feature = "grpc")]
+async fn spawn_grpc_server_inner(
+    defer_response: bool,
+) -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<GrpcConnInfo>,
+) {
     let (tx, rx) = tokio::sync::oneshot::channel::<GrpcConnInfo>();
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -235,13 +260,23 @@ pub async fn spawn_grpc_server() -> (
         // and processes all connection-level frames.
         tokio::spawn(async move { while conn.accept().await.is_some() {} });
 
-        // Send a 200 OK with end_of_stream=false (streaming response).
-        let response = http::Response::builder()
-            .status(200)
-            .body(())
-            .expect("response build");
-        let Ok(mut send) = respond.send_response(response, false) else {
-            return;
+        // Send a 200 OK with end_of_stream=false (streaming response), unless
+        // the caller asked for the grpc-go behaviour of withholding headers
+        // until the request body starts flowing.
+        let send_response = |respond: &mut h2::server::SendResponse<bytes::Bytes>| {
+            let response = http::Response::builder()
+                .status(200)
+                .body(())
+                .expect("response build");
+            respond.send_response(response, false)
+        };
+        let mut send = if defer_response {
+            None
+        } else {
+            match send_response(&mut respond) {
+                Ok(send) => Some(send),
+                Err(_) => return,
+            }
         };
 
         // Echo every DATA frame back verbatim (same gun-framed bytes).
@@ -252,6 +287,13 @@ pub async fn spawn_grpc_server() -> (
                 Some(Ok(data)) => {
                     // Release flow-control window so the client can keep sending.
                     let _ = body.flow_control().release_capacity(data.len());
+                    let send = match &mut send {
+                        Some(send) => send,
+                        None => match send_response(&mut respond) {
+                            Ok(new) => send.insert(new),
+                            Err(_) => return,
+                        },
+                    };
                     if send.send_data(data, false).is_err() {
                         return;
                     }
@@ -259,6 +301,7 @@ pub async fn spawn_grpc_server() -> (
                 None | Some(Err(_)) => break,
             }
         }
+        let Some(mut send) = send else { return };
 
         // Close the response stream.
         let _ = send.send_data(bytes::Bytes::new(), true);
@@ -286,9 +329,9 @@ pub struct H2ReqInfo {
 ///
 /// 1. Accepts a TCP connection and performs the HTTP/2 handshake.
 /// 2. Accepts one h2 request, captures `:authority` and `:path`.
-/// 3. Sends [`H2ReqInfo`] through the mpsc channel **before** sending the
-///    response, so by the time the client's `connect()` returns the info is
-///    already in the channel.
+/// 3. Sends [`H2ReqInfo`] through the mpsc channel as soon as the request
+///    HEADERS arrive — i.e. before the response — so a caller that awaits the
+///    receiver sees the metadata without having to exchange body bytes first.
 /// 4. Sends a `200 OK` streaming response and echoes every DATA frame back.
 ///
 /// Using mpsc (not oneshot) allows multi-connection tests (e.g. D2 with 1000
@@ -296,6 +339,25 @@ pub struct H2ReqInfo {
 #[cfg(feature = "h2")]
 pub async fn spawn_h2_server(
     max_connections: usize,
+) -> (std::net::SocketAddr, tokio::sync::mpsc::Receiver<H2ReqInfo>) {
+    spawn_h2_server_inner(max_connections, false).await
+}
+
+/// Same as [`spawn_h2_server`] but withholds the response HEADERS until the
+/// client's first DATA frame arrives, the way mihomo's h2 handler behaves.
+/// A client that awaits the response inside `connect()` deadlocks here
+/// (issue #377).
+#[cfg(feature = "h2")]
+pub async fn spawn_h2_server_deferred_response(
+    max_connections: usize,
+) -> (std::net::SocketAddr, tokio::sync::mpsc::Receiver<H2ReqInfo>) {
+    spawn_h2_server_inner(max_connections, true).await
+}
+
+#[cfg(feature = "h2")]
+async fn spawn_h2_server_inner(
+    max_connections: usize,
+    defer_response: bool,
 ) -> (std::net::SocketAddr, tokio::sync::mpsc::Receiver<H2ReqInfo>) {
     let (tx, rx) = tokio::sync::mpsc::channel(max_connections.max(1));
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -311,7 +373,7 @@ pub async fn spawn_h2_server(
             };
             remaining -= 1;
             let tx = tx.clone();
-            tokio::spawn(h2_handle_conn(tcp, tx));
+            tokio::spawn(h2_handle_conn(tcp, tx, defer_response));
         }
     });
 
@@ -319,7 +381,11 @@ pub async fn spawn_h2_server(
 }
 
 #[cfg(feature = "h2")]
-async fn h2_handle_conn(tcp: tokio::net::TcpStream, tx: tokio::sync::mpsc::Sender<H2ReqInfo>) {
+async fn h2_handle_conn(
+    tcp: tokio::net::TcpStream,
+    tx: tokio::sync::mpsc::Sender<H2ReqInfo>,
+    defer_response: bool,
+) {
     let Ok(mut conn) = h2::server::handshake(tcp).await else {
         eprintln!("h2 loopback handshake error");
         return;
@@ -333,20 +399,28 @@ async fn h2_handle_conn(tcp: tokio::net::TcpStream, tx: tokio::sync::mpsc::Sende
     let authority = req.uri().authority().map(std::string::ToString::to_string);
     let path = req.uri().path().to_string();
 
-    // Send info BEFORE the 200 response — callers can safely `recv()` after
-    // `connect()` returns because connect() awaits the 200 which we send next.
+    // Publish the request metadata as soon as the HEADERS arrive, so tests can
+    // assert on it without depending on when the response is sent.
     let _ = tx.send(H2ReqInfo { authority, path }).await;
 
     // Drive the h2 connection (SETTINGS, WINDOW_UPDATE, …) in background.
     tokio::spawn(async move { while conn.accept().await.is_some() {} });
 
     // Send 200 OK (streaming response, end_of_stream=false).
-    let response = http::Response::builder()
-        .status(200)
-        .body(())
-        .expect("response build");
-    let Ok(mut send) = respond.send_response(response, false) else {
-        return;
+    let send_response = |respond: &mut h2::server::SendResponse<bytes::Bytes>| {
+        let response = http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response build");
+        respond.send_response(response, false)
+    };
+    let mut send = if defer_response {
+        None
+    } else {
+        match send_response(&mut respond) {
+            Ok(send) => Some(send),
+            Err(_) => return,
+        }
     };
 
     // Echo every DATA frame back verbatim.
@@ -356,6 +430,13 @@ async fn h2_handle_conn(tcp: tokio::net::TcpStream, tx: tokio::sync::mpsc::Sende
         match chunk {
             Some(Ok(data)) => {
                 let _ = body.flow_control().release_capacity(data.len());
+                let send = match &mut send {
+                    Some(send) => send,
+                    None => match send_response(&mut respond) {
+                        Ok(new) => send.insert(new),
+                        Err(_) => return,
+                    },
+                };
                 if send.send_data(data, false).is_err() {
                     return;
                 }
@@ -363,6 +444,7 @@ async fn h2_handle_conn(tcp: tokio::net::TcpStream, tx: tokio::sync::mpsc::Sende
             None | Some(Err(_)) => break,
         }
     }
+    let Some(mut send) = send else { return };
     let _ = send.send_data(bytes::Bytes::new(), true);
 }
 

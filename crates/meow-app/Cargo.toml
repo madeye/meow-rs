@@ -28,6 +28,9 @@ vless-vision = ["vless", "meow-config/vless-vision", "meow-proxy/vless-vision"]
 vless-encryption = ["vless", "meow-config/vless-encryption", "meow-proxy/vless-encryption"]
 vmess = ["meow-config/vmess", "meow-proxy/vmess"]
 snell = ["meow-config/snell", "meow-proxy/snell"]
+# AnyTLS outbound (issue #377 item 1) — in the `full` bundle so release
+# binaries carry it; excluded from `minimal` (ADR-0007 binary-size caps).
+anytls = ["meow-config/anytls", "meow-proxy/anytls"]
 hysteria2 = ["meow-config/hysteria2", "meow-proxy/hysteria2"]
 ech-tls-tunnel = [
     "ss",
@@ -51,7 +54,7 @@ listener-tun = ["meow-listener/listener-tun", "meow-api/listener-tun"]
 # Convenience bundles
 minimal = ["ss", "trojan", "dns-server", "listener-mixed"]
 full = [
-    "ss", "trojan", "vless", "vless-vision", "vless-encryption", "vmess", "snell", "hysteria2", "ech-tls-tunnel",
+    "ss", "trojan", "vless", "vless-vision", "vless-encryption", "vmess", "snell", "hysteria2", "anytls", "ech-tls-tunnel",
     "dns-server", "dns-encrypted",
     "listener-http", "listener-socks5", "listener-tproxy", "listener-mixed", "listener-tun",
 ]

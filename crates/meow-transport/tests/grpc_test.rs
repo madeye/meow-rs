@@ -11,6 +11,7 @@
 //! | B  | `grpc_service_name_in_path` — `:path` must be `/{service_name}/Tun` |
 //! | C  | `grpc_content_type_header` — request must carry `content-type: application/grpc` |
 //! | D  | `grpc_round_trip` — 4 MiB loopback echo through a real h2 server |
+//! | E  | `grpc_round_trip_with_deferred_response` — server withholds response HEADERS until the first client hunk (issue #377) |
 
 mod support;
 
@@ -21,7 +22,7 @@ use meow_transport::Transport;
 use meow_transport::TransportError;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use support::loopback::spawn_grpc_server;
+use support::loopback::{spawn_grpc_server, spawn_grpc_server_deferred_response};
 
 async fn assert_grpc_config_error(config: GrpcConfig, expected: &str) {
     let (client, _server) = tokio::io::duplex(64);
@@ -275,4 +276,43 @@ async fn grpc_round_trip() {
         "received byte count must match sent byte count"
     );
     assert_eq!(recv_buf, send_buf, "round-trip bytes must be identical");
+}
+
+// ─── E: Response HEADERS withheld until the first client hunk ─────────────────
+
+/// E: `grpc_round_trip_with_deferred_response`
+///
+/// Regression test for issue #377. xray's `Tun` handler reads the client's
+/// first hunk before writing anything, and grpc-go only flushes response
+/// headers on the first `SendMsg`, so a client that awaits the response inside
+/// `connect()` deadlocks: the server waits for data that the client will not
+/// send until the response arrives. `GrpcLayer::connect` must therefore return
+/// as soon as the request HEADERS are queued and resolve the response lazily on
+/// the first read.
+#[tokio::test]
+async fn grpc_round_trip_with_deferred_response() {
+    let (addr, _info_rx) = spawn_grpc_server_deferred_response().await;
+
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("tcp connect");
+
+    let layer = GrpcLayer::new(GrpcConfig::default());
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), layer.connect(Box::new(tcp)))
+        .await
+        .expect("connect must not block on the server's response")
+        .expect("grpc connect");
+
+    stream.write_all(b"ping").await.expect("write");
+    stream.flush().await.expect("flush");
+
+    let mut got = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut got))
+        .await
+        .expect("echo must arrive once the server answers")
+        .expect("read_exact");
+    assert_eq!(
+        &got, b"ping",
+        "round-trip bytes must survive the deferred response"
+    );
 }

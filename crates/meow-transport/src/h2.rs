@@ -16,6 +16,7 @@ use bytes::Bytes;
 use rand::seq::IndexedRandom as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use crate::h2_common::RecvState;
 use crate::{Result, Stream, Transport, TransportError};
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -100,13 +101,14 @@ impl Transport for H2Layer {
             .send_request(request, false)
             .map_err(|e| TransportError::H2(e.to_string()))?;
 
-        // Await the server's 200 response to get the inbound body stream.
-        let response = response_future
-            .await
-            .map_err(|e| TransportError::H2(e.to_string()))?;
-        let recv_stream = response.into_body();
-
-        Ok(Box::new(H2Stream::new(send_stream, recv_stream)))
+        // Do NOT await the response here: upstream's h2 handler reads the
+        // client's first DATA frame before it writes anything, so awaiting
+        // would deadlock the tunnel (issue #377). The response is resolved on
+        // the first read instead — see `h2_common::RecvState`.
+        Ok(Box::new(H2Stream::new(
+            send_stream,
+            RecvState::new(response_future),
+        )))
     }
 }
 
@@ -118,7 +120,8 @@ impl Transport for H2Layer {
 /// through the h2 DATA frames verbatim.
 struct H2Stream {
     send: h2::SendStream<Bytes>,
-    recv: h2::RecvStream,
+    /// Response body, resolved on the first read (see [`RecvState`]).
+    recv: RecvState,
     /// Buffered payload bytes from the most recently received DATA frame.
     read_buf: Bytes,
     /// Pre-encoded payload stashed while we wait for h2 send-window capacity.
@@ -129,7 +132,7 @@ struct H2Stream {
 }
 
 impl H2Stream {
-    fn new(send: h2::SendStream<Bytes>, recv: h2::RecvStream) -> Self {
+    fn new(send: h2::SendStream<Bytes>, recv: RecvState) -> Self {
         Self {
             send,
             recv,
@@ -156,8 +159,16 @@ impl AsyncRead for H2Stream {
                 return Poll::Ready(Ok(()));
             }
 
-            // Fetch the next DATA frame from the h2 receive stream.
-            match this.recv.poll_data(cx) {
+            // Fetch the next DATA frame from the h2 receive stream. Resolving
+            // the response is part of the read path, not of `connect()`; see
+            // `h2_common::RecvState`.
+            match this.recv.poll_ready(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {}
+            }
+            let recv = this.recv.stream().expect("poll_ready resolved Ok");
+            match recv.poll_data(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => return Poll::Ready(Ok(())), // clean EOF
                 Poll::Ready(Some(Err(e))) => {
@@ -165,7 +176,7 @@ impl AsyncRead for H2Stream {
                 }
                 Poll::Ready(Some(Ok(bytes))) => {
                     // Release flow-control window back to the sender.
-                    let _ = this.recv.flow_control().release_capacity(bytes.len());
+                    let _ = recv.flow_control().release_capacity(bytes.len());
                     this.read_buf = bytes;
                     // loop → drain read_buf
                 }

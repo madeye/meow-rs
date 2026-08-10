@@ -401,9 +401,12 @@ proxies:
     );
 }
 
-#[cfg(feature = "boring-tls")]
+/// REALITY must load on any build that has the `vless` feature — it no longer
+/// needs `boring-tls`. Release targets where boring-sys cannot be compiled
+/// (armv7/i686 musl, MIPS, windows-gnu, iOS) used to warn-and-skip every
+/// REALITY proxy, which read as "vless just doesn't work" (issue #377).
 #[tokio::test]
-async fn parse_vless_reality_opts_valid_loads_with_boring_tls() {
+async fn parse_vless_reality_opts_valid_loads_without_boring_tls() {
     let yaml = r#"
 proxies:
   - name: v

@@ -31,11 +31,14 @@ mod error;
 #[cfg(feature = "tls")]
 pub mod tls;
 
-#[cfg(all(feature = "tls", feature = "boring-tls"))]
+#[cfg(all(feature = "tls", feature = "reality"))]
 mod reality_tls;
 
 #[cfg(feature = "ws")]
 pub mod ws;
+
+#[cfg(any(feature = "grpc", feature = "h2"))]
+mod h2_common;
 
 #[cfg(feature = "grpc")]
 pub mod grpc;
@@ -73,7 +76,7 @@ pub fn enable_raw_passthrough(stream: &mut dyn Stream) -> bool {
 }
 
 pub fn enable_raw_read_passthrough(stream: &mut dyn Stream) -> bool {
-    #[cfg(all(feature = "tls", feature = "boring-tls"))]
+    #[cfg(all(feature = "tls", feature = "reality"))]
     {
         if let Some(reality) = stream
             .as_any_mut()
@@ -89,7 +92,7 @@ pub fn enable_raw_read_passthrough(stream: &mut dyn Stream) -> bool {
 }
 
 pub fn enable_raw_write_passthrough(stream: &mut dyn Stream) -> bool {
-    #[cfg(all(feature = "tls", feature = "boring-tls"))]
+    #[cfg(all(feature = "tls", feature = "reality"))]
     {
         if let Some(reality) = stream
             .as_any_mut()

@@ -12,7 +12,11 @@ homepage.workspace = true
 default = ["ss", "trojan", "vless", "vless-vision", "vless-encryption", "ech-tls-tunnel", "vmess", "snell", "hysteria2"]
 ss = ["meow-proxy/ss"]
 trojan = ["meow-proxy/trojan"]
-vless = ["meow-proxy/vless"]
+# `meow-transport/reality` rides along with vless: `reality-opts` is only
+# reachable from the vless parser, and REALITY must not depend on boring-tls
+# (issue #377 — boring-sys does not build for armv7/i686 musl, MIPS,
+# windows-gnu or iOS, and those builds silently lost every REALITY proxy).
+vless = ["meow-proxy/vless", "meow-transport/reality"]
 vless-vision = ["vless", "meow-proxy/vless-vision"]
 vless-encryption = ["vless", "meow-proxy/vless-encryption"]
 vmess = ["meow-proxy/vmess"]

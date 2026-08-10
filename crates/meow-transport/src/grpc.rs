@@ -36,6 +36,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use crate::h2_common::RecvState;
 use crate::{Result, Stream, Transport, TransportError};
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -115,13 +116,15 @@ impl Transport for GrpcLayer {
             .send_request(request, false)
             .map_err(|e| TransportError::Grpc(e.to_string()))?;
 
-        // Await the server's 200 response to get the response body stream.
-        let response = response_future
-            .await
-            .map_err(|e| TransportError::Grpc(e.to_string()))?;
-        let recv_stream = response.into_body();
-
-        Ok(Box::new(GunStream::new(send_stream, recv_stream)))
+        // Do NOT await the response here: upstream's `Tun` handler reads the
+        // client's first hunk before it writes anything, and grpc-go only
+        // flushes response headers on the first `SendMsg`. Awaiting would
+        // deadlock the tunnel (issue #377). The response is resolved on the
+        // first read instead — see `h2_common::RecvState`.
+        Ok(Box::new(GunStream::new(
+            send_stream,
+            RecvState::new(response_future),
+        )))
     }
 }
 
@@ -259,7 +262,8 @@ const MAX_GUN_FRAME_LEN: usize = 16 * 1024 * 1024;
 /// A bidirectional gRPC-framed stream over a single h2 request/response pair.
 struct GunStream {
     send: h2::SendStream<Bytes>,
-    recv: h2::RecvStream,
+    /// Response body, resolved on the first read (see [`RecvState`]).
+    recv: RecvState,
     /// Decoded payload bytes from the most-recently parsed gun frame.
     read_buf: Bytes,
     /// Raw h2 DATA bytes accumulating across multiple `poll_data` calls until
@@ -273,7 +277,7 @@ struct GunStream {
 }
 
 impl GunStream {
-    fn new(send: h2::SendStream<Bytes>, recv: h2::RecvStream) -> Self {
+    fn new(send: h2::SendStream<Bytes>, recv: RecvState) -> Self {
         Self {
             send,
             recv,
@@ -348,7 +352,15 @@ impl AsyncRead for GunStream {
             }
 
             // ── Need more bytes from the h2 DATA stream ───────────────────────
-            match this.recv.poll_data(cx) {
+            // Resolving the response is part of the read path, not of
+            // `connect()`; see `h2_common::RecvState`.
+            match this.recv.poll_ready(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(())) => {}
+            }
+            let recv = this.recv.stream().expect("poll_ready resolved Ok");
+            match recv.poll_data(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => return Poll::Ready(Ok(())), // clean EOF
                 Poll::Ready(Some(Err(e))) => {
@@ -356,7 +368,7 @@ impl AsyncRead for GunStream {
                 }
                 Poll::Ready(Some(Ok(bytes))) => {
                     // Release flow-control window back to the sender.
-                    let _ = this.recv.flow_control().release_capacity(bytes.len());
+                    let _ = recv.flow_control().release_capacity(bytes.len());
                     this.pending_frame.extend_from_slice(&bytes);
                     // loop → re-check pending_frame for a complete frame
                 }

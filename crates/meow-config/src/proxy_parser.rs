@@ -1282,11 +1282,18 @@ fn parse_vless(
                 .and_then(|v| v.as_str())
                 .unwrap_or("GunService")
                 .to_string();
-            // Authority: use the outbound server address so the gRPC virtual
-            // host matches the TLS SNI. Upstream hard-codes "localhost" when
-            // unset; we normalise here per ADR-0001 §1 (transport never infers
-            // context-sensitive values).
-            let authority = server.to_string();
+            // Authority: mihomo's gun transport sets `Host` to `servername`
+            // and only falls back to the dial host when `servername` is empty
+            // (adapter/outbound/vless.go). Front-ends that route gRPC by
+            // `:authority` are provisioned against that value, so match it
+            // rather than always sending the dial host (issue #377). Resolved
+            // here per ADR-0001 §1 — the transport never infers it.
+            let authority = config
+                .get("servername")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(server)
+                .to_string();
             let grpc_cfg = GrpcConfig {
                 service_name,
                 authority,
