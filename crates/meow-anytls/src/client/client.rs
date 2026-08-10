@@ -305,7 +305,13 @@ impl Client {
 
         // Set sequence number for pool ordering (use timestamp-based counter)
         static SEQ_COUNTER: meow_common::atomic::AtomicU = meow_common::atomic::AtomicU::new(0);
-        let seq = SEQ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        #[allow(
+            clippy::useless_conversion,
+            reason = "identity on 64-bit; widens u32 on targets without 64-bit atomics"
+        )]
+        let seq: u64 = SEQ_COUNTER
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .into();
         session.set_seq(seq);
         tracing::debug!("[Client] Session created with seq={}", seq);
 

@@ -4,7 +4,7 @@ use crate::protocol::{Command, Frame};
 use crate::session::{Session, Stream};
 use crate::util::{AnyTlsError, Result, configure_tcp_stream, resolve_host_with_cache};
 use bytes::Bytes;
-use meow_common::atomic::AtomicU;
+use meow_common::atomic::{AtomicU, Uint};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -428,7 +428,7 @@ async fn proxy_tcp_connection_data_forwarding(
                 tracing::error!("[Proxy-Task1] Outbound write error: {}", e);
                 break;
             }
-            bytes_to_outbound_clone.fetch_add(n as u64, Ordering::Relaxed);
+            bytes_to_outbound_clone.fetch_add(n as Uint, Ordering::Relaxed);
 
             tracing::trace!(
                 "[Proxy-Task1] Forwarded {} bytes to outbound (iteration={})",
@@ -493,7 +493,7 @@ async fn proxy_tcp_connection_data_forwarding(
                 );
                 break;
             }
-            bytes_to_client_clone.fetch_add(n as u64, Ordering::Relaxed);
+            bytes_to_client_clone.fetch_add(n as Uint, Ordering::Relaxed);
 
             tracing::trace!(
                 "[Proxy-Task2] Wrote {} bytes to stream {} (iteration={})",

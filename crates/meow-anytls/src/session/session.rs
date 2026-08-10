@@ -116,7 +116,13 @@ impl Session {
         W: AsyncWrite + Send + Unpin + 'static,
     {
         let (stream_data_tx, stream_data_rx) = mpsc::unbounded_channel();
-        let id = SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[allow(
+            clippy::useless_conversion,
+            reason = "identity on 64-bit; widens u32 on targets without 64-bit atomics"
+        )]
+        let id: u64 = SESSION_COUNTER
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .into();
         let heartbeat_state = heartbeat.map(|cfg| {
             Arc::new(HeartbeatState {
                 interval: cfg.interval,
@@ -157,7 +163,13 @@ impl Session {
         W: AsyncWrite + Send + Unpin + 'static,
     {
         let (stream_data_tx, stream_data_rx) = mpsc::unbounded_channel();
-        let id = SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[allow(
+            clippy::useless_conversion,
+            reason = "identity on 64-bit; widens u32 on targets without 64-bit atomics"
+        )]
+        let id: u64 = SESSION_COUNTER
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .into();
 
         Self {
             id,
@@ -1374,12 +1386,21 @@ impl Session {
 
     /// Get session sequence number
     pub fn seq(&self) -> u64 {
-        self.seq.load(std::sync::atomic::Ordering::Relaxed)
+        #[allow(
+            clippy::useless_conversion,
+            reason = "identity on 64-bit; widens u32 on targets without 64-bit atomics"
+        )]
+        self.seq.load(std::sync::atomic::Ordering::Relaxed).into()
     }
 
     /// Set session sequence number
     pub fn set_seq(&self, seq: u64) {
-        self.seq.store(seq, std::sync::atomic::Ordering::Relaxed);
+        // Truncates on targets whose `AtomicU` is 32-bit (MIPS32); the sequence
+        // is only used for pool ordering, so wrapping there is harmless.
+        self.seq.store(
+            seq as meow_common::atomic::Uint,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Get peer version

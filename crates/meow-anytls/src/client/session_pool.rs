@@ -84,7 +84,13 @@ impl SessionPool {
 
     /// Get the next sequence number
     pub fn next_seq(&self) -> u64 {
-        self.next_seq.fetch_add(1, Ordering::Relaxed)
+        // `AtomicU` is 32-bit on targets without 64-bit atomics (MIPS32); the
+        // public sequence stays u64 and simply wraps sooner there.
+        #[allow(
+            clippy::useless_conversion,
+            reason = "identity on 64-bit; widens u32 on targets without 64-bit atomics"
+        )]
+        self.next_seq.fetch_add(1, Ordering::Relaxed).into()
     }
 
     /// Get an idle session for reuse (the most recent live one, largest seq).

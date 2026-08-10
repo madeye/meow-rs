@@ -21,7 +21,7 @@
 use crate::session::{Stream, StreamReader};
 use crate::util::{AnyTlsError, Result, resolve_host_with_cache};
 use bytes::{BufMut, Bytes, BytesMut};
-use meow_common::atomic::AtomicU;
+use meow_common::atomic::{AtomicU, Uint};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -308,7 +308,7 @@ async fn stream_to_udp(
             tracing::warn!("[UDP] Partial UDP send: {} / {} bytes", sent, payload.len());
         }
         packets_counter.fetch_add(1, Ordering::Relaxed);
-        bytes_counter.fetch_add(sent as u64, Ordering::Relaxed);
+        bytes_counter.fetch_add(sent as Uint, Ordering::Relaxed);
     }
 
     Ok(())
@@ -355,7 +355,7 @@ async fn udp_to_stream(
             return Err(AnyTlsError::Protocol("Channel send failed".into()));
         }
         packets_counter.fetch_add(1, Ordering::Relaxed);
-        bytes_counter.fetch_add(len as u64, Ordering::Relaxed);
+        bytes_counter.fetch_add(len as Uint, Ordering::Relaxed);
     }
 }
 
