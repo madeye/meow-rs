@@ -731,9 +731,16 @@ fn run_cmd(cmd: &str, args: &[&str]) -> Result<()> {
 /// of `format!("{listen}:{port}")`. The string form produces an unparseable
 /// `:::7890` for an IPv6 listen address like `::`, which silently broke
 /// dual-stack binding (`bind-address: '::'`); `SocketAddr::new` handles IPv4
-/// and IPv6 uniformly. `listen` is always an IP literal here (`0.0.0.0`, `::`,
-/// `127.0.0.1`, or a specific address).
+/// and IPv6 uniformly. `listen` is normally an IP literal here (`0.0.0.0`,
+/// `::`, `127.0.0.1`, or a specific address); the mihomo wildcard `'*'` is
+/// normalised to `0.0.0.0`.
 fn bind_socket_addr(listen: &str, port: u16) -> Result<SocketAddr> {
+    // mihomo treats `bind-address: '*'` as the wildcard "all interfaces" — it is
+    // the idiomatic value Clash Verge writes. This only surfaces when allow-lan
+    // is on, since allow-lan:off already forces 127.0.0.1 upstream, so map it to
+    // the IPv4-any literal instead of aborting the whole process (issue #388).
+    // `::` remains the explicit dual-stack opt-in.
+    let listen = if listen == "*" { "0.0.0.0" } else { listen };
     let ip: IpAddr = listen
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid bind address '{listen}': {e}"))?;
@@ -1080,6 +1087,15 @@ mod tests {
     #[test]
     fn invalid_bind_address_errors() {
         assert!(bind_socket_addr("not-an-ip", 80).is_err());
+    }
+
+    #[test]
+    fn wildcard_bind_address_is_ipv4_any() {
+        // mihomo wildcard: `bind-address: '*'` binds all interfaces (0.0.0.0)
+        // instead of aborting the process (issue #388).
+        let a = bind_socket_addr("*", 7890).unwrap();
+        assert_eq!(a.to_string(), "0.0.0.0:7890");
+        assert!(a.is_ipv4());
     }
 
     #[cfg(target_os = "windows")]

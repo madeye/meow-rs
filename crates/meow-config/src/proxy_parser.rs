@@ -1474,11 +1474,14 @@ fn parse_vless_reality_opts(
     let mut public_key = [0u8; 32];
     public_key.copy_from_slice(&public_key_bytes);
 
+    // mihomo tolerates `short-id: null` — many subscription generators emit it
+    // when the server has no short ID — and treats it as absent. Map it to the
+    // empty short ID instead of rejecting (and silently dropping) the node.
     let short_id_str = match opts.get("short-id") {
+        Some(serde_yaml::Value::Null) | None => "",
         Some(value) => value
             .as_str()
             .ok_or_else(|| "vless: reality-opts.short-id must be a hex string".to_string())?,
-        None => "",
     };
     let short_id_vec = parse_reality_short_id(short_id_str)?;
     let mut short_id = [0u8; 8];
@@ -1973,6 +1976,36 @@ mod tests {
         assert_eq!(decoded.len(), 32);
         // Garbage is still rejected.
         assert!(decode_raw_url_base64_lenient("!!!not base64!!!").is_none());
+    }
+
+    #[cfg(feature = "vless")]
+    #[test]
+    fn reality_short_id_null_treated_as_absent() {
+        // mihomo tolerates `short-id: null` — many subscription generators emit
+        // it when the server has no short ID — so it must not drop the node
+        // (issue #388). The 32-byte key is the one from the test above.
+        let key = "OKkD6Wt1lC4-9avJj2t3PkvIDkvcA1Fu0b09QwJ7GGh";
+
+        let cfg = proxy_config(&format!(
+            "reality-opts:\n  public-key: {key}\n  short-id: null\n"
+        ));
+        let opts = parse_vless_reality_opts(&cfg)
+            .expect("null short-id must parse")
+            .expect("reality-opts present");
+        assert_eq!(opts.short_id, [0u8; 8]);
+
+        // An explicit hex short-id still decodes and zero-pads to 8 bytes.
+        let cfg = proxy_config(&format!(
+            "reality-opts:\n  public-key: {key}\n  short-id: \"01ab\"\n"
+        ));
+        let opts = parse_vless_reality_opts(&cfg).unwrap().unwrap();
+        assert_eq!(opts.short_id, [0x01, 0xab, 0, 0, 0, 0, 0, 0]);
+
+        // A present but non-hex short-id is still rejected.
+        let cfg = proxy_config(&format!(
+            "reality-opts:\n  public-key: {key}\n  short-id: \"zz\"\n"
+        ));
+        assert!(parse_vless_reality_opts(&cfg).is_err());
     }
 
     #[cfg(any(feature = "vless", feature = "vmess"))]
