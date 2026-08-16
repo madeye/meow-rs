@@ -33,10 +33,15 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Buffer size used for each relay direction.
-/// 4 KiB halves the tokio default (8 KiB) to save 8 KiB/conn at the
-/// cost of more syscalls; acceptable for proxy workloads where connections
-/// are long-lived and latency matters less than memory at 5k+ conns.
-pub const RELAY_BUF_SIZE: usize = 4 * 1024;
+///
+/// 32 KiB keeps per-cycle syscall+task-wakeup overhead small on bulk
+/// transfers: at 4 KiB a 64 MB transfer ran 16k fill+drain cycles and the
+/// per-cycle wakeup latency (tens of µs on loopback) dominated the
+/// throughput (~0.4 Gbps through the tunnel vs ~2 Gbps with larger buffers).
+/// 32 KiB is four 8 KiB mux frames (or two 16 KiB TLS records) per write,
+/// so the pipeline stays deep without ballooning the per-connection async
+/// frame (2 × 32 KiB).
+pub const RELAY_BUF_SIZE: usize = 32 * 1024;
 
 /// Idle window granted to the surviving relay direction after the *other*
 /// direction has reached EOF.
@@ -66,7 +71,7 @@ pub const RELAY_HALF_CLOSE_LINGER: Duration = Duration::from_secs(30);
 /// same magnitude, but coop is an implementation detail of tokio's leaf
 /// resources — custom `ProxyConn` stacks (or the in-memory streams used in
 /// tests) may never return `Pending` on their own. This cap makes the yield
-/// deterministic: at 4 KiB per cycle it bounds one poll at 256 KiB relayed.
+/// deterministic: at 32 KiB per cycle it bounds one poll at 2 MiB relayed.
 const RELAY_CYCLES_PER_POLL: u32 = 64;
 
 // ---------------------------------------------------------------------------
