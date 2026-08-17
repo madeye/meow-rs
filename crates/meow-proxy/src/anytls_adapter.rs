@@ -53,12 +53,10 @@ impl AnytlsAdapter {
         sni: Option<&str>,
         skip_cert_verify: bool,
     ) -> std::result::Result<Self, String> {
-        // Bridge meow_common's `SocketProtector` into anytls-rs's separate
-        // registry exactly once. anytls-rs ships its own protector trait
-        // (it can't depend on meow_common), so the host VPN only installs
-        // a `meow_common::SocketProtector` and this shim re-forwards every
-        // protect call into the anytls-rs registry.
-        install_anytls_protector_bridge();
+        // Bridge meow_common's outbound-socket hooks (resolver-aware TCP
+        // dialer + Android `SocketProtector`) into anytls-rs's separate
+        // registries exactly once — see `install_anytls_bridges`.
+        install_anytls_bridges();
 
         let server_addr = format!("{server}:{port}");
 
@@ -392,33 +390,59 @@ fn build_tls_client_config(
 
 // ─── meow_common ⇄ anytls_rs protector bridge ────────────────────────────────
 //
-// On Android, `meow_common` and `anytls_rs` each ship their own
-// `SocketProtector` registry — `anytls-rs` can't depend on `meow_common`
-// and vice-versa. The host VPN installs a `meow_common::SocketProtector`
-// once at startup; this bridge re-publishes every protect call into the
-// `anytls-rs` registry so the AnyTLS client-side dials (`connect_tcp`,
-// `bind_udp`) fire the same JNI hook. Installed exactly once via the
-// `Once` guard inside `AnytlsAdapter::new`.
-#[cfg(target_os = "android")]
-fn install_anytls_protector_bridge() {
+// `anytls_rs` can't depend on `meow_common` (or vice-versa), so each ships
+// its own outbound-socket hook registries. These bridges — installed exactly
+// once via the `Once` guard inside `AnytlsAdapter::new` — re-publish
+// meow_common's hooks into the `anytls-rs` registries:
+//
+// - `TcpDialer` (all targets): routes the client-side session dial through
+//   `meow_common::connect_tcp_host`, i.e. the installed `HostResolver` +
+//   `SocketProtector` stack. Without it `anytls-rs` resolves the server
+//   hostname with `tokio::net::lookup_host` (the system resolver), which
+//   inside a meow VPN is the in-process fake-IP DNS — the protected socket
+//   then dials an unroutable fake IP and times out (the loop-routing
+//   failure mode described in `meow_common::socket_protect`).
+//
+// - `SocketProtector` (Android): covers the remaining direct socket sites
+//   in `anytls-rs` (the per-stream UDP relay's `bind_udp`), which don't go
+//   through the dialer.
+fn install_anytls_bridges() {
     use std::sync::Once;
 
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        struct Bridge;
-        impl anytls_rs::SocketProtector for Bridge {
-            fn protect(&self, fd: std::os::fd::RawFd) -> std::io::Result<()> {
-                match meow_common::socket_protector() {
-                    Some(p) => p.protect(fd),
-                    // No protector installed on the meow_common side — match
-                    // the off-Android no-protector behaviour: just allow.
-                    None => Ok(()),
-                }
+        struct DialBridge;
+        impl anytls_rs::TcpDialer for DialBridge {
+            fn dial<'a>(
+                &'a self,
+                host: &'a str,
+                port: u16,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = std::io::Result<tokio::net::TcpStream>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(meow_common::connect_tcp_host(host, port))
             }
         }
-        anytls_rs::set_socket_protector(Arc::new(Bridge));
+        anytls_rs::set_tcp_dialer(Arc::new(DialBridge));
+
+        #[cfg(target_os = "android")]
+        {
+            struct Bridge;
+            impl anytls_rs::SocketProtector for Bridge {
+                fn protect(&self, fd: std::os::fd::RawFd) -> std::io::Result<()> {
+                    match meow_common::socket_protector() {
+                        Some(p) => p.protect(fd),
+                        // No protector installed on the meow_common side —
+                        // match the off-Android no-protector behaviour.
+                        None => Ok(()),
+                    }
+                }
+            }
+            anytls_rs::set_socket_protector(Arc::new(Bridge));
+        }
     });
 }
-
-#[cfg(not(target_os = "android"))]
-fn install_anytls_protector_bridge() {}

@@ -175,3 +175,112 @@ pub async fn bind_udp<A: ToSocketAddrs>(local: A) -> io::Result<UdpSocket> {
     }
     UdpSocket::bind(local).await
 }
+
+/// Pluggable outbound TCP dialer hook.
+///
+/// [`connect_tcp`] resolves hostnames with `tokio::net::lookup_host`, i.e.
+/// the operating-system resolver. When `anytls-rs` runs inside a VPN app
+/// that is itself the system's DNS handler (meow-rs on Android answers the
+/// TUN's DNS with an in-process fake-IP server), that resolver hands back
+/// fake IPs — so the (correctly protected) socket dials a blackhole and
+/// times out. The host app installs a dialer here that resolves through its
+/// own real-IP resolver stack (e.g. meow-common's `connect_tcp_host`); when
+/// present it fully replaces the resolve+connect path, protector included.
+pub trait TcpDialer: Send + Sync {
+    /// Dial `host:port` and return a connected stream. `host` may be a
+    /// hostname or an IP literal.
+    fn dial<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<TcpStream>> + Send + 'a>>;
+}
+
+static TCP_DIALER: std::sync::RwLock<Option<std::sync::Arc<dyn TcpDialer>>> =
+    std::sync::RwLock::new(None);
+
+/// Install the global TCP dialer. Call once during app startup, before any
+/// AnyTLS client dials. Re-installing is allowed; the new dialer takes
+/// effect on the next outbound connection.
+pub fn set_tcp_dialer(dialer: std::sync::Arc<dyn TcpDialer>) {
+    if let Ok(mut guard) = TCP_DIALER.write() {
+        *guard = Some(dialer);
+    }
+}
+
+/// Remove the currently installed dialer, if any.
+pub fn clear_tcp_dialer() {
+    if let Ok(mut guard) = TCP_DIALER.write() {
+        *guard = None;
+    }
+}
+
+/// Snapshot of the currently-installed dialer.
+pub fn tcp_dialer() -> Option<std::sync::Arc<dyn TcpDialer>> {
+    TCP_DIALER.read().ok().and_then(|g| g.clone())
+}
+
+/// Split a `host:port` / `[v6]:port` address string.
+fn split_host_port(addr: &str) -> Option<(&str, u16)> {
+    let (host, port) = addr.rsplit_once(':')?;
+    let port: u16 = port.parse().ok()?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        None
+    } else {
+        Some((host, port))
+    }
+}
+
+/// Dial a `host:port` address string, preferring the installed [`TcpDialer`]
+/// and falling back to [`connect_tcp`] (system resolver + optional
+/// protector) when none is installed or the address doesn't split.
+pub async fn connect_tcp_addr(addr: &str) -> io::Result<TcpStream> {
+    if let (Some(dialer), Some((host, port))) = (tcp_dialer(), split_host_port(addr)) {
+        return dialer.dial(host, port).await;
+    }
+    connect_tcp(addr).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_host_port_forms() {
+        assert_eq!(
+            split_host_port("example.com:443"),
+            Some(("example.com", 443))
+        );
+        assert_eq!(split_host_port("1.2.3.4:80"), Some(("1.2.3.4", 80)));
+        assert_eq!(split_host_port("[::1]:8443"), Some(("::1", 8443)));
+        assert_eq!(split_host_port("no-port"), None);
+        assert_eq!(split_host_port(":443"), None);
+        assert_eq!(split_host_port("host:notaport"), None);
+    }
+
+    #[test]
+    fn dialer_registry_roundtrip() {
+        struct Nop;
+        impl TcpDialer for Nop {
+            fn dial<'a>(
+                &'a self,
+                _host: &'a str,
+                _port: u16,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = io::Result<TcpStream>> + Send + 'a>,
+            > {
+                Box::pin(async { Err(io::Error::other("nop")) })
+            }
+        }
+        clear_tcp_dialer();
+        assert!(tcp_dialer().is_none());
+        set_tcp_dialer(std::sync::Arc::new(Nop));
+        assert!(tcp_dialer().is_some());
+        clear_tcp_dialer();
+        assert!(tcp_dialer().is_none());
+    }
+}

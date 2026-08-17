@@ -216,11 +216,16 @@ impl Client {
             "[Client] Connecting TCP to {} (this may trigger DNS lookup)",
             self.server_addr
         );
-        // Dial via the socket-protect helper so a host VPN (Android) can
-        // call `VpnService.protect(fd)` on the outbound socket before the
-        // SYN — otherwise the connection loops back into the same VPN.
-        // Off-Android the helper degrades to `TcpStream::connect`.
-        let tcp_stream = match crate::util::socket_protect::connect_tcp(&self.server_addr).await {
+        // Dial via the socket-protect helper: an installed `TcpDialer`
+        // (host-app bridge, e.g. meow-common's resolver + protector stack)
+        // takes the whole resolve+connect path; otherwise the fallback
+        // applies the `SocketProtector` (Android) around a system-resolver
+        // dial, degrading to plain `TcpStream::connect` off-Android. The
+        // dialer hook matters inside VPN apps whose system DNS is a fake-IP
+        // server — `lookup_host` there returns unroutable fake IPs.
+        let tcp_stream = match crate::util::socket_protect::connect_tcp_addr(&self.server_addr)
+            .await
+        {
             Ok(stream) => stream,
             Err(e) => {
                 tracing::error!("[Client] Failed to connect to {}: {}", self.server_addr, e);
