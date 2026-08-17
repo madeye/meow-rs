@@ -58,6 +58,13 @@ impl DirectAdapter {
         self
     }
 
+    /// Read back the configured connect bound. `None` = unbounded. Lets
+    /// config-layer tests assert the `tcp-connect-timeout` /
+    /// `connect-timeout` wiring without dialing anything.
+    pub fn connect_timeout(&self) -> Option<Duration> {
+        self.connect_timeout
+    }
+
     /// Determine the concrete `SocketAddr` candidates to dial for `metadata`,
     /// avoiding the OS resolver whenever possible.
     async fn resolve_targets(&self, metadata: &Metadata) -> Result<Vec<SocketAddr>> {

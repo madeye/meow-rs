@@ -529,6 +529,9 @@ fn rebuild_from_raw_impl(
     if let Some(resolver) = resolver {
         direct = direct.with_resolver(resolver);
     }
+    if let Some(secs) = raw.tcp_connect_timeout {
+        direct = direct.with_connect_timeout(std::time::Duration::from_secs(secs));
+    }
     proxies.insert(
         SmolStr::new_static("DIRECT"),
         Arc::new(proxy_parser::WrappedProxy::new(Box::new(direct))),

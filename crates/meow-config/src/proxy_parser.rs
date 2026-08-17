@@ -492,6 +492,17 @@ fn parse_direct(
 
     let mut adapter = DirectAdapter::new();
 
+    // Optional `connect-timeout:` (seconds) — per-proxy counterpart of the
+    // global `tcp-connect-timeout:` that covers the built-in DIRECT. Hard
+    // error on a non-integer (Class A per ADR-0002): silently ignoring it
+    // would leave the connect unbounded when the user asked for a bound.
+    if let Some(v) = config.get("connect-timeout") {
+        let secs = v.as_u64().ok_or_else(|| {
+            format!("direct[{name}]: connect-timeout must be a non-negative integer (seconds)")
+        })?;
+        adapter = adapter.with_connect_timeout(std::time::Duration::from_secs(secs));
+    }
+
     if let Some(v) = config.get("dns") {
         let entries: Vec<String> = match v {
             serde_yaml::Value::String(s) => vec![s.clone()],
@@ -2145,6 +2156,32 @@ tls: true
             panic!("empty dns list must hard-error (Class A)");
         };
         assert!(err.contains("dns list is empty"), "msg: {err}");
+    }
+
+    #[test]
+    fn parse_direct_with_connect_timeout_wires_adapter() {
+        let cfg = direct_config("name: d\ntype: direct\nconnect-timeout: 7\n");
+        let adapter = parse_direct("d", &cfg).unwrap();
+        assert_eq!(
+            adapter.connect_timeout(),
+            Some(std::time::Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn parse_direct_without_connect_timeout_is_unbounded() {
+        let cfg = direct_config("name: d\ntype: direct\n");
+        let adapter = parse_direct("d", &cfg).unwrap();
+        assert_eq!(adapter.connect_timeout(), None);
+    }
+
+    #[test]
+    fn parse_direct_rejects_non_integer_connect_timeout() {
+        let cfg = direct_config("name: bad\ntype: direct\nconnect-timeout: fast\n");
+        let Err(err) = parse_proxy(&cfg) else {
+            panic!("non-integer connect-timeout must hard-error (Class A)");
+        };
+        assert!(err.contains("connect-timeout"), "msg: {err}");
     }
 
     #[test]
