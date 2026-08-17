@@ -12,7 +12,7 @@
 # dependents' `use anytls_rs::...` paths are unchanged.
 [package]
 name = "meow-anytls"
-version = "0.20.1"
+version = "0.20.2"
 edition = "2024"
 rust-version = "1.89"
 description = "Vendored AnyTLS protocol implementation (madeye fork) for the meow-rs proxy kernel."
@@ -26,7 +26,7 @@ name = "anytls_rs"
 path = "src/lib.rs"
 
 [dependencies]
-meow-common = { path = "../meow-common", version = "0.20.1" }
+meow-common = { path = "../meow-common", version = "0.20.2" }
 tokio = { version = "1.48", features = [
     "macros",
     "rt-multi-thread",
