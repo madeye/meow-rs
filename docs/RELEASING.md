@@ -80,13 +80,25 @@ meow-app                                     (→ everything)
 - **New versions of existing crates:** a much higher limit, so a normal release
   publishes all 11 crates back-to-back without throttling.
 
-## `anytls-rs`
+## Forked dependencies
 
-`anytls-rs` is an **opt-in, non-default** dependency (the `anytls` feature) pinned
-to its crates.io release in `[workspace.dependencies]` — crates.io forbids `git`
-dependencies, so it must stay a registry version, not the `madeye/anytls-rs` git
-fork. If you need a newer fork change, publish it to crates.io first, then bump the
-version here.
+**crates.io forbids `git` dependencies in a published manifest — even optional,
+non-default ones.** A `git =` entry anywhere in `[workspace.dependencies]` makes
+every crate that reaches it unpublishable. This bit the `0.20.2` release: a git
+pin on the `lwip` fork (added with TUN inbound, #326) aborted the publish job
+after nine crates had already uploaded, stranding `meow-listener`, `meow-api`
+and `meow-app` at `0.20.1`.
+
+So a fork has to be **vendored in-tree** or **published to the registry** before
+anything can depend on it:
+
+| Fork | Route | Notes |
+|------|-------|-------|
+| `anytls-rs` | Vendored as `crates/meow-anytls` (lib name `anytls_rs`), published with the workspace | Upstream lacks `Stream::close()`. Opt-in via `meow-proxy`'s `anytls` feature. |
+| `lwip` | Published as [`meow-lwip`](https://crates.io/crates/meow-lwip) from [madeye/lwip](https://github.com/madeye/lwip), consumed as `lwip = { package = "meow-lwip", version = "0.3.15" }` | Upstream `lwip` is **not** a substitute: the fork rewrites the Rust layer (single-owner core) and carries the `poll_next` UAF, `poll_flush` deadlock, FIN_WAIT_2 leak and livelock fixes. Required by `listener-tun`, which is in `meow-app`'s default `full` bundle. |
+
+If you need a newer fork change, publish it to crates.io first, then bump the
+version here — never point `[workspace.dependencies]` at a git rev.
 
 ## Manual fallback
 
