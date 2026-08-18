@@ -2550,9 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "meow-lwip"
-version = "0.3.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22746441375482072bd0368d5f615b5a5f22553c649ac197bd91de0a64cb1dcc"
+version = "0.20.2"
 dependencies = [
  "bindgen 0.69.5",
  "bytes",

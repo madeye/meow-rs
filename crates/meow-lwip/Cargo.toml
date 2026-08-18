@@ -1,0 +1,67 @@
+# Vendored copy of the madeye fork of lwip (github.com/madeye/lwip), pinned at
+# 5f6f0dfe025c967157ff328d94efe488852d8755 (branch `feature/single-owner-core`).
+# Vendored in-tree for the same reason as `meow-anytls`: crates.io forbids `git`
+# dependencies in a published manifest, so a `git =` pin made meow-listener /
+# meow-api / meow-app unpublishable (it aborted the 0.20.2 release half-way).
+#
+# Upstream `lwip` on crates.io (ssrlive/lwip) is NOT interchangeable with this
+# tree — the Rust layer here is a rewrite: single-owner core (LWIP_MUTEX removed
+# entirely), plus fixes for a data race / use-after-free in `Stream::poll_next`,
+# a `poll_flush` Pending-without-waker deadlock, a FIN_WAIT_2 pcb leak and a
+# timer-task livelock. None of those are in upstream 0.4.0.
+#
+# The package is renamed (`meow-lwip`) because `lwip` on crates.io belongs to
+# upstream, while the library name stays `lwip` so dependents' `use lwip::...`
+# paths are unchanged.
+#
+# Only the files the build consumes are vendored: `old-src/{core,custom,include}`
+# (what build.rs actually compiles), `src/api/err.c` (the single file it pulls
+# from the modern tree) and `rust/`. The fork's unused `src/`, `contrib/`,
+# `test/`, `doc/` and `xcode/` trees are omitted — 2.6 MB vendored instead of
+# 12 MB. Re-check build.rs's file list when syncing a newer fork commit.
+#
+# Local delta vs the fork: `rust/udp.rs` uses `io::Error::other(..)` in two
+# places instead of `io::Error::new(ErrorKind::Other, ..)`, to satisfy clippy's
+# `io_other_error` under the workspace `-D warnings` gate. Re-apply when syncing.
+[package]
+name = "meow-lwip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Vendored lwIP TCP/IP stack bindings (madeye fork, single-owner core) for the meow-rs proxy kernel."
+# The Rust bindings are MIT/Apache-2.0 (upstream ssrlive/lwip); the vendored C
+# sources under old-src/ are lwIP's own BSD-3-Clause (see COPYING). Declared as
+# upstream declares it rather than restating it as the workspace's plain MIT.
+license = "MIT/Apache-2.0"
+authors = ["@ssrlive", "@madeye"]
+repository = "https://github.com/madeye/meow-rs"
+homepage = "https://madeye.github.io/meow-rs/"
+readme = "README.md"
+
+[lib]
+# Library name stays `lwip` so `use lwip::...` in meow-listener is unchanged.
+name = "lwip"
+crate-type = ["lib", "cdylib"]
+path = "rust/lib.rs"
+
+[dependencies]
+bytes = "1"
+futures = "0.3"
+log = "0.4"
+thiserror = "1"
+tokio = { version = "1", features = [
+  "sync",
+  "io-util",
+  "macros",
+  "net",
+  "time",
+  "rt",
+  "rt-multi-thread",
+] }
+# PollSender: waker-correct bounded-channel Sink used by the TcpStream write
+# path and the NetStack ingress Sink. The `sync` module is unconditional.
+tokio-util = { version = "0.7", default-features = false }
+
+[build-dependencies]
+bindgen = "0.69"
+cc = "1.0"
