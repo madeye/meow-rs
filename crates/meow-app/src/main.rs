@@ -796,9 +796,12 @@ async fn run(
     // deadlocks against the tunnel carrying it.
     const VPN_PLATFORM: bool = cfg!(any(target_os = "android", target_os = "ios"));
     if config.dns.enabled || VPN_PLATFORM {
-        meow_common::set_host_resolver(Arc::new(meow_dns::ResolverHostHook::new(Arc::clone(
-            &config.dns.resolver,
-        ))));
+        meow_common::set_host_resolver(Arc::new(
+            meow_dns::ResolverHostHook::new_with_proxy_resolver(
+                Arc::clone(&config.dns.resolver),
+                config.dns.proxy_resolver.clone(),
+            ),
+        ));
     } else {
         meow_common::clear_host_resolver();
     }

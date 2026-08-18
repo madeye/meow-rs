@@ -9,7 +9,7 @@ use meow_dns::upstream::{NameServerEntry, NameServerUrl};
 use meow_dns::{DnsClient, HostOrIp, Resolver};
 use meow_trie::DomainTrie;
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
@@ -41,6 +41,7 @@ pub async fn parse_dns(
                 resolver,
                 listen_addr: None,
                 enabled: false,
+                proxy_resolver: None,
             });
         }
     };
@@ -52,6 +53,8 @@ pub async fn parse_dns(
     let fallback_urls = parse_nameserver_entries(dns.fallback.as_deref().unwrap_or(&[]))?;
     let default_ns_urls =
         parse_nameserver_entries(dns.default_nameserver.as_deref().unwrap_or(&[]))?;
+    let proxy_ns_urls =
+        parse_nameserver_entries(dns.proxy_server_nameserver.as_deref().unwrap_or(&[]))?;
 
     let mode = match dns.enhanced_mode.as_deref() {
         Some("fake-ip") => DnsMode::FakeIp,
@@ -65,6 +68,46 @@ pub async fn parse_dns(
     if use_hosts && use_system_hosts {
         merge_system_hosts(&mut hosts).await;
     }
+
+    // mihomo `proxy-server-nameserver`: a dedicated resolver used only for
+    // proxy server hostnames (dns.Config.ProxyServer → ProxyServerHostResolver).
+    // Normal mode — proxy server domains must never get fake IPs — and no
+    // fallback/policy; hostname URLs bootstrap via default-nameserver exactly
+    // like the main list. Hosts entries still apply (mihomo checks its global
+    // hosts table before consulting any resolver), so it gets its own copy of
+    // the hosts trie — DomainTrie is not Clone, hence the rebuild.
+    let proxy_resolver = if proxy_ns_urls.is_empty() {
+        None
+    } else {
+        for (nameserver, proxy) in circular_proxy_tags(&proxy_ns_urls, proxy_registry) {
+            warn!(
+                "dns.proxy-server-nameserver '{nameserver}' is tagged #{proxy}, but '{proxy}' is \
+                 itself reached by hostname — resolving that hostname is what this nameserver \
+                 exists to do, so the lookup re-enters the resolver, is fenced to hosts: + cache, \
+                 and falls through to the system resolver on a miss. Pin the node's server in \
+                 hosts:, give it an IP-literal server:, or drop the #{proxy} tag."
+            );
+        }
+        let mut proxy_hosts = build_hosts_trie(raw.hosts.as_ref())?;
+        if use_hosts && use_system_hosts {
+            merge_system_hosts(&mut proxy_hosts).await;
+        }
+        Some(Arc::new(
+            Resolver::new_with_bootstrap_with_proxies(
+                proxy_ns_urls,
+                vec![],
+                default_ns_urls.clone(),
+                DnsMode::Normal,
+                proxy_hosts,
+                use_hosts,
+                None,
+                None,
+                proxy_registry,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("proxy-server-nameserver: {e}"))?,
+        ))
+    };
 
     // Build nameserver-policy if configured.
     let policy = if let Some(nsp_map) = &dns.nameserver_policy {
@@ -127,6 +170,7 @@ pub async fn parse_dns(
         resolver: Arc::new(resolver),
         listen_addr,
         enabled: true,
+        proxy_resolver,
     })
 }
 
@@ -192,6 +236,54 @@ async fn install_fakeip(
     };
     resolver.set_fakeip_skipper(Skipper::new(&patterns, skipper_mode));
     Ok(())
+}
+
+/// `#PROXY`-tagged `dns.proxy-server-nameserver` entries whose proxy cannot be
+/// dialled without this very resolver, as `(nameserver, proxy name)` pairs.
+///
+/// A tag here is legitimate when the named node has an IP-literal `server:` —
+/// `meow_common::resolve_addrs` short-circuits literals, so the hook is never
+/// re-entered and the nameserver is genuinely reached through the proxy. It is
+/// circular when the node is reached by hostname: resolving *that* hostname
+/// routes back into this resolver, trips the re-entrancy fence, and degrades to
+/// `resolve_ips_local` (hosts: + warm cache) with a silent system-resolver
+/// fallback on a miss. Groups report an empty `addr()` because the member is
+/// only chosen at dial time, so they count as circular too.
+///
+/// Unknown proxy names are skipped — `Resolver::new_with_bootstrap_with_proxies`
+/// already rejects those with `BootstrapError::UnknownProxy`.
+fn circular_proxy_tags(
+    entries: &[NameServerEntry],
+    proxy_registry: &HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>>,
+) -> Vec<(String, String)> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.proxy.as_deref()?;
+            let proxy = proxy_registry.get(name)?;
+            if is_ip_literal_addr(proxy.addr()) {
+                return None;
+            }
+            Some((entry.url.to_string(), name.to_string()))
+        })
+        .collect()
+}
+
+/// True when a `ProxyAdapter::addr()` string (`"<server>:<port>"`) carries an
+/// IP literal rather than a hostname. Anything unparseable is treated as a
+/// literal so a shape we do not recognise cannot manufacture a false warning.
+fn is_ip_literal_addr(addr: &str) -> bool {
+    if addr.is_empty() {
+        // Groups: member — and therefore its server — unknown until dial time.
+        return false;
+    }
+    if addr.parse::<SocketAddr>().is_ok() || addr.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    let host = host.strip_prefix('[').unwrap_or(host);
+    let host = host.strip_suffix(']').unwrap_or(host);
+    host.parse::<IpAddr>().is_ok()
 }
 
 /// Parse nameserver strings into `NameServerEntry`s — every entry must
@@ -765,6 +857,46 @@ mod tests {
         assert!(trie.search("example.com").is_none());
     }
 
+    #[tokio::test]
+    async fn proxy_server_nameserver_builds_dedicated_resolver() {
+        let raw: RawConfig = serde_yaml::from_str(
+            "dns:\n  enable: true\n  nameserver:\n    - 1.1.1.1\n  proxy-server-nameserver:\n    - 223.5.5.5\n",
+        )
+        .unwrap();
+        let cfg = parse_dns(&raw, None, None, &HashMap::new(), None)
+            .await
+            .unwrap();
+        assert!(
+            cfg.proxy_resolver.is_some(),
+            "proxy-server-nameserver must build a dedicated resolver"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_proxy_server_nameserver_leaves_proxy_resolver_none() {
+        let raw: RawConfig =
+            serde_yaml::from_str("dns:\n  enable: true\n  nameserver:\n    - 1.1.1.1\n").unwrap();
+        let cfg = parse_dns(&raw, None, None, &HashMap::new(), None)
+            .await
+            .unwrap();
+        assert!(cfg.proxy_resolver.is_none());
+    }
+
+    #[tokio::test]
+    async fn proxy_server_nameserver_ignored_when_dns_disabled() {
+        // mihomo: ProxyServerHostResolver is nil whenever the DNS section is
+        // off — proxy server hostnames fall back to the system resolver.
+        let raw: RawConfig = serde_yaml::from_str(
+            "dns:\n  enable: false\n  proxy-server-nameserver:\n    - 223.5.5.5\n",
+        )
+        .unwrap();
+        let cfg = parse_dns(&raw, None, None, &HashMap::new(), None)
+            .await
+            .unwrap();
+        assert!(!cfg.enabled);
+        assert!(cfg.proxy_resolver.is_none());
+    }
+
     #[test]
     fn build_hosts_trie_single_ip() {
         let mut map = HashMap::new();
@@ -1031,6 +1163,8 @@ mod tests {
     /// these tests only care whether the adapter handle reached the client.
     struct PolicyStubProxy {
         health: meow_common::ProxyHealth,
+        /// `"<server>:<port>"`, or empty to stand in for a group.
+        addr: String,
     }
 
     #[async_trait::async_trait]
@@ -1045,7 +1179,7 @@ mod tests {
             meow_common::AdapterType::Direct
         }
         fn addr(&self) -> &str {
-            ""
+            &self.addr
         }
         fn support_udp(&self) -> bool {
             false
@@ -1089,6 +1223,7 @@ mod tests {
             "Proxy".into(),
             Arc::new(PolicyStubProxy {
                 health: meow_common::ProxyHealth::new(),
+                addr: String::new(),
             }),
         );
         let value = crate::raw::RawNspValue::One("tcp://8.8.8.8#Proxy".to_string());
@@ -1130,5 +1265,68 @@ mod tests {
             .expect("tls entry with SNI fragment builds");
         assert_eq!(resolvers.len(), 1);
         assert!(!resolvers[0].is_proxied());
+    }
+
+    // --- proxy-server-nameserver `#PROXY` circularity ---------------------
+
+    fn stub_registry(
+        entries: &[(&str, &str)],
+    ) -> HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>> {
+        entries
+            .iter()
+            .map(|(name, addr)| {
+                let proxy: Arc<dyn meow_common::Proxy> = Arc::new(PolicyStubProxy {
+                    health: meow_common::ProxyHealth::new(),
+                    addr: (*addr).to_string(),
+                });
+                (smol_str::SmolStr::from(*name), proxy)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ip_literal_addr_detection() {
+        assert!(is_ip_literal_addr("1.2.3.4:443"));
+        assert!(is_ip_literal_addr("[2001:db8::1]:443"));
+        assert!(is_ip_literal_addr("2001:db8::1"));
+        assert!(!is_ip_literal_addr("node.example:443"));
+        // Groups report no address at all.
+        assert!(!is_ip_literal_addr(""));
+    }
+
+    #[test]
+    fn proxy_tag_on_hostname_node_is_circular() {
+        let entries = parse_nameserver_entries(&["223.5.5.5#JP".to_string()]).unwrap();
+        let registry = stub_registry(&[("JP", "node.example:443")]);
+        assert_eq!(
+            circular_proxy_tags(&entries, &registry),
+            vec![("udp://223.5.5.5:53".to_string(), "JP".to_string())]
+        );
+    }
+
+    #[test]
+    fn proxy_tag_on_ip_literal_node_is_fine() {
+        // The hook short-circuits IP literals, so this tag never re-enters
+        // the resolver — it works exactly as written and must not warn.
+        let entries = parse_nameserver_entries(&["223.5.5.5#JP".to_string()]).unwrap();
+        let registry = stub_registry(&[("JP", "1.2.3.4:443")]);
+        assert!(circular_proxy_tags(&entries, &registry).is_empty());
+    }
+
+    #[test]
+    fn proxy_tag_on_group_is_circular() {
+        let entries = parse_nameserver_entries(&["223.5.5.5#Auto".to_string()]).unwrap();
+        let registry = stub_registry(&[("Auto", "")]);
+        assert_eq!(circular_proxy_tags(&entries, &registry).len(), 1);
+    }
+
+    #[test]
+    fn untagged_and_unknown_proxy_entries_are_skipped() {
+        let entries =
+            parse_nameserver_entries(&["223.5.5.5".to_string(), "8.8.8.8#NoSuchProxy".to_string()])
+                .unwrap();
+        // Unknown names are the bootstrap builder's error to raise, not ours.
+        let registry = stub_registry(&[("JP", "node.example:443")]);
+        assert!(circular_proxy_tags(&entries, &registry).is_empty());
     }
 }

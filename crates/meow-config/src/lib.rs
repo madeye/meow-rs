@@ -93,6 +93,10 @@ pub struct DnsConfig {
     /// user's DNS — callers that would otherwise impose it process-wide,
     /// such as the `meow_common::HostResolver` hook, must not install it.
     pub enabled: bool,
+    /// Dedicated resolver built from `dns.proxy-server-nameserver` (mihomo
+    /// `ProxyServerHostResolver`). `None` when the option is unset or DNS is
+    /// disabled — proxy server hostnames then resolve via `resolver`.
+    pub proxy_resolver: Option<Arc<Resolver>>,
 }
 
 /// Listener protocol type — mirrors the `type:` field in the YAML `listeners:` array.

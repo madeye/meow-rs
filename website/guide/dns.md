@@ -26,6 +26,7 @@ still used internally so rules and proxies can resolve names.
 | `nameserver` | list | `[]` | Primary upstreams (defaults to `8.8.8.8` if empty) |
 | `fallback` | list | `[]` | Fallback upstreams (gated by `fallback-filter`) |
 | `default-nameserver` | list | `[]` | Bootstrap servers to resolve DoT/DoH hostnames |
+| `proxy-server-nameserver` | list | `[]` | Dedicated upstreams for proxy server hostnames; when unset they use `nameserver` |
 | `nameserver-policy` | map | — | Per-domain upstream routing |
 | `fallback-filter` | block | — | When to use `fallback` |
 | `fake-ip-range` | string | `198.18.0.1/16` | Fake-IP CIDR pool |
@@ -134,11 +135,43 @@ Android and iOS builds are the exception: there the OS resolver's sockets would 
 back through the VPN tunnel and deadlock, so node hostnames always go through the
 built-in resolver, `enable` or not.
 
+### Dedicated upstreams for nodes
+
+`proxy-server-nameserver` gives node hostnames their own upstreams, separate from the
+ones serving ordinary traffic. The usual reason is bootstrapping: the main `nameserver`
+is somewhere the proxy has to reach first, so the nodes themselves need a resolver that
+is reachable without a working tunnel.
+
+```yaml
+dns:
+  enable: true
+  nameserver: ["https://1.1.1.1/dns-query"]   # for destination domains
+  proxy-server-nameserver: [223.5.5.5]        # for the nodes' own server:
+```
+
+It is a self-contained resolver, so a few things differ from the main one:
+
+- **No fallback to `nameserver`.** Once configured it is authoritative for node
+  hostnames; if it cannot answer, the dial fails rather than retrying elsewhere.
+- **`nameserver-policy`, `fallback` and `fallback-filter` do not apply** — only the
+  listed upstreams are consulted.
+- **`hosts:` still wins**, so a pinned node never reaches these upstreams at all.
+- **Always `normal` mode**, so a node can never be handed a fake IP.
+- **`default-nameserver` still bootstraps it**, so a DoT/DoH entry here needs a plain
+  IP-literal bootstrap server just like one in `nameserver`.
+- **Ignored when `enable: false`**, along with the rest of the `dns` block.
+
 ::: tip `#PROXY` nameservers
 A nameserver tagged `#PROXY` has to dial that proxy to answer a query. If the query *is*
 for that proxy's own server hostname, meow-rs would be waiting on itself, so this one hop
 falls back to the `hosts:` map and the DNS cache, then to the OS resolver. Pinning such
 nodes in `hosts:` (or configuring them by IP) keeps them off the OS resolver entirely.
+
+Tagging a `proxy-server-nameserver` entry is the sharpest form of this: resolving node
+hostnames is the job you just gave it, so `proxy-server-nameserver: [223.5.5.5#HK]` can
+only work when `HK` itself needs no lookup — an IP-literal `server:`, or one pinned in
+`hosts:`. meow-rs warns at startup when the tagged node is reached by hostname (or is a
+group, whose member is only picked at dial time).
 :::
 
 ## Caching
