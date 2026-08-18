@@ -2,7 +2,9 @@ use crate::raw::{HostsValue, RawConfig};
 use crate::DnsConfig;
 use meow_common::DnsMode;
 use meow_dns::fakeip::{FileStore, MemoryStore, Pool, Skipper, SkipperMode, Store};
-use meow_dns::resolver::{FallbackFilter, NameserverPolicy, NameserverPolicyMatcher, PolicyEntry};
+use meow_dns::resolver::{
+    FallbackFilter, HostEntry, NameserverPolicy, NameserverPolicyMatcher, PolicyEntry,
+};
 use meow_dns::upstream::{NameServerEntry, NameServerUrl};
 use meow_dns::{DnsClient, HostOrIp, Resolver};
 use meow_trie::DomainTrie;
@@ -573,55 +575,104 @@ fn build_fallback_filter(
     }
 }
 
-/// Build the hosts trie from `dns.hosts` config entries.
-///
-/// Returns an error if any IP value is malformed (Class A per ADR-0002 —
-/// malformed IPs in hosts are almost certainly typos).
+/// Build the hosts trie from top-level mihomo-compatible `hosts:` entries.
+/// A single value may be an IP or domain alias; lists must contain only IPs.
+/// Malformed values and alias cycles are hard errors (Class A per ADR-0002).
 fn build_hosts_trie(
     hosts: Option<&HashMap<String, HostsValue>>,
-) -> Result<DomainTrie<Vec<IpAddr>>, anyhow::Error> {
-    let mut trie: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+) -> Result<DomainTrie<HostEntry>, anyhow::Error> {
+    let mut trie: DomainTrie<HostEntry> = DomainTrie::new();
     let Some(hosts) = hosts else {
         return Ok(trie);
     };
+    let mut aliases = Vec::new();
     for (host, value) in hosts {
-        let raw_ips = value.as_slice();
-        let mut ips: Vec<IpAddr> = Vec::with_capacity(raw_ips.len());
-        for s in &raw_ips {
-            match s.parse::<IpAddr>() {
-                Ok(ip) => ips.push(ip),
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "dns.hosts: invalid IP '{s}' for host '{host}': {e} \
-                        (Class A per ADR-0002 — malformed hosts entries are almost certainly typos)"
-                    ));
-                }
-            }
-        }
-        if ips.is_empty() {
-            warn!("dns.hosts: entry '{}' has no IPs, skipping", host);
+        let values = value.as_slice();
+        if values.is_empty() {
+            warn!("hosts: entry '{}' has no values, skipping", host);
             continue;
         }
+        let host_entry = if values.len() == 1 {
+            let raw = values[0].trim();
+            match raw.parse::<IpAddr>() {
+                Ok(ip) => HostEntry::Addresses(vec![ip]),
+                Err(_) => {
+                    let alias = parse_host_alias(raw, host)?;
+                    aliases.push((normalize_hosts_wildcard(host.trim()), alias.clone()));
+                    HostEntry::Alias(alias.into())
+                }
+            }
+        } else {
+            let mut ips = Vec::with_capacity(values.len());
+            for raw in values {
+                let ip = raw.parse::<IpAddr>().map_err(|e| {
+                    anyhow::anyhow!(
+                        "hosts: invalid IP '{raw}' for host '{host}': {e} \
+                         (lists may contain only IP addresses)"
+                    )
+                })?;
+                ips.push(ip);
+            }
+            HostEntry::Addresses(ips)
+        };
         // Rewrite *.foo → +.foo for DomainTrie wildcard semantics at parse time.
         let entry = normalize_hosts_wildcard(host.trim());
-        if !trie.insert(&entry, ips.clone()) {
-            warn!("dns.hosts: failed to insert '{}' into trie", host);
+        if !trie.insert(&entry, host_entry.clone()) {
+            warn!("hosts: failed to insert '{}' into trie", host);
         }
         // DomainTrie's +. semantics don't include the root domain itself — insert
         // it explicitly so that "corp.internal" matches "+.corp.internal".
         if let Some(bare) = entry.strip_prefix("+.") {
-            trie.insert(bare, ips);
+            trie.insert(bare, host_entry);
         }
     }
+    reject_host_alias_cycles(&trie, &aliases)?;
     Ok(trie)
 }
 
+fn parse_host_alias(value: &str, host: &str) -> Result<String, anyhow::Error> {
+    let alias = value.trim_end_matches('.').to_ascii_lowercase();
+    let valid = alias.contains('.')
+        && !alias.contains('*')
+        && !alias.contains('+')
+        && hickory_proto::rr::Name::from_ascii(&alias).is_ok();
+    if !valid {
+        return Err(anyhow::anyhow!(
+            "hosts: value '{value}' for host '{host}' is neither an IP address nor a valid domain alias"
+        ));
+    }
+    Ok(alias)
+}
+
+fn reject_host_alias_cycles(
+    trie: &DomainTrie<HostEntry>,
+    aliases: &[(String, String)],
+) -> Result<(), anyhow::Error> {
+    for (source, target) in aliases {
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(source.to_ascii_lowercase());
+        let mut current = target.as_str();
+        loop {
+            if !seen.insert(current.to_ascii_lowercase()) {
+                return Err(anyhow::anyhow!(
+                    "hosts: domain alias cycle detected starting at '{source}'"
+                ));
+            }
+            match trie.search(current) {
+                Some(HostEntry::Alias(next)) => current = next.as_str(),
+                Some(HostEntry::Addresses(_)) | None => break,
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Merge system hosts entries into the trie at lower priority than config entries.
-async fn merge_system_hosts(trie: &mut DomainTrie<Vec<IpAddr>>) {
+async fn merge_system_hosts(trie: &mut DomainTrie<HostEntry>) {
     let entries = parse_system_hosts().await;
     for (domain, ips) in entries {
         if trie.search(&domain).is_none() {
-            trie.insert(&domain, ips);
+            trie.insert(&domain, HostEntry::Addresses(ips));
         }
     }
 }
@@ -699,6 +750,13 @@ mod tests {
         HostsValue::Many(ss.iter().map(std::string::ToString::to_string).collect())
     }
 
+    fn addresses(entry: &HostEntry) -> &[IpAddr] {
+        match entry {
+            HostEntry::Addresses(ips) => ips,
+            HostEntry::Alias(alias) => panic!("expected addresses, got alias {alias}"),
+        }
+    }
+
     #[test]
     fn build_hosts_trie_none_is_empty() {
         let trie = build_hosts_trie(None).unwrap();
@@ -711,7 +769,7 @@ mod tests {
         map.insert("example.com".to_string(), one("1.2.3.4"));
         let trie = build_hosts_trie(Some(&map)).unwrap();
         let v = trie.search("example.com").expect("must hit");
-        assert_eq!(v, &vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))]);
+        assert_eq!(addresses(v), &[IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))]);
     }
 
     #[test]
@@ -720,10 +778,45 @@ mod tests {
         map.insert("dual.test".to_string(), many(&["1.1.1.1", "::1"]));
         let trie = build_hosts_trie(Some(&map)).unwrap();
         let v = trie.search("dual.test").expect("must hit");
-        assert_eq!(v.len(), 2);
+        assert_eq!(addresses(v).len(), 2);
     }
 
-    // Malformed IP in dns.hosts → hard error (Class A per ADR-0002).
+    #[test]
+    fn build_hosts_trie_domain_alias() {
+        let mut map = HashMap::new();
+        map.insert("node.example".to_string(), one("origin.example"));
+        let trie = build_hosts_trie(Some(&map)).unwrap();
+        assert_eq!(
+            trie.search("node.example"),
+            Some(&HostEntry::Alias("origin.example".into()))
+        );
+    }
+
+    #[test]
+    fn build_hosts_trie_rejects_alias_cycle() {
+        let mut map = HashMap::new();
+        map.insert("a.example".to_string(), one("b.example"));
+        map.insert("b.example".to_string(), one("a.example"));
+        let err = build_hosts_trie(Some(&map))
+            .err()
+            .expect("domain alias cycles must be rejected");
+        assert!(err.to_string().contains("alias cycle"));
+    }
+
+    #[test]
+    fn build_hosts_trie_rejects_domain_in_multi_value_list() {
+        let mut map = HashMap::new();
+        map.insert(
+            "bad.example".to_string(),
+            many(&["192.0.2.1", "origin.example"]),
+        );
+        let err = build_hosts_trie(Some(&map))
+            .err()
+            .expect("multi-value hosts entries may contain only IPs");
+        assert!(err.to_string().contains("lists may contain only IP"));
+    }
+
+    // A value that is neither an IP nor a valid alias is a hard error.
     // Upstream: silently skips malformed IPs. NOT silent skip — Class A per ADR-0002.
     #[test]
     fn build_hosts_trie_malformed_ip_hard_error() {
@@ -732,7 +825,7 @@ mod tests {
         let result = build_hosts_trie(Some(&map));
         let err = result
             .err()
-            .expect("malformed IP in dns.hosts must be a hard error (Class A)");
+            .expect("malformed hosts value must be a hard error (Class A)");
         let msg = err.to_string();
         assert!(
             msg.contains("not-an-ip") && msg.contains("bad.test"),
@@ -779,7 +872,7 @@ mod tests {
         let exact = trie.search("dns.corp.internal").expect("must hit exact");
         let exact_addr: IpAddr = exact_ip.parse().unwrap();
         assert_eq!(
-            exact.first().copied(),
+            addresses(exact).first().copied(),
             Some(exact_addr),
             "exact entry must override wildcard"
         );

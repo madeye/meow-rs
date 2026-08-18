@@ -9,15 +9,15 @@
 use ipnet::IpNet;
 use meow_common::{DnsMode, Metadata, Network};
 use meow_dns::fakeip::{MemoryStore, Pool};
-use meow_dns::Resolver;
+use meow_dns::{HostEntry, Resolver};
 use meow_trie::DomainTrie;
 use meow_tunnel::Tunnel;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 fn build_fakeip_resolver(real_host: &str, real_ip: IpAddr) -> Arc<Resolver> {
-    let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
-    hosts.insert(real_host, vec![real_ip]);
+    let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+    hosts.insert(real_host, vec![real_ip].into());
     // hosts trie is consulted BEFORE the fake-IP pool, so put the host in
     // the trie. That mirrors the production wiring: explicit `hosts:`
     // entries override fake-IP. For the rewrite test we want the resolver

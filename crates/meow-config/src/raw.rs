@@ -169,8 +169,8 @@ pub struct RawConfig {
     /// Explicit `type: direct` proxy blocks are NOT covered by this
     /// global; they accept their own per-proxy `connect-timeout` field.
     pub tcp_connect_timeout: Option<u64>,
-    /// Static host → IP mappings, preferred over upstream DNS lookups.
-    /// Values may be a single IP string or a list of IPs.
+    /// Static host mappings, preferred over upstream DNS lookups. Values may
+    /// be a single IP, a list of IPs, or one domain-name alias.
     pub hosts: Option<HashMap<String, HostsValue>>,
     pub sniffer: Option<RawSniffer>,
     /// Named listener array. Each entry defines an explicitly-named proxy
@@ -188,7 +188,7 @@ pub struct RawConfig {
     pub max_connections: Option<usize>,
 }
 
-/// A `hosts:` map value: either a single IP address or a list of addresses.
+/// A `hosts:` map value: one IP/domain alias or a list of IP addresses.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum HostsValue {
@@ -301,7 +301,7 @@ pub struct RawDns {
     /// If false, the hosts trie lookup is skipped entirely at query time.
     pub use_hosts: Option<bool>,
     /// If true, `/etc/hosts` is read at startup and merged (lower priority than
-    /// `dns.hosts` config entries). No-op + warn on Windows.
+    /// top-level `hosts` config entries). No-op + warn on Windows.
     pub use_system_hosts: Option<bool>,
     /// Per-domain nameserver routing: each key is an exact domain or a `+.`
     /// wildcard prefix; value is a single server URL or a list of URLs.

@@ -48,10 +48,15 @@ pub(crate) fn parse_optional_socket_addr(
     value: Option<&str>,
 ) -> Result<Option<SocketAddr>, anyhow::Error> {
     match value {
-        Some(value) if !value.is_empty() => value
-            .parse()
-            .map(Some)
-            .map_err(|e| anyhow::anyhow!("invalid {field} socket address '{value}': {e}")),
+        Some(value) if !value.is_empty() => {
+            let normalized = value
+                .strip_prefix(':')
+                .map_or_else(|| value.to_string(), |port| format!("0.0.0.0:{port}"));
+            normalized
+                .parse()
+                .map(Some)
+                .map_err(|e| anyhow::anyhow!("invalid {field} socket address '{value}': {e}"))
+        }
         _ => Ok(None),
     }
 }
@@ -2344,6 +2349,10 @@ mod socket_address_tests {
         assert!(parse_optional_socket_addr("dns.listen", Some("localhost")).is_err());
         assert!(parse_optional_socket_addr("dns.listen", Some("127.0.0.1:70000")).is_err());
         assert!(parse_optional_socket_addr("external-controller", Some("[::1]:9090")).is_ok());
+        assert_eq!(
+            parse_optional_socket_addr("external-controller", Some(":9090")).unwrap(),
+            Some("0.0.0.0:9090".parse().unwrap())
+        );
         assert_eq!(
             parse_optional_socket_addr("dns.listen", Some("127.0.0.1:0")).unwrap(),
             Some("127.0.0.1:0".parse().unwrap())

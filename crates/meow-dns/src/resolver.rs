@@ -17,6 +17,23 @@ use tracing::debug;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// A mihomo-compatible `hosts:` value.
+///
+/// A mapping may pin a host to one or more addresses, or redirect it to a
+/// different domain. Domain redirects are followed before consulting the DNS
+/// cache/upstreams, so they also apply to outbound proxy server resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostEntry {
+    Addresses(Vec<IpAddr>),
+    Alias(SmolStr),
+}
+
+impl From<Vec<IpAddr>> for HostEntry {
+    fn from(value: Vec<IpAddr>) -> Self {
+        Self::Addresses(value)
+    }
+}
+
 /// Error returned by `Resolver::new_with_bootstrap`.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -166,7 +183,7 @@ pub struct Resolver {
     fallback: Option<Vec<Arc<DnsClient>>>,
     cache: DnsCache,
     mode: DnsMode,
-    hosts: DomainTrie<Vec<IpAddr>>,
+    hosts: DomainTrie<HostEntry>,
     use_hosts: bool,
     inflight: DashMap<Arc<str>, InflightTx>,
     policy: Option<NameserverPolicy>,
@@ -181,6 +198,11 @@ pub struct Resolver {
     /// TTL stamped on synthesised A/AAAA responses. Short by design so
     /// clients re-query rather than caching a fake IP after pool eviction.
     fakeip_ttl: Duration,
+}
+
+enum HostsLookup<'a> {
+    Addresses(&'a Vec<IpAddr>),
+    Alias(&'a str),
 }
 
 struct InflightGuard<'a> {
@@ -460,12 +482,32 @@ async fn query_pool_generic(
 }
 
 impl Resolver {
+    /// Follow a mihomo-style hosts alias chain. Config parsing rejects cycles;
+    /// the depth guard is a defensive backstop for programmatically-built
+    /// tries passed to the public constructors.
+    fn lookup_hosts_entry<'a>(&'a self, host: &str) -> Option<HostsLookup<'a>> {
+        let mut current = host;
+        let mut terminal_alias = None;
+        for _ in 0..64 {
+            match self.hosts.search(current) {
+                Some(HostEntry::Addresses(ips)) => return Some(HostsLookup::Addresses(ips)),
+                Some(HostEntry::Alias(alias)) => {
+                    terminal_alias = Some(alias.as_str());
+                    current = alias.as_str();
+                }
+                None => return terminal_alias.map(HostsLookup::Alias),
+            }
+        }
+        tracing::error!(host, "hosts alias chain exceeded 64 entries");
+        None
+    }
+
     #[allow(clippy::needless_pass_by_value)] // Vec<SocketAddr> is conventional for public constructors
     pub fn new(
         main_servers: Vec<SocketAddr>,
         fallback_servers: Vec<SocketAddr>,
         mode: DnsMode,
-        hosts: DomainTrie<Vec<IpAddr>>,
+        hosts: DomainTrie<HostEntry>,
         use_hosts: bool,
     ) -> Self {
         let main = Self::build_clients(&main_servers);
@@ -511,7 +553,7 @@ impl Resolver {
         fallback_urls: Vec<NameServerUrl>,
         default_ns: Vec<NameServerUrl>,
         mode: DnsMode,
-        hosts: DomainTrie<Vec<IpAddr>>,
+        hosts: DomainTrie<HostEntry>,
         use_hosts: bool,
         policy: Option<NameserverPolicy>,
         fallback_filter: Option<FallbackFilter>,
@@ -544,7 +586,7 @@ impl Resolver {
         fallback_urls: Vec<NameServerEntry>,
         default_ns: Vec<NameServerEntry>,
         mode: DnsMode,
-        hosts: DomainTrie<Vec<IpAddr>>,
+        hosts: DomainTrie<HostEntry>,
         use_hosts: bool,
         policy: Option<NameserverPolicy>,
         fallback_filter: Option<FallbackFilter>,
@@ -799,19 +841,23 @@ impl Resolver {
     }
 
     pub async fn resolve_ips(&self, host: &str) -> Option<Vec<IpAddr>> {
-        if self.use_hosts {
-            if let Some(ips) = self.hosts.search(host) {
-                if !ips.is_empty() {
+        let lookup_host = if self.use_hosts {
+            match self.lookup_hosts_entry(host) {
+                Some(HostsLookup::Addresses(ips)) if !ips.is_empty() => {
                     return Some(ips.clone());
                 }
+                Some(HostsLookup::Alias(alias)) => alias,
+                _ => host,
             }
-        }
-        if let Some(ips) = self.cache.get(host) {
+        } else {
+            host
+        };
+        if let Some(ips) = self.cache.get(lookup_host) {
             if !ips.is_empty() {
                 return Some(ips.to_vec());
             }
         }
-        self.lookup_actual_all(host).await
+        self.lookup_actual_all(lookup_host).await
     }
 
     pub async fn resolve_ip(&self, host: &str) -> Option<IpAddr> {
@@ -832,12 +878,22 @@ impl Resolver {
     /// lookups. Hosts-trie hits get [`HOSTS_ANSWER_TTL`] — static mappings
     /// have no upstream TTL to honor.
     pub async fn lookup_ipv4_with_ttl(&self, host: &str) -> Option<(IpAddr, Duration)> {
-        if self.use_hosts {
-            if let Some(ips) = self.hosts.search(host) {
-                let ip = ips.iter().find(|ip| ip.is_ipv4()).copied()?;
-                return Some((ip, HOSTS_ANSWER_TTL));
+        let lookup_host = if self.use_hosts {
+            match self.lookup_hosts_entry(host) {
+                Some(HostsLookup::Addresses(ips)) => {
+                    let ip = ips.iter().find(|ip| ip.is_ipv4()).copied()?;
+                    return Some((ip, HOSTS_ANSWER_TTL));
+                }
+                Some(HostsLookup::Alias(alias)) => {
+                    return self
+                        .lookup_real_with_ttl(alias, std::net::IpAddr::is_ipv4)
+                        .await;
+                }
+                None => host,
             }
-        }
+        } else {
+            host
+        };
         // Fake-IP mode: synthesise from the v4 pool unless the skipper says
         // bypass. The hosts trie above still wins — explicit user mappings
         // never get rewritten to a fake address.
@@ -848,7 +904,7 @@ impl Resolver {
                 }
             }
         }
-        self.lookup_real_with_ttl(host, std::net::IpAddr::is_ipv4)
+        self.lookup_real_with_ttl(lookup_host, std::net::IpAddr::is_ipv4)
             .await
     }
 
@@ -858,12 +914,22 @@ impl Resolver {
 
     /// AAAA counterpart of [`Self::lookup_ipv4_with_ttl`] — same TTL contract.
     pub async fn lookup_ipv6_with_ttl(&self, host: &str) -> Option<(IpAddr, Duration)> {
-        if self.use_hosts {
-            if let Some(ips) = self.hosts.search(host) {
-                let ip = ips.iter().find(|ip| ip.is_ipv6()).copied()?;
-                return Some((ip, HOSTS_ANSWER_TTL));
+        let lookup_host = if self.use_hosts {
+            match self.lookup_hosts_entry(host) {
+                Some(HostsLookup::Addresses(ips)) => {
+                    let ip = ips.iter().find(|ip| ip.is_ipv6()).copied()?;
+                    return Some((ip, HOSTS_ANSWER_TTL));
+                }
+                Some(HostsLookup::Alias(alias)) => {
+                    return self
+                        .lookup_real_with_ttl(alias, std::net::IpAddr::is_ipv6)
+                        .await;
+                }
+                None => host,
             }
-        }
+        } else {
+            host
+        };
         // Fake-IP mode for AAAA: synthesise from the v6 pool if configured.
         // If only a v4 pool is configured (the common case — upstream
         // default is `198.18.0.1/16` only), return None so the server emits
@@ -878,7 +944,7 @@ impl Resolver {
                 return None;
             }
         }
-        self.lookup_real_with_ttl(host, std::net::IpAddr::is_ipv6)
+        self.lookup_real_with_ttl(lookup_host, std::net::IpAddr::is_ipv6)
             .await
     }
 
@@ -922,7 +988,10 @@ impl Resolver {
         if !self.use_hosts {
             return None;
         }
-        self.hosts.search(host)
+        match self.lookup_hosts_entry(host) {
+            Some(HostsLookup::Addresses(ips)) => Some(ips),
+            Some(HostsLookup::Alias(_)) | None => None,
+        }
     }
 
     async fn lookup_actual_all(&self, host: &str) -> Option<Vec<IpAddr>> {
@@ -1257,9 +1326,9 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ip_uses_hosts_file() {
-        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
-        hosts.insert("example.test", vec![real]);
+        hosts.insert("example.test", vec![real].into());
         let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
         assert_eq!(resolver.resolve_ip("example.test").await, Some(real));
         assert_eq!(resolver.resolve_ip_real("example.test").await, Some(real));
@@ -1267,12 +1336,12 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ips_preserves_all_hosts_file_addresses() {
-        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let ips = vec![
             IpAddr::V6(Ipv6Addr::LOCALHOST),
             IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
         ];
-        hosts.insert("example.test", ips.clone());
+        hosts.insert("example.test", ips.clone().into());
         let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
 
         assert_eq!(resolver.resolve_ips("example.test").await, Some(ips));
@@ -1283,8 +1352,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_ips_follows_hosts_domain_alias_chain() {
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+        let real = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        hosts.insert("alias.test", HostEntry::Alias("middle.test".into()));
+        hosts.insert("middle.test", HostEntry::Alias("origin.test".into()));
+        hosts.insert("origin.test", HostEntry::Addresses(vec![real]));
+        let resolver = Resolver::new(vec![], vec![], DnsMode::FakeIp, hosts, true);
+
+        assert_eq!(resolver.resolve_ips("alias.test").await, Some(vec![real]));
+        assert_eq!(
+            resolver.lookup_ipv4("alias.test").await,
+            Some(real),
+            "an explicit alias must bypass fake-IP synthesis"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_ip_returns_cached_entry() {
-        let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         resolver
@@ -1295,7 +1381,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_ips_preserves_all_cached_addresses() {
-        let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
         let ips = vec![
             IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
@@ -1312,7 +1398,7 @@ mod tests {
     fn fake_ip_active_for_gates_on_mode_pool_and_skipper() {
         use crate::fakeip::{MemoryStore, SkipperMode};
 
-        let new_hosts = || -> DomainTrie<Vec<IpAddr>> { DomainTrie::new() };
+        let new_hosts = || -> DomainTrie<HostEntry> { DomainTrie::new() };
 
         // Normal mode: never active.
         let normal = Resolver::new(vec![], vec![], DnsMode::Normal, new_hosts(), true);
@@ -1420,9 +1506,9 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_with_ttl_uses_hosts_ttl_for_static_mappings() {
-        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let pinned = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        hosts.insert("pinned.test", vec![pinned]);
+        hosts.insert("pinned.test", vec![pinned].into());
         let resolver = Resolver::new(vec![], vec![], DnsMode::Mapping, hosts, true);
         assert_eq!(
             resolver.lookup_ipv4_with_ttl("pinned.test").await,
@@ -1496,7 +1582,7 @@ mod tests {
 
     #[tokio::test]
     async fn inflight_entry_cleared_after_lookup_miss() {
-        let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
         let _ = resolver.lookup_actual_all("nonexistent.test").await;
         assert!(
@@ -1508,7 +1594,7 @@ mod tests {
 
     #[tokio::test]
     async fn inflight_concurrent_callers_share_one_lookup() {
-        let hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let resolver =
             std::sync::Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
         let r1 = Arc::clone(&resolver);
@@ -1769,9 +1855,9 @@ mod tests {
     // Upstream: use-hosts is always on in upstream. NOT a bypass here — Class B per ADR-0002 (deferred config option).
     #[tokio::test]
     async fn use_hosts_false_bypasses_hosts_trie() {
-        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let hosts_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        hosts.insert("example.test", vec![hosts_ip]);
+        hosts.insert("example.test", vec![hosts_ip].into());
         let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, false);
         // With use_hosts=false, hosts lookup is bypassed, no upstream → None.
         assert_eq!(
@@ -1785,8 +1871,11 @@ mod tests {
     #[test]
     fn lookup_hosts_all_respects_use_hosts_flag() {
         let make_hosts = || {
-            let mut h: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
-            h.insert("example.test", vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))]);
+            let mut h: DomainTrie<HostEntry> = DomainTrie::new();
+            h.insert(
+                "example.test",
+                vec![IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))].into(),
+            );
             h
         };
         let r_on = Resolver::new(vec![], vec![], DnsMode::Normal, make_hosts(), true);

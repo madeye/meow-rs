@@ -3,7 +3,7 @@
 //! entirely when an earlier rule already matched.
 
 use meow_common::{DnsMode, Metadata, Network, Rule};
-use meow_dns::Resolver;
+use meow_dns::{HostEntry, Resolver};
 use meow_rules::{domain_suffix::DomainSuffixRule, final_rule::FinalRule, ipcidr::IpCidrRule};
 use meow_trie::DomainTrie;
 use meow_tunnel::Tunnel;
@@ -11,8 +11,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 fn build_resolver_with_host(host: &str, ip: IpAddr) -> Arc<Resolver> {
-    let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
-    hosts.insert(host, vec![ip]);
+    let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+    hosts.insert(host, vec![ip].into());
     Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true))
 }
 

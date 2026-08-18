@@ -544,7 +544,7 @@ fn parse_direct(
             servers,
             Vec::new(),
             DnsMode::Normal,
-            DomainTrie::<Vec<IpAddr>>::new(),
+            DomainTrie::new(),
             false,
         ));
         adapter = adapter.with_resolver(resolver);

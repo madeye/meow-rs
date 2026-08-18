@@ -4,7 +4,7 @@ use http_body_util::BodyExt;
 use meow_api::routes::{create_router, AppState};
 use meow_common::{DnsMode, Proxy};
 use meow_config::raw::{RawConfig, RawProxyGroup, RawSubscription};
-use meow_dns::Resolver;
+use meow_dns::{HostEntry, Resolver};
 use meow_trie::DomainTrie;
 use meow_tunnel::Tunnel;
 use parking_lot::RwLock;
@@ -2727,8 +2727,8 @@ async fn delete_all_connections_clears_all() {
 fn test_state_with_hosts_entry() -> Arc<AppState> {
     use std::net::IpAddr;
     let ip: IpAddr = "192.0.2.1".parse().unwrap();
-    let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
-    hosts.insert("test.local", vec![ip]);
+    let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+    hosts.insert("test.local", vec![ip].into());
 
     let resolver = Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
     let tunnel = Tunnel::new(resolver);

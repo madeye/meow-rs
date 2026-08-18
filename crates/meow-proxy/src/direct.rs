@@ -349,6 +349,7 @@ impl ProxyAdapter for DirectAdapter {
 mod tests {
     use super::*;
     use meow_common::DnsMode;
+    use meow_dns::HostEntry;
     use meow_trie::DomainTrie;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -377,13 +378,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let mut hosts: DomainTrie<Vec<IpAddr>> = DomainTrie::new();
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
         hosts.insert(
             "multi.test",
             vec![
                 IpAddr::V6(Ipv6Addr::LOCALHOST),
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
-            ],
+            ]
+            .into(),
         );
         let resolver = Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
         let adapter = DirectAdapter::new()
