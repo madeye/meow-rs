@@ -230,6 +230,7 @@ Obfuscated-TLS outbound (requires the `anytls` feature).
 | `password` | string | ✓ | — | |
 | `sni` | string | | — | |
 | `skip-cert-verify` | bool | | `false` | |
+| `udp` | bool | | `false` | Enable UDP relay (sing-box udp-over-tcp v2) |
 
 ---
 

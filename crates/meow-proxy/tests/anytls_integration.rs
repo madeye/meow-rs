@@ -107,6 +107,7 @@ async fn anytls_round_trip_through_upstream_server() {
         PASSWORD,
         Some("localhost"),
         true,
+        true,
     )
     .expect("adapter must build");
 
@@ -158,6 +159,7 @@ async fn anytls_concurrent_dials_each_get_independent_streams() {
             PASSWORD,
             Some("localhost"),
             true,
+            true,
         )
         .expect("adapter must build"),
     );
@@ -204,6 +206,7 @@ async fn anytls_sequential_writes_same_connection() {
         PASSWORD,
         Some("localhost"),
         true,
+        true,
     )
     .expect("adapter must build");
 
@@ -246,6 +249,7 @@ async fn anytls_rejects_wrong_password() {
         "WRONG-PASSWORD",
         Some("localhost"),
         true,
+        true,
     )
     .expect("adapter must build");
 
@@ -282,4 +286,151 @@ async fn anytls_rejects_wrong_password() {
             );
         }
     }
+}
+
+// ─── UDP over AnyTLS (sing-box udp-over-tcp v2, Bind format) ─────────────────
+
+/// Local UDP echo server. Returns its bound `127.0.0.1:port`.
+async fn start_udp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    let h = tokio::spawn(async move {
+        let mut buf = vec![0u8; 2048];
+        while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+            if sock.send_to(&buf[..n], peer).await.is_err() {
+                break;
+            }
+        }
+    });
+    (addr, h)
+}
+
+fn udp_metadata(dst: SocketAddr) -> Metadata {
+    Metadata {
+        network: Network::Udp,
+        host: smol_str::SmolStr::from(dst.ip().to_string()),
+        dst_ip: Some(dst.ip()),
+        dst_port: dst.port(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn anytls_udp_round_trip_through_upstream_server() {
+    install_crypto_provider();
+
+    let (echo_addr, _echo_h) = start_udp_echo_server().await;
+    let (cert, key) = self_signed_cert();
+    let (server_addr, _server_h) = start_anytls_server(cert, key).await;
+
+    let adapter = AnytlsAdapter::new(
+        "test-anytls-udp",
+        &server_addr.ip().to_string(),
+        server_addr.port(),
+        PASSWORD,
+        Some("localhost"),
+        true,
+        true,
+    )
+    .expect("adapter must build");
+
+    let conn = timeout(T, adapter.dial_udp(&udp_metadata(echo_addr)))
+        .await
+        .expect("dial_udp must not stall")
+        .expect("dial_udp must succeed end-to-end");
+
+    let payload = b"meow<>anytls udp round-trip";
+    let sent = timeout(T, conn.write_packet(payload, &echo_addr))
+        .await
+        .expect("write_packet must not stall")
+        .expect("write_packet must succeed");
+    assert_eq!(sent, payload.len());
+
+    let mut buf = vec![0u8; 2048];
+    let (n, from) = timeout(T, conn.read_packet(&mut buf))
+        .await
+        .expect("read_packet must not stall")
+        .expect("read_packet must succeed");
+    assert_eq!(&buf[..n], payload, "echoed payload must match");
+    // Bind format carries the real source per packet — if the reply header
+    // were mis-encoded this would come back as 0.0.0.0:0 or garbage.
+    assert_eq!(from, echo_addr, "reply must carry the peer address");
+}
+
+#[tokio::test]
+async fn anytls_udp_routes_each_packet_to_its_own_destination() {
+    // Bind format (isConnect=0) means the destination travels with every
+    // datagram rather than being pinned at handshake. Two echo servers on one
+    // packet conn prove that path, and that replies are attributed correctly.
+    install_crypto_provider();
+
+    let (echo_a, _a_h) = start_udp_echo_server().await;
+    let (echo_b, _b_h) = start_udp_echo_server().await;
+    let (cert, key) = self_signed_cert();
+    let (server_addr, _server_h) = start_anytls_server(cert, key).await;
+
+    let adapter = AnytlsAdapter::new(
+        "test-anytls-udp-multi",
+        &server_addr.ip().to_string(),
+        server_addr.port(),
+        PASSWORD,
+        Some("localhost"),
+        true,
+        true,
+    )
+    .expect("adapter must build");
+
+    let conn = timeout(T, adapter.dial_udp(&udp_metadata(echo_a)))
+        .await
+        .expect("dial_udp must not stall")
+        .expect("dial_udp must succeed");
+
+    timeout(T, conn.write_packet(b"to-a", &echo_a))
+        .await
+        .expect("write a must not stall")
+        .expect("write a");
+    timeout(T, conn.write_packet(b"to-b", &echo_b))
+        .await
+        .expect("write b must not stall")
+        .expect("write b");
+
+    // Replies may arrive in either order; key them by source address.
+    let mut seen = std::collections::HashMap::new();
+    let mut buf = vec![0u8; 2048];
+    for _ in 0..2 {
+        let (n, from) = timeout(T, conn.read_packet(&mut buf))
+            .await
+            .expect("read_packet must not stall")
+            .expect("read_packet must succeed");
+        seen.insert(from, buf[..n].to_vec());
+    }
+
+    assert_eq!(seen.get(&echo_a).map(Vec::as_slice), Some(&b"to-a"[..]));
+    assert_eq!(seen.get(&echo_b).map(Vec::as_slice), Some(&b"to-b"[..]));
+}
+
+#[tokio::test]
+async fn anytls_udp_is_refused_when_not_enabled() {
+    install_crypto_provider();
+
+    let (echo_addr, _echo_h) = start_udp_echo_server().await;
+    let (cert, key) = self_signed_cert();
+    let (server_addr, _server_h) = start_anytls_server(cert, key).await;
+
+    let adapter = AnytlsAdapter::new(
+        "test-anytls-udp-off",
+        &server_addr.ip().to_string(),
+        server_addr.port(),
+        PASSWORD,
+        Some("localhost"),
+        true,
+        false,
+    )
+    .expect("adapter must build");
+
+    assert!(!adapter.support_udp(), "udp: false must not advertise UDP");
+    let Err(err) = adapter.dial_udp(&udp_metadata(echo_addr)).await else {
+        panic!("dial_udp must be refused when `udp` is off");
+    };
+    assert!(err.to_string().contains("udp: true"), "msg: {err}");
 }

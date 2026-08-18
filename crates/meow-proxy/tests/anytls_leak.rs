@@ -135,6 +135,7 @@ async fn anytls_repeated_dials_do_not_leak_fds() {
         PASSWORD,
         Some("localhost"),
         true,
+        true,
     )
     .expect("adapter must build");
 

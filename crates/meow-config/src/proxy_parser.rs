@@ -556,8 +556,11 @@ fn parse_direct(
 /// Parse a `type: anytls` proxy block into an [`AnytlsAdapter`].
 ///
 /// Required fields: `server`, `port`, `password`. Optional: `sni`,
-/// `skip-cert-verify`. Closes the parser side of issue #75; the wire
+/// `skip-cert-verify`, `udp`. Closes the parser side of issue #75; the wire
 /// protocol itself is provided by the `anytls-rs` crate.
+///
+/// `udp` defaults to `false`, matching mihomo's `AnyTLSOption.UDP` (the
+/// adapter then relays datagrams over udp-over-tcp v2).
 ///
 /// # Hard errors (Class A per ADR-0002)
 ///
@@ -584,8 +587,12 @@ fn parse_anytls(
         .get("skip-cert-verify")
         .and_then(serde_yaml::Value::as_bool)
         .unwrap_or(false);
+    let udp = config
+        .get("udp")
+        .and_then(serde_yaml::Value::as_bool)
+        .unwrap_or(false);
 
-    meow_proxy::AnytlsAdapter::new(name, server, port, password, sni, skip_cert_verify)
+    meow_proxy::AnytlsAdapter::new(name, server, port, password, sni, skip_cert_verify, udp)
 }
 
 /// Parse a `type: hysteria2` proxy block.
@@ -2221,6 +2228,21 @@ tls: true
             "name: jp\ntype: anytls\nserver: 1.2.3.4\nport: 443\npassword: secret\nsni: example.com\nskip-cert-verify: true\n",
         );
         assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    /// mihomo's `AnyTLSOption.UDP` is `omitempty`/false by default; only an
+    /// explicit `udp: true` advertises datagram support to the tunnel.
+    #[cfg(feature = "anytls")]
+    #[tokio::test]
+    async fn parse_anytls_udp_is_opt_in() {
+        let off =
+            anytls_config("name: jp\ntype: anytls\nserver: 1.2.3.4\nport: 443\npassword: secret\n");
+        assert!(!parse_proxy(&off).unwrap().support_udp());
+
+        let on = anytls_config(
+            "name: jp\ntype: anytls\nserver: 1.2.3.4\nport: 443\npassword: secret\nudp: true\n",
+        );
+        assert!(parse_proxy(&on).unwrap().support_udp());
     }
 
     #[cfg(feature = "anytls")]
