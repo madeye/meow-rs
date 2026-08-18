@@ -59,6 +59,8 @@ DNS-over-proxy creates one hard loop hazard:
 **Mitigation rules** (enforced at config-parse time, hard error per ADR-0002 Class A — silent breakage in DNS is a privacy failure):
 
 1. **Proxy-server hostnames must never resolve through a `#PROXY` client.** When the resolver dials a proxy adapter, it must use a *bootstrap* resolver that has no `#PROXY` entries. This is the same bootstrap path that already resolves `dns.google` for an encrypted upstream today (`resolver.rs:354–382`).
+
+   *Implemented as a runtime fence rather than a retained bootstrap pool.* Since proxy-server hostnames now resolve through the `meow_common::HostResolver` hook (i.e. through this resolver) on every platform, the cycle is detected where it forms: `resolve_addrs` marks its task while the hook runs, and a dial made under that mark — which is exactly a `#PROXY` upstream dialing its own proxy — is answered by `Resolver::resolve_ips_local` (`hosts:` trie + DNS cache, never an upstream query), falling through to the system resolver when nothing is known. This holds the invariant without keeping the throwaway bootstrap clients alive past construction, and without which the resolver's single-flight `inflight` entry would make the inner lookup wait on the outer one.
 2. **Direct cycle detection**: if proxy `A` declares `dns: <anything>#A`, reject the config at load.
 3. **Indirect cycles** (A→B→A) are detected by walking the proxy `dns:` graph at config load. A cycle is a Class A error.
 

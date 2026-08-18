@@ -765,19 +765,29 @@ async fn run(
     // Keep a resolver clone for the auto-update task before it moves into the tunnel.
     let resolver = Arc::clone(&config.dns.resolver);
 
-    // Android: install the resolver as the global host-resolver hook used
-    // by `meow_common::connect_tcp_host` / `resolve_host`. Without this,
-    // proxy adapters dialling by hostname would fall back to libc's
-    // `getaddrinfo`, whose DNS sockets bypass `VpnService.protect(fd)` —
-    // so on a VPN-active device DNS would route through our own tunnel
-    // and loop. See `meow-common/src/socket_protect.rs` for the full
-    // failure mode. The `SocketProtector` itself is installed separately
-    // by the JNI bridge.
-    #[cfg(target_os = "android")]
-    {
+    // Install the configured resolver as the global host-resolver hook used
+    // by `meow_common::connect_tcp_host` / `resolve_host`, so a proxy node's
+    // own server hostname is resolved by the DNS in the config — matching
+    // mihomo, and matching what `DirectAdapter` already does for destination
+    // hostnames. Without it the proxy adapters fall back to libc's
+    // `getaddrinfo`, which ignores `dns:` entirely (wrong nameserver,
+    // wrong `hosts:` entries) and, on a VPN-active device, opens DNS sockets
+    // that bypass `VpnService.protect(fd)` so the query loops back through
+    // our own tunnel. See `meow-common/src/socket_protect.rs` for the full
+    // failure mode; the Android `SocketProtector` is installed separately by
+    // the JNI bridge.
+    //
+    // Only when `dns.enable` is true: with DNS off, `config.dns.resolver` is
+    // a stub pointing at a hard-coded upstream, and forcing every proxy dial
+    // through it would be worse than the OS resolver the user asked for.
+    // Clearing otherwise keeps a config reload from leaving a stale hook
+    // installed.
+    if config.dns.enabled {
         meow_common::set_host_resolver(Arc::new(meow_dns::ResolverHostHook::new(Arc::clone(
             &config.dns.resolver,
         ))));
+    } else {
+        meow_common::clear_host_resolver();
     }
 
     // Create the tunnel (core routing engine)

@@ -55,4 +55,8 @@ impl HostResolver for ResolverHostHook {
             )
         })
     }
+
+    fn resolve_all_local(&self, host: &str) -> Option<Vec<IpAddr>> {
+        self.resolver.resolve_ips_local(host)
+    }
 }

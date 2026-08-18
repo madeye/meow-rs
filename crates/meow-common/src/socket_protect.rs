@@ -69,6 +69,20 @@ pub trait HostResolver: Send + Sync {
     async fn resolve_all(&self, host: &str) -> io::Result<Vec<IpAddr>> {
         self.resolve(host).await.map(|ip| vec![ip])
     }
+
+    /// Resolve `host` using only answers the implementation already holds —
+    /// static mappings, warm cache — without any lookup that could itself
+    /// need an outbound dial.
+    ///
+    /// Consulted instead of [`Self::resolve_all`] when the hook is re-entered
+    /// — a nameserver that dials a proxy to answer a query, for the very
+    /// hostname that proxy is reached at. `None` means "nothing known", and the
+    /// caller falls through to the system resolver. The default answers
+    /// nothing, which is always safe.
+    fn resolve_all_local(&self, host: &str) -> Option<Vec<IpAddr>> {
+        let _ = host;
+        None
+    }
 }
 
 static RESOLVER: RwLock<Option<Arc<dyn HostResolver>>> = RwLock::new(None);
@@ -89,6 +103,29 @@ pub fn clear_host_resolver() {
 /// Snapshot of the currently-installed host resolver.
 pub fn host_resolver() -> Option<Arc<dyn HostResolver>> {
     RESOLVER.read().clone()
+}
+
+tokio::task_local! {
+    /// Set for the duration of a [`HostResolver`] call made from
+    /// [`resolve_addrs`]. See [`in_host_resolver`] for why.
+    static IN_HOST_RESOLVER: ();
+}
+
+/// True when the current task is already inside a [`HostResolver`] call.
+///
+/// The hook is backed by meow-rs's own `meow_dns::Resolver`, and a nameserver
+/// may be tagged `#PROXY` — i.e. answering the query means dialing a proxy,
+/// which means resolving *that* proxy's server hostname, which re-enters the
+/// hook. If the two hostnames coincide (the usual case: the proxy carrying
+/// DNS is the one being dialed) the resolver's single-flight `inflight` map
+/// would make the inner lookup wait on the outer one, deadlocking the dial
+/// until it times out. Detecting the re-entry and falling back to the system
+/// resolver for the inner lookup breaks the cycle. The whole chain — hook →
+/// resolver → DNS client → proxy dial → hook — runs on one task, so a
+/// task-local is a precise fence: unrelated concurrent dials keep using the
+/// configured DNS.
+fn in_host_resolver() -> bool {
+    IN_HOST_RESOLVER.try_with(|()| ()).is_ok()
 }
 
 // ─── System-resolver result cache (Android / iOS only) ─────────────────────
@@ -311,6 +348,8 @@ async fn connect_tcp_iface_bound(addr: SocketAddr) -> io::Result<TcpStream> {
 ///    don't loop the query back through our own tunnel. Consulted
 ///    independently of whether a `SocketProtector` is installed — iOS uses
 ///    the resolver hook without a protector.
+///    Skipped when the call is itself nested inside a hook call (see
+///    [`in_host_resolver`]).
 /// 3. Short-TTL cache of prior system-resolver results (Android / iOS only)
 ///    → collapses a wake-time burst of dials to one `getaddrinfo`.
 /// 4. System resolver (`tokio::net::lookup_host`), result cached.
@@ -321,18 +360,26 @@ async fn resolve_addrs(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
         return Ok(vec![SocketAddr::new(ip, port)]);
     }
 
-    if let Some(r) = host_resolver() {
-        let ips = r.resolve_all(host).await?;
-        if ips.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("resolve: no address for {host}:{port}"),
-            ));
+    match host_resolver() {
+        Some(r) if in_host_resolver() => {
+            // Re-entered: answer from what the hook already knows, and only
+            // fall through to the system resolver when it knows nothing.
+            if let Some(ips) = r.resolve_all_local(host) {
+                if !ips.is_empty() {
+                    return Ok(ips
+                        .into_iter()
+                        .map(|ip| SocketAddr::new(ip, port))
+                        .collect());
+                }
+            }
+            tracing::debug!(
+                host,
+                "resolve: re-entrant host-resolver call (a DNS upstream dials through a \
+                 proxy) — using the system resolver for this hop to avoid a lookup cycle"
+            );
         }
-        return Ok(ips
-            .into_iter()
-            .map(|ip| SocketAddr::new(ip, port))
-            .collect());
+        Some(r) => return resolve_via_hook(r.as_ref(), host, port).await,
+        None => {}
     }
 
     if let Some(cached) = sys_cache_get(host, port) {
@@ -359,6 +406,27 @@ async fn resolve_addrs(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     }
     sys_cache_put(host, &addrs);
     Ok(addrs)
+}
+
+/// Run one [`HostResolver`] lookup with [`IN_HOST_RESOLVER`] set, so a dial
+/// made while answering it takes the system-resolver path instead of
+/// re-entering the hook.
+async fn resolve_via_hook(
+    r: &dyn HostResolver,
+    host: &str,
+    port: u16,
+) -> io::Result<Vec<SocketAddr>> {
+    let ips = IN_HOST_RESOLVER.scope((), r.resolve_all(host)).await?;
+    if ips.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("resolve: no address for {host}:{port}"),
+        ));
+    }
+    Ok(ips
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect())
 }
 
 /// Dial an outbound TCP stream to `host:port`. The hostname is resolved
@@ -890,5 +958,115 @@ mod tests {
 
         clear_host_resolver();
         assert!(host_resolver().is_none());
+    }
+
+    /// Stands in for a `#PROXY`-tagged nameserver: answering a lookup means
+    /// dialing a proxy, which resolves that proxy's own server hostname.
+    struct ReentrantResolver {
+        calls: AtomicUsize,
+        inner: parking_lot::Mutex<Option<io::Result<Vec<SocketAddr>>>>,
+    }
+    #[async_trait]
+    impl HostResolver for ReentrantResolver {
+        async fn resolve(&self, host: &str) -> io::Result<IpAddr> {
+            self.resolve_all(host).await.map(|ips| ips[0])
+        }
+
+        async fn resolve_all(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            // The nested dial the DNS upstream would make.
+            *self.inner.lock() = Some(resolve_host_all("localhost", 53).await);
+            Ok(vec![IpAddr::from([203, 0, 113, 7])])
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_dial_inside_the_hook_uses_the_system_resolver() {
+        let _g = LOCK.lock().await;
+        clear_host_resolver();
+        let r = Arc::new(ReentrantResolver {
+            calls: AtomicUsize::new(0),
+            inner: parking_lot::Mutex::new(None),
+        });
+        set_host_resolver(Arc::clone(&r) as Arc<dyn HostResolver>);
+
+        let addrs = resolve_host_all("proxy.example", 443)
+            .await
+            .expect("outer lookup answered by the hook");
+        assert_eq!(addrs, vec![SocketAddr::from(([203, 0, 113, 7], 443))]);
+
+        // One hook call, not two: the nested dial must not re-enter it, or a
+        // real resolver's single-flight map would deadlock the pair.
+        assert_eq!(r.calls.load(Ordering::SeqCst), 1);
+        let inner = r.inner.lock().take().expect("nested dial ran");
+        let inner = inner.expect("system resolver answered the nested dial");
+        assert!(
+            inner.iter().all(|a| a.ip().is_loopback()),
+            "nested dial must come from the system resolver, got {inner:?}"
+        );
+
+        clear_host_resolver();
+    }
+
+    /// Same nesting, but the hook knows the inner host statically (a `hosts:`
+    /// entry or a warm cache line), so the system resolver is never reached.
+    struct LocalAnswerResolver {
+        local_calls: AtomicUsize,
+        inner: parking_lot::Mutex<Option<io::Result<Vec<SocketAddr>>>>,
+    }
+    #[async_trait]
+    impl HostResolver for LocalAnswerResolver {
+        async fn resolve(&self, host: &str) -> io::Result<IpAddr> {
+            self.resolve_all(host).await.map(|ips| ips[0])
+        }
+
+        async fn resolve_all(&self, _host: &str) -> io::Result<Vec<IpAddr>> {
+            *self.inner.lock() = Some(resolve_host_all("node.example", 8388).await);
+            Ok(vec![IpAddr::from([203, 0, 113, 7])])
+        }
+
+        fn resolve_all_local(&self, _host: &str) -> Option<Vec<IpAddr>> {
+            self.local_calls.fetch_add(1, Ordering::SeqCst);
+            Some(vec![IpAddr::from([192, 0, 2, 55])])
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_dial_prefers_the_hooks_local_answer() {
+        let _g = LOCK.lock().await;
+        clear_host_resolver();
+        let r = Arc::new(LocalAnswerResolver {
+            local_calls: AtomicUsize::new(0),
+            inner: parking_lot::Mutex::new(None),
+        });
+        set_host_resolver(Arc::clone(&r) as Arc<dyn HostResolver>);
+
+        resolve_host_all("proxy.example", 443).await.unwrap();
+
+        assert_eq!(r.local_calls.load(Ordering::SeqCst), 1);
+        let inner = r.inner.lock().take().unwrap().unwrap();
+        assert_eq!(
+            inner,
+            vec![SocketAddr::from(([192, 0, 2, 55], 8388))],
+            "the nested hop must take the hook's local answer, not the OS resolver"
+        );
+
+        clear_host_resolver();
+    }
+
+    #[tokio::test]
+    async fn hook_applies_again_after_the_nested_scope_ends() {
+        let _g = LOCK.lock().await;
+        clear_host_resolver();
+        let r = FixedResolver::new(IpAddr::from([198, 51, 100, 4]));
+        set_host_resolver(Arc::clone(&r) as Arc<dyn HostResolver>);
+
+        for _ in 0..2 {
+            let addrs = resolve_host_all("node.example", 8388).await.unwrap();
+            assert_eq!(addrs, vec![SocketAddr::from(([198, 51, 100, 4], 8388))]);
+        }
+        assert_eq!(r.count(), 2, "the guard must not leak across calls");
+
+        clear_host_resolver();
     }
 }

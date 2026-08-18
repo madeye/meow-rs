@@ -860,6 +860,35 @@ impl Resolver {
         self.lookup_actual_all(lookup_host).await
     }
 
+    /// [`Self::resolve_ips`] restricted to answers this resolver already
+    /// holds — the `hosts:` trie and the DNS cache. Never queries an
+    /// upstream, so it can never dial a proxy.
+    ///
+    /// This is the answer offered when the host-resolver hook is re-entered
+    /// (a `#PROXY` nameserver dialing the very proxy whose server hostname
+    /// is being looked up). Going upstream there would re-enter the resolver
+    /// and stall on its own single-flight entry; returning what is already
+    /// known keeps `hosts:` mappings and warm cache entries authoritative
+    /// for proxy-server hostnames even on that path.
+    pub fn resolve_ips_local(&self, host: &str) -> Option<Vec<IpAddr>> {
+        let lookup_host = if self.use_hosts {
+            match self.lookup_hosts_entry(host) {
+                Some(HostsLookup::Addresses(ips)) if !ips.is_empty() => {
+                    return Some(ips.clone());
+                }
+                Some(HostsLookup::Alias(alias)) => alias,
+                _ => host,
+            }
+        } else {
+            host
+        };
+        let ips = self.cache.get(lookup_host)?;
+        if ips.is_empty() {
+            return None;
+        }
+        Some(ips.to_vec())
+    }
+
     pub async fn resolve_ip(&self, host: &str) -> Option<IpAddr> {
         self.resolve_ips(host).await?.into_iter().next()
     }
@@ -1392,6 +1421,51 @@ mod tests {
             .put("cached.test", &ips, Duration::from_secs(60));
 
         assert_eq!(resolver.resolve_ips("cached.test").await, Some(ips));
+    }
+
+    #[test]
+    fn resolve_ips_local_answers_from_hosts_and_cache_only() {
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+        let via_hosts = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+        hosts.insert("node.test", vec![via_hosts].into());
+        hosts.insert("alias.test", HostEntry::Alias("cached.test".into()));
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+
+        let via_cache = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3));
+        resolver
+            .cache
+            .put("cached.test", &[via_cache], Duration::from_secs(60));
+
+        assert_eq!(
+            resolver.resolve_ips_local("node.test"),
+            Some(vec![via_hosts])
+        );
+        assert_eq!(
+            resolver.resolve_ips_local("cached.test"),
+            Some(vec![via_cache])
+        );
+        assert_eq!(
+            resolver.resolve_ips_local("alias.test"),
+            Some(vec![via_cache]),
+            "a hosts alias must resolve through to the cached target"
+        );
+        assert_eq!(
+            resolver.resolve_ips_local("unknown.test"),
+            None,
+            "an unknown host must not trigger an upstream query"
+        );
+    }
+
+    #[test]
+    fn resolve_ips_local_ignores_hosts_when_use_hosts_is_off() {
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+        hosts.insert(
+            "node.test",
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))].into(),
+        );
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, false);
+
+        assert_eq!(resolver.resolve_ips_local("node.test"), None);
     }
 
     #[test]

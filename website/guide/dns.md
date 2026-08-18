@@ -110,6 +110,34 @@ dns:
   same domain keeps its fake IP across restarts.
 - Flush at runtime with `POST /cache/fakeip/flush`.
 
+## Proxy server hostnames
+
+When `enable: true`, a proxy node's own `server:` hostname is resolved by this resolver
+— not by the operating system. So `nameserver`, `nameserver-policy`, `fallback` and the
+top-level `hosts:` map all apply to the proxy upstream itself, exactly as they do to
+destination domains:
+
+```yaml
+hosts:
+  hk.example.com: 203.0.113.9   # pins the node, no lookup at all
+
+proxies:
+  - { name: HK, type: trojan, server: hk.example.com, port: 443, password: … }
+```
+
+FakeIP never applies here: proxy dials always take the real address, whatever
+`enhanced-mode` is set to.
+
+With `enable: false` the resolver is an internal stub, so proxy hostnames keep going to
+the OS resolver — set `enable: true` if you want the config's DNS to own them.
+
+::: tip `#PROXY` nameservers
+A nameserver tagged `#PROXY` has to dial that proxy to answer a query. If the query *is*
+for that proxy's own server hostname, meow-rs would be waiting on itself, so this one hop
+falls back to the `hosts:` map and the DNS cache, then to the OS resolver. Pinning such
+nodes in `hosts:` (or configuring them by IP) keeps them off the OS resolver entirely.
+:::
+
 ## Caching
 
 - **Forward cache** (name → IP) honors response TTL (min 10s) in a sharded LRU.

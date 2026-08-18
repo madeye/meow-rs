@@ -40,6 +40,7 @@ pub async fn parse_dns(
             return Ok(DnsConfig {
                 resolver,
                 listen_addr: None,
+                enabled: false,
             });
         }
     };
@@ -125,6 +126,7 @@ pub async fn parse_dns(
     Ok(DnsConfig {
         resolver: Arc::new(resolver),
         listen_addr,
+        enabled: true,
     })
 }
 

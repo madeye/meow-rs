@@ -88,6 +88,11 @@ pub struct GeneralConfig {
 pub struct DnsConfig {
     pub resolver: Arc<Resolver>,
     pub listen_addr: Option<SocketAddr>,
+    /// `dns.enable` from the config. False means `resolver` is the stub
+    /// built for `DirectAdapter` (a single hard-coded upstream), not the
+    /// user's DNS — callers that would otherwise impose it process-wide,
+    /// such as the `meow_common::HostResolver` hook, must not install it.
+    pub enabled: bool,
 }
 
 /// Listener protocol type — mirrors the `type:` field in the YAML `listeners:` array.
