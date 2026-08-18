@@ -129,7 +129,10 @@ FakeIP never applies here: proxy dials always take the real address, whatever
 `enhanced-mode` is set to.
 
 With `enable: false` the resolver is an internal stub, so proxy hostnames keep going to
-the OS resolver — set `enable: true` if you want the config's DNS to own them.
+the OS resolver — set `enable: true` if you want the config's DNS to own them. The
+Android and iOS builds are the exception: there the OS resolver's sockets would route
+back through the VPN tunnel and deadlock, so node hostnames always go through the
+built-in resolver, `enable` or not.
 
 ::: tip `#PROXY` nameservers
 A nameserver tagged `#PROXY` has to dial that proxy to answer a query. If the query *is*

@@ -777,12 +777,25 @@ async fn run(
     // failure mode; the Android `SocketProtector` is installed separately by
     // the JNI bridge.
     //
-    // Only when `dns.enable` is true: with DNS off, `config.dns.resolver` is
-    // a stub pointing at a hard-coded upstream, and forcing every proxy dial
-    // through it would be worse than the OS resolver the user asked for.
-    // Clearing otherwise keeps a config reload from leaving a stale hook
-    // installed.
-    if config.dns.enabled {
+    // On desktop this is gated on `dns.enable`: with DNS off,
+    // `config.dns.resolver` is a stub pointing at a hard-coded upstream, and
+    // forcing every proxy dial through it would be worse than the OS resolver
+    // the user asked for. Clearing otherwise keeps a config reload from
+    // leaving a stale hook installed.
+    //
+    // The VPN platforms are the exception and install it unconditionally.
+    // There the hook is not a DNS-quality choice but a correctness one: it is
+    // the only thing keeping proxy-server lookups off libc `getaddrinfo`,
+    // whose sockets bypass `VpnService.protect(fd)` / the NE tunnel's
+    // exclusion and therefore loop the query back through our own tunnel.
+    // Android installed it unconditionally before proxy-server resolution
+    // moved cross-platform; gating it on `dns.enable` there would resurrect
+    // that loop for `dns.enable: false` configs (the very case
+    // `socket_protect::resolve_addrs` warns about). The stub upstream is a
+    // worse resolver than the OS one, but a reachable one beats a lookup that
+    // deadlocks against the tunnel carrying it.
+    const VPN_PLATFORM: bool = cfg!(any(target_os = "android", target_os = "ios"));
+    if config.dns.enabled || VPN_PLATFORM {
         meow_common::set_host_resolver(Arc::new(meow_dns::ResolverHostHook::new(Arc::clone(
             &config.dns.resolver,
         ))));
