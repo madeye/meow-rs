@@ -23,7 +23,14 @@ fn build_fakeip_resolver(real_host: &str, real_ip: IpAddr) -> Arc<Resolver> {
     // entries override fake-IP. For the rewrite test we want the resolver
     // to NOT have the host in the trie (so the pool synthesises) and we
     // wire the real IP separately via the cache. Use a different trie.
-    let mut resolver = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+    let mut resolver = Resolver::new(
+        vec![],
+        vec![],
+        DnsMode::FakeIp,
+        DomainTrie::new(),
+        true,
+        true,
+    );
     let net = "198.18.0.0/16".parse::<IpNet>().unwrap();
     let pool = Pool::new(net, Arc::new(MemoryStore::new(1024))).unwrap();
     resolver.set_fakeip_v4(Arc::new(pool));
@@ -94,7 +101,14 @@ async fn fakeip_skipper_bypasses_filtered_host() {
     // Build a resolver with a skipper that BYPASSES the test host. The
     // fake-IP pool then leaves the host alone — but because there's no
     // upstream nameserver configured, the lookup returns None.
-    let mut resolver = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+    let mut resolver = Resolver::new(
+        vec![],
+        vec![],
+        DnsMode::FakeIp,
+        DomainTrie::new(),
+        true,
+        true,
+    );
     let net = "198.18.0.0/16".parse::<IpNet>().unwrap();
     resolver.set_fakeip_v4(Arc::new(
         Pool::new(net, Arc::new(MemoryStore::new(1024))).unwrap(),

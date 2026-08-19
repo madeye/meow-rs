@@ -19,7 +19,14 @@ use tokio::net::TcpListener;
 /// client requested. Tests should target a locally-bound echo server.
 pub fn direct_tunnel() -> Tunnel {
     let hosts = DomainTrie::new();
-    let resolver = Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, false));
+    let resolver = Arc::new(Resolver::new(
+        vec![],
+        vec![],
+        DnsMode::Normal,
+        hosts,
+        false,
+        true,
+    ));
     let tunnel = Tunnel::new(resolver);
     tunnel.set_mode(meow_common::TunnelMode::Direct);
     tunnel
@@ -37,7 +44,14 @@ pub async fn fakeip_tunnel(host: &str, real_ip: std::net::IpAddr) -> (Tunnel, st
     use meow_dns::fakeip::{MemoryStore, Pool};
     use std::time::Duration;
 
-    let mut resolver = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+    let mut resolver = Resolver::new(
+        vec![],
+        vec![],
+        DnsMode::FakeIp,
+        DomainTrie::new(),
+        true,
+        true,
+    );
     let net = "198.18.0.0/16".parse::<IpNet>().unwrap();
     resolver.set_fakeip_v4(Arc::new(
         Pool::new(net, Arc::new(MemoryStore::new(1024))).unwrap(),

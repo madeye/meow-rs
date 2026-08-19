@@ -289,6 +289,7 @@ mod tests {
             DnsMode::Normal,
             meow_trie::DomainTrie::new(),
             false,
+            true,
         ));
         Tunnel::new(resolver)
     }

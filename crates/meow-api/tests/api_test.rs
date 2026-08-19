@@ -38,6 +38,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         DnsMode::Normal,
         DomainTrie::new(),
         true,
+        true,
     ));
     let tunnel = Tunnel::new(resolver);
 
@@ -71,6 +72,7 @@ fn test_state_with_route(raw: RawConfig, named: Vec<(&str, Arc<dyn Proxy>)>) -> 
         vec![],
         DnsMode::Normal,
         DomainTrie::new(),
+        true,
         true,
     ));
     let tunnel = Tunnel::new(resolver);
@@ -109,6 +111,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         vec![],
         DnsMode::Normal,
         DomainTrie::new(),
+        true,
         true,
     ));
     let tunnel = Tunnel::new(resolver);
@@ -195,6 +198,7 @@ async fn external_ui_serves_static_directory() {
         vec![],
         DnsMode::Normal,
         DomainTrie::new(),
+        true,
         true,
     ));
     let tunnel = Tunnel::new(resolver);
@@ -1841,6 +1845,7 @@ mod delay_support {
             DnsMode::Normal,
             DomainTrie::new(),
             true,
+            true,
         ));
         let tunnel = Tunnel::new(resolver);
         tunnel.update_proxies(proxies);
@@ -1893,6 +1898,7 @@ mod delay_support {
             vec![],
             DnsMode::Normal,
             DomainTrie::new(),
+            true,
             true,
         ));
         let tunnel = Tunnel::new(resolver);
@@ -2730,7 +2736,14 @@ fn test_state_with_hosts_entry() -> Arc<AppState> {
     let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
     hosts.insert("test.local", vec![ip].into());
 
-    let resolver = Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
+    let resolver = Arc::new(Resolver::new(
+        vec![],
+        vec![],
+        DnsMode::Normal,
+        hosts,
+        true,
+        true,
+    ));
     let tunnel = Tunnel::new(resolver);
     let mut raw = test_raw_config();
     raw.dns = Some(serde_yaml::from_str("enable: true").unwrap());

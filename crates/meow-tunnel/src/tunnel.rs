@@ -490,6 +490,7 @@ mod tun_handle_tests {
             DnsMode::Normal,
             DomainTrie::new(),
             false,
+            true,
         ));
         Tunnel::new(resolver)
     }

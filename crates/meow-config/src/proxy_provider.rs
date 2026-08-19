@@ -29,6 +29,7 @@ pub struct ProxyProvider {
     pub health_check: Option<HealthCheckConfig>,
     updated_at: AtomicU,
     header: HashMap<String, String>,
+    ipv6: bool,
     /// Group-level filtered views of `slot` (issue #358), re-populated on
     /// every refresh. Weak: each view is kept alive by the group built from
     /// it, so views belonging to dropped or rebuilt groups get pruned here.
@@ -123,6 +124,7 @@ impl ProxyProvider {
         name: &str,
         raw: &RawProxyProvider,
         cache_dir: Option<&Path>,
+        ipv6: bool,
     ) -> Result<Self, String> {
         // Any on-disk location (read or write) must stay inside `cache_dir`
         // (issue #429): `path:` — and the provider *name* feeding the implicit
@@ -196,6 +198,7 @@ impl ProxyProvider {
             health_check,
             updated_at: AtomicU::new(0),
             header,
+            ipv6,
             derived: RwLock::new(Vec::new()),
         })
     }
@@ -342,7 +345,7 @@ impl ProxyProvider {
                 continue;
             }
 
-            match proxy_parser::parse_proxy(raw_map) {
+            match proxy_parser::parse_proxy(raw_map, self.ipv6) {
                 Ok(proxy) => result.push(proxy),
                 Err(e) => {
                     warn!(provider = %self.name, proxy = raw_name, error = %e, "failed to parse proxy");
@@ -397,10 +400,11 @@ impl ProxyProvider {
 pub async fn load_proxy_providers(
     raw_map: &HashMap<String, RawProxyProvider>,
     cache_dir: Option<&Path>,
+    ipv6: bool,
 ) -> HashMap<String, Arc<ProxyProvider>> {
     let mut result = HashMap::new();
     for (name, raw) in raw_map {
-        match ProxyProvider::new(name, raw, cache_dir) {
+        match ProxyProvider::new(name, raw, cache_dir, ipv6) {
             Ok(provider) => {
                 let provider = Arc::new(provider);
                 let _ = provider.refresh().await;
@@ -483,7 +487,7 @@ mod tests {
     fn file_provider_new_succeeds() {
         let dir = tempfile::tempdir().unwrap();
         let raw = raw_file_provider("proxies.yaml");
-        let p = ProxyProvider::new("test", &raw, Some(dir.path())).unwrap();
+        let p = ProxyProvider::new("test", &raw, Some(dir.path()), true).unwrap();
         assert_eq!(p.name, "test");
         assert_eq!(p.vehicle_type, "File");
         assert!(p.header.is_empty());
@@ -492,7 +496,7 @@ mod tests {
     #[test]
     fn file_provider_requires_cache_dir_for_path() {
         let raw = raw_file_provider("/tmp/proxies.yaml");
-        let Err(err) = ProxyProvider::new("test", &raw, None) else {
+        let Err(err) = ProxyProvider::new("test", &raw, None, true) else {
             panic!("file path without a cache dir must fail");
         };
         assert!(err.contains("cache directory"), "unexpected: {err}");
@@ -503,7 +507,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for path in ["../../etc/pwned", "/etc/pwned"] {
             let raw = raw_file_provider(path);
-            let Err(err) = ProxyProvider::new("test", &raw, Some(dir.path())) else {
+            let Err(err) = ProxyProvider::new("test", &raw, Some(dir.path()), true) else {
                 panic!("escaping path {path} must be rejected");
             };
             assert!(err.contains("escapes"), "path {path}: unexpected: {err}");
@@ -524,7 +528,7 @@ mod tests {
             health_check: None,
             header: None,
         };
-        let Err(err) = ProxyProvider::new("test", &raw, Some(dir.path())) else {
+        let Err(err) = ProxyProvider::new("test", &raw, Some(dir.path()), true) else {
             panic!("escaping http cache path must be rejected");
         };
         assert!(err.contains("escapes"), "unexpected: {err}");
@@ -545,7 +549,7 @@ mod tests {
             health_check: None,
             header: Some(headers),
         };
-        let p = ProxyProvider::new("airport", &raw, None).unwrap();
+        let p = ProxyProvider::new("airport", &raw, None, true).unwrap();
         assert_eq!(p.vehicle_type, "HTTP");
         assert_eq!(p.header.get("X-Token").map(String::as_str), Some("secret"));
     }
@@ -574,7 +578,7 @@ header:
         let yaml = "type: file\npath: proxies.yaml\n";
         let raw: RawProxyProvider = serde_yaml::from_str(yaml).unwrap();
         assert!(raw.header.is_none());
-        let p = ProxyProvider::new("p", &raw, Some(dir.path())).unwrap();
+        let p = ProxyProvider::new("p", &raw, Some(dir.path()), true).unwrap();
         assert!(p.header.is_empty());
     }
 
@@ -615,7 +619,7 @@ header:
     async fn file_provider(path: &std::path::Path) -> ProxyProvider {
         let raw = raw_file_provider(path.to_str().unwrap());
         let cache_dir = path.parent().expect("temp file has a parent dir");
-        let p = ProxyProvider::new("airport", &raw, Some(cache_dir)).unwrap();
+        let p = ProxyProvider::new("airport", &raw, Some(cache_dir), true).unwrap();
         p.refresh().await.unwrap();
         p
     }

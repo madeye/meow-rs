@@ -5,6 +5,7 @@
 //! `protect()` before the socket is used. This is the reason the project
 //! ships its own DNS client instead of relying on `hickory-resolver`.
 
+use crate::cache::QueryFamilies;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
@@ -109,6 +110,45 @@ pub struct DnsClient {
     timeout: Duration,
     proxy: Option<DnsProxy>,
     label: Option<Arc<str>>,
+}
+
+pub(crate) struct IpLookupResult {
+    pub(crate) ips: Vec<IpAddr>,
+    pub(crate) ttl: Duration,
+    pub(crate) queried: QueryFamilies,
+}
+
+pub(crate) enum FamilyLookupResult {
+    Response(IpLookupResult),
+    NxDomain,
+}
+
+/// One family's answer within a [`FamilySet`]. The resolver/cache consume this
+/// unified shape so the per-family and "all enabled families" lookup paths
+/// share one pipeline (review issue J). TTLs are the raw upstream values; the
+/// resolver clamps them once before use.
+#[derive(Clone, Debug)]
+pub(crate) enum FamilyAnswer {
+    /// NOERROR with at least one address record of this family.
+    Answer { ips: Vec<IpAddr>, ttl: Duration },
+    /// NOERROR with zero address records of this family (NODATA). Carries the
+    /// upstream TTL so the cache can expire the negative on its own schedule.
+    NoData(Duration),
+    /// The upstream authoritatively said the name does not exist. Not cached.
+    NxDomain,
+    /// A network/timeout failure for this family — not a definitive answer.
+    Failed,
+}
+
+/// A client's resolution result across the requested family set. `None` for a
+/// family means "not queried" (e.g. the prefer-IPv4 path skips AAAA once A has
+/// addresses); the resolver treats that as a cache miss for the family and
+/// re-queries on demand.
+#[derive(Clone, Debug)]
+pub(crate) struct FamilySet {
+    pub(crate) v4: Option<FamilyAnswer>,
+    pub(crate) v6: Option<FamilyAnswer>,
+    pub(crate) source: String,
 }
 
 enum Transport {
@@ -279,6 +319,16 @@ impl DnsClient {
     /// question must match the request before any response flags or records
     /// are used.
     pub async fn query(&self, name: &str, record_type: RecordType) -> Result<Message, ClientError> {
+        tokio::time::timeout(self.timeout, self.query_inner(name, record_type))
+            .await
+            .map_err(|_| ClientError::Timeout(self.timeout))?
+    }
+
+    async fn query_inner(
+        &self,
+        name: &str,
+        record_type: RecordType,
+    ) -> Result<Message, ClientError> {
         let id: u16 = rand::random();
         let mut msg = Message::new(id, MessageType::Query, OpCode::Query);
         msg.metadata.recursion_desired = true;
@@ -297,42 +347,171 @@ impl DnsClient {
         msg.add_query(query.clone());
         let wire = msg.to_bytes()?;
         let expected = ExpectedResponse { id, query };
-        tokio::time::timeout(self.timeout, self.exchange(&wire, &expected))
-            .await
-            .map_err(|_| ClientError::Timeout(self.timeout))?
+        self.exchange(&wire, &expected).await
     }
 
-    /// Convenience: query `A` and `AAAA` in parallel, merge addresses, return
-    /// (addrs, min_ttl).  Empty answer set returns `Ok((vec![], _))`; upstream
-    /// SERVFAIL surfaces as `ClientError::Rcode`.
+    /// Convenience: query `A` first and fall back to `AAAA` when needed.
+    /// Returns the addresses and minimum answer TTL.
     pub async fn lookup_ip(&self, name: &str) -> Result<(Vec<IpAddr>, Duration), ClientError> {
-        let (a, aaaa) = tokio::join!(
-            self.query(name, RecordType::A),
-            self.query(name, RecordType::AAAA),
-        );
+        let result = self.lookup_ip_with_ipv6(name, true).await?;
+        Ok((result.ips, result.ttl))
+    }
+
+    pub(crate) async fn lookup_ip_with_ipv6(
+        &self,
+        name: &str,
+        ipv6_enabled: bool,
+    ) -> Result<IpLookupResult, ClientError> {
+        tokio::time::timeout(
+            self.timeout,
+            self.lookup_ip_with_ipv6_inner(name, ipv6_enabled),
+        )
+        .await
+        .map_err(|_| ClientError::Timeout(self.timeout))?
+    }
+
+    pub(crate) async fn lookup_family(
+        &self,
+        name: &str,
+        record_type: RecordType,
+    ) -> Result<FamilyLookupResult, ClientError> {
+        let queried = QueryFamilies::from_record_type(record_type);
+        if queried.is_empty() {
+            return Err(ClientError::Protocol(
+                "address family query must be A or AAAA",
+            ));
+        }
+        let message = self.query(name, record_type).await?;
+        match message.metadata.response_code {
+            ResponseCode::NoError => {}
+            ResponseCode::NXDomain => return Ok(FamilyLookupResult::NxDomain),
+            code => return Err(ClientError::Rcode(code)),
+        }
+        let (ips, ttl) = relevant_ip_answers(&message);
+        Ok(FamilyLookupResult::Response(IpLookupResult {
+            ips,
+            ttl: Duration::from_secs(u64::from(ttl.unwrap_or(0))),
+            queried,
+        }))
+    }
+
+    /// Unified entry point for the resolver pipeline (review issue J). For a
+    /// single family (`IPV4`/`IPV6`) this is a per-family query that preserves
+    /// the NXDOMAIN/NODATA distinction the DNS server needs; for `BOTH` it is
+    /// the prefer-IPv4 A-then-AAAA path that returns every enabled address for
+    /// `resolve_ips`. `Err` means the client could not produce *any* answer for
+    /// the requested set (e.g. both families timed out); the resolver keeps
+    /// racing the remaining clients.
+    pub(crate) async fn lookup_set(
+        &self,
+        name: &str,
+        want: QueryFamilies,
+        ipv6_enabled: bool,
+    ) -> Result<FamilySet, ClientError> {
+        let source = self.upstream_label();
+        if want == QueryFamilies::BOTH {
+            let result = self.lookup_ip_with_ipv6(name, ipv6_enabled).await?;
+            return Ok(family_set_from_ip_lookup(&result, source));
+        }
+        let family = if want == QueryFamilies::IPV4 {
+            QueryFamilies::IPV4
+        } else if want == QueryFamilies::IPV6 {
+            QueryFamilies::IPV6
+        } else {
+            return Err(ClientError::Protocol(
+                "lookup_set requires a single family or BOTH",
+            ));
+        };
+        let record_type = match family {
+            QueryFamilies::IPV4 => RecordType::A,
+            _ => RecordType::AAAA,
+        };
+        let answer = match self.lookup_family(name, record_type).await {
+            Ok(FamilyLookupResult::Response(r)) => {
+                let ttl = r.ttl;
+                if r.ips.is_empty() {
+                    FamilyAnswer::NoData(ttl)
+                } else {
+                    FamilyAnswer::Answer { ips: r.ips, ttl }
+                }
+            }
+            Ok(FamilyLookupResult::NxDomain) => FamilyAnswer::NxDomain,
+            Err(_) => FamilyAnswer::Failed,
+        };
+        let (v4, v6) = if family == QueryFamilies::IPV4 {
+            (Some(answer), None)
+        } else {
+            (None, Some(answer))
+        };
+        Ok(FamilySet { v4, v6, source })
+    }
+
+    async fn lookup_ip_with_ipv6_inner(
+        &self,
+        name: &str,
+        ipv6_enabled: bool,
+    ) -> Result<IpLookupResult, ClientError> {
+        // Prefer IPv4: query A first and return it when it yields any
+        // address; fall back to AAAA only when A is empty.  This mirrors the
+        // `prefer-ipv4: true` mihomo option and keeps the common v4-capable
+        // case at a *single* query instead of fanning out A + AAAA in
+        // parallel.  That matters because the resolver races two upstreams,
+        // so a parallel A+AAAA lookup is 4 TCP DNS queries per host — all
+        // serialised on one keep-alive connection per upstream, which under a
+        // page-load burst starves the proxy server's own resolution and can
+        // take the whole tunnel down.
+        //
+        // v6-only domains (A empty) still resolve via the AAAA fallback, so
+        // IPv6 remains *supported*; we just prefer IPv4.  When the app has
+        // fully disabled IPv6 (ipv6_enabled == false), skip AAAA entirely —
+        // the VPN has no IPv6 route, so AAAA addresses only cause connect
+        // failures and waste a round-trip.
         let mut addrs = Vec::new();
         let mut min_ttl: Option<u32> = None;
         let mut had_any_ok = false;
-        let mut last_err: Option<ClientError> = None;
-        for r in [a, aaaa] {
-            match r {
+        let mut first_err: Option<ClientError> = None;
+        let mut queried = QueryFamilies::NONE;
+
+        // Query A first (IPv4-preferred). Track whether it returned any
+        // usable address so we can decide whether the AAAA fallback is
+        // needed.
+        let got_v4 = match self.query_inner(name, RecordType::A).await {
+            Ok(msg) => {
+                had_any_ok = true;
+                queried = queried.union(QueryFamilies::IPV4);
+                absorb_ip_response(&msg, &mut addrs, &mut min_ttl)
+            }
+            Err(e) => {
+                first_err = Some(e);
+                false
+            }
+        };
+
+        // No IPv4 answer (empty A, or A failed): fall back to AAAA unless the
+        // user has disabled IPv6 entirely.
+        if !got_v4 && ipv6_enabled {
+            match self.query_inner(name, RecordType::AAAA).await {
                 Ok(msg) => {
                     had_any_ok = true;
-                    let (response_addrs, response_ttl) = relevant_ip_answers(&msg);
-                    addrs.extend(response_addrs);
-                    if let Some(ttl) = response_ttl {
-                        min_ttl = Some(min_ttl.map_or(ttl, |current| current.min(ttl)));
-                    }
+                    queried = queried.union(QueryFamilies::IPV6);
+                    absorb_ip_response(&msg, &mut addrs, &mut min_ttl);
                 }
                 Err(e) => {
-                    last_err = Some(e);
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
                 }
             }
         }
+
         if !had_any_ok {
-            return Err(last_err.unwrap_or(ClientError::Protocol("no response")));
+            return Err(first_err.unwrap_or(ClientError::Protocol("no response")));
         }
-        Ok((addrs, Duration::from_secs(u64::from(min_ttl.unwrap_or(0)))))
+        Ok(IpLookupResult {
+            ips: addrs,
+            ttl: Duration::from_secs(u64::from(min_ttl.unwrap_or(0))),
+            queried,
+        })
     }
 
     async fn exchange(
@@ -563,6 +742,51 @@ fn relevant_ip_answers(message: &Message) -> (Vec<IpAddr>, Option<u32>) {
     (addrs, min_ttl)
 }
 
+fn absorb_ip_response(
+    message: &Message,
+    addrs: &mut Vec<IpAddr>,
+    min_ttl: &mut Option<u32>,
+) -> bool {
+    let (response_addrs, response_ttl) = relevant_ip_answers(message);
+    let non_empty = !response_addrs.is_empty();
+    addrs.extend(response_addrs);
+    if let Some(ttl) = response_ttl {
+        *min_ttl = Some(min_ttl.map_or(ttl, |current| current.min(ttl)));
+    }
+    non_empty
+}
+
+/// Convert a `lookup_ip_with_ipv6` merged result (the prefer-IPv4 A-then-AAAA
+/// path, which does not distinguish NXDOMAIN from NODATA) into a [`FamilySet`].
+/// NXDOMAIN is folded into `NoData` here — the "give me every enabled address"
+/// caller (`resolve_ips`) ignores the rcode, and the per-family `queried`
+/// tracking in the cache ensures a later family-specific query still re-queries
+/// and gets the real rcode from `lookup_family`.
+fn family_set_from_ip_lookup(result: &IpLookupResult, source: String) -> FamilySet {
+    let ttl = result.ttl;
+    let split = |family: QueryFamilies| -> Option<FamilyAnswer> {
+        if !result.queried.contains(family) {
+            return None;
+        }
+        let ips: Vec<IpAddr> = result
+            .ips
+            .iter()
+            .copied()
+            .filter(|ip| family.contains_ip(*ip))
+            .collect();
+        if ips.is_empty() {
+            Some(FamilyAnswer::NoData(ttl))
+        } else {
+            Some(FamilyAnswer::Answer { ips, ttl })
+        }
+    };
+    FamilySet {
+        v4: split(QueryFamilies::IPV4),
+        v6: split(QueryFamilies::IPV6),
+        source,
+    }
+}
+
 async fn udp_exchange(
     addr: SocketAddr,
     wire: &[u8],
@@ -732,6 +956,7 @@ mod tests {
     use hickory_proto::rr::rdata::{A, CNAME};
     use hickory_proto::rr::DNSClass;
     use std::net::Ipv4Addr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn expected(name: &str, record_type: RecordType, id: u16) -> ExpectedResponse {
         ExpectedResponse {
@@ -772,9 +997,9 @@ mod tests {
 
     #[tokio::test]
     async fn udp_client_times_out_on_unroutable() {
-        // 192.0.2.1/24 is TEST-NET-1, guaranteed not to respond.
-        let client = DnsClient::udp("192.0.2.1:53".parse().unwrap())
-            .with_timeout(Duration::from_millis(200));
+        let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client =
+            DnsClient::udp(sink.local_addr().unwrap()).with_timeout(Duration::from_millis(200));
         let r = client.query("example.test", RecordType::A).await;
         assert!(matches!(r, Err(ClientError::Timeout(_))));
     }
@@ -977,6 +1202,49 @@ mod tests {
             result,
             Err(ClientError::Protocol("response ID mismatch"))
         ));
+    }
+
+    #[tokio::test]
+    async fn lookup_ip_shares_one_timeout_across_a_and_aaaa() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server_requests = Arc::clone(&requests);
+        tokio::spawn(async move {
+            // A and AAAA ride separate connections (no pooling here), so the
+            // server accepts twice. The point under test is that the *client*
+            // covers both sequential queries with one overall timeout, not
+            // that they share a socket.
+            for expected in [RecordType::A, RecordType::AAAA] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_lp(&mut stream).await.unwrap();
+                let request = Message::from_bytes(&request).unwrap();
+                assert_eq!(request.queries[0].query_type, expected);
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                if expected == RecordType::A {
+                    // Empty NOERROR (no address records) after 250 ms, so the
+                    // prefer-IPv4 path falls back to AAAA.
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let response = response_for(&request, request.metadata.id);
+                    write_lp(&mut stream, &response.to_bytes().unwrap())
+                        .await
+                        .unwrap();
+                } else {
+                    // AAAA never answers within the client budget.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        });
+
+        let client = DnsClient::tcp(addr).with_timeout(Duration::from_millis(400));
+        let result = tokio::time::timeout(
+            Duration::from_millis(550),
+            client.lookup_ip_with_ipv6("dual.example", true),
+        )
+        .await
+        .expect("A and AAAA must share the client's overall timeout");
+        assert!(matches!(result, Err(ClientError::Timeout(_))));
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[cfg(feature = "encrypted")]

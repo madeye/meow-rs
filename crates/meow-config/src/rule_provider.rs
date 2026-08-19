@@ -739,7 +739,7 @@ mod tests {
     fn direct_proxy() -> Arc<dyn Proxy> {
         let cfg: HashMap<String, serde_yaml::Value> =
             serde_yaml::from_str("name: d\ntype: direct").unwrap();
-        crate::proxy_parser::parse_proxy(&cfg).unwrap()
+        crate::proxy_parser::parse_proxy(&cfg, true).unwrap()
     }
 
     #[test]

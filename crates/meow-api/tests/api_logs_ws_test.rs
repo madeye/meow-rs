@@ -24,6 +24,7 @@ fn make_state_with_cap(cap: usize) -> (Arc<AppState>, broadcast::Sender<LogMessa
         DnsMode::Normal,
         DomainTrie::new(),
         true,
+        true,
     ));
     let tunnel = Tunnel::new(resolver);
     let raw = RawConfig {

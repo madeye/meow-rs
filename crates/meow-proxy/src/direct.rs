@@ -387,7 +387,14 @@ mod tests {
             ]
             .into(),
         );
-        let resolver = Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
+        let resolver = Arc::new(Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            hosts,
+            true,
+            true,
+        ));
         let adapter = DirectAdapter::new()
             .with_resolver(resolver)
             .with_connect_timeout(Duration::from_secs(2));

@@ -1,8 +1,9 @@
-use crate::cache::{DnsCache, DnsCacheSnapshotEntry};
-use crate::client::DnsClient;
+use crate::cache::{DnsCache, DnsCacheSnapshotEntry, FamilyCacheHit, QueryFamilies};
+use crate::client::{DnsClient, FamilyAnswer, FamilySet};
 use crate::fakeip::{Pool, Skipper};
 use crate::upstream::{HostOrIp, NameServerEntry, NameServerUrl};
 use dashmap::DashMap;
+use futures::stream::{FuturesUnordered, StreamExt};
 use hickory_proto::op::Message;
 use hickory_proto::rr::RecordType;
 use ipnet::IpNet;
@@ -59,7 +60,14 @@ pub enum BootstrapError {
 
 /// Broadcast channel used to share a singleflight lookup result.
 /// Capacity 1 is enough — subscribers call `recv()` at most once.
-type InflightTx = tokio::sync::broadcast::Sender<Option<Vec<IpAddr>>>;
+type InflightTx = tokio::sync::broadcast::Sender<Option<FamilySet>>;
+
+/// Singleflight key: `(host, queried-families)`. Keying by the family set as
+/// well as the host (review issue B) means a concurrent A query coalesces with
+/// other A queries and a concurrent AAAA query coalesces with other AAAA
+/// queries, but a genuinely different query set starts its own flight instead
+/// of being silently subsumed by a neighboring one.
+type InflightKey = (Arc<str>, QueryFamilies);
 
 /// A single entry in `NameserverPolicy`: one or more pre-built upstream DNS
 /// clients, one per configured nameserver URL.
@@ -185,7 +193,7 @@ pub struct Resolver {
     mode: DnsMode,
     hosts: DomainTrie<HostEntry>,
     use_hosts: bool,
-    inflight: DashMap<Arc<str>, InflightTx>,
+    inflight: DashMap<InflightKey, InflightTx>,
     policy: Option<NameserverPolicy>,
     fallback_filter: Option<FallbackFilter>,
     /// IPv4 fake-IP pool (None when fake-ip mode is disabled or only v6 is configured).
@@ -198,6 +206,9 @@ pub struct Resolver {
     /// TTL stamped on synthesised A/AAAA responses. Short by design so
     /// clients re-query rather than caching a fake IP after pool eviction.
     fakeip_ttl: Duration,
+    /// Whether IPv6 resolution is enabled. Driven by the top-level `ipv6`
+    /// config flag and fixed at construction time.
+    ipv6: bool,
 }
 
 enum HostsLookup<'a> {
@@ -206,14 +217,14 @@ enum HostsLookup<'a> {
 }
 
 struct InflightGuard<'a> {
-    map: &'a DashMap<Arc<str>, InflightTx>,
-    key: Arc<str>,
+    map: &'a DashMap<InflightKey, InflightTx>,
+    key: InflightKey,
     _armed: (),
 }
 
 impl Drop for InflightGuard<'_> {
     fn drop(&mut self) {
-        self.map.remove(self.key.as_ref());
+        self.map.remove(&self.key);
     }
 }
 
@@ -223,9 +234,8 @@ impl Drop for InflightGuard<'_> {
 pub const DEFAULT_FAKE_IP_TTL: Duration = Duration::from_secs(1);
 
 /// TTL stamped on answers that have no upstream TTL to honor: hosts-trie
-/// mappings, and the (rare) fresh-lookup path where the just-written cache
-/// entry got evicted before it could be re-read. Matches the DNS server's
-/// pre-TTL-propagation default so hosts answers behave exactly as before.
+/// mappings. Matches the DNS server's pre-TTL-propagation default so hosts
+/// answers behave exactly as before.
 pub const HOSTS_ANSWER_TTL: Duration = Duration::from_secs(60);
 
 fn clamp_ttl(raw: Duration) -> Duration {
@@ -310,17 +320,117 @@ async fn system_nameservers() -> Vec<SocketAddr> {
     out
 }
 
-/// Query a pool of clients in parallel; return the first successful A+AAAA
-/// result. `select_ok` semantics — first `Ok` wins, remaining are cancelled.
-/// Unit error for racing upstream attempts: the failure detail is discarded
-/// by `select_ok` callers, so attempts must not allocate an error String.
-#[derive(Debug, Clone, Copy)]
-struct LookupFailed;
+#[derive(Clone, Debug)]
+pub(crate) enum AddressLookupResult {
+    Answer(IpAddr, Duration),
+    NoData,
+    NxDomain,
+    Failed,
+}
 
-struct PoolLookupResult {
-    ips: Vec<IpAddr>,
-    ttl: Duration,
-    source: String,
+impl FamilySet {
+    /// True when at least one queried family has a non-empty answer — the
+    /// signal that a pool/tier result is a positive resolution.
+    fn has_positive(&self) -> bool {
+        self.v4
+            .as_ref()
+            .is_some_and(|a| matches!(a, FamilyAnswer::Answer { ips, .. } if !ips.is_empty()))
+            || self
+                .v6
+                .as_ref()
+                .is_some_and(|a| matches!(a, FamilyAnswer::Answer { ips, .. } if !ips.is_empty()))
+    }
+
+    /// Every IP carried by a positive (`Answer`) family — used by the
+    /// fallback-filter's `ip_gated` check and by the bootstrap path.
+    fn positive_ips(&self) -> Vec<IpAddr> {
+        let mut out = Vec::new();
+        for ans in [&self.v4, &self.v6].into_iter().flatten() {
+            if let FamilyAnswer::Answer { ips, .. } = ans {
+                out.extend_from_slice(ips);
+            }
+        }
+        out
+    }
+
+    /// A definitive negative **for the requested family set `want`**: no
+    /// positive answer, and every requested family has a real `NoData`/`NxDomain`
+    /// answer (not `None` — "never queried" — and not `Failed`). A `None`
+    /// family means the client never got that far (e.g. the prefer-IPv4 path
+    /// skipped AAAA after A failed, or AAAA itself errored), so the set is
+    /// *not* a definitive answer for a `BOTH` query and must not short-circuit
+    /// the race — another client may still supply the missing family. This is
+    /// what `query_pool_set` uses to return on the first definitive negative
+    /// instead of draining a dead upstream's full timeout (review issue C).
+    fn is_definitive_negative(&self, want: QueryFamilies) -> bool {
+        if want.is_empty() {
+            return false;
+        }
+        let family_ok = |ans: &Option<FamilyAnswer>| {
+            matches!(
+                ans,
+                Some(FamilyAnswer::NoData(_)) | Some(FamilyAnswer::NxDomain)
+            )
+        };
+        let v4_ok = !want.contains(QueryFamilies::IPV4) || family_ok(&self.v4);
+        let v6_ok = !want.contains(QueryFamilies::IPV6) || family_ok(&self.v6);
+        // No positive (an `Answer` is always non-empty by construction) and
+        // every requested family answered definitively.
+        !self.has_positive() && v4_ok && v6_ok
+    }
+
+    /// Clamp every carried TTL into the cache's `[MIN, MAX]` window. The client
+    /// returns raw upstream TTLs; the resolver owns the clamp policy so it is
+    /// applied exactly once, both for the answer and the cache write.
+    fn clamped(mut self) -> Self {
+        for ans in [&mut self.v4, &mut self.v6].into_iter().flatten() {
+            match ans {
+                FamilyAnswer::Answer { ttl, .. } | FamilyAnswer::NoData(ttl) => {
+                    *ttl = clamp_ttl(*ttl);
+                }
+                _ => {}
+            }
+        }
+        self
+    }
+}
+
+/// Query a pool of clients in parallel for the requested family set `want`,
+/// returning the first positive resolution or the first definitive negative
+/// (review issue C: a fast NODATA/NXDOMAIN from a healthy upstream no longer
+/// waits out a dead upstream's full 5 s timeout). `Err` (network failure) is
+/// not definitive — keep racing the remaining clients.
+async fn query_pool_set(
+    clients: &[Arc<DnsClient>],
+    host: &str,
+    want: QueryFamilies,
+    ipv6_enabled: bool,
+) -> Option<FamilySet> {
+    if clients.is_empty() {
+        return None;
+    }
+    let mut pending = FuturesUnordered::new();
+    for client in clients {
+        pending.push(async move { client.lookup_set(host, want, ipv6_enabled).await });
+    }
+    let mut negative: Option<FamilySet> = None;
+    while let Some(result) = pending.next().await {
+        let set = match result {
+            Ok(set) => set.clamped(),
+            Err(_) => continue,
+        };
+        if set.has_positive() || set.is_definitive_negative(want) {
+            // First positive OR first definitive negative wins; the remaining
+            // futures are dropped (cancelled) on return.
+            return Some(set);
+        }
+        // Partial failure (some family Failed, none positive): remember the
+        // first as a last-resort answer but keep racing for a complete one.
+        if negative.is_none() {
+            negative = Some(set);
+        }
+    }
+    negative
 }
 
 fn encrypted_upstream_label(url: &NameServerUrl) -> Option<String> {
@@ -362,91 +472,7 @@ fn authority_label(addr: &HostOrIp, port: u16, default_port: u16) -> String {
     }
 }
 
-async fn query_pool(clients: &[Arc<DnsClient>], host: &str) -> Option<PoolLookupResult> {
-    match clients.len() {
-        0 => None,
-        1 => match clients[0].lookup_ip(host).await {
-            Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
-                ips,
-                ttl: clamp_ttl(ttl),
-                source: clients[0].upstream_label(),
-            }),
-            _ => None,
-        },
-        2 => {
-            // Common case: borrow `host` instead of String-cloning it per
-            // future, and stack-pin the two futures instead of going through
-            // Vec<Pin<Box<…>>>.
-            let f1 = clients[0].lookup_ip(host);
-            let f2 = clients[1].lookup_ip(host);
-            tokio::pin!(f1);
-            tokio::pin!(f2);
-            tokio::select! {
-                r = &mut f1 => match r {
-                    Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
-                        ips,
-                        ttl: clamp_ttl(ttl),
-                        source: clients[0].upstream_label(),
-                    }),
-                    _ => match (&mut f2).await {
-                        Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
-                            ips,
-                            ttl: clamp_ttl(ttl),
-                            source: clients[1].upstream_label(),
-                        }),
-                        _ => None,
-                    },
-                },
-                r = &mut f2 => match r {
-                    Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
-                        ips,
-                        ttl: clamp_ttl(ttl),
-                        source: clients[1].upstream_label(),
-                    }),
-                    _ => match (&mut f1).await {
-                        Ok((ips, ttl)) if !ips.is_empty() => Some(PoolLookupResult {
-                            ips,
-                            ttl: clamp_ttl(ttl),
-                            source: clients[0].upstream_label(),
-                        }),
-                        _ => None,
-                    },
-                },
-            }
-        }
-        _ => {
-            // ≥ 3 nameservers: fall back to select_ok with Vec<Pin<Box<…>>>.
-            // host can still be borrowed because `select_ok` keeps the
-            // futures alive only until it resolves.
-            // Unit error: the per-attempt failure reason is never read
-            // (select_ok only reports the last error), so don't format!
-            // an error String per failed attempt.
-            let futs: Vec<_> = clients
-                .iter()
-                .enumerate()
-                .map(|(idx, c)| {
-                    Box::pin(async move {
-                        let (ips, ttl) = c.lookup_ip(host).await.map_err(|_| LookupFailed)?;
-                        if ips.is_empty() {
-                            return Err(LookupFailed);
-                        }
-                        Ok((idx, ips, clamp_ttl(ttl)))
-                    })
-                })
-                .collect();
-            match futures::future::select_ok(futs).await {
-                Ok(((idx, ips, ttl), _)) => Some(PoolLookupResult {
-                    ips,
-                    ttl,
-                    source: clients[idx].upstream_label(),
-                }),
-                Err(_) => None,
-            }
-        }
-    }
-}
-
-/// Typed-record counterpart of `query_pool`: queries a client pool for an
+/// Typed-record counterpart of `query_pool_set`: queries a client pool for an
 /// arbitrary `RecordType` (TXT, MX, SRV, HTTPS, …) and returns the first
 /// successful `Message`. Caller copies the answer section into its response.
 async fn query_pool_generic(
@@ -470,11 +496,7 @@ async fn query_pool_generic(
         _ => {
             let futs: Vec<_> = clients
                 .iter()
-                .map(|c| {
-                    Box::pin(
-                        async move { c.query(host, record_type).await.map_err(|_| LookupFailed) },
-                    )
-                })
+                .map(|c| Box::pin(async move { c.query(host, record_type).await.map_err(|_| ()) }))
                 .collect();
             futures::future::select_ok(futs).await.ok().map(|(m, _)| m)
         }
@@ -509,6 +531,7 @@ impl Resolver {
         mode: DnsMode,
         hosts: DomainTrie<HostEntry>,
         use_hosts: bool,
+        ipv6: bool,
     ) -> Self {
         let main = Self::build_clients(&main_servers);
         let fallback = if fallback_servers.is_empty() {
@@ -530,6 +553,7 @@ impl Resolver {
             fakeip_v6: None,
             fakeip_skipper: None,
             fakeip_ttl: DEFAULT_FAKE_IP_TTL,
+            ipv6,
         }
     }
 
@@ -555,6 +579,7 @@ impl Resolver {
         mode: DnsMode,
         hosts: DomainTrie<HostEntry>,
         use_hosts: bool,
+        ipv6: bool,
         policy: Option<NameserverPolicy>,
         fallback_filter: Option<FallbackFilter>,
     ) -> Result<Self, BootstrapError> {
@@ -565,6 +590,7 @@ impl Resolver {
             mode,
             hosts,
             use_hosts,
+            ipv6,
             policy,
             fallback_filter,
             &HashMap::new(),
@@ -588,6 +614,7 @@ impl Resolver {
         mode: DnsMode,
         hosts: DomainTrie<HostEntry>,
         use_hosts: bool,
+        ipv6: bool,
         policy: Option<NameserverPolicy>,
         fallback_filter: Option<FallbackFilter>,
         proxy_registry: &HashMap<SmolStr, Arc<dyn meow_common::Proxy>>,
@@ -704,14 +731,24 @@ impl Resolver {
                     .collect()
             };
 
-            // Resolve sequentially — fail-fast on first failure.
+            // Resolve sequentially — fail-fast on first failure. Bootstrap is
+            // intentionally dual-stack so a hostname-based encrypted upstream
+            // can fall back to whichever family its bootstrap resolver has.
             let mut map = HashMap::new();
             for host in &hostnames_needing_bootstrap {
-                match query_pool(&bootstrap_clients, host).await {
-                    Some(result) if !result.ips.is_empty() => {
-                        map.insert(host.clone(), result.ips[0]);
+                match query_pool_set(&bootstrap_clients, host, QueryFamilies::BOTH, true).await {
+                    Some(set) => {
+                        let ips = set.positive_ips();
+                        if let Some(first) = ips.first() {
+                            map.insert(host.clone(), *first);
+                        } else {
+                            return Err(BootstrapError::CannotResolve {
+                                host: host.clone(),
+                                source: "no addresses returned".into(),
+                            });
+                        }
                     }
-                    _ => {
+                    None => {
                         return Err(BootstrapError::CannotResolve {
                             host: host.clone(),
                             source: "no addresses returned".into(),
@@ -756,7 +793,12 @@ impl Resolver {
             fakeip_v6: None,
             fakeip_skipper: None,
             fakeip_ttl: DEFAULT_FAKE_IP_TTL,
+            ipv6,
         })
+    }
+
+    pub(crate) fn ipv6_enabled(&self) -> bool {
+        self.ipv6
     }
 
     /// Build a single `DnsClient` for one `NameServerUrl`, using `resolved`
@@ -843,21 +885,63 @@ impl Resolver {
     pub async fn resolve_ips(&self, host: &str) -> Option<Vec<IpAddr>> {
         let lookup_host = if self.use_hosts {
             match self.lookup_hosts_entry(host) {
-                Some(HostsLookup::Addresses(ips)) if !ips.is_empty() => {
-                    return Some(ips.clone());
+                Some(HostsLookup::Addresses(ips)) => {
+                    // Review issue E: a hosts entry that has no *enabled* IPs
+                    // (e.g. v6-only under `ipv6: false`) must NOT short-circuit
+                    // to `None` — fall through to upstream so DirectAdapter can
+                    // still reach a host that the hosts file only pins for the
+                    // other family.
+                    if let Some(enabled) = self.filter_enabled_ips(ips) {
+                        return Some(enabled);
+                    }
+                    host
                 }
                 Some(HostsLookup::Alias(alias)) => alias,
-                _ => host,
+                None => host,
             }
         } else {
             host
         };
-        if let Some(ips) = self.cache.get(lookup_host) {
-            if !ips.is_empty() {
-                return Some(ips.to_vec());
+        let required = if self.ipv6 {
+            QueryFamilies::BOTH
+        } else {
+            QueryFamilies::IPV4
+        };
+        // Only query the families the cache cannot already answer. Fresh
+        // families (Answer or NoData) are dropped from the query set so a
+        // short-TTL AAAA re-query doesn't redundantly re-fetch a still-fresh A.
+        let mut want = required;
+        if let Some(cached) = self.cache.get_lookup(lookup_host) {
+            if let Some(enabled) = self.filter_enabled_ips(&cached.ips) {
+                return Some(enabled);
+            }
+            if cached.v4.is_fresh() && required.contains(QueryFamilies::IPV4) {
+                want = want.minus(QueryFamilies::IPV4);
+            }
+            if cached.v6.is_fresh() && required.contains(QueryFamilies::IPV6) {
+                want = want.minus(QueryFamilies::IPV6);
             }
         }
-        self.lookup_actual_all(lookup_host).await
+        if !want.is_empty() {
+            self.run_pipeline(lookup_host, want).await;
+        }
+        // Re-read the cache: it now holds the freshly-queried families merged
+        // alongside any pre-existing fresh ones.
+        if let Some(cached) = self.cache.get_lookup(lookup_host) {
+            if let Some(enabled) = self.filter_enabled_ips(&cached.ips) {
+                return Some(enabled);
+            }
+            // No usable IPs. If every required family is now fresh (cached or
+            // just queried), the name is genuinely unresolvable — return `None`
+            // rather than looping or masking the negative as a transient fail.
+            let all_required_fresh = (!required.contains(QueryFamilies::IPV4)
+                || cached.v4.is_fresh())
+                && (!required.contains(QueryFamilies::IPV6) || cached.v6.is_fresh());
+            if all_required_fresh {
+                return None;
+            }
+        }
+        None
     }
 
     /// [`Self::resolve_ips`] restricted to answers this resolver already
@@ -873,20 +957,22 @@ impl Resolver {
     pub fn resolve_ips_local(&self, host: &str) -> Option<Vec<IpAddr>> {
         let lookup_host = if self.use_hosts {
             match self.lookup_hosts_entry(host) {
-                Some(HostsLookup::Addresses(ips)) if !ips.is_empty() => {
-                    return Some(ips.clone());
+                Some(HostsLookup::Addresses(ips)) => {
+                    if let Some(enabled) = self.filter_enabled_ips(ips) {
+                        return Some(enabled);
+                    }
+                    host
                 }
                 Some(HostsLookup::Alias(alias)) => alias,
-                _ => host,
+                None => host,
             }
         } else {
             host
         };
-        let ips = self.cache.get(lookup_host)?;
-        if ips.is_empty() {
-            return None;
+        if let Some(cached) = self.cache.get_lookup(lookup_host) {
+            return self.filter_enabled_ips(&cached.ips);
         }
-        Some(ips.to_vec())
+        None
     }
 
     pub async fn resolve_ip(&self, host: &str) -> Option<IpAddr> {
@@ -907,34 +993,43 @@ impl Resolver {
     /// lookups. Hosts-trie hits get [`HOSTS_ANSWER_TTL`] — static mappings
     /// have no upstream TTL to honor.
     pub async fn lookup_ipv4_with_ttl(&self, host: &str) -> Option<(IpAddr, Duration)> {
-        let lookup_host = if self.use_hosts {
+        match self.lookup_ipv4_result(host).await {
+            AddressLookupResult::Answer(ip, ttl) => Some((ip, ttl)),
+            AddressLookupResult::NoData
+            | AddressLookupResult::NxDomain
+            | AddressLookupResult::Failed => None,
+        }
+    }
+
+    pub(crate) async fn lookup_ipv4_result(&self, host: &str) -> AddressLookupResult {
+        if self.use_hosts {
             match self.lookup_hosts_entry(host) {
                 Some(HostsLookup::Addresses(ips)) => {
-                    let ip = ips.iter().find(|ip| ip.is_ipv4()).copied()?;
-                    return Some((ip, HOSTS_ANSWER_TTL));
+                    return ips
+                        .iter()
+                        .find(|ip| ip.is_ipv4())
+                        .copied()
+                        .map_or(AddressLookupResult::NoData, |ip| {
+                            AddressLookupResult::Answer(ip, HOSTS_ANSWER_TTL)
+                        });
                 }
                 Some(HostsLookup::Alias(alias)) => {
-                    return self
-                        .lookup_real_with_ttl(alias, std::net::IpAddr::is_ipv4)
-                        .await;
+                    return self.lookup_real_with_ttl(alias, RecordType::A).await;
                 }
-                None => host,
+                None => {}
             }
-        } else {
-            host
-        };
+        }
         // Fake-IP mode: synthesise from the v4 pool unless the skipper says
         // bypass. The hosts trie above still wins — explicit user mappings
         // never get rewritten to a fake address.
         if self.mode == DnsMode::FakeIp {
             if let Some(pool) = &self.fakeip_v4 {
                 if !self.skipper_bypasses(host) {
-                    return Some((pool.lookup(host), self.fakeip_ttl));
+                    return AddressLookupResult::Answer(pool.lookup(host), self.fakeip_ttl);
                 }
             }
         }
-        self.lookup_real_with_ttl(lookup_host, std::net::IpAddr::is_ipv4)
-            .await
+        self.lookup_real_with_ttl(host, RecordType::A).await
     }
 
     pub async fn lookup_ipv6(&self, host: &str) -> Option<IpAddr> {
@@ -943,68 +1038,118 @@ impl Resolver {
 
     /// AAAA counterpart of [`Self::lookup_ipv4_with_ttl`] — same TTL contract.
     pub async fn lookup_ipv6_with_ttl(&self, host: &str) -> Option<(IpAddr, Duration)> {
-        let lookup_host = if self.use_hosts {
+        match self.lookup_ipv6_result(host).await {
+            AddressLookupResult::Answer(ip, ttl) => Some((ip, ttl)),
+            AddressLookupResult::NoData
+            | AddressLookupResult::NxDomain
+            | AddressLookupResult::Failed => None,
+        }
+    }
+
+    pub(crate) async fn lookup_ipv6_result(&self, host: &str) -> AddressLookupResult {
+        if !self.ipv6 {
+            return AddressLookupResult::NoData;
+        }
+        if self.use_hosts {
             match self.lookup_hosts_entry(host) {
                 Some(HostsLookup::Addresses(ips)) => {
-                    let ip = ips.iter().find(|ip| ip.is_ipv6()).copied()?;
-                    return Some((ip, HOSTS_ANSWER_TTL));
+                    return ips
+                        .iter()
+                        .find(|ip| ip.is_ipv6())
+                        .copied()
+                        .map_or(AddressLookupResult::NoData, |ip| {
+                            AddressLookupResult::Answer(ip, HOSTS_ANSWER_TTL)
+                        });
                 }
                 Some(HostsLookup::Alias(alias)) => {
-                    return self
-                        .lookup_real_with_ttl(alias, std::net::IpAddr::is_ipv6)
-                        .await;
+                    return self.lookup_real_with_ttl(alias, RecordType::AAAA).await;
                 }
-                None => host,
+                None => {}
             }
-        } else {
-            host
-        };
+        }
         // Fake-IP mode for AAAA: synthesise from the v6 pool if configured.
         // If only a v4 pool is configured (the common case — upstream
-        // default is `198.18.0.1/16` only), return None so the server emits
+        // default is `198.18.0.1/16` only), report NODATA so the server emits
         // a NOERROR with zero answers and clients fall back to IPv4.
         if self.mode == DnsMode::FakeIp {
             if let Some(pool) = &self.fakeip_v6 {
                 if !self.skipper_bypasses(host) {
-                    return Some((pool.lookup(host), self.fakeip_ttl));
+                    return AddressLookupResult::Answer(pool.lookup(host), self.fakeip_ttl);
                 }
             } else if self.fakeip_v4.is_some() && !self.skipper_bypasses(host) {
                 // v4-only fake-ip config: suppress AAAA so clients fall back.
-                return None;
+                return AddressLookupResult::NoData;
             }
         }
-        self.lookup_real_with_ttl(lookup_host, std::net::IpAddr::is_ipv6)
-            .await
+        self.lookup_real_with_ttl(host, RecordType::AAAA).await
     }
 
-    /// Cache-then-upstream address lookup carrying the answer TTL. Cache hits
-    /// report the entry's remaining lifetime; upstream lookups re-read the
-    /// cache entry `do_lookup` just wrote, so the answer reflects the same
-    /// (clamped) TTL the cache will honor. The re-read can only miss on a
-    /// zero-capacity cache or an eviction race — fall back to the upstream
-    /// answer with [`HOSTS_ANSWER_TTL`] rather than dropping it.
+    /// Cache-then-upstream address lookup carrying the answer TTL. A cache hit
+    /// for the queried family reports that family's own remaining lifetime
+    /// (per-family expiry — review issue D); a cache miss re-queries just that
+    /// family through the unified single-flight pipeline and returns the
+    /// upstream's clamped TTL. NXDOMAIN is not cached (a re-query always gets a
+    /// fresh authoritative answer), so it is surfaced directly from the
+    /// pipeline result rather than re-read from the cache.
     async fn lookup_real_with_ttl(
         &self,
         host: &str,
-        family: fn(&IpAddr) -> bool,
-    ) -> Option<(IpAddr, Duration)> {
-        if let Some((ips, remaining)) = self.cache.get_with_ttl(host) {
-            let ip = ips.iter().find(|ip| family(ip)).copied()?;
-            return Some((ip, remaining));
+        record_type: RecordType,
+    ) -> AddressLookupResult {
+        let family = QueryFamilies::from_record_type(record_type);
+        if family.is_empty() {
+            return AddressLookupResult::Failed;
         }
-        let ips = self.lookup_actual_all(host).await?;
-        let ip = ips.into_iter().find(family)?;
-        let ttl = self
-            .cache
-            .get_with_ttl(host)
-            .map_or(HOSTS_ANSWER_TTL, |(_, remaining)| remaining);
-        Some((ip, ttl))
+        if let Some(cached) = self.cache.get_lookup(host) {
+            let hit = if family == QueryFamilies::IPV4 {
+                &cached.v4
+            } else {
+                &cached.v6
+            };
+            match hit {
+                FamilyCacheHit::Answer(ips, ttl) => {
+                    return AddressLookupResult::Answer(ips[0], *ttl);
+                }
+                FamilyCacheHit::NoData => return AddressLookupResult::NoData,
+                FamilyCacheHit::Miss => {}
+            }
+        }
+
+        let Some(set) = self.run_pipeline(host, family).await else {
+            return AddressLookupResult::Failed;
+        };
+        let answer = if family == QueryFamilies::IPV4 {
+            &set.v4
+        } else {
+            &set.v6
+        };
+        match answer {
+            Some(FamilyAnswer::Answer { ips, ttl }) => ips
+                .iter()
+                .copied()
+                .find(|ip| family.contains_ip(*ip))
+                .map_or(AddressLookupResult::NoData, |ip| {
+                    AddressLookupResult::Answer(ip, *ttl)
+                }),
+            Some(FamilyAnswer::NoData(_)) => AddressLookupResult::NoData,
+            Some(FamilyAnswer::NxDomain) => AddressLookupResult::NxDomain,
+            Some(FamilyAnswer::Failed) | None => AddressLookupResult::Failed,
+        }
     }
 
     fn skipper_bypasses(&self, host: &str) -> bool {
         self.fakeip_skipper
             .as_ref()
             .is_some_and(|s| s.should_skip(host))
+    }
+
+    fn filter_enabled_ips(&self, ips: &[IpAddr]) -> Option<Vec<IpAddr>> {
+        let ips: Vec<_> = ips
+            .iter()
+            .copied()
+            .filter(|ip| self.ipv6 || ip.is_ipv4())
+            .collect();
+        (!ips.is_empty()).then_some(ips)
     }
 
     /// Returns all IPs for `host` from the hosts trie (respecting `use_hosts`),
@@ -1023,18 +1168,35 @@ impl Resolver {
         }
     }
 
-    async fn lookup_actual_all(&self, host: &str) -> Option<Vec<IpAddr>> {
+    /// One unified resolution pipeline parameterized by the queried family set
+    /// (review issue J): the old code carried two parallel pipelines —
+    /// `do_lookup`/`query_pool`/`try_fallback` for the "every enabled address"
+    /// path and `lookup_actual_family`/`query_pool_family`/`try_fallback_family`
+    /// for the per-family DNS-server path — and they had already diverged
+    /// (single-flight and negative bookkeeping existed in only one each). Both
+    /// now share domain-gate → policy → main → fallback, single-flight, and
+    /// symmetric negative bookkeeping.
+    ///
+    /// `want` selects which families to fetch: `BOTH` uses the prefer-IPv4
+    /// A-then-AAAA client path (for `resolve_ips`); a single family uses the
+    /// per-family client path (for the DNS server's A/AAAA answers, which must
+    /// distinguish NXDOMAIN/NODATA). The publisher merges positives and NODATA
+    /// into the cache (per-family expiry) before broadcasting; subscribers
+    /// receive the same `FamilySet` with the cache already populated.
+    async fn run_pipeline(&self, host: &str, want: QueryFamilies) -> Option<FamilySet> {
         use dashmap::mapref::entry::Entry;
-        if let Some(entry) = self.inflight.get(host) {
+        let key: InflightKey = (Arc::from(host), want);
+        if let Some(entry) = self.inflight.get(&key) {
             let mut rx = entry.subscribe();
             drop(entry);
             return rx.recv().await.ok().flatten();
         }
-        // Allocate the Arc<str> key only when we may need to insert. The
-        // Occupied path below still uses the early-`get` fast path most of
-        // the time; this Arc covers the racy gap between get() and entry().
-        let key: Arc<str> = Arc::from(host);
-        let tx = match self.inflight.entry(Arc::clone(&key)) {
+        // `entry(key)` consumes the key; clone one for the guard so it can
+        // remove the inflight slot on drop. The Arc is shared with the
+        // broadcast sender's stored key, so this is a refcount bump, not a
+        // deep copy.
+        let guard_key = key.clone();
+        let tx = match self.inflight.entry(key) {
             Entry::Occupied(existing) => {
                 let mut rx = existing.get().subscribe();
                 drop(existing);
@@ -1048,54 +1210,111 @@ impl Resolver {
         };
         let _guard = InflightGuard {
             map: &self.inflight,
-            key,
+            key: guard_key,
             _armed: (),
         };
-        let result = self.do_lookup(host).await;
+        let result = self.pipeline_inner(host, want).await;
+        // Only the publisher writes to the cache; subscribers re-read it (or
+        // use the broadcast FamilySet directly) after the merge has landed.
+        if let Some(set) = &result {
+            self.merge_set_into_cache(host, set);
+        }
         let _ = tx.send(result.clone());
         result
     }
 
-    async fn do_lookup(&self, host: &str) -> Option<Vec<IpAddr>> {
-        debug!("DNS lookup: {}", host);
+    async fn pipeline_inner(&self, host: &str, want: QueryFamilies) -> Option<FamilySet> {
+        debug!(host, ?want, "DNS lookup");
 
         // Domain-gate: skip primary entirely, go straight to fallback.
         if let Some(ff) = &self.fallback_filter {
             if ff.domain_gated(host) {
-                return self.try_fallback(host).await;
+                return self.query_fallback_set(host, want).await;
             }
         }
+
+        // Symmetric first-wins negative bookkeeping (review issue F): the first
+        // tier's definitive negative is kept and later tiers' negatives never
+        // overwrite it, so the rcode the client sees depends on tier order
+        // (policy → main → fallback), not on an asymmetric clobber rule.
+        let mut negative: Option<FamilySet> = None;
 
         // Nameserver-policy lookup.
         if let Some(policy) = &self.policy {
             if let Some(entry) = policy.lookup(host) {
-                if let Some(result) = query_pool(&entry.nameservers, host).await {
-                    if let Some(ff) = &self.fallback_filter {
-                        if ff.ip_gated(&result.ips) {
-                            return self.try_fallback(host).await;
+                if let Some(set) = query_pool_set(&entry.nameservers, host, want, self.ipv6).await {
+                    if set.has_positive() {
+                        if self
+                            .fallback_filter
+                            .as_ref()
+                            .is_some_and(|ff| ff.ip_gated(&set.positive_ips()))
+                        {
+                            return self.query_fallback_set(host, want).await;
                         }
+                        return Some(set);
                     }
+                    if negative.is_none() {
+                        negative = Some(set);
+                    }
+                }
+                // Policy negative: fall through to global nameservers.
+            }
+        }
+
+        // Global nameservers (parallel, first-positive / first-definitive-negative).
+        if let Some(set) = query_pool_set(&self.main, host, want, self.ipv6).await {
+            if set.has_positive() {
+                if self
+                    .fallback_filter
+                    .as_ref()
+                    .is_some_and(|ff| ff.ip_gated(&set.positive_ips()))
+                {
+                    return self.query_fallback_set(host, want).await;
+                }
+                return Some(set);
+            }
+            if negative.is_none() {
+                negative = Some(set);
+            }
+        }
+
+        if let Some(set) = self.query_fallback_set(host, want).await {
+            if set.has_positive() {
+                return Some(set);
+            }
+            if negative.is_none() {
+                negative = Some(set);
+            }
+        }
+        negative
+    }
+
+    async fn query_fallback_set(&self, host: &str, want: QueryFamilies) -> Option<FamilySet> {
+        query_pool_set(self.fallback.as_deref()?, host, want, self.ipv6).await
+    }
+
+    /// Write a pipeline result's per-family answers into the cache. Positives
+    /// and NODATA are cached (per-family expiry); NXDOMAIN and `Failed` are
+    /// not, so a re-query always gets a fresh authoritative answer rather than
+    /// a stale negative.
+    fn merge_set_into_cache(&self, host: &str, set: &FamilySet) {
+        for (family, answer) in [
+            (QueryFamilies::IPV4, &set.v4),
+            (QueryFamilies::IPV6, &set.v6),
+        ] {
+            let Some(answer) = answer else { continue };
+            match answer {
+                FamilyAnswer::Answer { ips, ttl } => {
                     self.cache
-                        .put_with_source(host, &result.ips, result.ttl, Some(&result.source));
-                    return Some(result.ips);
+                        .merge_family(host, family, ips, *ttl, Some(&set.source));
                 }
-                // Policy lookup failed: fall through to global nameservers.
+                FamilyAnswer::NoData(ttl) => {
+                    self.cache
+                        .merge_family(host, family, &[], *ttl, Some(&set.source));
+                }
+                FamilyAnswer::NxDomain | FamilyAnswer::Failed => {}
             }
         }
-
-        // Global nameservers (parallel, first-response wins).
-        if let Some(result) = query_pool(&self.main, host).await {
-            if let Some(ff) = &self.fallback_filter {
-                if ff.ip_gated(&result.ips) {
-                    return self.try_fallback(host).await;
-                }
-            }
-            self.cache
-                .put_with_source(host, &result.ips, result.ttl, Some(&result.source));
-            return Some(result.ips);
-        }
-
-        self.try_fallback(host).await
     }
 
     /// Forward a non-A/AAAA query (TXT, MX, SRV, HTTPS, SOA, PTR, …) through
@@ -1127,16 +1346,6 @@ impl Resolver {
     async fn try_fallback_generic(&self, domain: &str, record_type: RecordType) -> Option<Message> {
         let fb = self.fallback.as_deref()?;
         query_pool_generic(fb, domain, record_type).await
-    }
-
-    async fn try_fallback(&self, host: &str) -> Option<Vec<IpAddr>> {
-        let fallback = self.fallback.as_deref()?;
-        if let Some(result) = query_pool(fallback, host).await {
-            self.cache
-                .put_with_source(host, &result.ips, result.ttl, Some(&result.source));
-            return Some(result.ips);
-        }
-        None
     }
 
     /// Capture the live reverse (IP → host) table with remaining lifetimes,
@@ -1314,7 +1523,37 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hickory_proto::op::{MessageType, OpCode, ResponseCode};
+    use hickory_proto::rr::rdata::{A, AAAA};
+    use hickory_proto::rr::{RData, Record};
+    use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    async fn one_shot_a_upstream(
+        response_code: ResponseCode,
+        answer: Option<Ipv4Addr>,
+    ) -> SocketAddr {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+            let request = Message::from_bytes(&buf[..len]).unwrap();
+            let query = request.queries[0].clone();
+            let mut response =
+                Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+            response.metadata.response_code = response_code;
+            response.add_query(query.clone());
+            if let Some(ip) = answer {
+                response.add_answer(Record::from_rdata(query.name, 60, RData::A(A(ip))));
+            }
+            socket
+                .send_to(&response.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+        addr
+    }
 
     #[test]
     fn build_single_resolver_preserves_configured_dot_label() {
@@ -1358,7 +1597,7 @@ mod tests {
         let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         hosts.insert("example.test", vec![real].into());
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
         assert_eq!(resolver.resolve_ip("example.test").await, Some(real));
         assert_eq!(resolver.resolve_ip_real("example.test").await, Some(real));
     }
@@ -1371,12 +1610,204 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
         ];
         hosts.insert("example.test", ips.clone().into());
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
 
         assert_eq!(resolver.resolve_ips("example.test").await, Some(ips));
         assert_eq!(
             resolver.resolve_ip("example.test").await,
             Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+    }
+
+    #[tokio::test]
+    async fn ipv6_disabled_filters_hosts_and_aaaa_lookup() {
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+        let ipv4 = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
+        hosts.insert(
+            "example.test",
+            vec![IpAddr::V6(Ipv6Addr::LOCALHOST), ipv4].into(),
+        );
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, false);
+
+        assert_eq!(resolver.resolve_ips("example.test").await, Some(vec![ipv4]));
+        assert_eq!(resolver.lookup_ipv6("example.test").await, None);
+    }
+
+    /// Review issue E: a hosts entry that pins only the *disabled* family
+    /// (v6-only under `ipv6: false`) must fall through to upstream DNS instead
+    /// of short-circuiting to `None` — otherwise DirectAdapter treats the host
+    /// as unresolvable even though a usable A record exists upstream. The old
+    /// code returned early whenever the hosts trie matched, regardless of
+    /// whether any enabled IP remained.
+    #[tokio::test]
+    async fn v6_only_hosts_entry_falls_through_to_upstream_when_ipv6_disabled() {
+        let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
+        hosts.insert("v6only.test", vec![IpAddr::V6(Ipv6Addr::LOCALHOST)].into());
+
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+            let request = Message::from_bytes(&buf[..len]).unwrap();
+            let query = request.queries[0].clone();
+            let mut response =
+                Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+            response.add_query(query.clone());
+            response.add_answer(Record::from_rdata(
+                query.name,
+                60,
+                RData::A(A(Ipv4Addr::new(192, 0, 2, 7))),
+            ));
+            socket
+                .send_to(&response.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+
+        let resolver = Resolver::new(vec![addr], vec![], DnsMode::Normal, hosts, true, false);
+        // The v6-only hosts pin is ignored for the disabled family and the
+        // resolver falls through to the upstream A record.
+        assert_eq!(
+            resolver.resolve_ips("v6only.test").await,
+            Some(vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 7))])
+        );
+    }
+
+    /// Review issue C: a definitive negative (NODATA/NXDOMAIN) from a healthy
+    /// upstream must not wait out a dead upstream's full 5 s timeout. With two
+    /// main upstreams — one black-holed (never responds) and one answering
+    /// AAAA NODATA in ~1 ms — `query_pool_set` returns on the first definitive
+    /// negative and cancels the straggler, so the whole lookup finishes in well
+    /// under the per-query timeout.
+    #[tokio::test]
+    async fn definitive_negative_does_not_stall_on_dead_upstream() {
+        // Dead upstream: bind but never answer.
+        let dead = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            // Hold the socket open for the test's duration; never reply.
+            let _ = dead.recv_from(&mut buf).await;
+        });
+
+        // Healthy upstream: answer AAAA with NOERROR + zero answers (NODATA).
+        let healthy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let healthy_addr = healthy.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = healthy.recv_from(&mut buf).await.unwrap();
+            let request = Message::from_bytes(&buf[..len]).unwrap();
+            let query = request.queries[0].clone();
+            let mut response =
+                Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+            response.add_query(query);
+            // No answers → NOERROR-empty (NODATA).
+            healthy
+                .send_to(&response.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+
+        let resolver = Resolver::new(
+            vec![dead_addr, healthy_addr],
+            vec![],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            false,
+            true,
+        );
+        let start = std::time::Instant::now();
+        let result = resolver.lookup_ipv6_result("v4only.example").await;
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(result, AddressLookupResult::NoData),
+            "expected NoData, got {result:?}"
+        );
+        // The per-query timeout is 5 s; first-definitive-negative must return
+        // in well under that. 1 s is a generous upper bound for a local UDP
+        // round-trip plus scheduling jitter.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "AAAA NODATA took {elapsed:?} — definitive negative stalled on the dead upstream"
+        );
+    }
+
+    /// Companion to issue C for the dual-stack (`BOTH`) path: a client whose A
+    /// is NODATA and whose AAAA *errored* (so the family is `None`, never
+    /// answered) is **not** a definitive negative for a `BOTH` query. The pool
+    /// must keep racing instead of short-circuiting, so a second client that
+    /// does return a v6 address wins. A naive "no `Failed` ⇒ definitive" rule
+    /// would treat `v6 = None` as definitive and wrongly return the empty
+    /// result, dropping the available v6 address.
+    #[tokio::test]
+    async fn both_query_keeps_racing_when_one_family_is_unknown() {
+        // Client A: A -> NODATA, AAAA -> malformed reply (so AAAA errors fast,
+        // yielding v4=NoData, v6=None — a *partial*, not a definitive negative).
+        let client_a = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_a_addr = client_a.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            for round in 0..2u32 {
+                let (len, peer) = client_a.recv_from(&mut buf).await.unwrap();
+                let request = Message::from_bytes(&buf[..len]).unwrap();
+                let query = request.queries[0].clone();
+                if round == 0 {
+                    // A: NOERROR with zero answers (NODATA).
+                    let mut response =
+                        Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+                    response.add_query(query);
+                    client_a
+                        .send_to(&response.to_bytes().unwrap(), peer)
+                        .await
+                        .unwrap();
+                } else {
+                    // AAAA: garbage that fails to parse -> lookup_family Err.
+                    client_a.send_to(&[0u8; 4], peer).await.unwrap();
+                    break;
+                }
+            }
+        });
+
+        // Client B: A -> NODATA, AAAA -> v6 address (a positive for BOTH).
+        let client_b = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_b_addr = client_b.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            for _ in 0..2 {
+                let (len, peer) = client_b.recv_from(&mut buf).await.unwrap();
+                let request = Message::from_bytes(&buf[..len]).unwrap();
+                let query = request.queries[0].clone();
+                let mut response =
+                    Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+                response.add_query(query.clone());
+                if query.query_type == RecordType::AAAA {
+                    response.add_answer(Record::from_rdata(
+                        query.name,
+                        60,
+                        RData::AAAA(AAAA(Ipv6Addr::LOCALHOST)),
+                    ));
+                }
+                client_b
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let resolver = Resolver::new(
+            vec![client_a_addr, client_b_addr],
+            vec![],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            false,
+            true,
+        );
+        let ips = resolver.resolve_ips("v6available.example").await;
+        let has_v6 = ips.as_ref().is_some_and(|v| v.iter().any(IpAddr::is_ipv6));
+        assert!(
+            has_v6,
+            "dual-stack query must keep racing past the partial (A=NODATA, AAAA=unknown)              result and return the v6 address from the second client, got {ips:?}"
         );
     }
 
@@ -1387,7 +1818,7 @@ mod tests {
         hosts.insert("alias.test", HostEntry::Alias("middle.test".into()));
         hosts.insert("middle.test", HostEntry::Alias("origin.test".into()));
         hosts.insert("origin.test", HostEntry::Addresses(vec![real]));
-        let resolver = Resolver::new(vec![], vec![], DnsMode::FakeIp, hosts, true);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::FakeIp, hosts, true, true);
 
         assert_eq!(resolver.resolve_ips("alias.test").await, Some(vec![real]));
         assert_eq!(
@@ -1398,9 +1829,134 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dual_stack_cache_queries_missing_aaaa_family() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            for _ in 0..2 {
+                let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+                let request = Message::from_bytes(&buf[..len]).unwrap();
+                let query = request.queries[0].clone();
+                let mut response =
+                    Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+                response.add_query(query.clone());
+                let record = match query.query_type {
+                    RecordType::A => Record::from_rdata(
+                        query.name.clone(),
+                        60,
+                        RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
+                    ),
+                    RecordType::AAAA => Record::from_rdata(
+                        query.name.clone(),
+                        60,
+                        RData::AAAA(AAAA(Ipv6Addr::LOCALHOST)),
+                    ),
+                    other => panic!("unexpected query type {other:?}"),
+                };
+                response.add_answer(record);
+                socket
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let resolver = Resolver::new(
+            vec![addr],
+            vec![],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            false,
+            true,
+        );
+        assert_eq!(
+            resolver.lookup_ipv4("dual.example").await,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+        );
+        assert_eq!(
+            resolver.lookup_ipv6("dual.example").await,
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
+        );
+    }
+
+    #[tokio::test]
+    async fn nodata_family_is_cached_without_discarding_other_family() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            for _ in 0..2 {
+                let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+                let request = Message::from_bytes(&buf[..len]).unwrap();
+                let query = request.queries[0].clone();
+                let mut response =
+                    Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+                response.add_query(query.clone());
+                if query.query_type == RecordType::A {
+                    response.add_answer(Record::from_rdata(
+                        query.name,
+                        60,
+                        RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
+                    ));
+                }
+                socket
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let resolver = Resolver::new(
+            vec![addr],
+            vec![],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            false,
+            true,
+        );
+        assert!(matches!(
+            resolver.lookup_ipv4_result("nodata.example").await,
+            AddressLookupResult::Answer(IpAddr::V4(_), _)
+        ));
+        assert!(matches!(
+            resolver.lookup_ipv6_result("nodata.example").await,
+            AddressLookupResult::NoData
+        ));
+        assert!(matches!(
+            resolver.lookup_ipv6_result("nodata.example").await,
+            AddressLookupResult::NoData
+        ));
+        assert!(matches!(
+            resolver.lookup_ipv4_result("nodata.example").await,
+            AddressLookupResult::Answer(IpAddr::V4(_), _)
+        ));
+    }
+
+    #[tokio::test]
+    async fn family_lookup_uses_fallback_after_primary_nxdomain() {
+        let main = one_shot_a_upstream(ResponseCode::NXDomain, None).await;
+        let fallback_ip = Ipv4Addr::new(192, 0, 2, 9);
+        let fallback = one_shot_a_upstream(ResponseCode::NoError, Some(fallback_ip)).await;
+        let resolver = Resolver::new(
+            vec![main],
+            vec![fallback],
+            DnsMode::Normal,
+            DomainTrie::new(),
+            false,
+            true,
+        );
+
+        assert!(matches!(
+            resolver.lookup_ipv4_result("fallback.example").await,
+            AddressLookupResult::Answer(IpAddr::V4(ip), _) if ip == fallback_ip
+        ));
+    }
+
+    #[tokio::test]
     async fn resolve_ip_returns_cached_entry() {
         let hosts: DomainTrie<HostEntry> = DomainTrie::new();
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         resolver
             .cache
@@ -1411,7 +1967,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_ips_preserves_all_cached_addresses() {
         let hosts: DomainTrie<HostEntry> = DomainTrie::new();
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
         let ips = vec![
             IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
             IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -1429,7 +1985,7 @@ mod tests {
         let via_hosts = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
         hosts.insert("node.test", vec![via_hosts].into());
         hosts.insert("alias.test", HostEntry::Alias("cached.test".into()));
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
 
         let via_cache = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3));
         resolver
@@ -1463,7 +2019,7 @@ mod tests {
             "node.test",
             vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))].into(),
         );
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, false);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, false, true);
 
         assert_eq!(resolver.resolve_ips_local("node.test"), None);
     }
@@ -1475,15 +2031,15 @@ mod tests {
         let new_hosts = || -> DomainTrie<HostEntry> { DomainTrie::new() };
 
         // Normal mode: never active.
-        let normal = Resolver::new(vec![], vec![], DnsMode::Normal, new_hosts(), true);
+        let normal = Resolver::new(vec![], vec![], DnsMode::Normal, new_hosts(), true, true);
         assert!(!normal.fake_ip_active_for("example.com"));
 
         // Fake-IP mode but no pool configured: not active.
-        let no_pool = Resolver::new(vec![], vec![], DnsMode::FakeIp, new_hosts(), true);
+        let no_pool = Resolver::new(vec![], vec![], DnsMode::FakeIp, new_hosts(), true, true);
         assert!(!no_pool.fake_ip_active_for("example.com"));
 
         // Fake-IP mode with a v4 pool: active.
-        let mut faked = Resolver::new(vec![], vec![], DnsMode::FakeIp, new_hosts(), true);
+        let mut faked = Resolver::new(vec![], vec![], DnsMode::FakeIp, new_hosts(), true, true);
         let pool = Arc::new(
             Pool::new(
                 "198.18.0.0/16".parse().unwrap(),
@@ -1523,7 +2079,14 @@ mod tests {
         // v4-only pool (the common default): A synthesises a v4 fake; AAAA is
         // suppressed (None → server emits NOERROR-empty) so a dual-stack
         // client cleanly falls back to the v4 fake instead of stalling.
-        let mut v4_only = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+        let mut v4_only = Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::FakeIp,
+            DomainTrie::new(),
+            true,
+            true,
+        );
         v4_only.set_fakeip_v4(v4_pool());
         let a = v4_only.lookup_ipv4("example.com").await;
         assert!(
@@ -1538,7 +2101,14 @@ mod tests {
 
         // Dual pool: both families synthesise → Happy Eyeballs picks between
         // two fakes, both of which route through the tunnel.
-        let mut dual = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+        let mut dual = Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::FakeIp,
+            DomainTrie::new(),
+            true,
+            true,
+        );
         dual.set_fakeip_v4(v4_pool());
         dual.set_fakeip_v6(Arc::new(
             Pool::new(
@@ -1561,7 +2131,14 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_with_ttl_reports_remaining_cache_lifetime() {
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Mapping, DomainTrie::new(), true);
+        let resolver = Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Mapping,
+            DomainTrie::new(),
+            true,
+            true,
+        );
         let real = IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4));
         resolver
             .cache
@@ -1583,7 +2160,7 @@ mod tests {
         let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let pinned = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         hosts.insert("pinned.test", vec![pinned].into());
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Mapping, hosts, true);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Mapping, hosts, true, true);
         assert_eq!(
             resolver.lookup_ipv4_with_ttl("pinned.test").await,
             Some((pinned, HOSTS_ANSWER_TTL))
@@ -1593,7 +2170,14 @@ mod tests {
     #[tokio::test]
     async fn lookup_with_ttl_reports_fake_ip_ttl_for_synthesised_answers() {
         use crate::fakeip::MemoryStore;
-        let mut resolver = Resolver::new(vec![], vec![], DnsMode::FakeIp, DomainTrie::new(), true);
+        let mut resolver = Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::FakeIp,
+            DomainTrie::new(),
+            true,
+            true,
+        );
         resolver.set_fakeip_v4(Arc::new(
             Pool::new(
                 "198.18.0.0/16".parse().unwrap(),
@@ -1611,7 +2195,14 @@ mod tests {
 
     #[test]
     fn reverse_cache_snapshot_restore_round_trips_via_resolver() {
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Mapping, DomainTrie::new(), true);
+        let resolver = Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Mapping,
+            DomainTrie::new(),
+            true,
+            true,
+        );
         let ip = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
         resolver
             .cache
@@ -1619,7 +2210,14 @@ mod tests {
         let snap = resolver.reverse_cache_snapshot();
         assert_eq!(snap.len(), 1);
 
-        let restarted = Resolver::new(vec![], vec![], DnsMode::Mapping, DomainTrie::new(), true);
+        let restarted = Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Mapping,
+            DomainTrie::new(),
+            true,
+            true,
+        );
         assert!(restarted.reverse_lookup(ip).is_none());
         restarted.restore_reverse_cache(snap);
         assert_eq!(
@@ -1657,8 +2255,10 @@ mod tests {
     #[tokio::test]
     async fn inflight_entry_cleared_after_lookup_miss() {
         let hosts: DomainTrie<HostEntry> = DomainTrie::new();
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
-        let _ = resolver.lookup_actual_all("nonexistent.test").await;
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
+        // `resolve_ips` routes the cache/host miss through the unified
+        // single-flight pipeline; the inflight slot must be released on drop.
+        let _ = resolver.resolve_ips("nonexistent.test").await;
         assert!(
             resolver.inflight.is_empty(),
             "inflight map must be empty after lookup, had {} entries",
@@ -1669,13 +2269,22 @@ mod tests {
     #[tokio::test]
     async fn inflight_concurrent_callers_share_one_lookup() {
         let hosts: DomainTrie<HostEntry> = DomainTrie::new();
-        let resolver =
-            std::sync::Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true));
+        let resolver = std::sync::Arc::new(Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            hosts,
+            true,
+            true,
+        ));
         let r1 = Arc::clone(&resolver);
         let r2 = Arc::clone(&resolver);
+        // Two concurrent callers for the same host/family-set coalesce onto a
+        // single upstream flight (keyed by (host, queried families) — review
+        // issue B) and observe the same result.
         let (a, b) = tokio::join!(
-            r1.lookup_actual_all("concurrent.test"),
-            r2.lookup_actual_all("concurrent.test"),
+            r1.resolve_ips("concurrent.test"),
+            r2.resolve_ips("concurrent.test"),
         );
         assert_eq!(a, b, "concurrent callers must see the same result");
         assert!(resolver.inflight.is_empty());
@@ -1696,6 +2305,7 @@ mod tests {
             vec![],
             DnsMode::Normal,
             hosts,
+            true,
             true,
             None,
             None,
@@ -1719,6 +2329,7 @@ mod tests {
             DnsMode::Normal,
             hosts,
             true,
+            true,
             None,
             None,
         )
@@ -1740,6 +2351,7 @@ mod tests {
             default_ns,
             DnsMode::Normal,
             DomainTrie::new(),
+            true,
             true,
             None,
             None,
@@ -1765,6 +2377,7 @@ mod tests {
             DnsMode::Normal,
             hosts,
             true,
+            true,
             None,
             None,
         )
@@ -1787,6 +2400,7 @@ mod tests {
             default_ns,
             DnsMode::Normal,
             hosts,
+            true,
             true,
             None,
             None,
@@ -1813,6 +2427,7 @@ mod tests {
             DnsMode::Normal,
             hosts,
             true,
+            true,
             None,
             None,
         )
@@ -1836,6 +2451,7 @@ mod tests {
             DnsMode::Normal,
             hosts,
             true,
+            true,
             None,
             None,
         )
@@ -1857,6 +2473,7 @@ mod tests {
             vec![],
             DnsMode::Normal,
             hosts,
+            true,
             true,
             None,
             None,
@@ -1881,6 +2498,7 @@ mod tests {
             DnsMode::Normal,
             hosts,
             true,
+            true,
             None,
             None,
         )
@@ -1901,6 +2519,7 @@ mod tests {
             vec![],
             DnsMode::Normal,
             hosts,
+            true,
             true,
             None,
             None,
@@ -1932,7 +2551,7 @@ mod tests {
         let mut hosts: DomainTrie<HostEntry> = DomainTrie::new();
         let hosts_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         hosts.insert("example.test", vec![hosts_ip].into());
-        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, false);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, false, true);
         // With use_hosts=false, hosts lookup is bypassed, no upstream → None.
         assert_eq!(
             resolver.resolve_ip("example.test").await,
@@ -1952,8 +2571,8 @@ mod tests {
             );
             h
         };
-        let r_on = Resolver::new(vec![], vec![], DnsMode::Normal, make_hosts(), true);
-        let r_off = Resolver::new(vec![], vec![], DnsMode::Normal, make_hosts(), false);
+        let r_on = Resolver::new(vec![], vec![], DnsMode::Normal, make_hosts(), true, true);
+        let r_off = Resolver::new(vec![], vec![], DnsMode::Normal, make_hosts(), false, true);
         assert!(r_on.lookup_hosts_all("example.test").is_some());
         assert!(r_off.lookup_hosts_all("example.test").is_none());
     }
@@ -1972,7 +2591,7 @@ mod tests {
             geoip_reader: None,
         };
         let hosts = DomainTrie::new();
-        let mut resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true);
+        let mut resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
         resolver.fallback_filter = Some(ff);
         // No fallback configured → None returned (primary never tried).
         let result = resolver.resolve_ip("www.google.cn").await;
