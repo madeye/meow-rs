@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::net::SocketAddr;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,7 +19,9 @@ async fn run_large_transfer(
     echo: SocketAddr,
     size: usize,
 ) -> anyhow::Result<(u64, f64)> {
-    let stream = socks5_connect(proxy, echo).await?;
+    let stream = socks5_connect(proxy, echo)
+        .await
+        .with_context(|| format!("large transfer connect to {echo}"))?;
     let (rd, wr) = tokio::io::split(stream);
 
     let start = Instant::now();
@@ -64,15 +67,23 @@ async fn run_small_messages(
     msg_size: usize,
     count: usize,
 ) -> anyhow::Result<(u64, f64)> {
-    let mut stream = socks5_connect(proxy, echo).await?;
+    let mut stream = socks5_connect(proxy, echo)
+        .await
+        .with_context(|| format!("small messages connect to {echo}"))?;
     let msg = vec![0xABu8; msg_size];
     let mut buf = vec![0u8; msg_size];
     let mut total_bytes = 0u64;
 
     let start = Instant::now();
     for _ in 0..count {
-        stream.write_all(&msg).await?;
-        stream.read_exact(&mut buf).await?;
+        stream
+            .write_all(&msg)
+            .await
+            .with_context(|| "small message write")?;
+        stream
+            .read_exact(&mut buf)
+            .await
+            .with_context(|| "small message read")?;
         total_bytes += (msg_size * 2) as u64;
     }
     let elapsed = start.elapsed().as_secs_f64();
