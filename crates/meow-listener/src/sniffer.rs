@@ -387,60 +387,99 @@ mod tests {
     }
 
     #[test]
-    fn maybe_apply_sniff_disabled_is_noop() {
-        let cfg = SnifferConfig {
-            enable: false,
-            override_destination: true,
-            ..Default::default()
-        };
-        let rt = make_runtime(cfg);
-        let mut meta = make_metadata("1.2.3.4", 443);
-        rt.maybe_apply_sniff("example.com", &mut meta);
-        assert_eq!(meta.sniff_host, "");
-        assert_eq!(meta.host, "1.2.3.4");
-    }
+    fn maybe_apply_sniff_cases() {
+        struct Case {
+            name: &'static str,
+            enable: bool,
+            override_destination: bool,
+            skip_domain: &'static [&'static str],
+            meta_host: &'static str,
+            meta_port: u16,
+            sniffed: &'static str,
+            expected_sniff_host: &'static str,
+            expected_host: &'static str,
+        }
 
-    #[test]
-    fn maybe_apply_sniff_skip_domain_drops_host() {
-        let cfg = SnifferConfig {
-            enable: true,
-            override_destination: true,
-            skip_domain: vec!["+.ads.example.com".into()],
-            ..Default::default()
-        };
-        let rt = make_runtime(cfg);
-        let mut meta = make_metadata("1.2.3.4", 80);
-        rt.maybe_apply_sniff("tracker.ads.example.com", &mut meta);
-        assert_eq!(meta.sniff_host, "");
-        assert_eq!(meta.host, "1.2.3.4");
-    }
+        let cases = [
+            // Sniffer disabled → no-op even with override-destination on.
+            Case {
+                name: "disabled_is_noop",
+                enable: false,
+                override_destination: true,
+                skip_domain: &[],
+                meta_host: "1.2.3.4",
+                meta_port: 443,
+                sniffed: "example.com",
+                expected_sniff_host: "",
+                expected_host: "1.2.3.4",
+            },
+            // skip-domain match → the sniffed host is discarded entirely.
+            Case {
+                name: "skip_domain_drops_host",
+                enable: true,
+                override_destination: true,
+                skip_domain: &["+.ads.example.com"],
+                meta_host: "1.2.3.4",
+                meta_port: 80,
+                sniffed: "tracker.ads.example.com",
+                expected_sniff_host: "",
+                expected_host: "1.2.3.4",
+            },
+            // override-destination on → both sniff_host and host are rewritten.
+            Case {
+                name: "override_destination_mutates_host",
+                enable: true,
+                override_destination: true,
+                skip_domain: &[],
+                meta_host: "1.2.3.4",
+                meta_port: 80,
+                sniffed: "example.com",
+                expected_sniff_host: "example.com",
+                expected_host: "example.com",
+            },
+            // override-destination off → only sniff_host is recorded.
+            Case {
+                name: "override_false_keeps_host",
+                enable: true,
+                override_destination: false,
+                skip_domain: &[],
+                meta_host: "1.2.3.4",
+                meta_port: 80,
+                sniffed: "example.com",
+                expected_sniff_host: "example.com",
+                expected_host: "1.2.3.4",
+            },
+        ];
 
-    #[test]
-    fn maybe_apply_sniff_override_destination_mutates_host() {
-        let cfg = SnifferConfig {
-            enable: true,
-            override_destination: true,
-            ..Default::default()
-        };
-        let rt = make_runtime(cfg);
-        let mut meta = make_metadata("1.2.3.4", 80);
-        rt.maybe_apply_sniff("example.com", &mut meta);
-        assert_eq!(meta.sniff_host, "example.com");
-        assert_eq!(meta.host, "example.com");
-    }
-
-    #[test]
-    fn maybe_apply_sniff_override_false_keeps_host() {
-        let cfg = SnifferConfig {
-            enable: true,
-            override_destination: false,
-            ..Default::default()
-        };
-        let rt = make_runtime(cfg);
-        let mut meta = make_metadata("1.2.3.4", 80);
-        rt.maybe_apply_sniff("example.com", &mut meta);
-        assert_eq!(meta.sniff_host, "example.com");
-        assert_eq!(meta.host, "1.2.3.4");
+        let mut failures = Vec::new();
+        for case in cases {
+            let cfg = SnifferConfig {
+                enable: case.enable,
+                override_destination: case.override_destination,
+                skip_domain: case.skip_domain.iter().copied().map(Into::into).collect(),
+                ..Default::default()
+            };
+            let rt = make_runtime(cfg);
+            let mut meta = make_metadata(case.meta_host, case.meta_port);
+            rt.maybe_apply_sniff(case.sniffed, &mut meta);
+            if meta.sniff_host != case.expected_sniff_host {
+                failures.push(format!(
+                    "[{}] sniff_host: expected {:?}, got {:?}",
+                    case.name, case.expected_sniff_host, meta.sniff_host
+                ));
+            }
+            if meta.host != case.expected_host {
+                failures.push(format!(
+                    "[{}] host: expected {:?}, got {:?}",
+                    case.name, case.expected_host, meta.host
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "maybe_apply_sniff cases failed:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[tokio::test]

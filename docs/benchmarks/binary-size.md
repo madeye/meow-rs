@@ -101,11 +101,50 @@ in the `full` bundle (`meow-app/Cargo.toml`), so it is part of every
 `default` build; it is excluded from `minimal` by design (ADR-0007 §1) and
 that profile is unaffected.
 
-**mipsel-unknown-linux-musl not measured**: blocked by #421 (`mux` uses
-`std::sync::atomic::AtomicU64` directly instead of
-`meow_common::atomic::AtomicU`, and mipsel has no 64-bit atomics — the
-`default` build does not compile for this target until #421 lands). Follow
-up once #421 merges.
+**mipsel-unknown-linux-musl still not measured, different reason now**:
+#421 (`mux` used `std::sync::atomic::AtomicU64` directly instead of
+`meow_common::atomic::AtomicU`) was fixed by #447, so the compile-time
+blocker is gone — `crates/meow-proxy/src/mux/` now uses
+`meow_common::atomic::AtomicU` exclusively (verified: no raw `AtomicU64`
+remains under `mux/`). But the target still cannot be measured with this
+repo's established method (`cargo zigbuild --release --target
+mipsel-unknown-linux-musl`, same as the other targets in this doc):
+`mipsel-unknown-linux-musl` is a **Tier 3** target
+([rustc platform support](https://doc.rust-lang.org/rustc/platform-support.html)) —
+rustup ships no prebuilt `std` for it on any host:
+
+```
+$ rustup target add mipsel-unknown-linux-musl
+error: toolchain 'stable-aarch64-apple-darwin' has no prebuilt artifacts
+available for target 'mipsel-unknown-linux-musl'
+note: this may happen to a low-tier target as per
+https://doc.rust-lang.org/nightly/rustc/platform-support.html
+note: you can find instructions on that page to build the target support
+from source
+```
+
+The only way to produce a `std`-linked binary for this target at all is
+`-Zbuild-std` on nightly (confirmed locally: `cargo +nightly zigbuild
+-Zbuild-std=std,panic_abort --release --target mipsel-unknown-linux-musl`
+does start compiling `core`/`alloc`/`std` from source). That is a
+materially different build — different toolchain (nightly vs. the
+workspace's pinned stable), different compiler flags, and a locally-built
+`std` rather than the distributed one — so a size measured that way
+would not be comparable to the zigbuild+stable numbers for the other
+targets in this table, and it is not this repo's established
+cross-compile method (see `docs/adr/0007-m2-footprint-budget.md` §"Single-
+target CI runners"). Per that ADR, mipsel is explicitly **soft-gated**
+for exactly this reason ("no mipsel cross-compile infra ... and no way to
+functionally validate a mipsel binary"), and CI's own `release.yml`
+release matrix does not build MIPS at all (excluded together with 32-bit
+musl and windows-gnu because they can't link `boring-sys`, which is part
+of the shipped `default` feature set). So this is not a regression from
+#412/mux or from this follow-up — mipsel `default`-profile size has never
+been measured end-to-end via the documented method, #421 only removed one
+blocker among several. Leaving this row `not measured` (status: toolchain
+gap, not a compile failure) rather than reporting a nightly-`build-std`
+number that would use a different build recipe than every other row in
+this document.
 
 ### `default` profile — absolute size vs. cap
 
@@ -113,11 +152,17 @@ up once #421 merges.
 |--------|------------------------|--------------------|----------|--------|
 | `aarch64-unknown-linux-musl` | 11,196,256 B (~10.68 MiB) | 18 MiB (18,874,368 B) | 7,678,112 B (~7.32 MiB), 59.3% used | ✓ under cap |
 | `x86_64-unknown-linux-musl` | 14,238,600 B (~13.58 MiB) | 20 MiB (20,971,520 B) | 6,732,920 B (~6.42 MiB), 67.9% used | ✓ under cap |
-| `mipsel-unknown-linux-musl` | not measured (blocked by #421) | 16 MiB (16,777,216 B) | — | — |
+| `mipsel-unknown-linux-musl` | not measured (Tier 3 toolchain gap, not #421 — see above) | 16 MiB (16,777,216 B) | — | — |
 
-No cap is breached or threatened; **no ADR-0007 amendment is required** for
-this change (ADR-0007 §6 only requires an amendment when a feature pushes a
-cap past its current value).
+No cap is breached or threatened on the two measured targets; **no
+ADR-0007 amendment is required** for this change (ADR-0007 §6 only
+requires an amendment when a feature pushes a cap past its current
+value). The mipsel cap remains unverified either way — it was unverified
+before this follow-up (blocked by #421) and remains unverified now
+(blocked by the Tier 3 toolchain gap above), so this follow-up cannot
+say whether the soft-gated mipsel cap holds; ADR-0007 already accounts
+for this ("no way to functionally validate a mipsel binary" at M2) and
+defers a hard gate to M3.
 
 ### Mux-attributable delta (mux on vs. mux off, same commit)
 

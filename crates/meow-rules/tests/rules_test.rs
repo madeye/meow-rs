@@ -44,28 +44,47 @@ fn meta_ip(ip: &str, dst_port: u16) -> Metadata {
 // ─── DOMAIN ─────────────────────────────────────────────────────────
 
 #[test]
-fn domain_exact_match() {
-    let r = DomainRule::new("google.com", "Proxy");
-    assert!(r.match_metadata(&meta("google.com", 443), &helper()));
-}
+fn domain_match_cases() {
+    // (case label, DOMAIN pattern, request host, expected match)
+    let cases: &[(&str, &str, &str, bool)] = &[
+        ("exact match", "google.com", "google.com", true),
+        (
+            "case-insensitive: mixed-case pattern vs lowercase host",
+            "Google.COM",
+            "google.com",
+            true,
+        ),
+        (
+            "case-insensitive: mixed-case pattern vs uppercase host",
+            "Google.COM",
+            "GOOGLE.COM",
+            true,
+        ),
+        // DOMAIN is exact-only: a subdomain must NOT match (that is DOMAIN-SUFFIX).
+        ("no match: subdomain", "google.com", "www.google.com", false),
+        (
+            "no match: different domain",
+            "google.com",
+            "example.com",
+            false,
+        ),
+    ];
 
-#[test]
-fn domain_case_insensitive() {
-    let r = DomainRule::new("Google.COM", "Proxy");
-    assert!(r.match_metadata(&meta("google.com", 443), &helper()));
-    assert!(r.match_metadata(&meta("GOOGLE.COM", 443), &helper()));
-}
-
-#[test]
-fn domain_no_match_subdomain() {
-    let r = DomainRule::new("google.com", "Proxy");
-    assert!(!r.match_metadata(&meta("www.google.com", 443), &helper()));
-}
-
-#[test]
-fn domain_no_match_different() {
-    let r = DomainRule::new("google.com", "Proxy");
-    assert!(!r.match_metadata(&meta("example.com", 443), &helper()));
+    let mut failures = Vec::new();
+    for (label, pattern, host, expected) in cases {
+        let r = DomainRule::new(pattern, "Proxy");
+        let got = r.match_metadata(&meta(host, 443), &helper());
+        if got != *expected {
+            failures.push(format!(
+                "{label}: DOMAIN,{pattern} vs host {host} => {got}, expected {expected}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "domain match failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -87,87 +106,198 @@ fn domain_type_and_payload() {
 // ─── DOMAIN-SUFFIX ──────────────────────────────────────────────────
 
 #[test]
-fn domain_suffix_exact() {
-    let r = DomainSuffixRule::new("google.com", "Proxy");
-    assert!(r.match_metadata(&meta("google.com", 443), &helper()));
-}
+fn domain_suffix_match_cases() {
+    // (case label, DOMAIN-SUFFIX pattern, request host, expected match)
+    let cases: &[(&str, &str, &str, bool)] = &[
+        (
+            "exact match: host equals suffix",
+            "google.com",
+            "google.com",
+            true,
+        ),
+        ("subdomain: one label", "google.com", "www.google.com", true),
+        (
+            "subdomain: one label (mail)",
+            "google.com",
+            "mail.google.com",
+            true,
+        ),
+        (
+            "subdomain: multiple labels",
+            "google.com",
+            "a.b.c.google.com",
+            true,
+        ),
+        // "notgoogle.com" must NOT match suffix "google.com": the suffix has to
+        // start at a label boundary, not mid-label.
+        (
+            "no match: partial label",
+            "google.com",
+            "notgoogle.com",
+            false,
+        ),
+        (
+            "case-insensitive: mixed-case pattern and host",
+            "Google.COM",
+            "WWW.google.com",
+            true,
+        ),
+        (
+            "no match: different domain",
+            "google.com",
+            "example.com",
+            false,
+        ),
+    ];
 
-#[test]
-fn domain_suffix_subdomain() {
-    let r = DomainSuffixRule::new("google.com", "Proxy");
-    assert!(r.match_metadata(&meta("www.google.com", 443), &helper()));
-    assert!(r.match_metadata(&meta("mail.google.com", 443), &helper()));
-    assert!(r.match_metadata(&meta("a.b.c.google.com", 443), &helper()));
-}
-
-#[test]
-fn domain_suffix_no_partial() {
-    // "notgoogle.com" should NOT match suffix "google.com"
-    let r = DomainSuffixRule::new("google.com", "Proxy");
-    assert!(!r.match_metadata(&meta("notgoogle.com", 443), &helper()));
-}
-
-#[test]
-fn domain_suffix_case_insensitive() {
-    let r = DomainSuffixRule::new("Google.COM", "Proxy");
-    assert!(r.match_metadata(&meta("WWW.google.com", 443), &helper()));
-}
-
-#[test]
-fn domain_suffix_no_match() {
-    let r = DomainSuffixRule::new("google.com", "Proxy");
-    assert!(!r.match_metadata(&meta("example.com", 443), &helper()));
+    let mut failures = Vec::new();
+    for (label, pattern, host, expected) in cases {
+        let r = DomainSuffixRule::new(pattern, "Proxy");
+        let got = r.match_metadata(&meta(host, 443), &helper());
+        if got != *expected {
+            failures.push(format!(
+                "{label}: DOMAIN-SUFFIX,{pattern} vs host {host} => {got}, expected {expected}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "domain-suffix match failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ─── DOMAIN-KEYWORD ─────────────────────────────────────────────────
 
 #[test]
-fn domain_keyword_match() {
-    let r = DomainKeywordRule::new("google", "Proxy");
-    assert!(r.match_metadata(&meta("www.google.com", 443), &helper()));
-    assert!(r.match_metadata(&meta("google.co.jp", 443), &helper()));
-}
+fn domain_keyword_match_cases() {
+    // (case label, DOMAIN-KEYWORD pattern, request host, expected match)
+    let cases: &[(&str, &str, &str, bool)] = &[
+        (
+            "match: keyword as interior label",
+            "google",
+            "www.google.com",
+            true,
+        ),
+        (
+            "match: keyword as leading label",
+            "google",
+            "google.co.jp",
+            true,
+        ),
+        (
+            "case-insensitive: uppercase pattern vs lowercase host",
+            "GOOGLE",
+            "www.google.com",
+            true,
+        ),
+        (
+            "no match: keyword absent from host",
+            "google",
+            "example.com",
+            false,
+        ),
+        (
+            "partial: keyword matches a mid-label substring, not only whole labels",
+            "oog",
+            "google.com",
+            true,
+        ),
+    ];
 
-#[test]
-fn domain_keyword_case_insensitive() {
-    let r = DomainKeywordRule::new("GOOGLE", "Proxy");
-    assert!(r.match_metadata(&meta("www.google.com", 443), &helper()));
-}
-
-#[test]
-fn domain_keyword_no_match() {
-    let r = DomainKeywordRule::new("google", "Proxy");
-    assert!(!r.match_metadata(&meta("example.com", 443), &helper()));
-}
-
-#[test]
-fn domain_keyword_partial() {
-    let r = DomainKeywordRule::new("oog", "Proxy");
-    assert!(r.match_metadata(&meta("google.com", 443), &helper()));
+    let mut failures = Vec::new();
+    for (label, pattern, host, expected) in cases {
+        let r = DomainKeywordRule::new(pattern, "Proxy");
+        let got = r.match_metadata(&meta(host, 443), &helper());
+        if got != *expected {
+            failures.push(format!(
+                "{label}: DOMAIN-KEYWORD,{pattern} vs host {host} => {got}, expected {expected}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "domain-keyword match failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ─── DOMAIN-REGEX ───────────────────────────────────────────────────
 
 #[test]
-fn domain_regex_match() {
-    let r = DomainRegexRule::new(r"^(.*\.)?google\.com$", "Proxy").unwrap();
-    assert!(r.match_metadata(&meta("google.com", 443), &helper()));
-    assert!(r.match_metadata(&meta("www.google.com", 443), &helper()));
-}
+fn domain_regex_match_cases() {
+    // (case label, DOMAIN-REGEX pattern, request host, dst port, expected match)
+    let cases: &[(&str, &str, &str, u16, bool)] = &[
+        // from `domain_regex_match`
+        (
+            "anchored: apex domain",
+            r"^(.*\.)?google\.com$",
+            "google.com",
+            443,
+            true,
+        ),
+        (
+            "anchored: subdomain",
+            r"^(.*\.)?google\.com$",
+            "www.google.com",
+            443,
+            true,
+        ),
+        // from `domain_regex_no_match`
+        (
+            "anchored: unrelated domain",
+            r"^(.*\.)?google\.com$",
+            "example.com",
+            443,
+            false,
+        ),
+        // `$` anchor must reject a lookalike that only *contains* the domain.
+        (
+            "anchored: suffix-lookalike must not match",
+            r"^(.*\.)?google\.com$",
+            "google.com.evil.net",
+            443,
+            false,
+        ),
+        // from `domain_regex_complex`
+        (
+            "complex: ads. label",
+            r"^ad[sv]?\d*\.",
+            "ads.example.com",
+            80,
+            true,
+        ),
+        (
+            "complex: adv123. label",
+            r"^ad[sv]?\d*\.",
+            "adv123.tracker.io",
+            80,
+            true,
+        ),
+        (
+            "complex: admin. must not match",
+            r"^ad[sv]?\d*\.",
+            "admin.example.com",
+            80,
+            false,
+        ),
+    ];
 
-#[test]
-fn domain_regex_no_match() {
-    let r = DomainRegexRule::new(r"^(.*\.)?google\.com$", "Proxy").unwrap();
-    assert!(!r.match_metadata(&meta("example.com", 443), &helper()));
-    assert!(!r.match_metadata(&meta("google.com.evil.net", 443), &helper()));
-}
-
-#[test]
-fn domain_regex_complex() {
-    let r = DomainRegexRule::new(r"^ad[sv]?\d*\.", "Proxy").unwrap();
-    assert!(r.match_metadata(&meta("ads.example.com", 80), &helper()));
-    assert!(r.match_metadata(&meta("adv123.tracker.io", 80), &helper()));
-    assert!(!r.match_metadata(&meta("admin.example.com", 80), &helper()));
+    let mut failures = Vec::new();
+    for &(label, pattern, host, dst_port, expected) in cases {
+        let r = DomainRegexRule::new(pattern, "Proxy").unwrap();
+        let got = r.match_metadata(&meta(host, dst_port), &helper());
+        if got != expected {
+            failures.push(format!(
+                "{label}: DOMAIN-REGEX,{pattern} vs host {host}:{dst_port} => {got}, expected {expected}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "domain-regex match failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -184,36 +314,59 @@ fn domain_regex_type() {
 // ─── IP-CIDR ────────────────────────────────────────────────────────
 
 #[test]
-fn ipcidr_v4_match() {
-    let r = IpCidrRule::new("192.168.1.0/24", "DIRECT", false, true).unwrap();
-    assert!(r.match_metadata(&meta_ip("192.168.1.1", 80), &helper()));
-    assert!(r.match_metadata(&meta_ip("192.168.1.254", 80), &helper()));
-}
+fn ipcidr_match_cases() {
+    // (label, cidr, dst ip, expected match)
+    let cases: [(&str, &str, &str, bool); 8] = [
+        (
+            "v4 /24 low host in range",
+            "192.168.1.0/24",
+            "192.168.1.1",
+            true,
+        ),
+        (
+            "v4 /24 high host in range",
+            "192.168.1.0/24",
+            "192.168.1.254",
+            true,
+        ),
+        (
+            "v4 /24 adjacent prefix",
+            "192.168.1.0/24",
+            "192.168.2.1",
+            false,
+        ),
+        (
+            "v4 /24 unrelated private block",
+            "192.168.1.0/24",
+            "10.0.0.1",
+            false,
+        ),
+        ("v4 /32 single host exact", "10.0.0.1/32", "10.0.0.1", true),
+        (
+            "v4 /32 single host neighbour",
+            "10.0.0.1/32",
+            "10.0.0.2",
+            false,
+        ),
+        ("v6 /8 inside ULA prefix", "fd00::/8", "fd12::1", true),
+        ("v6 /8 outside ULA prefix", "fd00::/8", "2001:db8::1", false),
+    ];
 
-#[test]
-fn ipcidr_v4_no_match() {
-    let r = IpCidrRule::new("192.168.1.0/24", "DIRECT", false, true).unwrap();
-    assert!(!r.match_metadata(&meta_ip("192.168.2.1", 80), &helper()));
-    assert!(!r.match_metadata(&meta_ip("10.0.0.1", 80), &helper()));
-}
-
-#[test]
-fn ipcidr_v4_single_host() {
-    let r = IpCidrRule::new("10.0.0.1/32", "DIRECT", false, true).unwrap();
-    assert!(r.match_metadata(&meta_ip("10.0.0.1", 80), &helper()));
-    assert!(!r.match_metadata(&meta_ip("10.0.0.2", 80), &helper()));
-}
-
-#[test]
-fn ipcidr_v6_match() {
-    let r = IpCidrRule::new("fd00::/8", "DIRECT", false, true).unwrap();
-    assert!(r.match_metadata(&meta_ip("fd12::1", 80), &helper()));
-}
-
-#[test]
-fn ipcidr_v6_no_match() {
-    let r = IpCidrRule::new("fd00::/8", "DIRECT", false, true).unwrap();
-    assert!(!r.match_metadata(&meta_ip("2001:db8::1", 80), &helper()));
+    let mut failures = Vec::new();
+    for (label, cidr, ip, expected) in cases {
+        let r = IpCidrRule::new(cidr, "DIRECT", false, true).unwrap();
+        let got = r.match_metadata(&meta_ip(ip, 80), &helper());
+        if got != expected {
+            failures.push(format!(
+                "{label}: IP-CIDR,{cidr} vs {ip} -> expected {expected}, got {got}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ipcidr match mismatches:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -224,20 +377,19 @@ fn ipcidr_no_ip_no_match() {
 }
 
 #[test]
-fn ipcidr_src() {
+fn ipcidr_src_match_cases() {
     let r = IpCidrRule::new("10.0.0.0/8", "DIRECT", true, true).unwrap();
     assert_eq!(r.rule_type(), RuleType::SrcIpCidr);
-    let mut m = meta("", 80);
-    m.src_ip = Some("10.1.2.3".parse().unwrap());
-    assert!(r.match_metadata(&m, &helper()));
-}
 
-#[test]
-fn ipcidr_src_no_match() {
-    let r = IpCidrRule::new("10.0.0.0/8", "DIRECT", true, true).unwrap();
-    let mut m = meta("", 80);
-    m.src_ip = Some("192.168.1.1".parse().unwrap());
-    assert!(!r.match_metadata(&m, &helper()));
+    for (src_ip, expected) in [("10.1.2.3", true), ("192.168.1.1", false)] {
+        let mut m = meta("", 80);
+        m.src_ip = Some(src_ip.parse().unwrap());
+        assert_eq!(
+            r.match_metadata(&m, &helper()),
+            expected,
+            "src_ip {src_ip} vs 10.0.0.0/8: expected match={expected}"
+        );
+    }
 }
 
 #[test]
@@ -256,47 +408,47 @@ fn ipcidr_invalid() {
 // ─── PORT ───────────────────────────────────────────────────────────
 
 #[test]
-fn port_single_match() {
-    let r = PortRule::new("80", "DIRECT", false).unwrap();
-    assert!(r.match_metadata(&meta("example.com", 80), &helper()));
-    assert!(!r.match_metadata(&meta("example.com", 443), &helper()));
-}
+fn port_match_cases() {
+    // (spec, adapter, host, dst_port, expected_match)
+    let cases: &[(&str, &str, &str, u16, bool)] = &[
+        // port_single_match
+        ("80", "DIRECT", "example.com", 80, true),
+        ("80", "DIRECT", "example.com", 443, false),
+        // port_range_match
+        ("8000-9000", "Proxy", "", 8000, true),
+        ("8000-9000", "Proxy", "", 8500, true),
+        ("8000-9000", "Proxy", "", 9000, true),
+        ("8000-9000", "Proxy", "", 7999, false),
+        ("8000-9000", "Proxy", "", 9001, false),
+        // port_multiple
+        ("80,443,8080", "Proxy", "", 80, true),
+        ("80,443,8080", "Proxy", "", 443, true),
+        ("80,443,8080", "Proxy", "", 8080, true),
+        ("80,443,8080", "Proxy", "", 8081, false),
+        // port_slash_multiple
+        ("80/8080/443/8443", "Proxy", "", 80, true),
+        ("80/8080/443/8443", "Proxy", "", 8080, true),
+        ("80/8080/443/8443", "Proxy", "", 443, true),
+        ("80/8080/443/8443", "Proxy", "", 8443, true),
+        ("80/8080/443/8443", "Proxy", "", 22, false),
+        // port_mixed_single_and_range
+        ("22,80,8000-9000", "Proxy", "", 22, true),
+        ("22,80,8000-9000", "Proxy", "", 8500, true),
+        ("22,80,8000-9000", "Proxy", "", 23, false),
+    ];
 
-#[test]
-fn port_range_match() {
-    let r = PortRule::new("8000-9000", "Proxy", false).unwrap();
-    assert!(r.match_metadata(&meta("", 8000), &helper()));
-    assert!(r.match_metadata(&meta("", 8500), &helper()));
-    assert!(r.match_metadata(&meta("", 9000), &helper()));
-    assert!(!r.match_metadata(&meta("", 7999), &helper()));
-    assert!(!r.match_metadata(&meta("", 9001), &helper()));
-}
-
-#[test]
-fn port_multiple() {
-    let r = PortRule::new("80,443,8080", "Proxy", false).unwrap();
-    assert!(r.match_metadata(&meta("", 80), &helper()));
-    assert!(r.match_metadata(&meta("", 443), &helper()));
-    assert!(r.match_metadata(&meta("", 8080), &helper()));
-    assert!(!r.match_metadata(&meta("", 8081), &helper()));
-}
-
-#[test]
-fn port_slash_multiple() {
-    let r = PortRule::new("80/8080/443/8443", "Proxy", false).unwrap();
-    assert!(r.match_metadata(&meta("", 80), &helper()));
-    assert!(r.match_metadata(&meta("", 8080), &helper()));
-    assert!(r.match_metadata(&meta("", 443), &helper()));
-    assert!(r.match_metadata(&meta("", 8443), &helper()));
-    assert!(!r.match_metadata(&meta("", 22), &helper()));
-}
-
-#[test]
-fn port_mixed_single_and_range() {
-    let r = PortRule::new("22,80,8000-9000", "Proxy", false).unwrap();
-    assert!(r.match_metadata(&meta("", 22), &helper()));
-    assert!(r.match_metadata(&meta("", 8500), &helper()));
-    assert!(!r.match_metadata(&meta("", 23), &helper()));
+    let mut failures = Vec::new();
+    for (spec, adapter, host, port, expected) in cases {
+        let r = PortRule::new(spec, adapter, false)
+            .unwrap_or_else(|e| panic!("PortRule::new({spec:?}) failed: {e}"));
+        let got = r.match_metadata(&meta(host, *port), &helper());
+        if got != *expected {
+            failures.push(format!(
+                "spec {spec:?} port {port}: expected match={expected}, got {got}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "port match mismatches: {failures:#?}");
 }
 
 #[test]
@@ -325,60 +477,88 @@ fn port_invalid() {
 // ─── NETWORK ────────────────────────────────────────────────────────
 
 #[test]
-fn network_tcp() {
-    let r = NetworkRule::new("tcp", "Proxy").unwrap();
-    let mut m = meta("", 80);
-    m.network = Network::Tcp;
-    assert!(r.match_metadata(&m, &helper()));
-    m.network = Network::Udp;
-    assert!(!r.match_metadata(&m, &helper()));
+fn network_match_cases() {
+    // (case label, NETWORK payload, metadata network, expected match)
+    let cases: &[(&str, &str, Network, bool)] = &[
+        ("tcp rule vs tcp traffic", "tcp", Network::Tcp, true),
+        ("tcp rule vs udp traffic", "tcp", Network::Udp, false),
+        ("udp rule vs udp traffic", "udp", Network::Udp, true),
+        ("udp rule vs tcp traffic", "udp", Network::Tcp, false),
+    ];
+
+    let mut failures = Vec::new();
+    for (label, payload, network, expected) in cases {
+        let r = NetworkRule::new(payload, "Proxy").unwrap();
+        let mut m = meta("", 80);
+        m.network = *network;
+        let got = r.match_metadata(&m, &helper());
+        if got != *expected {
+            failures.push(format!(
+                "{label}: NETWORK,{payload} vs metadata network {network:?} => {got}, expected {expected}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "network match failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
-fn network_udp() {
-    let r = NetworkRule::new("udp", "Proxy").unwrap();
-    let mut m = meta("", 80);
-    m.network = Network::Udp;
-    assert!(r.match_metadata(&m, &helper()));
-    m.network = Network::Tcp;
-    assert!(!r.match_metadata(&m, &helper()));
-}
-
-#[test]
-fn network_case_insensitive() {
-    assert!(NetworkRule::new("TCP", "Proxy").is_ok());
-    assert!(NetworkRule::new("Udp", "Proxy").is_ok());
-}
-
-#[test]
-fn network_invalid() {
-    assert!(NetworkRule::new("icmp", "Proxy").is_err());
+fn network_parse_validity_cases() {
+    // (literal, should_parse)
+    let cases: &[(&str, bool)] = &[
+        ("TCP", true),   // case-insensitive accept
+        ("Udp", true),   // case-insensitive accept
+        ("icmp", false), // unknown network rejected
+    ];
+    let mut failures = Vec::new();
+    for (literal, should_parse) in cases {
+        let ok = NetworkRule::new(literal, "Proxy").is_ok();
+        if ok != *should_parse {
+            failures.push(format!(
+                "NetworkRule::new({literal:?}): expected is_ok()={should_parse}, got {ok}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "network parse validity mismatches: {failures:?}"
+    );
 }
 
 // ─── PROCESS-NAME ───────────────────────────────────────────────────
 
 #[test]
-fn process_match() {
-    let r = ProcessRule::new("chrome", "Proxy");
-    let mut m = meta("", 443);
-    m.process = "chrome".into();
-    assert!(r.match_metadata(&m, &helper()));
-}
-
-#[test]
-fn process_case_insensitive() {
-    let r = ProcessRule::new("Chrome", "Proxy");
-    let mut m = meta("", 443);
-    m.process = "chrome".into();
-    assert!(r.match_metadata(&m, &helper()));
-}
-
-#[test]
-fn process_no_match() {
-    let r = ProcessRule::new("chrome", "Proxy");
-    let mut m = meta("", 443);
-    m.process = "firefox".into();
-    assert!(!r.match_metadata(&m, &helper()));
+fn process_match_cases() {
+    // (label, rule pattern, metadata process name, expected match)
+    let cases: &[(&str, &str, &str, bool)] = &[
+        ("exact name matches", "chrome", "chrome", true),
+        ("pattern case is ignored", "Chrome", "chrome", true),
+        (
+            "different process does not match",
+            "chrome",
+            "firefox",
+            false,
+        ),
+    ];
+    let mut failures = Vec::new();
+    for &(label, pattern, process, expected) in cases {
+        let r = ProcessRule::new(pattern, "Proxy");
+        let mut m = meta("", 443);
+        m.process = process.into();
+        let got = r.match_metadata(&m, &helper());
+        if got != expected {
+            failures.push(format!(
+                "{label}: PROCESS-NAME,{pattern} vs process {process:?} expected {expected}, got {got}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "process-name match mismatches: {failures:?}"
+    );
 }
 
 #[test]
@@ -408,26 +588,44 @@ fn final_type_and_payload() {
 // ─── LOGIC: AND ─────────────────────────────────────────────────────
 
 #[test]
-fn and_all_match() {
-    let rules: Vec<Box<dyn Rule>> = vec![
-        Box::new(DomainSuffixRule::new("google.com", "")),
-        Box::new(PortRule::new("443", "", false).unwrap()),
+fn and_rule_match_cases() {
+    // AndRule([DOMAIN-SUFFIX,google.com] AND [DST-PORT,443]) matches only when
+    // every child rule matches.
+    let cases: &[(&str, &str, u16, bool)] = &[
+        ("all children match", "www.google.com", 443, true),
+        (
+            "domain matches but port does not",
+            "www.google.com",
+            80,
+            false,
+        ),
+        (
+            "port matches but domain does not",
+            "example.com",
+            443,
+            false,
+        ),
     ];
-    let r = AndRule::new(rules, "Proxy");
-    assert!(r.match_metadata(&meta("www.google.com", 443), &helper()));
-}
 
-#[test]
-fn and_partial_no_match() {
-    let rules: Vec<Box<dyn Rule>> = vec![
-        Box::new(DomainSuffixRule::new("google.com", "")),
-        Box::new(PortRule::new("443", "", false).unwrap()),
-    ];
-    let r = AndRule::new(rules, "Proxy");
-    // Domain matches but port doesn't
-    assert!(!r.match_metadata(&meta("www.google.com", 80), &helper()));
-    // Port matches but domain doesn't
-    assert!(!r.match_metadata(&meta("example.com", 443), &helper()));
+    let mut failures = Vec::new();
+    for &(label, host, port, expected) in cases {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainSuffixRule::new("google.com", "")),
+            Box::new(PortRule::new("443", "", false).unwrap()),
+        ];
+        let r = AndRule::new(rules, "Proxy");
+        let actual = r.match_metadata(&meta(host, port), &helper());
+        if actual != expected {
+            failures.push(format!(
+                "case `{label}` (host={host}, port={port}): expected {expected}, got {actual}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "AndRule match mismatches:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -440,33 +638,31 @@ fn and_type() {
 // ─── LOGIC: OR ──────────────────────────────────────────────────────
 
 #[test]
-fn or_first_matches() {
-    let rules: Vec<Box<dyn Rule>> = vec![
-        Box::new(DomainRule::new("google.com", "")),
-        Box::new(DomainRule::new("example.com", "")),
+fn or_rule_match_cases() {
+    // OR([DOMAIN google.com, DOMAIN example.com]) — (host, expected):
+    // first sub-rule matches, second sub-rule matches, neither matches.
+    let cases: &[(&str, bool)] = &[
+        ("google.com", true),
+        ("example.com", true),
+        ("other.com", false),
     ];
-    let r = OrRule::new(rules, "Proxy");
-    assert!(r.match_metadata(&meta("google.com", 80), &helper()));
-}
 
-#[test]
-fn or_second_matches() {
-    let rules: Vec<Box<dyn Rule>> = vec![
-        Box::new(DomainRule::new("google.com", "")),
-        Box::new(DomainRule::new("example.com", "")),
-    ];
-    let r = OrRule::new(rules, "Proxy");
-    assert!(r.match_metadata(&meta("example.com", 80), &helper()));
-}
+    let mut failures = Vec::new();
+    for &(host, expected) in cases {
+        let rules: Vec<Box<dyn Rule>> = vec![
+            Box::new(DomainRule::new("google.com", "")),
+            Box::new(DomainRule::new("example.com", "")),
+        ];
+        let r = OrRule::new(rules, "Proxy");
+        let got = r.match_metadata(&meta(host, 80), &helper());
+        if got != expected {
+            failures.push(format!(
+                "OR([DOMAIN google.com, DOMAIN example.com]) vs host {host}: expected {expected}, got {got}"
+            ));
+        }
+    }
 
-#[test]
-fn or_none_match() {
-    let rules: Vec<Box<dyn Rule>> = vec![
-        Box::new(DomainRule::new("google.com", "")),
-        Box::new(DomainRule::new("example.com", "")),
-    ];
-    let r = OrRule::new(rules, "Proxy");
-    assert!(!r.match_metadata(&meta("other.com", 80), &helper()));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -641,24 +837,27 @@ fn parse_match() {
 }
 
 #[test]
-fn parse_unknown_type_error() {
-    assert!(parse_rule("UNKNOWN-RULE,payload,Proxy").is_err());
-}
+fn parse_rule_malformed_input_errors() {
+    // Syntactically malformed rule lines the parser must reject. Each case is
+    // labelled and every case is evaluated, so a regression names the exact
+    // offending input(s) instead of stopping at the first failure.
+    let cases = [
+        ("too few parts: type only", "DOMAIN"),
+        ("too few parts: no target", "DOMAIN,google.com"),
+        ("invalid regex payload", "DOMAIN-REGEX,[bad,Proxy"),
+        ("invalid CIDR payload", "IP-CIDR,not-a-cidr,DIRECT"),
+    ];
 
-#[test]
-fn parse_too_few_parts_error() {
-    assert!(parse_rule("DOMAIN").is_err());
-    assert!(parse_rule("DOMAIN,google.com").is_err());
-}
+    let accepted: Vec<&str> = cases
+        .iter()
+        .filter(|(_, line)| parse_rule(line).is_ok())
+        .map(|(label, _)| *label)
+        .collect();
 
-#[test]
-fn parse_invalid_regex_error() {
-    assert!(parse_rule("DOMAIN-REGEX,[bad,Proxy").is_err());
-}
-
-#[test]
-fn parse_invalid_cidr_error() {
-    assert!(parse_rule("IP-CIDR,not-a-cidr,DIRECT").is_err());
+    assert!(
+        accepted.is_empty(),
+        "parse_rule accepted malformed lines: {accepted:?}"
+    );
 }
 
 #[test]

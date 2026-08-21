@@ -123,13 +123,23 @@ impl Store for MemoryStore {
         // Evict the LRU pair from both directions so the two maps stay
         // consistent — bounded LRUs would evict each side independently.
         if inner.by_ip.len() > inner.cap {
-            if let Some((_, evicted_host)) = inner.by_ip.pop_lru() {
-                inner.by_host.pop(&evicted_host);
+            if let Some((evicted_ip, evicted_host)) = inner.by_ip.pop_lru() {
+                // Compare-and-delete: only drop the forward entry while it
+                // still points at the just-evicted ip. Same hazard as
+                // `del_by_ip` — if `evicted_host` was since remapped to a
+                // different address, the stale `by_ip` entry we're evicting
+                // here must not destroy that live forward mapping.
+                if inner.by_host.peek(&evicted_host) == Some(&evicted_ip) {
+                    inner.by_host.pop(&evicted_host);
+                }
             }
         }
         if inner.by_host.len() > inner.cap {
-            if let Some((_, evicted_ip)) = inner.by_host.pop_lru() {
-                inner.by_ip.pop(&evicted_ip);
+            if let Some((evicted_host, evicted_ip)) = inner.by_host.pop_lru() {
+                // Mirror image of the guard above, for the reverse direction.
+                if inner.by_ip.peek(&evicted_ip) == Some(&evicted_host) {
+                    inner.by_ip.pop(&evicted_ip);
+                }
             }
         }
     }
@@ -369,12 +379,21 @@ impl Store for FileStore {
         let host = self.reverse.lock().remove(&ip);
         if let Some(host) = host {
             let mut s = self.state.lock();
-            // Compare-and-delete — see `MemoryStore::del_by_ip`.
-            if s.entries.get(host.as_str()) == Some(&ip) {
+            // Compare-and-delete — see `MemoryStore::del_by_ip`. Only mark
+            // dirty when `entries` (the persisted map) actually changes —
+            // `reverse` is a non-persisted in-memory rebuild aid, so a stale
+            // hit there must not trigger a debounced rewrite of an
+            // unchanged snapshot.
+            let removed = if s.entries.get(host.as_str()) == Some(&ip) {
                 s.entries.remove(host.as_str());
-            }
+                true
+            } else {
+                false
+            };
             drop(s);
-            self.mark_dirty();
+            if removed {
+                self.mark_dirty();
+            }
         }
     }
     fn exists(&self, ip: IpAddr) -> bool {
@@ -863,6 +882,58 @@ mod tests {
         assert!(s.get_by_ip(ip2).is_none());
     }
 
+    #[test]
+    fn memory_store_cap_eviction_spares_remapped_host() {
+        // Same hazard as `memory_store_del_by_ip_spares_remapped_host`, but
+        // triggered via the cap-eviction path in `put` rather than an
+        // explicit `del_by_ip` call. cap=2: put "a"->ip1, "b"->ip2, then
+        // re-put "a"->ip3. by_ip now holds 3 entries (ip1, ip2, ip3) with
+        // ip1 the LRU (untouched since step 1), so the cap check evicts
+        // ip1 from by_ip. Without the compare-and-delete guard this would
+        // unconditionally pop by_host["a"] too — destroying the live
+        // "a" -> ip3 mapping just written.
+        let s = MemoryStore::new(2);
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let ip3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        s.put("a", ip1);
+        s.put("b", ip2);
+        s.put("a", ip3); // ip1's reverse entry is now stale, cap exceeded on by_ip
+        assert!(s.get_by_ip(ip1).is_none(), "stale by_ip entry evicted");
+        assert_eq!(
+            s.get_by_host("a"),
+            Some(ip3),
+            "cap eviction of a stale by_ip entry must not delete the live forward mapping"
+        );
+        assert_eq!(s.get_by_ip(ip3).as_deref(), Some("a"));
+        assert_eq!(s.get_by_host("b"), Some(ip2));
+        assert_eq!(s.get_by_ip(ip2).as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn file_store_del_by_ip_stale_does_not_mark_dirty() {
+        // Companion to `file_store_del_by_ip_spares_remapped_host`: a
+        // compare-and-delete that finds the reverse entry stale (host since
+        // remapped) must leave the persisted `entries` map untouched, so it
+        // must not schedule a debounced rewrite of an identical snapshot.
+        let tmp = tempdir();
+        let path = tmp.join("fakeip-del-dirty.json");
+        let s = FileStore::open(&path).unwrap();
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        s.put("h.example", ip1);
+        s.put("h.example", ip2); // ip1's reverse entry is now stale
+                                 // Isolate the del_by_ip call from the dirty flag set by the puts above.
+        s.dirty.store(false, Ordering::Relaxed);
+        s.del_by_ip(ip1); // stale — compare-and-delete must no-op
+        assert!(
+            !s.dirty.load(Ordering::Relaxed),
+            "a no-op compare-and-delete must not mark the store dirty"
+        );
+        assert_eq!(s.get_by_host("h.example"), Some(ip2));
+        let _ = fs::remove_file(&path);
+    }
+
     #[tokio::test]
     async fn file_store_del_by_ip_spares_remapped_host() {
         let tmp = tempdir();
@@ -931,36 +1002,117 @@ mod tests {
         );
     }
 
+    /// Table-driven merge of the former `skipper_blacklist_skips_matched`,
+    /// `skipper_whitelist_skips_unmatched`, `skipper_plain_entry_is_suffix`
+    /// and `skipper_empty_filter_never_skips` cases. Every row is evaluated
+    /// even if an earlier one fails; all failures are reported together with
+    /// their case label.
     #[test]
-    fn skipper_blacklist_skips_matched() {
-        let s = Skipper::new(&["+.local".to_string()], SkipperMode::BlackList);
-        assert!(s.should_skip("foo.local"));
-        assert!(s.should_skip("local"));
-        assert!(!s.should_skip("example.com"));
-    }
+    fn skipper_table_driven_cases() {
+        struct Case {
+            label: &'static str,
+            patterns: &'static [&'static str],
+            mode: SkipperMode,
+            host: &'static str,
+            expect_skip: bool,
+        }
 
-    #[test]
-    fn skipper_whitelist_skips_unmatched() {
-        let s = Skipper::new(&["+.example.com".to_string()], SkipperMode::WhiteList);
-        assert!(!s.should_skip("foo.example.com"));
-        assert!(s.should_skip("other.test"));
-    }
+        let cases = [
+            // BlackList: a `+.` pattern matches sub-domains AND the bare root.
+            Case {
+                label: "blacklist/+.local/sub",
+                patterns: &["+.local"],
+                mode: SkipperMode::BlackList,
+                host: "foo.local",
+                expect_skip: true,
+            },
+            Case {
+                label: "blacklist/+.local/root",
+                patterns: &["+.local"],
+                mode: SkipperMode::BlackList,
+                host: "local",
+                expect_skip: true,
+            },
+            Case {
+                label: "blacklist/+.local/unrelated",
+                patterns: &["+.local"],
+                mode: SkipperMode::BlackList,
+                host: "example.com",
+                expect_skip: false,
+            },
+            // WhiteList inverts: matched hosts keep fake-ip, others bypass.
+            Case {
+                label: "whitelist/+.example.com/matched",
+                patterns: &["+.example.com"],
+                mode: SkipperMode::WhiteList,
+                host: "foo.example.com",
+                expect_skip: false,
+            },
+            Case {
+                label: "whitelist/+.example.com/unmatched",
+                patterns: &["+.example.com"],
+                mode: SkipperMode::WhiteList,
+                host: "other.test",
+                expect_skip: true,
+            },
+            // A plain entry is a suffix match that also covers the root, and
+            // must respect label boundaries (not a raw substring match).
+            Case {
+                label: "blacklist/plain/sub",
+                patterns: &["example.com"],
+                mode: SkipperMode::BlackList,
+                host: "foo.example.com",
+                expect_skip: true,
+            },
+            Case {
+                label: "blacklist/plain/root",
+                patterns: &["example.com"],
+                mode: SkipperMode::BlackList,
+                host: "example.com",
+                expect_skip: true,
+            },
+            Case {
+                label: "blacklist/plain/label-boundary",
+                patterns: &["example.com"],
+                mode: SkipperMode::BlackList,
+                host: "notexample.com",
+                expect_skip: false,
+            },
+            // Empty filter never skips — including WhiteList, where the naive
+            // reading would bypass every host (defensive foot-gun guard).
+            Case {
+                label: "empty/blacklist",
+                patterns: &[],
+                mode: SkipperMode::BlackList,
+                host: "foo.test",
+                expect_skip: false,
+            },
+            Case {
+                label: "empty/whitelist-defensive",
+                patterns: &[],
+                mode: SkipperMode::WhiteList,
+                host: "foo.test",
+                expect_skip: false,
+            },
+        ];
 
-    #[test]
-    fn skipper_plain_entry_is_suffix() {
-        let s = Skipper::new(&["example.com".to_string()], SkipperMode::BlackList);
-        assert!(s.should_skip("foo.example.com"));
-        assert!(s.should_skip("example.com"));
-        assert!(!s.should_skip("notexample.com"));
-    }
-
-    #[test]
-    fn skipper_empty_filter_never_skips() {
-        let s = Skipper::new(&[], SkipperMode::BlackList);
-        assert!(!s.should_skip("foo.test"));
-        // Whitelist + empty = treated as "skip nothing" (defensive).
-        let s = Skipper::new(&[], SkipperMode::WhiteList);
-        assert!(!s.should_skip("foo.test"));
+        let mut failures = Vec::new();
+        for c in &cases {
+            let patterns: Vec<String> = c.patterns.iter().copied().map(String::from).collect();
+            let skipper = Skipper::new(&patterns, c.mode);
+            let got = skipper.should_skip(c.host);
+            if got != c.expect_skip {
+                failures.push(format!(
+                    "[{}] Skipper::new({:?}, {:?}).should_skip({:?}) = {got}, want {}",
+                    c.label, c.patterns, c.mode, c.host, c.expect_skip
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "skipper cases failed:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[tokio::test]

@@ -870,19 +870,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_question_rejects_truncated_label() {
-        // Label length byte 5 but only 2 bytes follow → label-truncated error.
-        let bad = [5u8, b'a', b'b'];
-        let err = DnsServer::parse_question_for_test(&bad);
-        assert!(err.is_err(), "must reject truncated label");
-    }
+    fn parse_question_rejects_malformed_input_table() {
+        // Each row exercises a distinct rejection branch in `parse_question`.
+        let cases: &[(&str, &[u8])] = &[
+            // Label length byte 5 but only 2 bytes follow -> label-truncated error.
+            ("truncated label", &[5u8, b'a', b'b']),
+            // Just a name terminator, no type/class.
+            ("missing qtype/qclass", &[3u8, b'a', b'b', b'c', 0x00]),
+        ];
 
-    #[test]
-    fn parse_question_rejects_missing_type_class() {
-        // Just a name terminator, no type/class.
-        let bad = [3u8, b'a', b'b', b'c', 0x00];
-        let err = DnsServer::parse_question_for_test(&bad);
-        assert!(err.is_err(), "must reject missing qtype/qclass");
+        // Collect instead of asserting per row so every case still runs and a
+        // failure names every row that wrongly parsed.
+        let accepted: Vec<&str> = cases
+            .iter()
+            .filter(|(_, bytes)| DnsServer::parse_question_for_test(bytes).is_ok())
+            .map(|(label, _)| *label)
+            .collect();
+
+        assert!(
+            accepted.is_empty(),
+            "malformed questions must be rejected, but these parsed: {accepted:?}"
+        );
     }
 
     #[test]
@@ -985,22 +993,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_query_rejects_packet_shorter_than_header() {
-        let resolver = empty_resolver();
-        let err = DnsServer::handle_query(&[0u8; 5], &resolver).await;
-        assert!(err.is_err(), "must reject too-short packets");
-    }
+    async fn handle_query_rejects_malformed_packets_table() {
+        // Malformed inputs must be rejected outright — no response is emitted.
+        let short = vec![0u8; 5];
+        let zero_questions = {
+            // Valid 12-byte header but QDCOUNT (bytes [4..6]) left at zero.
+            let mut q = vec![0u8; 12];
+            q[0] = 0x12;
+            q[1] = 0x34;
+            q
+        };
+        let cases: [(&str, &[u8]); 2] = [
+            ("packet shorter than the 12-byte header", &short),
+            ("valid header with qdcount=0", &zero_questions),
+        ];
 
-    #[tokio::test]
-    async fn handle_query_rejects_zero_questions() {
-        // Valid header but qdcount=0.
-        let mut q = [0u8; 12];
-        q[0] = 0x12;
-        q[1] = 0x34;
-        // qdcount bytes [4..6] left at zero
         let resolver = empty_resolver();
-        let err = DnsServer::handle_query(&q, &resolver).await;
-        assert!(err.is_err(), "must reject queries with no question");
+        // Collect rather than assert per-case, so a failure in one case does
+        // not stop the loop and hide the other case's result.
+        let mut failures = Vec::new();
+        for (label, packet) in cases {
+            if DnsServer::handle_query(packet, &resolver).await.is_ok() {
+                failures.push(label);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "handle_query must reject these malformed packets: {failures:?}"
+        );
     }
 
     #[tokio::test]

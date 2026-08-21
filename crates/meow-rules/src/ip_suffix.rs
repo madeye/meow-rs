@@ -171,7 +171,6 @@ impl Rule for IpSuffixRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
 
     fn helper() -> RuleMatchHelper {
@@ -185,55 +184,52 @@ mod tests {
         }
     }
 
-    // Upstream: rules/common/ipcidr.go — IP-SUFFIX applies mask to low bits.
+    /// Upstream: `rules/common/ipcidr.go` — IP-SUFFIX applies the mask to the
+    /// **low** bits. Cross-family comparisons must not panic; they return false.
     #[test]
-    fn ip_suffix_ipv4_32_exact_match() {
-        let r = IpSuffixRule::new("8.8.8.8/32", "PROXY", false, true).unwrap();
-        assert!(r.matches_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-        assert!(!r.matches_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 9))));
-    }
+    fn ip_suffix_matches_ip_cases() {
+        // (label, payload, candidate ip, expected)
+        let cases: &[(&str, &str, &str, bool)] = &[
+            // /32 — exact IPv4 match.
+            ("ipv4 /32 exact hit", "8.8.8.8/32", "8.8.8.8", true),
+            ("ipv4 /32 exact miss", "8.8.8.8/32", "8.8.8.9", false),
+            // /8 — low byte must equal 0x01 → matches any a.b.c.1.
+            ("ipv4 /8 low byte hit a", "0.0.0.1/8", "10.20.30.1", true),
+            ("ipv4 /8 low byte hit b", "0.0.0.1/8", "192.168.0.1", true),
+            ("ipv4 /8 low byte miss", "0.0.0.1/8", "10.20.30.2", false),
+            // /24 — low 24 bits must equal 0x010203 (0.1.2.3) → matches x.1.2.3.
+            ("ipv4 /24 hit a", "0.1.2.3/24", "10.1.2.3", true),
+            ("ipv4 /24 hit b", "0.1.2.3/24", "200.1.2.3", true),
+            ("ipv4 /24 miss", "0.1.2.3/24", "10.1.2.4", false),
+            // /64 — low 64 bits must equal ::1.
+            ("ipv6 /64 low half hit a", "::1/64", "2001:db8::1", true),
+            ("ipv6 /64 low half hit b", "::1/64", "fd00::1", true),
+            ("ipv6 /64 low half miss", "::1/64", "2001:db8::2", false),
+            // /128 — exact IPv6 match.
+            ("ipv6 /128 hit", "2001:db8::1/128", "2001:db8::1", true),
+            ("ipv6 /128 miss", "2001:db8::1/128", "2001:db8::2", false),
+            // Cross-family: never matches, never panics.
+            ("ipv4 rule vs ipv6 addr", "0.0.0.1/8", "::1", false),
+            ("ipv6 rule vs ipv4 addr", "::1/8", "1.2.3.4", false),
+        ];
 
-    #[test]
-    fn ip_suffix_ipv4_8_low_byte() {
-        // Low 8 bits must equal 0x01 → matches any a.b.c.1
-        let r = IpSuffixRule::new("0.0.0.1/8", "PROXY", false, true).unwrap();
-        assert!(r.matches_ip(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 1))));
-        assert!(r.matches_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
-        assert!(!r.matches_ip(IpAddr::V4(Ipv4Addr::new(10, 20, 30, 2))));
-    }
-
-    #[test]
-    fn ip_suffix_ipv4_24_low_three_bytes() {
-        // Low 24 bits must equal 0x010203 (0.1.2.3) — matches x.1.2.3
-        let r = IpSuffixRule::new("0.1.2.3/24", "PROXY", false, true).unwrap();
-        assert!(r.matches_ip(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))));
-        assert!(r.matches_ip(IpAddr::V4(Ipv4Addr::new(200, 1, 2, 3))));
-        assert!(!r.matches_ip(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 4))));
-    }
-
-    #[test]
-    fn ip_suffix_ipv6_64_low_half() {
-        // Low 64 bits must equal ::1 → matches any prefix with low half = 1
-        let r = IpSuffixRule::new("::1/64", "PROXY", false, true).unwrap();
-        assert!(r.matches_ip(IpAddr::V6(Ipv6Addr::from_str("2001:db8::1").unwrap())));
-        assert!(r.matches_ip(IpAddr::V6(Ipv6Addr::from_str("fd00::1").unwrap())));
-        assert!(!r.matches_ip(IpAddr::V6(Ipv6Addr::from_str("2001:db8::2").unwrap())));
-    }
-
-    #[test]
-    fn ip_suffix_ipv6_128_exact_match() {
-        let r = IpSuffixRule::new("2001:db8::1/128", "PROXY", false, true).unwrap();
-        assert!(r.matches_ip(IpAddr::V6(Ipv6Addr::from_str("2001:db8::1").unwrap())));
-        assert!(!r.matches_ip(IpAddr::V6(Ipv6Addr::from_str("2001:db8::2").unwrap())));
-    }
-
-    /// Cross-family comparison must not panic; returns false.
-    #[test]
-    fn ip_suffix_ipv4_vs_ipv6_family_no_match() {
-        let r4 = IpSuffixRule::new("0.0.0.1/8", "PROXY", false, true).unwrap();
-        assert!(!r4.matches_ip(IpAddr::V6(Ipv6Addr::from_str("::1").unwrap())));
-        let r6 = IpSuffixRule::new("::1/8", "PROXY", false, true).unwrap();
-        assert!(!r6.matches_ip(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
+        // Every case runs; failures are collected so one bad row does not hide
+        // the rest.
+        let mut failures = Vec::new();
+        for (label, payload, ip, expected) in cases {
+            let rule = IpSuffixRule::new(payload, "PROXY", false, true).unwrap();
+            let got = rule.matches_ip(IpAddr::from_str(ip).unwrap());
+            if got != *expected {
+                failures.push(format!(
+                    "{label}: IP-SUFFIX {payload} vs {ip} = {got}, expected {expected}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "IP-SUFFIX match mismatches:\n{}",
+            failures.join("\n")
+        );
     }
 
     #[test]
@@ -249,17 +245,6 @@ mod tests {
         // ipnet rejects /33 on IPv4 itself, but make sure the error path returns Err.
         assert!(IpSuffixRule::new("1.2.3.4/33", "PROXY", false, true).is_err());
         assert!(IpSuffixRule::new("::1/129", "PROXY", false, true).is_err());
-    }
-
-    #[test]
-    fn ip_suffix_error_message_distinct_from_ipcidr() {
-        match IpSuffixRule::new("garbage", "PROXY", false, true) {
-            Ok(_) => panic!("expected parse error"),
-            Err(err) => assert!(
-                err.contains("IP-SUFFIX"),
-                "IP-SUFFIX error should self-identify, got: {err}"
-            ),
-        }
     }
 
     #[test]

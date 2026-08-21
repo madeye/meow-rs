@@ -26,23 +26,24 @@ use meow_transport::h2::{H2Config, H2Layer};
 use meow_transport::h2_common::{H2Stream, RecvState};
 use meow_transport::Transport;
 use meow_transport::TransportError;
+use support::h2_stalled::{stalled_h2_parts, STALLED_PAYLOAD_LEN};
 use support::loopback::{spawn_h2_server, spawn_h2_server_deferred_response};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-async fn assert_h2_config_error(config: H2Config, expected: &str) {
+async fn assert_h2_config_error(case: &str, config: H2Config, expected: &str) {
     let (client, _server) = tokio::io::duplex(64);
     let layer = H2Layer::new(config);
     let Err(err) = layer.connect(Box::new(client)).await else {
-        panic!("invalid h2 config unexpectedly connected");
+        panic!("[{case}] invalid h2 config unexpectedly connected");
     };
     match err {
         TransportError::Config(msg) => {
             assert!(
                 msg.contains(expected),
-                "expected config error containing {expected:?}, got: {msg}"
+                "[{case}] expected config error containing {expected:?}, got: {msg}"
             );
         }
-        other => panic!("expected TransportError::Config, got: {other:?}"),
+        other => panic!("[{case}] expected TransportError::Config, got: {other:?}"),
     }
 }
 
@@ -210,37 +211,40 @@ async fn h2_path_forwarded() {
     );
 }
 
+/// Config validation rejects bad `H2Config` before any handshake bytes are
+/// written: empty host list, CRLF injection in `path`, and an invalid host.
 #[tokio::test]
-async fn h2_rejects_empty_hosts_before_handshake() {
-    assert_h2_config_error(
-        H2Config {
-            path: "/".into(),
-            hosts: vec![],
-        },
-        "hosts",
-    )
-    .await;
-}
+async fn h2_rejects_invalid_config_table() {
+    let cases: [(&str, H2Config, &str); 3] = [
+        (
+            "empty hosts",
+            H2Config {
+                path: "/".into(),
+                hosts: vec![],
+            },
+            "hosts",
+        ),
+        (
+            "crlf injection in path",
+            H2Config {
+                path: "/ok\r\nx: y".into(),
+                hosts: vec!["example.com".into()],
+            },
+            "invalid request config",
+        ),
+        (
+            "invalid host with space",
+            H2Config {
+                path: "/".into(),
+                hosts: vec!["bad host".into()],
+            },
+            "invalid request config",
+        ),
+    ];
 
-#[tokio::test]
-async fn h2_rejects_invalid_request_config_before_handshake() {
-    assert_h2_config_error(
-        H2Config {
-            path: "/ok\r\nx: y".into(),
-            hosts: vec!["example.com".into()],
-        },
-        "invalid request config",
-    )
-    .await;
-
-    assert_h2_config_error(
-        H2Config {
-            path: "/".into(),
-            hosts: vec!["bad host".into()],
-        },
-        "invalid request config",
-    )
-    .await;
+    for (case, config, expected) in cases {
+        assert_h2_config_error(case, config, expected).await;
+    }
 }
 
 // ─── D5: Response HEADERS withheld until the first client DATA frame ──────────
@@ -284,45 +288,12 @@ async fn h2_round_trip_with_deferred_response() {
 
 // ─── D6/D7: write-cancellation contract on the shared H2 stream ──────────────
 
-/// Payload larger than h2's default 65535-byte send window, so the write
-/// cannot complete in one poll however the peer's SETTINGS race the first
-/// `poll_write`.
-const STALLED_PAYLOAD_LEN: usize = 128 * 1024;
-
-/// Open one client stream against a server that accepts the request and then
-/// stops driving its connection: the request body is never read, so the
-/// client's send window is never replenished and the write parks with the
-/// payload stashed in the stream's `pending_write`.
+/// Open one client stream against a stalled server (harness shared with the
+/// `h2_common` unit tests via `support::h2_stalled`): the request body is
+/// never read, so the client's send window is never replenished and the
+/// write parks with the payload stashed in the stream's `pending_write`.
 async fn stalled_h2_stream() -> (H2Stream, tokio::task::JoinHandle<()>) {
-    let (client_io, server_io) = tokio::io::duplex(256 * 1024);
-
-    let server = tokio::spawn(async move {
-        let mut connection = h2::server::Builder::new()
-            .handshake::<_, bytes::Bytes>(server_io)
-            .await
-            .expect("server handshake");
-        let _accepted = connection.accept().await;
-        // Never polled again: no WINDOW_UPDATE is ever sent back.
-        std::future::pending::<()>().await;
-    });
-
-    let (send_request, connection) = h2::client::handshake(client_io)
-        .await
-        .expect("client handshake");
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    let request = http::Request::builder()
-        .method(http::Method::POST)
-        .uri("https://localhost")
-        .body(())
-        .expect("static request");
-    let mut send_request = send_request.ready().await.expect("send_request ready");
-    let (response, send_stream) = send_request
-        .send_request(request, false)
-        .expect("send_request");
-
+    let (send_stream, response, server) = stalled_h2_parts().await;
     (H2Stream::new(send_stream, RecvState::new(response)), server)
 }
 
@@ -390,11 +361,18 @@ async fn h2_pending_write_retried_with_changed_buffer_is_rejected() {
     let sent = write_until_pending(&mut stream, &payload).await;
 
     // Same length as the stashed remainder: the guard must compare content,
-    // not just size.
+    // not just size.  One-shot poll (Pending surfaces as None) so a guard
+    // regression to accept-and-park fails the test instead of hanging it.
     let decoy = vec![b'b'; STALLED_PAYLOAD_LEN - sent];
-    let error = poll_fn(|cx| Pin::new(&mut stream).poll_write(cx, &decoy))
-        .await
-        .expect_err("a changed buffer must be rejected");
+    let error = poll_fn(|cx| {
+        Poll::Ready(match Pin::new(&mut stream).poll_write(cx, &decoy) {
+            Poll::Pending => None,
+            Poll::Ready(result) => Some(result),
+        })
+    })
+    .await
+    .expect("the changed-buffer guard must resolve in one poll, not park")
+    .expect_err("a changed buffer must be rejected");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     assert!(
         error.to_string().contains("write buffer changed"),

@@ -115,18 +115,28 @@ impl RecvState {
     }
 }
 
+/// Per-poll cap on the bytes copied into `pending_write`.  Without a cap,
+/// a large write under backpressure re-copies the whole shrinking
+/// remainder on every `write_all` resubmission (a 1 MiB write through a
+/// 64 KiB window costs ~16 allocations / ~8 MiB of memcpy); capping the
+/// stash bounds every copy to one window's worth.  64 KiB is chosen to
+/// exceed h2's default 65535-byte initial window, so writes that fit the
+/// default window keep their single-poll behaviour.
+const WRITE_STASH_CAP: usize = 64 * 1024;
+
 /// Raw bidirectional bytes over one HTTP/2 request/response pair.
 pub struct H2Stream {
     send: h2::SendStream<Bytes>,
     recv: RecvState,
     read_buf: Bytes,
     /// Payload stashed while a `poll_write` waits for h2 send-window
-    /// capacity.  Only retained across a `Poll::Pending` return — every
-    /// `Ready` return (including a partial one) clears it, because after
-    /// `Ready(Ok(n))` the caller may legally submit a different buffer
-    /// (issue #423).  Only granted capacity is ever handed to the
-    /// connection, so a peer that stops reading applies real
-    /// backpressure instead of growing h2's internal buffer.
+    /// capacity — at most [`WRITE_STASH_CAP`] bytes, i.e. possibly only a
+    /// prefix of the caller's buffer.  Only retained across a
+    /// `Poll::Pending` return — every `Ready` return (including a partial
+    /// one) clears it, because after `Ready(Ok(n))` the caller may legally
+    /// submit a different buffer (issue #423).  Only granted capacity is
+    /// ever handed to the connection, so a peer that stops reading applies
+    /// real backpressure instead of growing h2's internal buffer.
     pending_write: Option<Bytes>,
     remote_no_error_is_eof: bool,
     eos_sent: bool,
@@ -226,12 +236,20 @@ impl AsyncWrite for H2Stream {
         // capacity has been reserved — do not copy or reserve again.
         // A Pending poll must be retried with the same buffer; reject a
         // changed buffer rather than silently sending stale bytes under
-        // its reported length.  This guard applies to the Pending path
+        // its reported length.  The stash may be a capped prefix of the
+        // caller's buffer, so compare it against the new buffer's prefix
+        // of the stash's length.  This guard applies to the Pending path
         // only: pending_write never survives a Ready return, so after a
         // partial `Ready(Ok(n))` the caller is free to submit anything
         // (issue #423).
         if let Some(data) = &this.pending_write {
-            if buf != data.as_ref() {
+            if buf.len() < data.len() || &buf[..data.len()] != data.as_ref() {
+                // Hand the stale stash's reservation back to the
+                // connection along with the stash itself: this error
+                // taints the stream, so nothing will ever send those
+                // bytes, and leaving the reservation requested would pin
+                // window capacity on the connection for good.
+                this.send.reserve_capacity(0);
                 this.pending_write = None;
                 return Poll::Ready(Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -240,7 +258,11 @@ impl AsyncWrite for H2Stream {
                 )));
             }
         } else {
-            let data = Bytes::copy_from_slice(buf);
+            // Stash (and therefore accept) at most WRITE_STASH_CAP bytes
+            // per poll so `write_all`-style resubmissions of a large
+            // buffer copy bounded chunks instead of the whole remainder.
+            let stash_len = buf.len().min(WRITE_STASH_CAP);
+            let data = Bytes::copy_from_slice(&buf[..stash_len]);
             this.send.reserve_capacity(data.len());
             this.pending_write = Some(data);
         }
@@ -304,50 +326,21 @@ impl AsyncWrite for H2Stream {
 
 impl Unpin for H2Stream {}
 
+/// Stalled-h2-server harness shared with the `h2_test` integration suite
+/// (single source in `tests/support/h2_stalled.rs`, see its module docs).
+#[cfg(test)]
+#[path = "../tests/support/h2_stalled.rs"]
+mod h2_stalled;
+
 #[cfg(test)]
 mod tests {
+    use super::h2_stalled::{stalled_h2_parts, STALLED_PAYLOAD_LEN};
     use super::*;
     use std::future::poll_fn;
     use tokio::io::AsyncWriteExt as _;
 
-    /// Payload larger than h2's default 65535-byte send window, so a write
-    /// against a stalled peer can never complete in one poll.
-    const STALLED_PAYLOAD_LEN: usize = 128 * 1024;
-
-    /// Open one client stream against a server that accepts the request and
-    /// then stops driving its connection: the request body is never read, so
-    /// the send window is never replenished and writes stall once the
-    /// initial window is spent.
     async fn stalled_h2_stream() -> (H2Stream, tokio::task::JoinHandle<()>) {
-        let (client_io, server_io) = tokio::io::duplex(256 * 1024);
-
-        let server = tokio::spawn(async move {
-            let mut connection = h2::server::Builder::new()
-                .handshake::<_, Bytes>(server_io)
-                .await
-                .expect("server handshake");
-            let _accepted = connection.accept().await;
-            // Never polled again: no WINDOW_UPDATE is ever sent back.
-            std::future::pending::<()>().await;
-        });
-
-        let (send_request, connection) = h2::client::handshake(client_io)
-            .await
-            .expect("client handshake");
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-
-        let request = http::Request::builder()
-            .method(http::Method::POST)
-            .uri("https://localhost")
-            .body(())
-            .expect("static request");
-        let mut send_request = send_request.ready().await.expect("send_request ready");
-        let (response, send_stream) = send_request
-            .send_request(request, false)
-            .expect("send_request");
-
+        let (send_stream, response, server) = stalled_h2_parts().await;
         (H2Stream::new(send_stream, RecvState::new(response)), server)
     }
 
@@ -374,15 +367,20 @@ mod tests {
 
         // Drive the first logical write to its first Ready(Ok(n)).  The send
         // window (at most 64 KiB) cannot cover the payload, so the write is
-        // necessarily partial.
-        let sent = loop {
-            match poll_write_once(&mut stream, &payload).await {
-                // Capacity not assigned yet — let the connection task run.
-                None => tokio::task::yield_now().await,
-                Some(Ok(n)) => break n,
-                Some(Err(error)) => panic!("unexpected write error: {error}"),
+        // necessarily partial.  Deadline-bounded so a regression that never
+        // yields Ready fails with a diagnostic instead of hanging CI.
+        let sent = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match poll_write_once(&mut stream, &payload).await {
+                    // Capacity not assigned yet — let the connection task run.
+                    None => tokio::task::yield_now().await,
+                    Some(Ok(n)) => break n,
+                    Some(Err(error)) => panic!("unexpected write error: {error}"),
+                }
             }
-        };
+        })
+        .await
+        .expect("first write must reach Ready(Ok(n)) once capacity is assigned");
         assert!(sent < payload.len(), "expected a partial write");
 
         // Submit a buffer with different contents.  Before the fix this
@@ -401,6 +399,157 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The stash is capped at [`WRITE_STASH_CAP`], so a parked large write
+    /// retried with the same *full* remainder (longer than the stash) must
+    /// keep parking: the changed-buffer guard compares the stash against
+    /// the retry buffer's prefix of the stash's length, not the whole
+    /// buffer.  Before the cap the two were always the same length, so an
+    /// exact comparison sufficed; with the cap an exact comparison would
+    /// falsely reject every `write_all` resubmission of a > 64 KiB buffer.
+    #[tokio::test]
+    async fn capped_stash_accepts_same_full_buffer_retry() {
+        let (mut stream, _server) = stalled_h2_stream().await;
+        let payload = vec![b'a'; STALLED_PAYLOAD_LEN];
+
+        // Exhaust the send window (at most 65535 bytes accepted), leaving a
+        // remainder strictly longer than WRITE_STASH_CAP parked in
+        // pending_write as a capped prefix.  A poll is treated as parked
+        // only after several consecutive Pendings with yields in between,
+        // so a capacity grant split across connection-task runs cannot
+        // race the assertions below.
+        let sent = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut sent = 0usize;
+            let mut idle_polls = 0usize;
+            loop {
+                match poll_write_once(&mut stream, &payload[sent..]).await {
+                    None => {
+                        idle_polls += 1;
+                        if sent > 0 && idle_polls >= 3 {
+                            break sent;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    Some(Ok(n)) => {
+                        sent += n;
+                        idle_polls = 0;
+                    }
+                    Some(Err(error)) => panic!("unexpected write error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("the stalled window must park the write, not spin forever");
+        let remainder = &payload[sent..];
+        assert!(
+            remainder.len() > WRITE_STASH_CAP,
+            "setup: the parked remainder must exceed the stash cap"
+        );
+
+        // Contract-abiding retry with the same (uncapped) remainder: must
+        // stay Pending, never trip the changed-buffer guard.
+        for _ in 0..3 {
+            let polled = poll_write_once(&mut stream, remainder).await;
+            assert!(
+                polled.is_none(),
+                "same-buffer retry of a capped stash must stay Pending, got {polled:?}"
+            );
+        }
+    }
+
+    /// A large write against a peer with plenty of window is accepted in
+    /// at most [`WRITE_STASH_CAP`]-byte chunks per poll, so `write_all`
+    /// resubmissions copy bounded chunks instead of re-copying the whole
+    /// shrinking remainder each time.
+    #[tokio::test]
+    async fn large_write_accepts_at_most_stash_cap_per_poll() {
+        const PAYLOAD_LEN: usize = 1024 * 1024;
+
+        let (client_io, server_io) = tokio::io::duplex(256 * 1024);
+
+        // Server with windows large enough to cover the whole payload, so
+        // only the stash cap can bound a single accept.  It drains the
+        // request body while keeping the connection driven.
+        let server = tokio::spawn(async move {
+            let mut connection = h2::server::Builder::new()
+                .initial_window_size(2 * 1024 * 1024)
+                .initial_connection_window_size(2 * 1024 * 1024)
+                .handshake::<_, Bytes>(server_io)
+                .await
+                .expect("server handshake");
+            let (request, respond) = connection
+                .accept()
+                .await
+                .expect("one request")
+                .expect("accept ok");
+            let mut body = request.into_body();
+            let drain = async {
+                let mut total = 0usize;
+                while let Some(data) = body.data().await {
+                    let bytes = data.expect("body data");
+                    total += bytes.len();
+                    let _ = body.flow_control().release_capacity(bytes.len());
+                }
+                total
+            };
+            let drive = async {
+                while connection.accept().await.is_some() {}
+                std::future::pending::<()>().await;
+            };
+            let total = tokio::select! {
+                total = drain => total,
+                () = drive => unreachable!("drive never resolves"),
+            };
+            assert_eq!(total, PAYLOAD_LEN, "server must receive every byte");
+            drop(respond); // kept alive until here so the stream is not reset
+        });
+
+        let (send_request, connection) = h2::client::handshake(client_io)
+            .await
+            .expect("client handshake");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri("https://localhost")
+            .body(())
+            .expect("static request");
+        let mut send_request = send_request.ready().await.expect("send_request ready");
+        let (response, send_stream) = send_request
+            .send_request(request, false)
+            .expect("send_request");
+        let mut stream = H2Stream::new(send_stream, RecvState::new(response));
+
+        let payload = vec![b'z'; PAYLOAD_LEN];
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut sent = 0usize;
+            while sent < payload.len() {
+                match poll_write_once(&mut stream, &payload[sent..]).await {
+                    None => tokio::task::yield_now().await,
+                    Some(Ok(n)) => {
+                        assert!(
+                            n <= WRITE_STASH_CAP,
+                            "a single poll accepted {n} bytes, more than the stash cap"
+                        );
+                        sent += n;
+                    }
+                    Some(Err(error)) => panic!("unexpected write error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("the whole payload must be accepted against an open window");
+
+        // Half-close so the server's body drain sees end-of-stream.
+        poll_fn(|cx| Pin::new(&mut stream).poll_shutdown(cx))
+            .await
+            .expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server must finish draining")
+            .expect("server task");
     }
 
     /// Dropping an `H2Stream` half-closes the request body with a clean

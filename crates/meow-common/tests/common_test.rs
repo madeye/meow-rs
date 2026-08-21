@@ -95,17 +95,23 @@ fn test_tunnel_mode_default() {
 }
 
 #[test]
-fn test_tunnel_mode_from_str() {
-    assert_eq!("global".parse::<TunnelMode>().unwrap(), TunnelMode::Global);
-    assert_eq!("rule".parse::<TunnelMode>().unwrap(), TunnelMode::Rule);
-    assert_eq!("direct".parse::<TunnelMode>().unwrap(), TunnelMode::Direct);
-}
-
-#[test]
-fn test_tunnel_mode_from_str_case_insensitive() {
-    assert_eq!("GLOBAL".parse::<TunnelMode>().unwrap(), TunnelMode::Global);
-    assert_eq!("Rule".parse::<TunnelMode>().unwrap(), TunnelMode::Rule);
-    assert_eq!("DIRECT".parse::<TunnelMode>().unwrap(), TunnelMode::Direct);
+fn tunnel_mode_from_str_cases() {
+    // Lowercase canonical spellings plus mixed/upper case: parsing is case-insensitive.
+    let cases = vec![
+        ("global", TunnelMode::Global),
+        ("rule", TunnelMode::Rule),
+        ("direct", TunnelMode::Direct),
+        ("GLOBAL", TunnelMode::Global),
+        ("Rule", TunnelMode::Rule),
+        ("DIRECT", TunnelMode::Direct),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(
+            input.parse::<TunnelMode>().unwrap(),
+            expected,
+            "TunnelMode::from_str({input:?})"
+        );
+    }
 }
 
 #[test]
@@ -166,92 +172,91 @@ fn test_metadata_default() {
 }
 
 #[test]
-fn test_metadata_remote_address_with_host() {
-    let m = Metadata {
-        host: "example.com".into(),
-        dst_port: 443,
-        ..Default::default()
-    };
-    assert_eq!(m.remote_address(), "example.com:443");
+fn metadata_remote_address_cases() {
+    // host wins over dst_ip; otherwise dst_ip is formatted as a SocketAddr
+    // (IPv6 bracketed); with neither, only the port is rendered.
+    let cases: Vec<(&str, &str, Option<IpAddr>, u16, &str)> = vec![
+        ("with host", "example.com", None, 443, "example.com:443"),
+        (
+            "with ipv4",
+            "",
+            Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
+            80,
+            "1.2.3.4:80",
+        ),
+        (
+            "with ipv6",
+            "",
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            8080,
+            "[::1]:8080",
+        ),
+        ("no host no ip", "", None, 443, ":443"),
+        (
+            "host takes priority over dst_ip",
+            "example.com",
+            Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
+            443,
+            "example.com:443",
+        ),
+    ];
+    for (label, host, dst_ip, dst_port, expected) in cases {
+        let m = Metadata {
+            host: host.into(),
+            dst_ip,
+            dst_port,
+            ..Default::default()
+        };
+        assert_eq!(m.remote_address(), expected, "{label}");
+    }
 }
 
 #[test]
-fn test_metadata_remote_address_with_ipv4() {
-    let m = Metadata {
-        dst_ip: Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
-        dst_port: 80,
-        ..Default::default()
-    };
-    assert_eq!(m.remote_address(), "1.2.3.4:80");
+fn test_metadata_source_address_cases() {
+    let cases = vec![
+        (
+            "with src_ip",
+            Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))),
+            12345u16,
+            "192.168.1.100:12345",
+        ),
+        ("no src_ip", None, 12345u16, ":12345"),
+    ];
+    for (label, src_ip, src_port, expected) in cases {
+        let m = Metadata {
+            src_ip,
+            src_port,
+            ..Default::default()
+        };
+        assert_eq!(m.source_address(), expected, "case: {label}");
+    }
 }
 
 #[test]
-fn test_metadata_remote_address_with_ipv6() {
-    let m = Metadata {
-        dst_ip: Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
-        dst_port: 8080,
-        ..Default::default()
-    };
-    assert_eq!(m.remote_address(), "[::1]:8080");
-}
-
-#[test]
-fn test_metadata_remote_address_no_host_no_ip() {
-    let m = Metadata {
-        dst_port: 443,
-        ..Default::default()
-    };
-    assert_eq!(m.remote_address(), ":443");
-}
-
-#[test]
-fn test_metadata_remote_address_host_takes_priority() {
-    let m = Metadata {
-        host: "example.com".into(),
-        dst_ip: Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
-        dst_port: 443,
-        ..Default::default()
-    };
-    // host should take priority over dst_ip
-    assert_eq!(m.remote_address(), "example.com:443");
-}
-
-#[test]
-fn test_metadata_source_address_with_ip() {
-    let m = Metadata {
-        src_ip: Some(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))),
-        src_port: 12345,
-        ..Default::default()
-    };
-    assert_eq!(m.source_address(), "192.168.1.100:12345");
-}
-
-#[test]
-fn test_metadata_source_address_no_ip() {
-    let m = Metadata {
-        src_port: 12345,
-        ..Default::default()
-    };
-    assert_eq!(m.source_address(), ":12345");
-}
-
-#[test]
-fn test_metadata_rule_host_sniff_priority() {
-    let m = Metadata {
-        host: "original.com".into(),
-        sniff_host: "sniffed.com".into(),
-        ..Default::default()
-    };
-    assert_eq!(m.rule_host(), "sniffed.com");
-}
-
-#[test]
-fn test_metadata_rule_host_fallback_to_host() {
-    let m = Metadata {
-        host: "original.com".into(),
-        ..Default::default()
-    };
-    assert_eq!(m.rule_host(), "original.com");
+fn test_metadata_rule_host_cases() {
+    // (label, host, sniff_host, expected rule_host())
+    let cases = [
+        (
+            "sniff takes priority over host",
+            "original.com",
+            "sniffed.com",
+            "sniffed.com",
+        ),
+        (
+            "empty sniff falls back to host",
+            "original.com",
+            "",
+            "original.com",
+        ),
+    ];
+    for (label, host, sniff_host, expected) in cases {
+        let m = Metadata {
+            host: host.into(),
+            sniff_host: sniff_host.into(),
+            ..Default::default()
+        };
+        assert_eq!(m.rule_host(), expected, "case: {label}");
+    }
 }
 
 #[test]
@@ -313,30 +318,46 @@ fn test_metadata_pure_clears_extra_fields() {
 }
 
 #[test]
-fn test_metadata_display_with_host() {
-    let m = Metadata {
-        src_ip: Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
-        src_port: 1234,
-        host: "example.com".into(),
-        dst_port: 443,
-        ..Default::default()
-    };
-    let s = m.to_string();
-    assert!(s.contains("example.com"));
-    assert!(s.contains("443"));
-    assert!(s.contains("tcp"));
-}
+fn test_metadata_display_cases() {
+    struct Case {
+        name: &'static str,
+        metadata: Metadata,
+        expected_substrings: &'static [&'static str],
+    }
 
-#[test]
-fn test_metadata_display_with_ip() {
-    let m = Metadata {
-        dst_ip: Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
-        dst_port: 80,
-        ..Default::default()
-    };
-    let s = m.to_string();
-    assert!(s.contains("1.2.3.4"));
-    assert!(s.contains("80"));
+    let cases = [
+        Case {
+            name: "with_host",
+            metadata: Metadata {
+                src_ip: Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))),
+                src_port: 1234,
+                host: "example.com".into(),
+                dst_port: 443,
+                ..Default::default()
+            },
+            expected_substrings: &["example.com", "443", "tcp"],
+        },
+        Case {
+            name: "with_ip",
+            metadata: Metadata {
+                dst_ip: Some(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))),
+                dst_port: 80,
+                ..Default::default()
+            },
+            expected_substrings: &["1.2.3.4", "80"],
+        },
+    ];
+
+    for case in &cases {
+        let s = case.metadata.to_string();
+        for expected in case.expected_substrings {
+            assert!(
+                s.contains(expected),
+                "case `{}`: display output `{s}` is missing `{expected}`",
+                case.name
+            );
+        }
+    }
 }
 
 // ============================================================

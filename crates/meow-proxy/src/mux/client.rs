@@ -466,8 +466,10 @@ impl MuxClient {
     }
 
     /// Pick an existing session that can take a new request, or dial a new
-    /// one.  Dead sessions are pruned and zero-stream sessions idle past
-    /// `IDLE_TIMEOUT` are evicted.  The returned session has one slot
+    /// one.  Unusable sessions are pruned (`is_unusable`: dead transports,
+    /// but also retired-yet-alive Mux.Cool sessions that must not take new
+    /// streams) and zero-stream sessions idle past `IDLE_TIMEOUT` are
+    /// evicted.  The returned session has one slot
     /// reserved for the caller via a CAS on `streams` — the check and the
     /// increment are a single atomic step, so concurrent offers can never
     /// overshoot max-streams.

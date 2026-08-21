@@ -2227,28 +2227,42 @@ mod tests {
     }
 
     #[test]
-    fn clamp_ttl_zero_returns_min() {
-        assert_eq!(clamp_ttl(Duration::ZERO), Duration::from_secs(10));
-    }
+    fn clamp_ttl_table_driven() {
+        // (label, raw TTL, expected clamped TTL) — MIN_TTL 10s, MAX_TTL 3600s.
+        let cases: [(&str, Duration, Duration); 4] = [
+            ("zero returns min", Duration::ZERO, Duration::from_secs(10)),
+            (
+                "below min returns min",
+                Duration::from_secs(3),
+                Duration::from_secs(10),
+            ),
+            (
+                "in range returns raw",
+                Duration::from_secs(120),
+                Duration::from_secs(120),
+            ),
+            (
+                "above max returns max",
+                Duration::from_secs(99_999),
+                Duration::from_secs(3600),
+            ),
+        ];
 
-    #[test]
-    fn clamp_ttl_below_min_returns_min() {
-        assert_eq!(clamp_ttl(Duration::from_secs(3)), Duration::from_secs(10));
-    }
-
-    #[test]
-    fn clamp_ttl_in_range_returns_raw() {
-        assert_eq!(
-            clamp_ttl(Duration::from_secs(120)),
-            Duration::from_secs(120)
-        );
-    }
-
-    #[test]
-    fn clamp_ttl_above_max_returns_max() {
-        assert_eq!(
-            clamp_ttl(Duration::from_secs(99_999)),
-            Duration::from_secs(3600)
+        // Collect instead of asserting inline so every case runs and all
+        // mismatches are reported in one failure.
+        let mut failures: Vec<String> = Vec::new();
+        for (label, raw, expected) in cases {
+            let got = clamp_ttl(raw);
+            if got != expected {
+                failures.push(format!(
+                    "{label}: clamp_ttl({raw:?}) = {got:?}, expected {expected:?}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "clamp_ttl cases failed:\n{}",
+            failures.join("\n")
         );
     }
 

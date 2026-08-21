@@ -21,35 +21,91 @@ mixed-port: 7890
 }
 
 #[tokio::test]
-async fn test_general_config_defaults() {
-    let yaml = "";
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert_eq!(config.general.mode.to_string(), "rule");
-    assert_eq!(config.general.log_level, "info");
-    // `ipv6` defaults to `true` for backward compatibility: before the
-    // top-level flag drove the resolver, dual-stack DNS was always on, so an
-    // existing config that omits `ipv6:` must keep dual-stack behavior rather
-    // than silently losing AAAA everywhere. Set `ipv6: false` to opt out.
-    assert!(config.general.ipv6);
-    assert!(!config.general.allow_lan);
-    assert_eq!(config.general.bind_address, "127.0.0.1");
-}
+async fn test_general_config_table() {
+    struct Case {
+        label: &'static str,
+        yaml: &'static str,
+        mode: &'static str,
+        log_level: &'static str,
+        ipv6: bool,
+        allow_lan: bool,
+        bind_address: &'static str,
+    }
 
-#[tokio::test]
-async fn test_general_config_custom() {
-    let yaml = r#"
+    let cases = [
+        Case {
+            label: "defaults (empty config)",
+            yaml: "",
+            mode: "rule",
+            log_level: "info",
+            // `ipv6` defaults to `true` for backward compatibility: before the
+            // top-level flag drove the resolver, dual-stack DNS was always on,
+            // so an existing config that omits `ipv6:` must keep dual-stack
+            // behavior rather than silently losing AAAA everywhere. Set
+            // `ipv6: false` to opt out.
+            ipv6: true,
+            allow_lan: false,
+            bind_address: "127.0.0.1",
+        },
+        Case {
+            label: "custom general section",
+            yaml: r#"
 mode: global
 log-level: debug
 ipv6: true
 allow-lan: true
 bind-address: "0.0.0.0"
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert_eq!(config.general.mode.to_string(), "global");
-    assert_eq!(config.general.log_level, "debug");
-    assert!(config.general.ipv6);
-    assert!(config.general.allow_lan);
-    assert_eq!(config.general.bind_address, "0.0.0.0");
+"#,
+            mode: "global",
+            log_level: "debug",
+            ipv6: true,
+            allow_lan: true,
+            bind_address: "0.0.0.0",
+        },
+    ];
+
+    // Collect every mismatch instead of panicking on the first one, so both
+    // the defaults path and the override path always run and a failure names
+    // the case and the field.
+    let mut failures: Vec<String> = Vec::new();
+    for case in &cases {
+        let config = load_config_from_str(case.yaml).await.unwrap();
+        let general = &config.general;
+
+        let mode = general.mode.to_string();
+        if mode != case.mode {
+            failures.push(format!(
+                "[{}] mode: expected {:?}, got {:?}",
+                case.label, case.mode, mode
+            ));
+        }
+        if general.log_level != case.log_level {
+            failures.push(format!(
+                "[{}] log_level: expected {:?}, got {:?}",
+                case.label, case.log_level, general.log_level
+            ));
+        }
+        if general.ipv6 != case.ipv6 {
+            failures.push(format!(
+                "[{}] ipv6: expected {}, got {}",
+                case.label, case.ipv6, general.ipv6
+            ));
+        }
+        if general.allow_lan != case.allow_lan {
+            failures.push(format!(
+                "[{}] allow_lan: expected {}, got {}",
+                case.label, case.allow_lan, general.allow_lan
+            ));
+        }
+        if general.bind_address != case.bind_address {
+            failures.push(format!(
+                "[{}] bind_address: expected {:?}, got {:?}",
+                case.label, case.bind_address, general.bind_address
+            ));
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[tokio::test]
@@ -778,199 +834,115 @@ proxies:
 }
 
 #[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_http() {
-    // `plugin: obfs` with mode=http is handled by the built-in simple-obfs
-    // implementation — no external binary is required, so the proxy must
-    // register successfully.
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-http"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-    plugin-opts:
-      mode: http
-      host: bing.com
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(config.proxies.contains_key("ss-obfs-http"));
-}
+async fn test_proxy_parsing_ss_with_builtin_obfs_table() {
+    // Built-in simple-obfs (`plugin: obfs` / `plugin: simple-obfs`) needs no
+    // external binary, so a well-formed node must register; a node whose obfs
+    // config cannot be resolved to a valid mode must be skipped (never
+    // silently falling back to the "external plugin" path).
+    //
+    // Each case supplies the `plugin:`/`plugin-opts:` tail (and, where it
+    // matters, the `server:` value) plus the expected registration outcome.
+    struct Case {
+        label: &'static str,
+        name: &'static str,
+        server: &'static str,
+        plugin_block: &'static str,
+        expect_present: bool,
+    }
 
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_tls() {
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-tls"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-    plugin-opts:
-      mode: tls
-      host: gateway.icloud.com
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(config.proxies.contains_key("ss-obfs-tls"));
-}
+    let cases = [
+        Case {
+            label: "yaml map, mode=http",
+            name: "ss-obfs-http",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: obfs\n    plugin-opts:\n      mode: http\n      host: bing.com\n",
+            expect_present: true,
+        },
+        Case {
+            label: "yaml map, mode=tls",
+            name: "ss-obfs-tls",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: obfs\n    plugin-opts:\n      mode: tls\n      host: gateway.icloud.com\n",
+            expect_present: true,
+        },
+        Case {
+            label: "SIP003 string form `obfs=tls;obfs-host=...`",
+            name: "ss-obfs-str",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: obfs\n    plugin-opts: \"obfs=tls;obfs-host=cloudflare.com\"\n",
+            expect_present: true,
+        },
+        Case {
+            label: "legacy `plugin: simple-obfs` alias",
+            name: "ss-simple-obfs",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: simple-obfs\n    plugin-opts:\n      mode: http\n      host: bing.com\n",
+            expect_present: true,
+        },
+        Case {
+            label: "yaml map with SIP003-native keys `obfs`/`obfs-host`",
+            name: "ss-obfs-sip003-map",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: obfs\n    plugin-opts:\n      obfs: tls\n      obfs-host: gateway.icloud.com\n",
+            expect_present: true,
+        },
+        Case {
+            label: "mode parsed case-insensitively (TLS)",
+            name: "ss-obfs-upper",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: obfs\n    plugin-opts:\n      mode: TLS\n      host: cloudflare.com\n",
+            expect_present: true,
+        },
+        Case {
+            label: "host omitted falls back to the ss server name",
+            name: "ss-obfs-default-host",
+            server: "ss.example.org",
+            plugin_block: "    plugin: obfs\n    plugin-opts:\n      mode: http\n",
+            expect_present: true,
+        },
+        Case {
+            label: "missing `mode` is invalid -> skipped",
+            name: "ss-obfs-bad",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: obfs\n    plugin-opts:\n      host: example.com\n",
+            expect_present: false,
+        },
+        Case {
+            label: "no plugin-opts at all -> skipped, no external fallback",
+            name: "ss-obfs-no-opts",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: obfs\n",
+            expect_present: false,
+        },
+        Case {
+            label: "unknown mode `quic` -> skipped",
+            name: "ss-obfs-bad-mode",
+            server: "1.2.3.4",
+            plugin_block: "    plugin: obfs\n    plugin-opts:\n      mode: quic\n      host: foo\n",
+            expect_present: false,
+        },
+    ];
 
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_string_opts() {
-    // SIP003 string form (`obfs=http;obfs-host=...`) must also be accepted.
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-str"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-    plugin-opts: "obfs=tls;obfs-host=cloudflare.com"
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(config.proxies.contains_key("ss-obfs-str"));
-}
-
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_missing_mode() {
-    // Without `mode`, the built-in obfs config is invalid and the proxy is skipped.
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-bad"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-    plugin-opts:
-      host: example.com
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(!config.proxies.contains_key("ss-obfs-bad"));
-}
-
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_simple_obfs_alias() {
-    // The legacy `plugin: simple-obfs` (the SIP003 binary's name) must also
-    // route through the built-in implementation.
-    let yaml = r#"
-proxies:
-  - name: "ss-simple-obfs"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: simple-obfs
-    plugin-opts:
-      mode: http
-      host: bing.com
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(config.proxies.contains_key("ss-simple-obfs"));
-}
-
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_sip003_keys_yaml_map() {
-    // YAML map using SIP003-native key names `obfs` / `obfs-host`.
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-sip003-map"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-    plugin-opts:
-      obfs: tls
-      obfs-host: gateway.icloud.com
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(config.proxies.contains_key("ss-obfs-sip003-map"));
-}
-
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_uppercase_mode() {
-    // Mode value should be parsed case-insensitively.
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-upper"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-    plugin-opts:
-      mode: TLS
-      host: cloudflare.com
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(config.proxies.contains_key("ss-obfs-upper"));
-}
-
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_no_plugin_opts() {
-    // Built-in obfs requires `mode`; with no plugin-opts at all, the proxy
-    // must be skipped instead of accidentally falling back to "external".
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-no-opts"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(!config.proxies.contains_key("ss-obfs-no-opts"));
-}
-
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_host_falls_back_to_server() {
-    // If `host` is omitted, the built-in obfs uses the SS server name as
-    // the fake Host: / SNI.
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-default-host"
-    type: ss
-    server: "ss.example.org"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-    plugin-opts:
-      mode: http
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(config.proxies.contains_key("ss-obfs-default-host"));
-}
-
-#[tokio::test]
-async fn test_proxy_parsing_ss_with_builtin_obfs_invalid_mode_skipped() {
-    let yaml = r#"
-proxies:
-  - name: "ss-obfs-bad-mode"
-    type: ss
-    server: "1.2.3.4"
-    port: 8388
-    cipher: "aes-256-gcm"
-    password: "password123"
-    plugin: obfs
-    plugin-opts:
-      mode: quic
-      host: foo
-"#;
-    let config = load_config_from_str(yaml).await.unwrap();
-    assert!(!config.proxies.contains_key("ss-obfs-bad-mode"));
+    let mut failures = Vec::new();
+    for case in &cases {
+        let yaml = format!(
+            "proxies:\n  - name: \"{}\"\n    type: ss\n    server: \"{}\"\n    port: 8388\n    cipher: \"aes-256-gcm\"\n    password: \"password123\"\n{}",
+            case.name, case.server, case.plugin_block
+        );
+        let config = load_config_from_str(&yaml).await.unwrap();
+        let present = config.proxies.contains_key(case.name);
+        if present != case.expect_present {
+            failures.push(format!(
+                "[{}] proxy `{}`: expected present={}, got present={}",
+                case.label, case.name, case.expect_present, present
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "built-in obfs parsing mismatches:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[tokio::test]

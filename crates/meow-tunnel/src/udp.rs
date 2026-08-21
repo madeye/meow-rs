@@ -18,9 +18,10 @@ pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
 /// NAT table entry for UDP sessions.
 // M2 layout change (ADR-0011 T3):
-//   proxy_name: String (24 B heap) → Arc<str> (16 B fat-ptr, −8 B)
-//   One allocation per distinct proxy name across all NAT entries; identical
-//   names share the same Arc instead of each holding an independent heap copy.
+//   proxy_name: String (24 B) → Arc<str> (16 B fat-ptr, −8 B per struct
+//   instance). Note this is *not* interning: the slow path in `handle_udp`
+//   builds a fresh `Arc::from(proxy.name())` per dial, so two sessions using
+//   the same proxy each hold their own heap allocation, not a shared one.
 pub struct UdpSession {
     pub conn: Box<dyn ProxyPacketConn>,
     pub proxy_name: Arc<str>,

@@ -753,20 +753,29 @@ mod tests {
     // ─── parse_http_status ────────────────────────────────────────────────────
 
     #[test]
-    fn parse_status_200() {
-        assert_eq!(parse_http_status("HTTP/1.1 200 OK").unwrap(), 200);
-    }
+    fn parse_http_status_cases() {
+        // (label, response line, expected): `Some(code)` => `Ok(code)`, `None` => `Err`.
+        let cases: &[(&str, &str, Option<u16>)] = &[
+            ("200 ok", "HTTP/1.1 200 OK", Some(200)),
+            (
+                "407 proxy auth required",
+                "HTTP/1.0 407 Proxy Auth Required",
+                Some(407),
+            ),
+            ("bad line", "GARBAGE", None),
+        ];
 
-    #[test]
-    fn parse_status_407() {
-        assert_eq!(
-            parse_http_status("HTTP/1.0 407 Proxy Auth Required").unwrap(),
-            407
-        );
-    }
-
-    #[test]
-    fn parse_status_bad_line() {
-        assert!(parse_http_status("GARBAGE").is_err());
+        // Collect instead of asserting inline so every case runs even if one fails.
+        let mut failures = Vec::new();
+        for &(label, line, expected) in cases {
+            match (parse_http_status(line), expected) {
+                (Ok(code), Some(want)) if code == want => {}
+                (Err(_), None) => {}
+                (got, want) => failures.push(format!(
+                    "case {label:?}: parse_http_status({line:?}) expected {want:?}, got {got:?}"
+                )),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

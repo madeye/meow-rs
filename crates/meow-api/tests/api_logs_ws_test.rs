@@ -137,44 +137,67 @@ fn log_level_ordering() {
 // ── B. Frame delivery (real TCP server + WS client) ───────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn logs_ws_emits_info_events() {
-    let (state, log_tx) = make_state();
-    let (addr, _handle) = spawn_server(state).await;
-    let mut ws = ws_connect(&format!("ws://127.0.0.1:{}/logs?level=info", addr.port())).await;
+async fn logs_ws_emits_level_table() {
+    // (case label, injected level, payload, expected `type` key in the frame).
+    // Every case uses a `?level=info` client, so the warning/error rows also
+    // cover the `>=` filter passing higher-severity events to an info client.
+    let cases: &[(&str, LogLevel, &str, &str)] = &[
+        ("B1 info event", LogLevel::Info, "hello", "info"),
+        // "warning", NOT "warn" — the structured (`?format=structured`) branch
+        // renames it, the plain mihomo frame must not.
+        ("B2 warning event", LogLevel::Warning, "warn", "warning"),
+        ("B3 error event", LogLevel::Error, "err", "error"),
+        (
+            "C: warning passes filter for info client",
+            LogLevel::Warning,
+            "warn-msg",
+            "warning",
+        ),
+    ];
 
-    log_tx.send(log_msg(LogLevel::Info, "hello")).unwrap();
+    let mut failures: Vec<String> = Vec::new();
+    for (label, level, payload, expected_type) in cases {
+        let (state, log_tx) = make_state();
+        let (addr, _handle) = spawn_server(state).await;
+        let mut ws = ws_connect(&format!("ws://127.0.0.1:{}/logs?level=info", addr.port())).await;
 
-    let text = recv_text(&mut ws).await;
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["type"], "info");
-    assert_eq!(v["payload"], "hello");
-}
+        log_tx.send(log_msg(*level, payload)).unwrap();
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn logs_ws_emits_warning_events() {
-    let (state, log_tx) = make_state();
-    let (addr, _handle) = spawn_server(state).await;
-    let mut ws = ws_connect(&format!("ws://127.0.0.1:{}/logs?level=info", addr.port())).await;
+        let text = match tokio::time::timeout(Duration::from_millis(500), ws.next()).await {
+            Ok(Some(Ok(msg))) => msg.into_text().unwrap().to_string(),
+            other => {
+                failures.push(format!(
+                    "[{label}] no WS text frame within 500ms: {other:?}"
+                ));
+                continue;
+            }
+        };
+        let v: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                failures.push(format!("[{label}] frame is not JSON ({e}): {text}"));
+                continue;
+            }
+        };
+        if v["type"] != *expected_type {
+            failures.push(format!(
+                "[{label}] expected type {expected_type:?}, got {}",
+                v["type"]
+            ));
+        }
+        if v["payload"] != *payload {
+            failures.push(format!(
+                "[{label}] expected payload {payload:?}, got {}",
+                v["payload"]
+            ));
+        }
+    }
 
-    log_tx.send(log_msg(LogLevel::Warning, "warn")).unwrap();
-
-    let text = recv_text(&mut ws).await;
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["type"], "warning");
-    assert_eq!(v["payload"], "warn");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn logs_ws_emits_error_events() {
-    let (state, log_tx) = make_state();
-    let (addr, _handle) = spawn_server(state).await;
-    let mut ws = ws_connect(&format!("ws://127.0.0.1:{}/logs?level=info", addr.port())).await;
-
-    log_tx.send(log_msg(LogLevel::Error, "err")).unwrap();
-
-    let text = recv_text(&mut ws).await;
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["type"], "error");
+    assert!(
+        failures.is_empty(),
+        "log frame table failures:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -227,20 +250,6 @@ async fn logs_ws_level_filter_suppresses_debug() {
         result.is_err(),
         "debug message must be suppressed for level=info client"
     );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn logs_ws_level_filter_passes_warning_for_info_client() {
-    let (state, log_tx) = make_state();
-    let (addr, _handle) = spawn_server(state).await;
-    let mut ws = ws_connect(&format!("ws://127.0.0.1:{}/logs?level=info", addr.port())).await;
-
-    log_tx.send(log_msg(LogLevel::Warning, "warn-msg")).unwrap();
-
-    let text = recv_text(&mut ws).await;
-    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["type"], "warning");
-    assert_eq!(v["payload"], "warn-msg");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

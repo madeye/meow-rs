@@ -75,15 +75,28 @@ mod tests {
     }
 
     #[test]
-    fn dscp_match() {
-        let r = DscpRule::new("46", "PROXY").unwrap();
-        assert!(r.match_metadata(&meta_with_dscp(Some(46)), &helper()));
-    }
+    fn dscp_match_cases() {
+        // (label, rule payload, metadata dscp, expected match)
+        let cases: &[(&str, &str, Option<u8>, bool)] = &[
+            ("EF (46) matches dscp 46", "46", Some(46), true),
+            ("rule 46 must not match dscp 0", "46", Some(0), false),
+        ];
 
-    #[test]
-    fn dscp_no_match_different_value() {
-        let r = DscpRule::new("46", "PROXY").unwrap();
-        assert!(!r.match_metadata(&meta_with_dscp(Some(0)), &helper()));
+        let mut failures = Vec::new();
+        for &(label, payload, dscp, expected) in cases {
+            let r = DscpRule::new(payload, "PROXY").unwrap();
+            let got = r.match_metadata(&meta_with_dscp(dscp), &helper());
+            if got != expected {
+                failures.push(format!(
+                    "{label}: DSCP,{payload} vs metadata dscp={dscp:?} — expected {expected}, got {got}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "DSCP match mismatches:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// `None` (HTTP/SOCKS5/Mixed) must never match any DSCP rule, including 0.
@@ -104,18 +117,25 @@ mod tests {
     }
 
     #[test]
-    fn dscp_out_of_range_errors() {
-        assert!(DscpRule::new("64", "DIRECT").is_err());
-        assert!(DscpRule::new("255", "DIRECT").is_err());
-    }
-
-    #[test]
-    fn dscp_invalid_payload_errors() {
-        assert!(DscpRule::new("abc", "DIRECT").is_err());
-    }
-
-    #[test]
-    fn dscp_boundary_63_valid() {
-        assert!(DscpRule::new("63", "DIRECT").is_ok());
+    fn dscp_validity_cases() {
+        // (payload, expect_ok)
+        let cases: &[(&str, bool)] = &[
+            ("64", false),  // out of range (> 63)
+            ("255", false), // out of range (> 63)
+            ("abc", false), // not an integer
+            ("63", true),   // boundary: max valid 6-bit value
+        ];
+        let mut failures = Vec::new();
+        for (payload, expect_ok) in cases {
+            let got = DscpRule::new(payload, "DIRECT");
+            if got.is_ok() != *expect_ok {
+                failures.push(format!(
+                    "DSCP payload {payload:?}: expected {}, got {:?}",
+                    if *expect_ok { "Ok" } else { "Err" },
+                    got.as_ref().map(|_| "Ok").map_err(String::as_str),
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "DSCP validity failures: {failures:#?}");
     }
 }

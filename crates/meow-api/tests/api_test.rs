@@ -956,31 +956,6 @@ async fn delete_proxy_group_not_found() {
 }
 
 #[tokio::test]
-async fn select_proxy_in_selector_group() {
-    let mut raw = test_raw_config();
-    raw.proxy_groups = Some(vec![RawProxyGroup {
-        name: "Sel".into(),
-        group_type: "select".into(),
-        proxies: Some(vec!["DIRECT".into(), "REJECT".into()]),
-        ..Default::default()
-    }]);
-    let state = test_state(raw);
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri("/api/proxy-groups/Sel/select")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"name":"REJECT"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-}
-
-#[tokio::test]
 async fn select_proxy_invalid_target() {
     let mut raw = test_raw_config();
     raw.proxy_groups = Some(vec![RawProxyGroup {
@@ -1421,196 +1396,186 @@ async fn select_proxy_roundtrip() {
 // ── Bearer auth middleware ───────────────────────────────────────
 
 #[tokio::test]
-async fn auth_unset_secret_allows_api_request() {
-    let state = test_state_default();
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn auth_empty_secret_allows_api_request() {
-    let state = test_state_with_secret("");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn auth_missing_header_rejects_with_401() {
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn auth_wrong_token_rejects_with_401() {
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .header("authorization", "Bearer wrongtoken")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn auth_correct_token_allows_request() {
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .header("authorization", "Bearer hunter2")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn auth_lowercase_bearer_prefix_rejected() {
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/version")
-                .header("authorization", "bearer hunter2")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn auth_non_bearer_scheme_rejected() {
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .header("authorization", "Basic hunter2")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn auth_ui_routes_remain_unauthenticated() {
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(Request::get("/ui").body(axum::body::Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn auth_gated_write_endpoint_rejects_unauthenticated_post() {
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::post("/rules")
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(r#"{"rules":[]}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-// Edge cases: malformed Authorization header values
-#[tokio::test]
-async fn auth_bearer_empty_value_rejects_with_401() {
-    // "Bearer " with nothing after the space: strip_prefix yields "", != secret.
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .header("authorization", "Bearer ")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn auth_no_space_after_bearer_rejects_with_401() {
-    // "Bearertoken" — neither "Bearer " nor "bearer " prefix present; strip_prefix
-    // returns None so middleware cannot extract a token.
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .header("authorization", "Bearerhunter2")
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn auth_multibyte_utf8_header_value_rejects_with_401() {
-    // "Bearer café" — é is 0xC3 0xA9 (two UTF-8 bytes, not valid ASCII).
-    // HeaderValue::to_str() returns Err for non-ASCII bytes, so the middleware
-    // sees None for the provided token and returns 401.
+async fn auth_middleware_table() {
     use axum::http::header::HeaderValue;
-    let state = test_state_with_secret("hunter2");
-    let app = create_router(state);
-    let hv = HeaderValue::from_bytes(b"Bearer caf\xc3\xa9").unwrap();
-    let resp = app
-        .oneshot(
-            Request::get("/proxies")
-                .header("authorization", hv)
-                .body(axum::body::Body::empty())
+
+    /// `Authorization` header a case sends.
+    enum AuthHeader {
+        /// No `Authorization` header at all.
+        Absent,
+        /// Header value that is valid ASCII.
+        Str(&'static str),
+        /// Raw bytes, so non-ASCII values can be exercised.
+        Raw(&'static [u8]),
+    }
+
+    struct Case {
+        label: &'static str,
+        /// `None` → `AppState.secret` is `None`; `Some(s)` → `Some(s.to_string())`.
+        secret: Option<&'static str>,
+        method: &'static str,
+        path: &'static str,
+        auth: AuthHeader,
+        /// JSON request body; sets `content-type: application/json` when present.
+        body: Option<&'static str>,
+        expected: StatusCode,
+    }
+
+    let cases = [
+        Case {
+            label: "unset secret: auth disabled, API request allowed",
+            secret: None,
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Absent,
+            body: None,
+            expected: StatusCode::OK,
+        },
+        Case {
+            label: "empty secret: auth disabled, API request allowed",
+            secret: Some(""),
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Absent,
+            body: None,
+            expected: StatusCode::OK,
+        },
+        Case {
+            label: "missing Authorization header rejected",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Absent,
+            body: None,
+            expected: StatusCode::UNAUTHORIZED,
+        },
+        Case {
+            label: "wrong token rejected",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Str("Bearer wrongtoken"),
+            body: None,
+            expected: StatusCode::UNAUTHORIZED,
+        },
+        Case {
+            label: "correct token allows request",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Str("Bearer hunter2"),
+            body: None,
+            expected: StatusCode::OK,
+        },
+        Case {
+            // /version is deliberately probed here: it proves the gate covers it too.
+            label: "lowercase `bearer ` prefix rejected (only `Bearer ` is stripped)",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/version",
+            auth: AuthHeader::Str("bearer hunter2"),
+            body: None,
+            expected: StatusCode::UNAUTHORIZED,
+        },
+        Case {
+            label: "non-Bearer scheme rejected",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Str("Basic hunter2"),
+            body: None,
+            expected: StatusCode::UNAUTHORIZED,
+        },
+        Case {
+            label: "UI routes remain unauthenticated",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/ui",
+            auth: AuthHeader::Absent,
+            body: None,
+            expected: StatusCode::OK,
+        },
+        Case {
+            label: "gated write endpoint rejects unauthenticated POST",
+            secret: Some("hunter2"),
+            method: "POST",
+            path: "/rules",
+            auth: AuthHeader::Absent,
+            body: Some(r#"{"rules":[]}"#),
+            expected: StatusCode::UNAUTHORIZED,
+        },
+        Case {
+            // "Bearer " with nothing after the space: strip_prefix yields "", != secret.
+            label: "`Bearer ` with empty value rejected",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Str("Bearer "),
+            body: None,
+            expected: StatusCode::UNAUTHORIZED,
+        },
+        Case {
+            // "Bearerhunter2" — no "Bearer " prefix, so strip_prefix returns None
+            // and the middleware cannot extract a token.
+            label: "no space after `Bearer` rejected",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Str("Bearerhunter2"),
+            body: None,
+            expected: StatusCode::UNAUTHORIZED,
+        },
+        Case {
+            // "Bearer café" — é is 0xC3 0xA9 (two UTF-8 bytes, not valid ASCII).
+            // HeaderValue::to_str() returns Err for non-ASCII bytes, so the
+            // middleware sees None for the provided token and returns 401.
+            label: "multibyte UTF-8 header value rejected",
+            secret: Some("hunter2"),
+            method: "GET",
+            path: "/proxies",
+            auth: AuthHeader::Raw(b"Bearer caf\xc3\xa9"),
+            body: None,
+            expected: StatusCode::UNAUTHORIZED,
+        },
+    ];
+
+    let mut failures = Vec::new();
+    for case in &cases {
+        let state = match case.secret {
+            None => test_state_default(),
+            Some(secret) => test_state_with_secret(secret),
+        };
+        let app = create_router(state);
+
+        let mut builder = Request::builder().method(case.method).uri(case.path);
+        match case.auth {
+            AuthHeader::Absent => {}
+            AuthHeader::Str(value) => builder = builder.header("authorization", value),
+            AuthHeader::Raw(bytes) => {
+                builder = builder.header("authorization", HeaderValue::from_bytes(bytes).unwrap());
+            }
+        }
+        let req = match case.body {
+            Some(body) => builder
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
                 .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            None => builder.body(axum::body::Body::empty()).unwrap(),
+        };
+
+        let status = app.oneshot(req).await.unwrap().status();
+        if status != case.expected {
+            failures.push(format!(
+                "[{}] {} {} → expected {}, got {status}",
+                case.label, case.method, case.path, case.expected
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "auth middleware cases failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 // ── Delay endpoints (M1.G-2) ─────────────────────────────────────────
@@ -1968,85 +1933,88 @@ async fn a1_get_proxy_delay_ok_records_delay() {
 
 // ── B: single-proxy error surface ────────────────────────────────────
 
+/// Error-surface table for the single-proxy delay endpoint: every case shares
+/// the same `TestAdapter`/state setup and differs only in the request path and
+/// the expected status/body. Cases are labelled and all of them run even when
+/// an earlier one fails.
 #[tokio::test]
-async fn b1_missing_url_is_400_body_invalid() {
-    let adapter = TestAdapter::new(
-        "T",
-        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
-    )
-    .into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(app, "/proxies/T/delay?timeout=1000".to_string()).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&bytes[..], br#"{"message":"Body invalid"}"#);
-}
+async fn b_series_delay_error_table() {
+    struct Case {
+        label: &'static str,
+        path: String,
+        expected_status: StatusCode,
+        expected_body: Option<&'static [u8]>,
+    }
 
-#[tokio::test]
-async fn b2_missing_timeout_is_400_body_invalid() {
-    let adapter = TestAdapter::new(
-        "T",
-        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
-    )
-    .into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(app, format!("/proxies/T/delay?url={}", url_q())).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&bytes[..], br#"{"message":"Body invalid"}"#);
-}
+    let cases = vec![
+        Case {
+            label: "b1 missing url is 400 Body invalid",
+            path: "/proxies/T/delay?timeout=1000".to_string(),
+            expected_status: StatusCode::BAD_REQUEST,
+            expected_body: Some(br#"{"message":"Body invalid"}"#),
+        },
+        Case {
+            label: "b2 missing timeout is 400 Body invalid",
+            path: format!("/proxies/T/delay?url={}", url_q()),
+            expected_status: StatusCode::BAD_REQUEST,
+            expected_body: Some(br#"{"message":"Body invalid"}"#),
+        },
+        Case {
+            label: "b3 timeout too large is 400 Body invalid",
+            path: format!("/proxies/T/delay?url={}&timeout=100000", url_q()),
+            expected_status: StatusCode::BAD_REQUEST,
+            expected_body: Some(br#"{"message":"Body invalid"}"#),
+        },
+        Case {
+            label: "b4 timeout zero is 400",
+            path: format!("/proxies/T/delay?url={}&timeout=0", url_q()),
+            expected_status: StatusCode::BAD_REQUEST,
+            expected_body: None,
+        },
+        Case {
+            label: "b5 unknown proxy is 404 resource not found",
+            path: format!("/proxies/NOPE/delay?url={}&timeout=1000", url_q()),
+            expected_status: StatusCode::NOT_FOUND,
+            expected_body: Some(br#"{"message":"resource not found"}"#),
+        },
+    ];
 
-#[tokio::test]
-async fn b3_timeout_too_large_is_400() {
-    let adapter = TestAdapter::new(
-        "T",
-        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
-    )
-    .into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/proxies/T/delay?url={}&timeout=100000", url_q()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&bytes[..], br#"{"message":"Body invalid"}"#);
-}
+    let mut failures: Vec<String> = Vec::new();
+    for case in cases {
+        let adapter = TestAdapter::new(
+            "T",
+            DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
+        )
+        .into_proxy();
+        let state = state_with_proxies(vec![("T", adapter)]);
+        let app = create_router(state);
+        let resp = delay_req(app, case.path.clone()).await;
+        let status = resp.status();
+        if status != case.expected_status {
+            failures.push(format!(
+                "[{}] GET {}: expected status {}, got {status}",
+                case.label, case.path, case.expected_status
+            ));
+        }
+        if let Some(expected_body) = case.expected_body {
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            if &bytes[..] != expected_body {
+                failures.push(format!(
+                    "[{}] GET {}: expected body {}, got {}",
+                    case.label,
+                    case.path,
+                    String::from_utf8_lossy(expected_body),
+                    String::from_utf8_lossy(&bytes)
+                ));
+            }
+        }
+    }
 
-#[tokio::test]
-async fn b4_timeout_zero_is_400() {
-    let adapter = TestAdapter::new(
-        "T",
-        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
-    )
-    .into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(app, format!("/proxies/T/delay?url={}&timeout=0", url_q())).await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn b5_unknown_proxy_is_404_resource_not_found() {
-    let adapter = TestAdapter::new(
-        "T",
-        DialBehavior::SleepThenOk(std::time::Duration::from_millis(5)),
-    )
-    .into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/proxies/NOPE/delay?url={}&timeout=1000", url_q()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&bytes[..], br#"{"message":"resource not found"}"#);
+    assert!(
+        failures.is_empty(),
+        "delay error-surface cases failed:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[tokio::test]
@@ -2120,28 +2088,41 @@ async fn d1_group_delay_ok_all_members_reported() {
 }
 
 #[tokio::test]
-async fn d2_group_delay_non_group_is_404() {
-    // upstream: findProxyByName rejects non-groups with 404 for the group route.
-    let a = TestAdapter::new("A", DialBehavior::InstantOk).into_proxy();
-    let state = state_with_proxies(vec![("A", a)]);
-    let app = create_router(state);
-    let resp = delay_req(app, format!("/group/A/delay?url={}&timeout=1000", url_q())).await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&bytes[..], br#"{"message":"resource not found"}"#);
-}
+async fn d2_d3_group_delay_404_table() {
+    // (case_label, target_name, expect_body_check)
+    //
+    // `non_group` (was d2): upstream findProxyByName rejects a *known*
+    // non-group name with 404 for the group route — `group.members()` is
+    // None. Body message is asserted exactly, as the original d2 did.
+    // `unknown_group` (was d3): the name is absent from the proxies map
+    // entirely. These are two distinct 404 branches in `get_group_delay`;
+    // both must stay covered.
+    let cases: [(&str, &str, bool); 2] =
+        [("non_group", "A", true), ("unknown_group", "NOPE", false)];
 
-#[tokio::test]
-async fn d3_group_delay_unknown_group_is_404() {
-    let a = TestAdapter::new("A", DialBehavior::InstantOk).into_proxy();
-    let state = state_with_proxies(vec![("A", a)]);
-    let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/group/NOPE/delay?url={}&timeout=1000", url_q()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    for (case_label, target_name, expect_body_check) in cases {
+        let a = TestAdapter::new("A", DialBehavior::InstantOk).into_proxy();
+        let state = state_with_proxies(vec![("A", a)]);
+        let app = create_router(state);
+        let resp = delay_req(
+            app,
+            format!("/group/{target_name}/delay?url={}&timeout=1000", url_q()),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "case {case_label}: expected 404"
+        );
+        if expect_body_check {
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                &bytes[..],
+                br#"{"message":"resource not found"}"#,
+                "case {case_label}: unexpected error body"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -2494,70 +2475,106 @@ async fn g3_get_proxy_delay_url_encoded_name() {
 // `httpHealthCheck` helper in `component/proxydialer/http.go`.
 
 #[tokio::test]
-async fn h1_default_expected_accepts_2xx() {
-    // No `expected` query param; response is 204 → success.
-    let adapter =
-        TestAdapter::new("T", DialBehavior::InstantStatus(204, "No Content")).into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/proxies/T/delay?url={}&timeout=1000", url_q()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-}
+async fn h_series_expected_status_table() {
+    // Merge of h1..h4: identical setup (one `TestAdapter` whose canned HTTP
+    // response carries a configurable status line, probed via
+    // `/proxies/T/delay`), varying only the canned status, the `expected`
+    // query param, and the resulting HTTP status / body. Every case is
+    // labelled and every case runs even if an earlier one fails, so a single
+    // run reports all mismatches.
+    struct Case {
+        label: &'static str,
+        canned_status: u16,
+        canned_reason: &'static str,
+        expected_param: Option<&'static str>,
+        want_http: StatusCode,
+        want_body: Option<&'static [u8]>,
+    }
 
-#[tokio::test]
-async fn h2_default_expected_rejects_non_2xx() {
-    // 500 → default expected (2xx) misses → transport error → 503.
-    let adapter =
-        TestAdapter::new("T", DialBehavior::InstantStatus(500, "Server Error")).into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/proxies/T/delay?url={}&timeout=1000", url_q()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(
-        &bytes[..],
-        br#"{"message":"An error occurred in the delay test"}"#
+    const ERR_BODY: &[u8] = br#"{"message":"An error occurred in the delay test"}"#;
+
+    let cases = [
+        Case {
+            // h1: no `expected` query param; response is 204 -> success.
+            label: "h1_default_expected_accepts_2xx",
+            canned_status: 204,
+            canned_reason: "No Content",
+            expected_param: None,
+            want_http: StatusCode::OK,
+            want_body: None,
+        },
+        Case {
+            // h2: 500 -> default expected (2xx) misses -> transport error -> 503.
+            label: "h2_default_expected_rejects_non_2xx",
+            canned_status: 500,
+            canned_reason: "Server Error",
+            expected_param: None,
+            want_http: StatusCode::SERVICE_UNAVAILABLE,
+            want_body: Some(ERR_BODY),
+        },
+        Case {
+            // h3: 301 is outside 2xx but within the explicit range the caller
+            // asked for.
+            label: "h3_expected_range_accepts_member",
+            canned_status: 301,
+            canned_reason: "Moved",
+            expected_param: Some("200,301-399"),
+            want_http: StatusCode::OK,
+            want_body: None,
+        },
+        Case {
+            // h4: 204 is inside 2xx but the caller restricted to 200 exactly.
+            label: "h4_expected_range_rejects_out_of_range",
+            canned_status: 204,
+            canned_reason: "No Content",
+            expected_param: Some("200"),
+            want_http: StatusCode::SERVICE_UNAVAILABLE,
+            want_body: None,
+        },
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for case in &cases {
+        let adapter = TestAdapter::new(
+            "T",
+            DialBehavior::InstantStatus(case.canned_status, case.canned_reason),
+        )
+        .into_proxy();
+        let state = state_with_proxies(vec![("T", adapter)]);
+        let app = create_router(state);
+        let path = match case.expected_param {
+            Some(expected) => format!(
+                "/proxies/T/delay?url={}&timeout=1000&expected={expected}",
+                url_q()
+            ),
+            None => format!("/proxies/T/delay?url={}&timeout=1000", url_q()),
+        };
+        let resp = delay_req(app, path).await;
+        let got_http = resp.status();
+        if got_http != case.want_http {
+            failures.push(format!(
+                "[{}] status: want {}, got {got_http}",
+                case.label, case.want_http
+            ));
+        }
+        if let Some(want_body) = case.want_body {
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            if &bytes[..] != want_body {
+                failures.push(format!(
+                    "[{}] body: want {:?}, got {:?}",
+                    case.label,
+                    String::from_utf8_lossy(want_body),
+                    String::from_utf8_lossy(&bytes)
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "delay `expected` cases failed:\n{}",
+        failures.join("\n")
     );
-}
-
-#[tokio::test]
-async fn h3_expected_range_accepts_member() {
-    // 301 is outside 2xx but within the explicit range the caller asked for.
-    let adapter = TestAdapter::new("T", DialBehavior::InstantStatus(301, "Moved")).into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!(
-            "/proxies/T/delay?url={}&timeout=1000&expected=200,301-399",
-            url_q()
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn h4_expected_range_rejects_out_of_range() {
-    // 204 is inside 2xx but the caller restricted to 200 exactly.
-    let adapter =
-        TestAdapter::new("T", DialBehavior::InstantStatus(204, "No Content")).into_proxy();
-    let state = state_with_proxies(vec![("T", adapter)]);
-    let app = create_router(state);
-    let resp = delay_req(
-        app,
-        format!("/proxies/T/delay?url={}&timeout=1000&expected=200", url_q()),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]

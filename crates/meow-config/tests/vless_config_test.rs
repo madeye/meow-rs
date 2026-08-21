@@ -461,6 +461,8 @@ proxies:
 /// YAML integer, not a string. mihomo's weakly-typed decoder coerces it back
 /// to its decimal digits before hex-decoding, so the identical subscription
 /// works there; without matching coercion the node is silently dropped (#408).
+/// The coercion also emits a warn telling the operator to quote the value
+/// if they meant the literal digits (leading zeros are otherwise lost).
 #[tokio::test]
 async fn parse_vless_reality_opts_numeric_short_id_coerced_to_string() {
     let yaml = r#"
@@ -476,19 +478,30 @@ proxies:
       public-key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
       short-id: 1234
 "#;
-    let config = load_config_from_str(yaml)
-        .await
-        .expect("REALITY VLESS config with unquoted numeric short-id must load");
+    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
+    let config = result.expect("REALITY VLESS config with unquoted numeric short-id must load");
     assert!(
         config.proxies.contains_key("v"),
         "REALITY VLESS proxy with unquoted numeric short-id must be registered, not dropped"
+    );
+    let warn_count = lines
+        .iter()
+        .filter(|l| l.contains("WARN") && l.contains("short-id") && l.contains("quote"))
+        .count();
+    assert!(
+        warn_count >= 1,
+        "a WARN about the coerced numeric short-id (with a quoting hint) must be emitted; \
+         captured lines: {lines:?}"
     );
 }
 
 /// `short-id: 0x1f` parses as the YAML integer 31 (not the hex string "1f").
 /// Pin the exact (lossy) coercion mihomo's decoder performs: the integer is
 /// reformatted to its decimal string ("31") and hex-decoded from there, same
-/// as a literal `short-id: "31"` would be.
+/// as a literal `short-id: "31"` would be — a real footgun for anyone who
+/// wrote `0x1f` expecting it to be read as hex digits "1f". The coercion
+/// must warn so operators who meant the literal digits know to quote the
+/// value instead of leaving it as a bare YAML number.
 #[tokio::test]
 async fn parse_vless_reality_opts_hex_literal_short_id_decimal_coerced() {
     let yaml = r#"
@@ -504,12 +517,62 @@ proxies:
       public-key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
       short-id: 0x1f
 "#;
-    let config = load_config_from_str(yaml)
-        .await
-        .expect("REALITY VLESS config with `0x1f` short-id must load");
+    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
+    let config = result.expect("REALITY VLESS config with `0x1f` short-id must load");
     assert!(
         config.proxies.contains_key("v"),
         "REALITY VLESS proxy with `short-id: 0x1f` must be registered, not dropped"
+    );
+    let warn_count = lines
+        .iter()
+        .filter(|l| l.contains("WARN") && l.contains("short-id") && l.contains("quote"))
+        .count();
+    assert!(
+        warn_count >= 1,
+        "a WARN about the coerced `0x1f` short-id (with a quoting hint) must be emitted; \
+         captured lines: {lines:?}"
+    );
+}
+
+/// A leading-zero all-decimal `short-id` (e.g. `short-id: 0012`, unquoted)
+/// is NOT reinterpreted as a YAML number by this parser: the core-schema
+/// int resolver only matches decimal scalars without a leading zero (plain
+/// `0` aside), so `0012` parses as the plain string `"0012"` and takes the
+/// pre-existing `as_str()` branch untouched — the leading zero, and thus the
+/// exact hex-decoded bytes (`0x00 0x12`), are preserved with no coercion and
+/// no warning. This pins that (verified) behavior so a future serde_yaml/
+/// resolver change that started collapsing such literals to numbers would
+/// be caught here rather than silently reintroducing the byte-loss bug the
+/// review finding described.
+#[tokio::test]
+async fn parse_vless_reality_opts_leading_zero_short_id_preserved_no_warn() {
+    let yaml = r#"
+proxies:
+  - name: v
+    type: vless
+    server: example.com
+    port: 443
+    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    tls: true
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE
+      short-id: 0012
+"#;
+    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
+    let config = result.expect("REALITY VLESS config with leading-zero string short-id must load");
+    assert!(
+        config.proxies.contains_key("v"),
+        "REALITY VLESS proxy with leading-zero short-id must be registered, not dropped"
+    );
+    let warn_count = lines
+        .iter()
+        .filter(|l| l.contains("WARN") && l.contains("short-id"))
+        .count();
+    assert_eq!(
+        warn_count, 0,
+        "`short-id: 0012` parses as a string already (leading zero preserved), so no \
+         numeric-coercion warning should fire; captured lines: {lines:?}"
     );
 }
 
@@ -1045,88 +1108,64 @@ proxies:
     );
 }
 
-/// D16j: sing-mux on VMess → accepted (default h2mux).
+/// D16j / D16j2 / D16k: VMess mux blocks that must load with no mux warn.
+///
+/// * D16j  — sing-mux via the legacy `mux:` alias (default protocol h2mux).
+/// * D16j2 — the canonical mihomo `smux:` key (same block as the legacy alias).
+/// * D16k  — `protocol: muxcool`: CommandMux 0x03 is the VMess request
+///   header's native mux signaling; sing-vmess routes it to
+///   `HandleMuxConnection`.
+///
+/// Every case runs even if an earlier one fails; failures are reported
+/// together with their label.
 #[cfg(all(feature = "mux", feature = "vmess"))]
 #[tokio::test]
-async fn parse_vmess_mux_singmux_accepted() {
-    let yaml = r#"
-proxies:
-  - name: m
-    type: vmess
-    server: example.com
-    port: 443
-    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
-    cipher: auto
-    mux:
-      enabled: true
-"#;
-    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
-    let config = result.expect("vmess mux must load");
-    assert!(config.proxies.contains_key("m"), "vmess proxy must be kept");
-    let mux_warns = lines
-        .iter()
-        .filter(|l| l.contains("WARN") && l.to_lowercase().contains("mux"))
-        .count();
-    assert_eq!(
-        mux_warns, 0,
-        "vmess sing-mux is implemented: no warn expected"
-    );
-}
+async fn parse_vmess_mux_protocol_table() {
+    const CASES: &[(&str, &str)] = &[
+        (
+            "D16j: sing-mux via the legacy `mux:` alias (default h2mux)",
+            "    mux:\n      enabled: true\n",
+        ),
+        (
+            "D16j2: the canonical mihomo `smux:` key",
+            "    smux:\n      enabled: true\n",
+        ),
+        (
+            "D16k: `protocol: muxcool` (VMess CommandMux 0x03)",
+            "    mux:\n      enabled: true\n      protocol: muxcool\n",
+        ),
+    ];
 
-/// D16j2: the canonical mihomo `smux:` key on VMess → accepted
-/// (same block as the legacy `mux:` alias, which stays covered above).
-#[cfg(all(feature = "mux", feature = "vmess"))]
-#[tokio::test]
-async fn parse_vmess_smux_key_accepted() {
-    let yaml = r#"
-proxies:
-  - name: m
-    type: vmess
-    server: example.com
-    port: 443
-    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
-    cipher: auto
-    smux:
-      enabled: true
-"#;
-    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
-    let config = result.expect("vmess smux: must load");
-    assert!(config.proxies.contains_key("m"), "vmess proxy must be kept");
-    let mux_warns = lines
-        .iter()
-        .filter(|l| l.contains("WARN") && l.to_lowercase().contains("mux"))
-        .count();
-    assert_eq!(mux_warns, 0, "smux: key is canonical: no warn expected");
-}
-
-/// D16k: `protocol: muxcool` on VMess → accepted (CommandMux 0x03 is the
-/// VMess request header's native mux signaling; sing-vmess routes it to
-/// HandleMuxConnection).
-#[cfg(all(feature = "mux", feature = "vmess"))]
-#[tokio::test]
-async fn parse_vmess_mux_muxcool_accepted() {
-    let yaml = r#"
-proxies:
-  - name: m
-    type: vmess
-    server: example.com
-    port: 443
-    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
-    cipher: auto
-    mux:
-      enabled: true
-      protocol: muxcool
-"#;
-    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
-    let config = result.expect("vmess muxcool must load");
-    assert!(config.proxies.contains_key("m"), "vmess proxy must be kept");
-    let mux_warns = lines
-        .iter()
-        .filter(|l| l.contains("WARN") && l.to_lowercase().contains("mux"))
-        .count();
-    assert_eq!(
-        mux_warns, 0,
-        "vmess muxcool is implemented: no warn expected"
+    let mut failures: Vec<String> = Vec::new();
+    for (label, mux_block) in CASES {
+        let yaml = format!(
+            "proxies:\n  - name: m\n    type: vmess\n    server: example.com\n    \
+             port: 443\n    uuid: b831381d-6324-4d53-ad4f-8cda48b30811\n    \
+             cipher: auto\n{mux_block}"
+        );
+        let (result, lines) = with_warn_capture_async(load_config_from_str(&yaml)).await;
+        match result {
+            Err(e) => failures.push(format!("{label}: config must load, got error: {e}")),
+            Ok(config) => {
+                if !config.proxies.contains_key("m") {
+                    failures.push(format!("{label}: vmess proxy must be kept; {lines:?}"));
+                }
+                let mux_warns = lines
+                    .iter()
+                    .filter(|l| l.contains("WARN") && l.to_lowercase().contains("mux"))
+                    .count();
+                if mux_warns != 0 {
+                    failures.push(format!(
+                        "{label}: implemented, no mux warn expected, got {mux_warns}; {lines:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "vmess mux cases failed:\n{}",
+        failures.join("\n")
     );
 }
 

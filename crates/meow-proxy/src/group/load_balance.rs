@@ -352,23 +352,32 @@ mod tests {
     // ─── D. FNV-1a 32-bit implementation ─────────────────────────────────────
 
     #[test]
-    fn fnv1a_empty_input() {
-        // FNV-1a starts from the offset basis; empty input returns it unchanged.
-        assert_eq!(fnv1a(&[]), 0x811c9dc5);
-    }
-
-    #[test]
-    fn fnv1a_single_byte() {
-        // Known FNV-1a 32-bit vector for single null byte.
+    fn fnv1a_known_vectors() {
+        // Known-answer vectors for the inline FNV-1a 32-bit implementation.
         // Reference: https://fnvhash.github.io/fnv-calculator-online/
-        assert_eq!(fnv1a(&[0x00]), 0x050c5d1f);
-    }
+        // Case labels map to docs/specs/group-load-balance-test-plan.md D1-D3.
+        // D3 ([1,1,1,1] = 0x154df079 / 357429369) guards consistent hashing,
+        // which derives its proxy index from this hash.
+        let cases: &[(&str, &[u8], u32)] = &[
+            ("D1 empty input (offset basis)", &[], 0x811c_9dc5),
+            ("D2 single null byte", &[0x00], 0x050c_5d1f),
+            ("D3 ipv4 bytes 1.1.1.1", &[1, 1, 1, 1], 0x154d_f079),
+        ];
 
-    #[test]
-    fn fnv1a_ipv4_bytes() {
-        // FNV-1a 32-bit of [1,1,1,1] = 0x154df079
-        // verified: fnv1a([1,1,1,1]) = 0x154df079 (357429369)
-        assert_eq!(fnv1a(&[1, 1, 1, 1]), 0x154d_f079);
+        let mut failures = Vec::new();
+        for (label, input, expected) in cases {
+            let got = fnv1a(input);
+            if got != *expected {
+                failures.push(format!(
+                    "{label}: fnv1a({input:?}) = {got:#010x}, expected {expected:#010x}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "FNV-1a vector mismatches:\n{}",
+            failures.join("\n")
+        );
     }
 
     // D4 is a build-time check: no `fnv` or `fnv1` crate dependency in Cargo.toml.
@@ -623,22 +632,37 @@ mod tests {
     // ─── E. UDP support ───────────────────────────────────────────────────────
 
     #[test]
-    fn support_udp_true_if_any_proxy_supports_udp() {
-        let a = MockProxy::new_udp("A");
-        let b = MockProxy::new("B");
-        let c = MockProxy::new("C");
-        let proxies: Vec<Arc<dyn Proxy>> = vec![a, b, c];
-        let group = make_rr(proxies);
-        assert!(group.support_udp());
-    }
+    fn support_udp_reflects_membership() {
+        // support_udp() is `any()` over members: true when at least one member
+        // supports UDP, false when none do.
+        type Case = (&'static str, Vec<Arc<dyn Proxy>>, bool);
+        let cases: Vec<Case> = vec![
+            (
+                "one of three members supports UDP",
+                vec![
+                    MockProxy::new_udp("A"),
+                    MockProxy::new("B"),
+                    MockProxy::new("C"),
+                ],
+                true,
+            ),
+            (
+                "no member supports UDP",
+                vec![MockProxy::new("A"), MockProxy::new("B")],
+                false,
+            ),
+        ];
 
-    #[test]
-    fn support_udp_false_if_none_support_udp() {
-        let a = MockProxy::new("A");
-        let b = MockProxy::new("B");
-        let proxies: Vec<Arc<dyn Proxy>> = vec![a, b];
-        let group = make_rr(proxies);
-        assert!(!group.support_udp());
+        let mut failures = Vec::new();
+        for (label, proxies, expected) in cases {
+            let got = make_rr(proxies).support_udp();
+            if got != expected {
+                failures.push(format!(
+                    "{label}: expected support_udp() == {expected}, got {got}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("; "));
     }
 
     #[tokio::test]
@@ -701,16 +725,6 @@ mod tests {
     fn adapter_type_serialises_to_load_balance() {
         let json = serde_json::to_string(&AdapterType::LoadBalance).unwrap();
         assert_eq!(json, r#""LoadBalance""#);
-    }
-
-    #[test]
-    fn adapter_type_enum_variant_exists() {
-        // Guards that the variant is in the enum (not caught by _ arm).
-        let ty = AdapterType::LoadBalance;
-        match ty {
-            AdapterType::LoadBalance => {}
-            _ => panic!("LoadBalance variant not matched"),
-        }
     }
 
     #[test]

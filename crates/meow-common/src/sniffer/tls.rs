@@ -147,24 +147,22 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_sni_basic() {
-        let data = build_client_hello("example.com");
-        assert_eq!(sniff_tls(&data).as_deref(), Some("example.com"));
-    }
-
-    #[test]
-    fn test_extract_sni_subdomain() {
-        let data = build_client_hello("www.google.com");
-        assert_eq!(sniff_tls(&data).as_deref(), Some("www.google.com"));
-    }
-
-    #[test]
-    fn test_extract_sni_long_hostname() {
-        let data = build_client_hello("very.long.subdomain.example.co.uk");
-        assert_eq!(
-            sniff_tls(&data).as_deref(),
-            Some("very.long.subdomain.example.co.uk")
-        );
+    fn sniff_tls_sni_extraction_cases() {
+        // `very.long.subdomain.example.co.uk` is longer than the 23-byte SmolStr
+        // inline limit, so it also covers the heap-allocated return path; the two
+        // shorter names stay inlined. Keep all three literals.
+        for host in [
+            "example.com",
+            "www.google.com",
+            "very.long.subdomain.example.co.uk",
+        ] {
+            let data = build_client_hello(host);
+            assert_eq!(
+                sniff_tls(&data).as_deref(),
+                Some(host),
+                "SNI extraction failed for hostname {host:?}"
+            );
+        }
     }
 
     #[test]

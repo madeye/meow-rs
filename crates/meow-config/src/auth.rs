@@ -84,21 +84,21 @@ mod tests {
     }
 
     #[test]
-    fn credentials_verify_correct() {
+    fn credentials_verify_table() {
         let cfg = make_auth(&["alice:hunter2"]);
-        assert!(cfg.credentials.verify("alice", "hunter2"));
-    }
-
-    #[test]
-    fn credentials_verify_wrong_password() {
-        let cfg = make_auth(&["alice:hunter2"]);
-        assert!(!cfg.credentials.verify("alice", "wrong"));
-    }
-
-    #[test]
-    fn credentials_verify_unknown_user() {
-        let cfg = make_auth(&["alice:hunter2"]);
-        assert!(!cfg.credentials.verify("bob", "hunter2"));
+        // (case label, username, password, expected)
+        let cases: &[(&str, &str, &str, bool)] = &[
+            ("correct credentials", "alice", "hunter2", true),
+            ("wrong password", "alice", "wrong", false),
+            ("unknown user", "bob", "hunter2", false),
+        ];
+        for (label, username, password, expected) in cases {
+            assert_eq!(
+                cfg.credentials.verify(username, password),
+                *expected,
+                "case {label}: verify({username:?}, {password:?}) should be {expected}"
+            );
+        }
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Default cap on in-flight inbound connections per listener when the
 /// listener config doesn't set `max-connections` (mirrors
@@ -204,10 +204,12 @@ where
         // Log-and-continue on accept errors (matching mixed.rs) rather than
         // propagating: a transient EMFILE/ECONNABORTED must not tear down
         // `run_on`'s `_firewall` guard and take the redirect rules with it.
+        // Logged at error! (not debug!) so fd-exhaustion events are visible
+        // at default log levels, mirroring mixed.rs's accept-error handling.
         let (stream, src_addr) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
-                debug!("TProxy listener '{}' accept error: {e}", name);
+                error!("TProxy listener '{}' accept error: {e}", name);
                 drop(permit);
                 continue;
             }
@@ -486,6 +488,94 @@ mod tests {
             max_observed.load(Ordering::SeqCst),
             CAP,
             "cap should have been reached but never exceeded"
+        );
+    }
+
+    /// Regression test for the `max_connections == 0` sentinel: it must
+    /// disable the cap entirely (no semaphore), letting far more handler
+    /// futures run concurrently than any small numeric cap would allow.
+    #[tokio::test]
+    async fn accept_loop_unbounded_when_max_connections_is_zero() {
+        // Deliberately larger than any small cap (e.g. the CAP=3 used by
+        // `accept_loop_never_exceeds_max_connections`) so saturating this
+        // many concurrent handlers proves `0` truly means unbounded rather
+        // than merely "a bigger-than-3 limit".
+        const CLIENTS: usize = 20;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_observed = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        // Signalled once all CLIENTS handlers are simultaneously in flight,
+        // proving no cap ever throttled admission below that count.
+        let all_in_flight = Arc::new(Notify::new());
+
+        let in_flight_h = Arc::clone(&in_flight);
+        let max_observed_h = Arc::clone(&max_observed);
+        let release_h = Arc::clone(&release);
+        let all_in_flight_h = Arc::clone(&all_in_flight);
+
+        let loop_task = tokio::spawn(async move {
+            bounded_accept_loop(
+                listener,
+                0, // unlimited sentinel
+                "test-tproxy-unbounded".to_string(),
+                move |stream, _src| {
+                    let in_flight = Arc::clone(&in_flight_h);
+                    let max_observed = Arc::clone(&max_observed_h);
+                    let release = Arc::clone(&release_h);
+                    let all_in_flight = Arc::clone(&all_in_flight_h);
+                    async move {
+                        drop(stream);
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_observed.fetch_max(now, Ordering::SeqCst);
+                        if now == CLIENTS {
+                            all_in_flight.notify_one();
+                        }
+                        release.notified().await;
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                    }
+                },
+            )
+            .await
+        });
+
+        let (done_tx, mut done_rx) = mpsc::channel::<()>(CLIENTS);
+        for _ in 0..CLIENTS {
+            let done_tx = done_tx.clone();
+            tokio::spawn(async move {
+                let _ = TcpStream::connect(addr).await;
+                let _ = done_tx.send(()).await;
+            });
+        }
+        drop(done_tx);
+
+        // With no cap, all CLIENTS handlers must be able to run at once —
+        // none should be blocked waiting for a permit.
+        tokio::time::timeout(Duration::from_secs(5), all_in_flight.notified())
+            .await
+            .expect("all handlers should have been admitted concurrently with max_connections=0");
+        assert_eq!(
+            in_flight.load(Ordering::SeqCst),
+            CLIENTS,
+            "unbounded accept loop should admit every connection without queuing"
+        );
+
+        release.notify_waiters();
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..CLIENTS {
+                done_rx.recv().await;
+            }
+        })
+        .await;
+
+        loop_task.abort();
+        assert_eq!(
+            max_observed.load(Ordering::SeqCst),
+            CLIENTS,
+            "max_connections=0 must allow more concurrent handlers than any small cap"
         );
     }
 

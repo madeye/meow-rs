@@ -365,26 +365,46 @@ fn encode_udp_header(out: &mut SmallVec<[u8; 1500]>, addr: &SocketAddr) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_udp_request_ipv4() {
-        // RSV FRAG ATYP=1 1.2.3.4 :443 "hi"
-        let dg = [0, 0, 0, ATYP_IPV4, 1, 2, 3, 4, 0x01, 0xBB, b'h', b'i'];
-        let (ip, host, port, off) = parse_udp_request(&dg).unwrap();
-        assert_eq!(ip, Some(IpAddr::from([1, 2, 3, 4])));
-        assert!(host.is_empty());
-        assert_eq!(port, 443);
-        assert_eq!(&dg[off..], b"hi");
-    }
+    /// (label, datagram, expected ip, expected host, expected port, expected payload)
+    type ParseUdpRequestCase = (
+        &'static str,
+        &'static [u8],
+        Option<IpAddr>,
+        &'static str,
+        u16,
+        &'static [u8],
+    );
 
     #[test]
-    fn parse_udp_request_domain() {
-        let mut dg = vec![0, 0, 0, ATYP_DOMAIN, 3, b'a', b'.', b'b', 0x00, 0x35];
-        dg.extend_from_slice(b"q");
-        let (ip, host, port, off) = parse_udp_request(&dg).unwrap();
-        assert_eq!(ip, None);
-        assert_eq!(host, "a.b");
-        assert_eq!(port, 53);
-        assert_eq!(&dg[off..], b"q");
+    fn parse_udp_request_cases() {
+        let cases: &[ParseUdpRequestCase] = &[
+            (
+                "ipv4",
+                // RSV FRAG ATYP=1 1.2.3.4 :443 "hi"
+                &[0, 0, 0, ATYP_IPV4, 1, 2, 3, 4, 0x01, 0xBB, b'h', b'i'],
+                Some(IpAddr::from([1, 2, 3, 4])),
+                "",
+                443,
+                b"hi",
+            ),
+            (
+                "domain",
+                // RSV FRAG ATYP=3 len=3 "a.b" :53 "q"
+                &[0, 0, 0, ATYP_DOMAIN, 3, b'a', b'.', b'b', 0x00, 0x35, b'q'],
+                None,
+                "a.b",
+                53,
+                b"q",
+            ),
+        ];
+        for (label, dg, want_ip, want_host, want_port, want_payload) in cases {
+            let (ip, host, port, off) =
+                parse_udp_request(dg).unwrap_or_else(|e| panic!("{label}: parse failed: {e}"));
+            assert_eq!(ip, *want_ip, "{label}: ip");
+            assert_eq!(host, *want_host, "{label}: host");
+            assert_eq!(port, *want_port, "{label}: port");
+            assert_eq!(&dg[off..], *want_payload, "{label}: payload");
+        }
     }
 
     #[test]

@@ -170,26 +170,36 @@ impl<W: tokio::io::AsyncWrite + Unpin> PacketWriter<W> {
     }
 
     async fn write_datagram(&mut self, data: &[u8]) -> std::io::Result<()> {
-        // A pending frame may only be resumed by a retry carrying the
-        // *same* datagram — otherwise the new datagram would be silently
-        // dropped while its bytes are reported as sent. If the new call
-        // carries different data: before any byte hit the wire the stale
-        // frame is simply discarded; after a partial write the length
-        // prefix is committed, so the frame must be completed with the
-        // original bytes — reject the changed buffer instead, mirroring
-        // `H2Stream::poll_write`'s changed-buffer guard (`h2_common.rs`).
-        // The pending frame is kept so a retry with the original data
-        // can still complete it without desyncing the peer framing.
+        // Recovering from a cancelled write: the pending frame owns its
+        // bytes, so a leftover frame is never a caller error.
+        //
+        // - Same data: this call is a retry of the cancelled write —
+        //   resume the pending frame from its offset.
+        // - Different data, nothing on the wire yet (offset 0): nothing
+        //   is committed — discard the stale frame and send the new one.
+        // - Different data after a partial write: the length prefix is
+        //   committed, so first complete the stale frame on the wire
+        //   (preserving peer framing — the cancelled datagram is
+        //   delivered late rather than truncated), then frame and send
+        //   the new datagram.  Two wire datagrams, no error, no drop.
+        //
+        // Datagram identity is content-based: after a cancelled partial
+        // write, a *new* datagram carrying identical bytes is
+        // indistinguishable from a retry of the cancelled one and will
+        // be coalesced into a single wire datagram — acceptable under
+        // UDP's lossy delivery semantics.
+        //
+        // Errors surfaced here are always stream I/O errors (the
+        // transport died mid-frame), never caller misuse: draining a
+        // stale frame on a dead stream reports the underlying write
+        // error, and the frame is kept so the state stays consistent
+        // if the caller retries anyway.
         if let Some((frame, offset)) = &self.pending {
             if &frame[2..] != data {
                 if *offset == 0 {
                     self.pending = None;
                 } else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "mux: datagram changed after a cancelled partial write; \
-                         the in-flight frame must be retried with the same data",
-                    ));
+                    self.drain_pending().await?;
                 }
             }
         }
@@ -204,16 +214,25 @@ impl<W: tokio::io::AsyncWrite + Unpin> PacketWriter<W> {
             self.pending = Some((frame.freeze(), 0));
         }
 
-        // Write the pending frame to completion, resuming from the
-        // stored offset if a previous call was cancelled mid-write.
-        // Use individual `write` calls (not `write_all`) so each
-        // successful write updates the offset before the next await
-        // point — `write_all` loses its internal progress on
-        // cancellation, which would duplicate already-sent bytes.
+        self.drain_pending().await?;
+        self.stream.flush().await
+    }
+
+    /// Write the pending frame to completion, resuming from the stored
+    /// offset if a previous call was cancelled mid-write.  Uses
+    /// individual `write` calls (not `write_all`) so each successful
+    /// write updates the offset before the next await point —
+    /// `write_all` loses its internal progress on cancellation, which
+    /// would duplicate already-sent bytes.  On error the frame (and its
+    /// offset) survive, so a later call can still resume it.
+    async fn drain_pending(&mut self) -> std::io::Result<()> {
         loop {
-            let (frame, offset) = self.pending.as_ref().unwrap();
+            let Some((frame, offset)) = self.pending.as_ref() else {
+                return Ok(());
+            };
             if *offset >= frame.len() {
-                break;
+                self.pending = None;
+                return Ok(());
             }
             let n = self.stream.write(&frame[*offset..]).await?;
             if n == 0 {
@@ -224,8 +243,6 @@ impl<W: tokio::io::AsyncWrite + Unpin> PacketWriter<W> {
             }
             self.pending.as_mut().unwrap().1 += n;
         }
-        self.pending = None;
-        self.stream.flush().await
     }
 }
 
@@ -644,25 +661,32 @@ mod tests {
         assert_eq!(&next, b"\x00\x01Z");
     }
 
-    /// Regression for issue #422: a retry carrying a *different* datagram
-    /// after a cancelled partial write must error (not finish the stale
-    /// frame and report the new datagram as sent), and must keep the
-    /// committed frame intact so the original data can still complete it.
+    /// A *different* datagram after a cancelled partial write recovers
+    /// instead of erroring (supersedes the issue #422 reject, which made
+    /// every relay loop tear the UDP flow down): the stale frame is
+    /// completed on the wire first — the cancelled datagram is delivered
+    /// late rather than truncated — then the new datagram is framed and
+    /// sent.  Two well-formed wire datagrams, correct framing for both.
     #[tokio::test]
-    async fn cancelled_partial_write_rejects_different_data() {
+    async fn cancelled_partial_write_different_data_completes_stale_then_sends_new() {
         let (client, mut peer) = tokio::io::duplex(4);
         let mut writer = PacketWriter::new(client);
+        // Frame is 6 bytes ([len u16][AAAA]); the 4-byte pipe takes the
+        // first 4 and parks the write mid-frame.
         assert_eq!(cancel_one_write(&mut writer, b"AAAA"), 4);
-        let err = writer.write_datagram(b"BBBB").await.unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        // The in-flight frame survives the rejected call: the original
-        // datagram still completes without desyncing the peer framing.
-        let mut head = [0u8; 4];
-        peer.read_exact(&mut head).await.unwrap();
-        writer.write_datagram(b"AAAA").await.unwrap();
-        let mut tail = [0u8; 2];
-        peer.read_exact(&mut tail).await.unwrap();
-        assert_eq!([head.as_slice(), &tail].concat(), b"\x00\x04AAAA");
+        // Drive the write and the peer read together: the stale tail
+        // (2 bytes) plus the new frame (4 bytes) exceed the pipe.
+        let mut wire = [0u8; 10];
+        let (write_res, read_res) =
+            tokio::join!(writer.write_datagram(b"BB"), peer.read_exact(&mut wire));
+        write_res.unwrap();
+        read_res.unwrap();
+        assert_eq!(&wire, b"\x00\x04AAAA\x00\x02BB");
+        // The writer is back on a clean frame boundary.
+        writer.write_datagram(b"Z").await.unwrap();
+        let mut next = [0u8; 3];
+        peer.read_exact(&mut next).await.unwrap();
+        assert_eq!(&next, b"\x00\x01Z");
     }
 
     /// A cancelled write that never reached the wire (offset 0) has

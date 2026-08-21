@@ -198,26 +198,48 @@ mod tests {
     }
 
     #[test]
-    fn prefers_dll_next_to_the_executable() {
+    fn resolve_from_search_order() {
         // Forward slashes so Path::parent works on Unix CI hosts too.
-        let exe = PathBuf::from("/opt/meow/meow.exe");
-        let cwd = PathBuf::from("/home/me");
-        let found = resolve_from(Some(&exe), Some(&cwd), |p| {
-            p == Path::new("/opt/meow").join(WINTUN_DLL)
-        })
-        .expect("exe-adjacent dll");
-        assert_eq!(found, PathBuf::from("/opt/meow").join(WINTUN_DLL));
-    }
+        struct Case {
+            name: &'static str,
+            exe: &'static str,
+            cwd: &'static str,
+            /// The only directory whose `wintun.dll` the predicate accepts.
+            present_dir: &'static str,
+        }
 
-    #[test]
-    fn falls_back_to_working_directory() {
-        let exe = PathBuf::from("/missing/meow.exe");
-        let cwd = PathBuf::from("/work/meow-rs");
-        let found = resolve_from(Some(&exe), Some(&cwd), |p| {
-            p == Path::new("/work/meow-rs").join(WINTUN_DLL)
-        })
-        .expect("cwd dll");
-        assert_eq!(found, PathBuf::from("/work/meow-rs").join(WINTUN_DLL));
+        let cases = [
+            Case {
+                name: "prefers the dll next to the executable",
+                exe: "/opt/meow/meow.exe",
+                cwd: "/home/me",
+                present_dir: "/opt/meow",
+            },
+            Case {
+                name: "falls back to the working directory",
+                exe: "/missing/meow.exe",
+                cwd: "/work/meow-rs",
+                present_dir: "/work/meow-rs",
+            },
+        ];
+
+        let mut failures = Vec::new();
+        for case in &cases {
+            let expected = Path::new(case.present_dir).join(WINTUN_DLL);
+            let exe = PathBuf::from(case.exe);
+            let cwd = PathBuf::from(case.cwd);
+            match resolve_from(Some(&exe), Some(&cwd), |p| p == expected) {
+                Ok(found) if found == expected => {}
+                Ok(found) => failures.push(format!(
+                    "{}: expected {}, got {}",
+                    case.name,
+                    expected.display(),
+                    found.display()
+                )),
+                Err(e) => failures.push(format!("{}: resolve_from failed: {e}", case.name)),
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("; "));
     }
 
     #[test]

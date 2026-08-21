@@ -19,56 +19,76 @@ fn minimal_raw_config() -> RawConfig {
 // ── systemd unit generation tests ───────────────────────────────────
 
 #[test]
-fn unit_contains_read_write_paths_for_config_dir() {
-    let unit = meow_app::generate_systemd_unit("/usr/bin/meow", "/etc/meow/config.yaml");
+fn systemd_unit_generation_table() {
+    // Table of (case_label, bin_path, config_path, expected_substrings).
+    // Rows correspond 1:1 to the former standalone tests:
+    //   read-write paths for config dir        <- unit_contains_read_write_paths_for_config_dir
+    //   exec start uses absolute config path   <- unit_exec_start_uses_absolute_config_path
+    //   hardening: protect system strict       <- unit_has_protect_system_strict
+    //   working directory matches config parent<- unit_working_directory_matches_config_parent
+    //   nested config path consistency         <- unit_paths_consistent_for_nested_config
+    //   edge case: config at filesystem root   <- unit_root_config_path_defaults_to_slash
+    let cases: &[(&str, &str, &str, &[&str])] = &[
+        (
+            "read-write paths for config dir",
+            "/usr/bin/meow",
+            "/etc/meow/config.yaml",
+            &["ReadWritePaths=/etc/meow"],
+        ),
+        (
+            "exec start uses absolute config path",
+            "/usr/bin/meow",
+            "/etc/meow/config.yaml",
+            &["ExecStart=/usr/bin/meow -f /etc/meow/config.yaml"],
+        ),
+        (
+            "hardening: protect system strict",
+            "/usr/bin/meow",
+            "/etc/meow/config.yaml",
+            &["ProtectSystem=strict"],
+        ),
+        (
+            "working directory matches config parent",
+            "/usr/bin/meow",
+            "/opt/meow/config.yaml",
+            &["WorkingDirectory=/opt/meow", "ReadWritePaths=/opt/meow"],
+        ),
+        (
+            "nested config path consistency",
+            "/usr/bin/meow",
+            "/var/lib/meow/configs/config.yaml",
+            &[
+                "WorkingDirectory=/var/lib/meow/configs",
+                "ReadWritePaths=/var/lib/meow/configs",
+            ],
+        ),
+        (
+            "edge case: config at filesystem root",
+            "/usr/bin/meow",
+            "/config.yaml",
+            &["WorkingDirectory=/", "ReadWritePaths=/"],
+        ),
+    ];
+
+    // Every case runs even if an earlier one fails, so a single run reports
+    // all mismatches instead of stopping at the first.
+    let mut failures: Vec<String> = Vec::new();
+    for &(label, bin, config_path, expected) in cases {
+        let unit = meow_app::generate_systemd_unit(bin, config_path);
+        for needle in expected {
+            if !unit.contains(needle) {
+                failures.push(format!(
+                    "[{label}] generate_systemd_unit({bin:?}, {config_path:?}) is missing {needle:?}\ngenerated unit:\n{unit}"
+                ));
+            }
+        }
+    }
 
     assert!(
-        unit.contains("ReadWritePaths=/etc/meow"),
-        "Unit must grant ReadWritePaths to config directory:\n{unit}",
+        failures.is_empty(),
+        "systemd unit generation mismatches:\n{}",
+        failures.join("\n---\n")
     );
-}
-
-#[test]
-fn unit_working_directory_matches_config_parent() {
-    let unit = meow_app::generate_systemd_unit("/usr/bin/meow", "/opt/meow/config.yaml");
-
-    assert!(unit.contains("WorkingDirectory=/opt/meow"));
-    assert!(unit.contains("ReadWritePaths=/opt/meow"));
-}
-
-#[test]
-fn unit_exec_start_uses_absolute_config_path() {
-    let unit = meow_app::generate_systemd_unit("/usr/bin/meow", "/etc/meow/config.yaml");
-
-    assert!(
-        unit.contains("ExecStart=/usr/bin/meow -f /etc/meow/config.yaml"),
-        "ExecStart should use the absolute config path:\n{unit}",
-    );
-}
-
-#[test]
-fn unit_has_protect_system_strict() {
-    let unit = meow_app::generate_systemd_unit("/usr/bin/meow", "/etc/meow/config.yaml");
-
-    assert!(unit.contains("ProtectSystem=strict"));
-}
-
-#[test]
-fn unit_paths_consistent_for_nested_config() {
-    let unit =
-        meow_app::generate_systemd_unit("/usr/bin/meow", "/var/lib/meow/configs/config.yaml");
-
-    assert!(unit.contains("WorkingDirectory=/var/lib/meow/configs"));
-    assert!(unit.contains("ReadWritePaths=/var/lib/meow/configs"));
-}
-
-#[test]
-fn unit_root_config_path_defaults_to_slash() {
-    // Edge case: config at filesystem root
-    let unit = meow_app::generate_systemd_unit("/usr/bin/meow", "/config.yaml");
-
-    assert!(unit.contains("WorkingDirectory=/"));
-    assert!(unit.contains("ReadWritePaths=/"));
 }
 
 // ── config save under restricted permissions (simulates ProtectSystem=strict) ──

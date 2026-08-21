@@ -270,30 +270,21 @@ mod tests {
     }
 
     #[test]
-    fn parse_fingerprint_chrome() {
-        let cfg = parse_opts(&format!(
-            "mode=client;sni=t.example;path=/ws;ech_config={FAKE_ECH_B64};fingerprint=chrome"
-        ))
-        .expect("ok");
-        assert_eq!(cfg.fingerprint.as_deref(), Some("chrome"));
-    }
+    fn parse_fingerprint_cases() {
+        // (label, opts suffix appended to the minimal client opts, expected cfg.fingerprint)
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            ("explicit chrome", ";fingerprint=chrome", Some("chrome")),
+            ("absent defaults to chrome", "", Some("chrome")),
+            ("none opts out", ";fingerprint=none", None),
+        ];
 
-    #[test]
-    fn parse_fingerprint_defaults_to_chrome() {
-        let cfg = parse_opts(&format!(
-            "mode=client;sni=t.example;path=/ws;ech_config={FAKE_ECH_B64}"
-        ))
-        .expect("ok");
-        assert_eq!(cfg.fingerprint.as_deref(), Some("chrome"));
-    }
-
-    #[test]
-    fn parse_fingerprint_none_opts_out() {
-        let cfg = parse_opts(&format!(
-            "mode=client;sni=t.example;path=/ws;ech_config={FAKE_ECH_B64};fingerprint=none"
-        ))
-        .expect("ok");
-        assert!(cfg.fingerprint.is_none());
+        for (label, suffix, expected) in cases {
+            let cfg = parse_opts(&format!(
+                "mode=client;sni=t.example;path=/ws;ech_config={FAKE_ECH_B64}{suffix}"
+            ))
+            .unwrap_or_else(|e| panic!("case {label}: parse_opts failed: {e}"));
+            assert_eq!(cfg.fingerprint.as_deref(), *expected, "case: {label}");
+        }
     }
 
     #[test]

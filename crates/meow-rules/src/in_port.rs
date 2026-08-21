@@ -110,34 +110,73 @@ mod tests {
     }
 
     #[test]
-    fn in_port_exact_match() {
-        let r = InPortRule::new("8080", "DIRECT").unwrap();
-        assert!(r.match_metadata(&meta_with_port(8080), &helper()));
-    }
+    fn in_port_match_cases() {
+        // (payload, adapter, metadata.in_port, expected match, label)
+        let cases = [
+            ("8080", "DIRECT", 8080u16, true, "exact match"),
+            ("8080", "DIRECT", 8081, false, "exact no match"),
+            ("1000-2000", "PROXY", 1000, true, "range lower bound"),
+            ("1000-2000", "PROXY", 2000, true, "range upper bound"),
+            (
+                "1000-2000",
+                "PROXY",
+                999,
+                false,
+                "range rejects below lower bound",
+            ),
+            (
+                "1000-2000",
+                "PROXY",
+                2001,
+                false,
+                "range rejects above upper bound",
+            ),
+            // in_port == 0 means the listener did not populate the field
+            // ("unknown"), not port 0 — it must never match.
+            (
+                "8080",
+                "DIRECT",
+                0,
+                false,
+                "zero in_port never matches nonzero rule",
+            ),
+            (
+                "80/8080/443/8443",
+                "PROXY",
+                8080,
+                true,
+                "slash list matches interior entry",
+            ),
+            (
+                "80/8080/443/8443",
+                "PROXY",
+                8443,
+                true,
+                "slash list matches last entry",
+            ),
+            (
+                "80/8080/443/8443",
+                "PROXY",
+                53,
+                false,
+                "slash list rejects unlisted port",
+            ),
+        ];
 
-    #[test]
-    fn in_port_exact_no_match() {
-        let r = InPortRule::new("8080", "DIRECT").unwrap();
-        assert!(!r.match_metadata(&meta_with_port(8081), &helper()));
-    }
-
-    #[test]
-    fn in_port_range_matches_lower_bound() {
-        let r = InPortRule::new("1000-2000", "PROXY").unwrap();
-        assert!(r.match_metadata(&meta_with_port(1000), &helper()));
-    }
-
-    #[test]
-    fn in_port_range_matches_upper_bound() {
-        let r = InPortRule::new("1000-2000", "PROXY").unwrap();
-        assert!(r.match_metadata(&meta_with_port(2000), &helper()));
-    }
-
-    #[test]
-    fn in_port_range_rejects_outside() {
-        let r = InPortRule::new("1000-2000", "PROXY").unwrap();
-        assert!(!r.match_metadata(&meta_with_port(999), &helper()));
-        assert!(!r.match_metadata(&meta_with_port(2001), &helper()));
+        let mut failures = Vec::new();
+        for (spec, adapter, port, expected, label) in cases {
+            let rule = InPortRule::new(spec, adapter).unwrap();
+            let got = rule.match_metadata(&meta_with_port(port), &helper());
+            if got != expected {
+                failures.push(format!(
+                    "{label}: IN-PORT '{spec}' vs in_port {port} => {got}, expected {expected}"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "IN-PORT match mismatches: {failures:#?}"
+        );
     }
 
     #[test]
@@ -148,21 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn in_port_zero_in_metadata_never_matches_nonzero_rule() {
-        let r = InPortRule::new("8080", "DIRECT").unwrap();
-        assert!(!r.match_metadata(&meta_with_port(0), &helper()));
-    }
-
-    #[test]
     fn in_port_inverted_range_errors() {
         assert!(InPortRule::new("2000-1000", "DIRECT").is_err());
-    }
-
-    #[test]
-    fn in_port_slash_list_matches() {
-        let r = InPortRule::new("80/8080/443/8443", "PROXY").unwrap();
-        assert!(r.match_metadata(&meta_with_port(8080), &helper()));
-        assert!(r.match_metadata(&meta_with_port(8443), &helper()));
-        assert!(!r.match_metadata(&meta_with_port(53), &helper()));
     }
 }

@@ -248,36 +248,72 @@ mod tests {
         assert!(idx("C") < idx("A"));
     }
 
-    #[test]
-    fn cycle_detected_two_block() {
-        let raw_map = raw(&[("A", &["SUB-RULE,B"]), ("B", &["SUB-RULE,A"])]);
-        let graph = build_reference_graph(&raw_map).unwrap();
-        let err = topo_order_with_cycle_check(&raw_map, &graph).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("cycle"), "unexpected: {msg}");
-        // Path must include both A and B.
-        assert!(msg.contains("A") && msg.contains("B"), "unexpected: {msg}");
+    /// One cycle topology plus the substrings its error message must contain.
+    struct CycleCase {
+        label: &'static str,
+        blocks: &'static [(&'static str, &'static [&'static str])],
+        expected: &'static [&'static str],
     }
 
     #[test]
-    fn cycle_detected_self_reference() {
-        let raw_map = raw(&[("A", &["SUB-RULE,A"])]);
-        let graph = build_reference_graph(&raw_map).unwrap();
-        let err = topo_order_with_cycle_check(&raw_map, &graph).unwrap_err();
-        assert!(format!("{err}").contains("cycle"));
-    }
+    fn cycle_detected_table() {
+        let cases: &[CycleCase] = &[
+            CycleCase {
+                label: "two-block cycle A -> B -> A",
+                blocks: &[("A", &["SUB-RULE,B"]), ("B", &["SUB-RULE,A"])],
+                // Path must include both A and B.
+                expected: &["cycle", "A", "B"],
+            },
+            CycleCase {
+                label: "self reference A -> A",
+                blocks: &[("A", &["SUB-RULE,A"])],
+                expected: &["cycle"],
+            },
+            CycleCase {
+                label: "three-node cycle A -> B -> C -> A",
+                blocks: &[
+                    ("A", &["SUB-RULE,B"]),
+                    ("B", &["SUB-RULE,C"]),
+                    ("C", &["SUB-RULE,A"]),
+                ],
+                expected: &["cycle"],
+            },
+        ];
 
-    #[test]
-    fn cycle_detected_three_node() {
-        let raw_map = raw(&[
-            ("A", &["SUB-RULE,B"]),
-            ("B", &["SUB-RULE,C"]),
-            ("C", &["SUB-RULE,A"]),
-        ]);
-        let graph = build_reference_graph(&raw_map).unwrap();
-        let err = topo_order_with_cycle_check(&raw_map, &graph).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("cycle"), "unexpected: {msg}");
+        // Every case runs; failures are collected so one bad topology does not
+        // hide the others.
+        let mut failures: Vec<String> = Vec::new();
+        for case in cases {
+            let label = case.label;
+            let raw_map = raw(case.blocks);
+            let graph = match build_reference_graph(&raw_map) {
+                Ok(graph) => graph,
+                Err(err) => {
+                    failures.push(format!("{label}: building reference graph failed: {err}"));
+                    continue;
+                }
+            };
+            match topo_order_with_cycle_check(&raw_map, &graph) {
+                Ok(order) => {
+                    failures.push(format!(
+                        "{label}: expected a cycle error, got order {order:?}"
+                    ));
+                }
+                Err(err) => {
+                    let msg = format!("{err}");
+                    for needle in case.expected {
+                        if !msg.contains(needle) {
+                            failures
+                                .push(format!("{label}: error message missing {needle:?}: {msg}"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "cycle detection failures: {failures:#?}"
+        );
     }
 
     #[test]

@@ -4,48 +4,42 @@ use smallvec::smallvec;
 use std::sync::Arc;
 
 #[test]
-fn test_statistics_new() {
-    let stats = Statistics::new();
-    let (up, down) = stats.snapshot();
-    assert_eq!(up, 0);
-    assert_eq!(down, 0);
-    assert!(stats.active_connections().is_empty());
+fn test_statistics_new_and_default_start_zeroed() {
+    let from_new = Statistics::new();
+    let (up, down) = from_new.snapshot();
+    assert_eq!(up, 0, "Statistics::new() upload_total must start at 0");
+    assert_eq!(down, 0, "Statistics::new() download_total must start at 0");
+    assert!(
+        from_new.active_connections().is_empty(),
+        "Statistics::new() must start with no active connections"
+    );
+
+    let from_default = Statistics::default();
+    let (up, down) = from_default.snapshot();
+    assert_eq!(up, 0, "Statistics::default() upload_total must start at 0");
+    assert_eq!(
+        down, 0,
+        "Statistics::default() download_total must start at 0"
+    );
+    assert!(
+        from_default.active_connections().is_empty(),
+        "Statistics::default() must start with no active connections"
+    );
 }
 
 #[test]
-fn test_statistics_default() {
-    let stats = Statistics::default();
-    let (up, down) = stats.snapshot();
-    assert_eq!(up, 0);
-    assert_eq!(down, 0);
-}
-
-#[test]
-fn test_add_upload() {
+fn test_add_upload_and_download_accumulate_independently() {
     let stats = Statistics::new();
+
     stats.add_upload(100);
-    stats.add_upload(200);
-    let (up, _) = stats.snapshot();
-    assert_eq!(up, 300);
-}
-
-#[test]
-fn test_add_download() {
-    let stats = Statistics::new();
     stats.add_download(500);
-    stats.add_download(1500);
-    let (_, down) = stats.snapshot();
-    assert_eq!(down, 2000);
-}
+    // One add per direction: each counter sees only its own bytes.
+    assert_eq!(stats.snapshot(), (100, 500));
 
-#[test]
-fn test_upload_and_download_independent() {
-    let stats = Statistics::new();
-    stats.add_upload(100);
-    stats.add_download(200);
-    let (up, down) = stats.snapshot();
-    assert_eq!(up, 100);
-    assert_eq!(down, 200);
+    stats.add_upload(200);
+    stats.add_download(1500);
+    // Repeated adds accumulate per direction, still without cross-contamination.
+    assert_eq!(stats.snapshot(), (300, 2000));
 }
 
 #[test]
