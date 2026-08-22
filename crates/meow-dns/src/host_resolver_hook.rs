@@ -105,7 +105,14 @@ mod tests {
                 HostEntry::Addresses(vec![ip.parse().expect("valid IP literal")]),
             ));
         }
-        Arc::new(Resolver::new(vec![], vec![], DnsMode::Normal, trie, true))
+        Arc::new(Resolver::new(
+            vec![],
+            vec![],
+            DnsMode::Normal,
+            trie,
+            true,
+            true,
+        ))
     }
 
     #[tokio::test]

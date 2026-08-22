@@ -1,8 +1,7 @@
-use crate::resolver::Resolver;
+use crate::resolver::{AddressLookupResult, Resolver};
 use futures::FutureExt;
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{Record, RecordType};
-use meow_common::DnsMode;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Weak};
@@ -121,6 +120,10 @@ impl DnsServer {
             .await;
         }
 
+        if qtype == 28 && !resolver.ipv6_enabled() {
+            return Ok(Self::build_noerror_empty(id, data, flags, question_len));
+        }
+
         // Check hosts trie first. If the domain is present in the hosts table
         // but has no IPs of the queried family, return NOERROR with zero answers
         // rather than NXDOMAIN — clients may retry on NXDOMAIN but not on an
@@ -152,26 +155,22 @@ impl DnsServer {
         // in cache — for everything else, so redir-host / normal-mode clients
         // expire their own caches on the upstream's schedule instead of a
         // synthetic constant.
-        let ip = if qtype == 1 {
-            resolver.lookup_ipv4_with_ttl(&domain).await
+        let lookup = if qtype == 1 {
+            resolver.lookup_ipv4_result(&domain).await
         } else {
-            resolver.lookup_ipv6_with_ttl(&domain).await
+            resolver.lookup_ipv6_result(&domain).await
         };
 
-        Ok(match ip {
-            Some((addr, ttl)) => {
+        Ok(match lookup {
+            AddressLookupResult::Answer(addr, ttl) => {
                 // Sub-second remainders round up to 1 — a 0-TTL answer means
                 // "never cache", which is stricter than the entry deserves.
                 let ttl_secs = ttl.as_secs().clamp(1, u64::from(u32::MAX)) as u32;
                 Self::build_response(id, data, flags, question_len, qtype, addr, ttl_secs)
             }
-            // Fake-IP mode AAAA when only v4 pool is configured: return
-            // NOERROR-empty so clients fall back to IPv4 cleanly. NXDOMAIN
-            // would tell them "no such host" — wrong signal.
-            None if qtype == 28 && resolver.mode() == DnsMode::FakeIp => {
-                Self::build_noerror_empty(id, data, flags, question_len)
-            }
-            None => Self::build_nxdomain(id, data, flags, question_len),
+            AddressLookupResult::NoData => Self::build_noerror_empty(id, data, flags, question_len),
+            AddressLookupResult::NxDomain => Self::build_nxdomain(id, data, flags, question_len),
+            AddressLookupResult::Failed => Self::build_servfail(id, data, flags, question_len),
         })
     }
 
@@ -212,9 +211,14 @@ impl DnsServer {
                 // real origin IP out of the hint and bypass the fake-IP
                 // routing the tunnel depends on.
                 let strip_hints = resolver.fake_ip_active_for(domain);
+                let strip_ipv6_hint = !resolver.ipv6_enabled();
                 for rec in &l.answers {
-                    if strip_hints {
-                        resp.add_answer(strip_svc_ip_hints(rec));
+                    if strip_hints || strip_ipv6_hint {
+                        resp.add_answer(strip_svc_ip_hints(
+                            rec,
+                            strip_hints,
+                            strip_hints || strip_ipv6_hint,
+                        ));
                     } else {
                         resp.add_answer(rec.clone());
                     }
@@ -469,6 +473,12 @@ impl DnsServer {
 
         response
     }
+
+    fn build_servfail(id: u16, query: &[u8], flags: u16, question_len: usize) -> Vec<u8> {
+        let mut response = Self::build_noerror_empty(id, query, flags, question_len);
+        response[3] = (response[3] & 0xF0) | 0x02;
+        response
+    }
 }
 
 /// A [`DnsServer`] whose listen socket is already bound. Produced by
@@ -581,27 +591,24 @@ impl BoundDnsServer {
 /// Return a copy of `rec` with `ipv4hint` / `ipv6hint` SvcParams removed when
 /// it is an HTTPS or SVCB record; any other record type is cloned unchanged.
 ///
-/// Used only in fake-IP mode (see [`Resolver::fake_ip_active_for`]). Those
-/// hints carry the origin's real addresses; stripping them forces an HTTP/3
-/// client back onto the A/AAAA records, which return fake IPs, so the
-/// connection stays inside fake-IP routing. All other SvcParams (alpn, port,
-/// ech, …) are preserved so HTTP/3 and ECH keep working — a deliberate, more
-/// surgical divergence from upstream mihomo, which returns an empty answer.
+/// In fake-IP mode both address hints are removed. When IPv6 is disabled,
+/// only `ipv6hint` is removed so clients can still use `ipv4hint`. All other
+/// SvcParams (alpn, port, ech, …) are preserved.
 /// See ADR-0013 for the dual-stack correctness analysis.
-fn strip_svc_ip_hints(rec: &Record) -> Record {
+fn strip_svc_ip_hints(rec: &Record, strip_ipv4: bool, strip_ipv6: bool) -> Record {
     use hickory_proto::rr::rdata::svcb::{Mandatory, SvcParamKey, SvcParamValue, SVCB};
     use hickory_proto::rr::rdata::HTTPS;
     use hickory_proto::rr::RData;
 
-    fn is_hint(k: SvcParamKey) -> bool {
-        matches!(k, SvcParamKey::Ipv4Hint | SvcParamKey::Ipv6Hint)
+    fn is_hint(k: SvcParamKey, strip_ipv4: bool, strip_ipv6: bool) -> bool {
+        (strip_ipv4 && k == SvcParamKey::Ipv4Hint) || (strip_ipv6 && k == SvcParamKey::Ipv6Hint)
     }
 
-    fn strip(svcb: &SVCB) -> SVCB {
+    fn strip(svcb: &SVCB, strip_ipv4: bool, strip_ipv6: bool) -> SVCB {
         let mut params = Vec::with_capacity(svcb.svc_params.len());
         for (key, value) in &svcb.svc_params {
             // Drop the address hints themselves.
-            if is_hint(*key) {
+            if is_hint(*key, strip_ipv4, strip_ipv6) {
                 continue;
             }
             // RFC 9460 §8: a key listed in `mandatory` that is absent from the
@@ -613,8 +620,11 @@ fn strip_svc_ip_hints(rec: &Record) -> Record {
             if let (SvcParamKey::Mandatory, SvcParamValue::Mandatory(Mandatory(keys))) =
                 (key, value)
             {
-                let kept: Vec<SvcParamKey> =
-                    keys.iter().copied().filter(|k| !is_hint(*k)).collect();
+                let kept: Vec<SvcParamKey> = keys
+                    .iter()
+                    .copied()
+                    .filter(|k| !is_hint(*k, strip_ipv4, strip_ipv6))
+                    .collect();
                 if kept.is_empty() {
                     continue;
                 }
@@ -630,8 +640,8 @@ fn strip_svc_ip_hints(rec: &Record) -> Record {
     }
 
     let new_rdata = match &rec.data {
-        RData::HTTPS(https) => RData::HTTPS(HTTPS(strip(&https.0))),
-        RData::SVCB(svcb) => RData::SVCB(strip(svcb)),
+        RData::HTTPS(https) => RData::HTTPS(HTTPS(strip(&https.0, strip_ipv4, strip_ipv6))),
+        RData::SVCB(svcb) => RData::SVCB(strip(svcb, strip_ipv4, strip_ipv6)),
         // Not an HTTPS/SVCB record (e.g. a CNAME in the chain) — leave intact.
         _ => return rec.clone(),
     };
@@ -653,6 +663,8 @@ pub fn hex_prefix(data: &[u8], max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+    use meow_common::DnsMode;
     use std::net::Ipv4Addr;
 
     /// Build a minimal valid DNS query: header + single QNAME (`example.com`)
@@ -705,7 +717,7 @@ mod tests {
         use hickory_proto::rr::rdata::svcb::SvcParamKey;
         use hickory_proto::rr::RData;
 
-        let stripped = strip_svc_ip_hints(&https_record_with_hints());
+        let stripped = strip_svc_ip_hints(&https_record_with_hints(), true, true);
         let RData::HTTPS(https) = &stripped.data else {
             panic!("expected HTTPS rdata");
         };
@@ -720,6 +732,20 @@ mod tests {
         );
         assert!(keys.contains(&&SvcParamKey::Alpn), "alpn must be preserved");
         assert!(keys.contains(&&SvcParamKey::Port), "port must be preserved");
+    }
+
+    #[test]
+    fn strip_ipv6_hint_preserves_ipv4_hint() {
+        use hickory_proto::rr::rdata::svcb::SvcParamKey;
+        use hickory_proto::rr::RData;
+
+        let stripped = strip_svc_ip_hints(&https_record_with_hints(), false, true);
+        let RData::HTTPS(https) = &stripped.data else {
+            panic!("expected HTTPS rdata");
+        };
+        let keys: Vec<_> = https.0.svc_params.iter().map(|(key, _)| *key).collect();
+        assert!(keys.contains(&SvcParamKey::Ipv4Hint));
+        assert!(!keys.contains(&SvcParamKey::Ipv6Hint));
     }
 
     #[test]
@@ -763,7 +789,7 @@ mod tests {
             RData::HTTPS(HTTPS(SVCB::new(1, name, params))),
         );
 
-        let RData::HTTPS(https) = &strip_svc_ip_hints(&rec).data else {
+        let RData::HTTPS(https) = &strip_svc_ip_hints(&rec, true, true).data else {
             panic!("expected HTTPS rdata");
         };
         let p = &https.0.svc_params;
@@ -810,7 +836,7 @@ mod tests {
             RData::HTTPS(HTTPS(SVCB::new(1, name, params))),
         );
 
-        let RData::HTTPS(https) = &strip_svc_ip_hints(&rec).data else {
+        let RData::HTTPS(https) = &strip_svc_ip_hints(&rec, true, true).data else {
             panic!("expected HTTPS rdata");
         };
         // An empty mandatory list is itself malformed, so it must be dropped.
@@ -831,7 +857,7 @@ mod tests {
             300,
             RData::A(A::new(93, 184, 216, 34)),
         );
-        let out = strip_svc_ip_hints(&rec);
+        let out = strip_svc_ip_hints(&rec, true, true);
         assert_eq!(out, rec, "non-HTTPS/SVCB records must be unchanged");
     }
 
@@ -936,6 +962,33 @@ mod tests {
             DnsMode::Normal,
             meow_trie::DomainTrie::new(),
             false,
+            true,
+        )
+    }
+
+    async fn resolver_with_upstream_rcode(code: ResponseCode) -> crate::resolver::Resolver {
+        let upstream = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = upstream.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (len, peer) = upstream.recv_from(&mut buf).await.unwrap();
+            let request = Message::from_bytes(&buf[..len]).unwrap();
+            let mut response =
+                Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+            response.metadata.response_code = code;
+            response.add_queries(request.queries.iter().cloned());
+            upstream
+                .send_to(&response.to_bytes().unwrap(), peer)
+                .await
+                .unwrap();
+        });
+        crate::resolver::Resolver::new(
+            vec![addr],
+            Vec::new(),
+            DnsMode::Normal,
+            meow_trie::DomainTrie::new(),
+            false,
+            true,
         )
     }
 
@@ -991,6 +1044,22 @@ mod tests {
         assert_eq!(resp.len(), 12, "header-only response");
     }
 
+    #[tokio::test]
+    async fn handle_query_distinguishes_nodata_nxdomain_and_failure() {
+        for (upstream, expected) in [
+            (ResponseCode::NoError, ResponseCode::NoError),
+            (ResponseCode::NXDomain, ResponseCode::NXDomain),
+            (ResponseCode::ServFail, ResponseCode::ServFail),
+        ] {
+            let resolver = resolver_with_upstream_rcode(upstream).await;
+            let response = DnsServer::handle_query(&sample_query(7, 1), &resolver)
+                .await
+                .unwrap();
+            assert_eq!(response[3] & 0x0f, expected.low());
+            assert_eq!(&response[6..8], &[0, 0]);
+        }
+    }
+
     #[test]
     fn build_response_echoes_single_question_verbatim() {
         let q = sample_query(9, 1);
@@ -1036,6 +1105,7 @@ mod tests {
             DnsMode::Normal,
             meow_trie::DomainTrie::new(),
             false,
+            true,
         ));
         let server = DnsServer::new(resolver, "127.0.0.1:0".parse().unwrap());
         let bound = server.bind().await.unwrap();

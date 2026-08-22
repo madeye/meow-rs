@@ -180,7 +180,7 @@ Any PR touching these types **must** include before/after byte counts (from `-Zp
 - `Metadata` (`crates/meow-common/src/metadata.rs`) — M2 baseline 272 B struct / heap via SmolStr
 - `ConnectionInfo` (`crates/meow-tunnel/src/statistics.rs`) — M2 exit 120 B
 - `UdpSession` (`crates/meow-tunnel/src/udp.rs`) — M2 exit 40 B
-- DNS `CacheEntry` / `ReverseEntry` (`crates/meow-dns/src/cache.rs`) — M2 exit 72 B per LruEntry slot
+- DNS `CacheEntry` / `ReverseEntry` (`crates/meow-dns/src/cache.rs`) — M2 exit 72 B per `CacheEntry` (the LRU `.val`; full `LruEntry` slot incl. key + links is ~104 B on macOS)
 
 Any PR touching relay code (`crates/meow-tunnel/src/relay.rs`, `tcp.rs`, or call sites in `meow-listener`) must preserve the zero-per-relay-setup-allocation invariant: relay buffers are stack-allocated in the caller's async frame, not heap-allocated per call.
 

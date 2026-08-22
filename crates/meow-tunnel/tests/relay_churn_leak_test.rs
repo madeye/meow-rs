@@ -59,6 +59,7 @@ fn direct_tunnel() -> Tunnel {
         meow_common::DnsMode::Normal,
         DomainTrie::new(),
         false,
+        true,
     ));
     let tunnel = Tunnel::new(resolver);
     tunnel.set_mode(meow_common::TunnelMode::Direct);
