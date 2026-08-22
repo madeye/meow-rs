@@ -82,6 +82,16 @@ pub trait RuleSet: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Domain-only match for DNS `nameserver-policy` `rule-set:` entries.
+    ///
+    /// Unlike [`RuleSet::matches`], this takes a bare domain string instead of
+    /// a full [`Metadata`], because DNS policy dispatch only has the query
+    /// domain. IP-behavior sets return `false`; classical sets evaluate their
+    /// rules against a host-only `Metadata` (IP rules never match).
+    fn matches_domain(&self, _domain: &str) -> bool {
+        false
+    }
 }
 
 /// Build a rule-set of the given behavior from already-parsed entries.
@@ -297,6 +307,10 @@ impl RuleSet for DomainRuleSet {
     fn len(&self) -> usize {
         self.count
     }
+
+    fn matches_domain(&self, domain: &str) -> bool {
+        self.trie.search(domain).is_some()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +441,20 @@ impl RuleSet for ClassicalRuleSet {
 
     fn should_find_process(&self) -> bool {
         self.rules.iter().any(|rule| rule.should_find_process())
+    }
+
+    fn matches_domain(&self, domain: &str) -> bool {
+        // Host-only metadata: IP/port/process/rules needing a resolver won't
+        // match, matching upstream's "only domain rules" semantics for
+        // classical sets. dst_port stays at the default 0 so DST-PORT rules
+        // never fire on a domain-only query.
+        let metadata = Metadata {
+            host: domain.into(),
+            ..Default::default()
+        };
+        self.rules
+            .iter()
+            .any(|r| r.match_metadata(&metadata, &RuleMatchHelper))
     }
 }
 
@@ -560,6 +588,43 @@ mod tests {
         let set = build_rule_set(RuleSetBehavior::Domain, &["example.com".to_string()], &ctx);
         assert_eq!(set.behavior(), RuleSetBehavior::Domain);
         assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn domain_rule_set_matches_domain_directly() {
+        let set = DomainRuleSet::from_entries(&["+.foo.com".to_string()]);
+        assert!(set.matches_domain("a.foo.com"));
+        assert!(set.matches_domain("foo.com"));
+        assert!(!set.matches_domain("bar.com"));
+        // case-insensitive, like the full Metadata path
+        assert!(set.matches_domain("A.Foo.COM"));
+    }
+
+    #[test]
+    fn classical_rule_set_matches_domain_only() {
+        let ctx = ParserContext::empty();
+        let set = ClassicalRuleSet::from_entries(
+            &[
+                "DOMAIN-SUFFIX,google.com".to_string(),
+                "IP-CIDR,10.0.0.0/8,no-resolve".to_string(),
+                // A DST-PORT rule must NOT fire on a domain-only query even
+                // though DNS runs on port 53 — guard against dst_port=53
+                // false positives in matches_domain.
+                "DST-PORT,53".to_string(),
+            ],
+            &ctx,
+        );
+        assert!(set.matches_domain("mail.google.com"));
+        // IP and port rules must not fire on a domain-only query.
+        assert!(!set.matches_domain("10.0.0.1"));
+        assert!(!set.matches_domain("example.org"));
+    }
+
+    #[test]
+    fn ipcidr_rule_set_matches_domain_is_false() {
+        let set = IpCidrRuleSet::from_entries(&["10.0.0.0/8".to_string()]);
+        assert!(!set.matches_domain("10.0.0.1"));
+        assert!(!set.matches_domain("foo.com"));
     }
 
     #[test]

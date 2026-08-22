@@ -67,16 +67,23 @@ DoH instead.
 
 ## Nameserver policy
 
-Route specific domains to specific upstreams. Keys are exact names, `+.`-wildcards, or
-`geosite:` category selectors; values are a single upstream or a list.
+Route specific domains to specific upstreams. Keys are exact names, `+.`-wildcards,
+`geosite:` category selectors, or `rule-set:` provider selectors; values are a single
+upstream or a list.
 
 ```yaml
 dns:
   nameserver-policy:
     "geosite:cn": [223.5.5.5, 119.29.29.29]
+    "rule-set:cn-domain": [223.5.5.5]   # behavior: domain (or classical)
     "+.local": 192.168.1.1
     "internal.corp": 10.0.0.1
 ```
+
+`rule-set:` references a rule-provider by name. The provider behavior must be `domain`
+(or `classical`, in which case only its domain rules are matched); an `ipcidr` provider or
+a missing provider is a config error. The matcher reads the provider live, so background
+refreshes apply automatically.
 
 ## Fallback filter
 

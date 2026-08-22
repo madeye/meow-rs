@@ -140,6 +140,12 @@ All new cases are `#[tokio::test]` to match the async DNS parser.
 | D10 | `parse_nameserver_policy_absent_is_valid` | No `nameserver-policy` key. Assert `Ok`, `policy: None` in resolver config. |
 | D11 | `parse_fallback_filter_invalid_cidr_errors` **[guard-rail]** | `ipcidr: ["not-a-cidr"]`. Assert `Err` at parse time, not at query time. Guards that CIDR parsing is eager. |
 | D12 | `parse_nameserver_policy_multiple_entries` | Three entries: one exact, two wildcard. Assert all three present in parsed policy. |
+| D13 | `parse_nameserver_policy_rule_set_domain_matches_loaded_provider` | `rule-set:cn` with an inline `domain` provider containing `example.cn`/`+.cn`. Assert `lookup("example.cn")` and `lookup("foo.cn")` hit; `lookup("example.com")` does not. |
+| D14 | `parse_nameserver_policy_rule_set_missing_provider_errors` | `rule-set:missing` with no provider. Assert `Err` containing `not found rule-set`. |
+| D15 | `parse_nameserver_policy_rule_set_ipcidr_behavior_errors` | `rule-set:ips` with an `ipcidr` provider. Assert `Err` mentioning `IpCidr`. |
+| D16 | `parse_nameserver_policy_rule_set_classical_warns_and_matches` | `rule-set:cls` with a `classical` provider containing `DOMAIN-SUFFIX,google.com`. Assert `lookup("mail.google.com")` hits; `lookup("example.org")` does not. |
+| D17 | `parse_nameserver_policy_rule_set_comma_expands` | `rule-set:a,b` with two providers. Assert both `a.example` and `b.example` hit. |
+| D18 | `parse_nameserver_policy_rule_set_case_sensitive_provider_name` | Provider named `CN` (uppercase). `rule-set:CN` hits; documents that provider names are case-sensitive. |
 
 ### E. Network-dependent integration tests (`crates/meow-dns/tests/nameserver_policy_integration.rs`)
 

@@ -1717,6 +1717,26 @@ async fn build_config(
     )
     .await?;
 
+    // Load rule-providers before DNS so that `nameserver-policy` `rule-set:`
+    // entries can resolve against them. This uses the step-1 proxy registry;
+    // step-2 only differs in DIRECT's resolver field (see ADR-0012), which
+    // does not affect provider `proxy:` resolution or HTTP fetches.
+    let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
+    let rule_providers = match raw.rule_providers.as_ref() {
+        Some(map) if !map.is_empty() => {
+            load_rule_providers_async(
+                map.clone(),
+                cache_dir_buf.clone(),
+                ctx.clone(),
+                download_proxy,
+                proxies.clone(),
+                Arc::clone(&provider_payloads),
+            )
+            .await?
+        }
+        _ => HashMap::new(),
+    };
+
     // DNS — pass the explicit mmdb path so fallback-filter GeoIP uses the
     // same path as the rule engine, plus the proxy registry from step 1
     // so #PROXY-tagged nameservers can resolve their referenced adapter.
@@ -1726,6 +1746,7 @@ async fn build_config(
         cache_dir,
         &proxies,
         ctx.geosite.clone(),
+        &rule_providers,
     )
     .await?;
 
@@ -1739,22 +1760,6 @@ async fn build_config(
         Arc::clone(&provider_payloads),
     )
     .await?;
-
-    let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
-    let rule_providers = match raw.rule_providers.as_ref() {
-        Some(map) if !map.is_empty() => {
-            load_rule_providers_async(
-                map.clone(),
-                cache_dir_buf.clone(),
-                ctx.clone(),
-                download_proxy,
-                proxies.clone(),
-                provider_payloads,
-            )
-            .await?
-        }
-        _ => HashMap::new(),
-    };
 
     // Listener config
     let bind_addr = if general.allow_lan {
