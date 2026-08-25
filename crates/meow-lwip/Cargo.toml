@@ -34,7 +34,7 @@ description = "Vendored lwIP TCP/IP stack bindings (madeye fork, single-owner co
 # upstream declares it rather than restating it as the workspace's plain MIT.
 license = "MIT/Apache-2.0"
 authors = ["@ssrlive", "@madeye"]
-repository = "https://github.com/madeye/meow-rs"
+repository = "https://github.com/meow-rs/meow-rs"
 homepage = "https://madeye.github.io/meow-rs/"
 readme = "README.md"
 
