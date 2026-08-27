@@ -45,7 +45,7 @@ v1 captures **domain-based** traffic only (the fake-IP range). Outbound dials
 always go to real IPs, so they cannot loop back into the adapter. IP-literal
 connections are not captured. Full field reference and the loop-freedom
 argument are in
-[docs/tun.md](https://github.com/madeye/meow-rs/blob/main/docs/tun.md).
+[docs/tun.md](https://github.com/meow-rs/meow-rs/blob/main/docs/tun.md).
 
 ## Linux / macOS tproxy
 
@@ -109,7 +109,7 @@ The repo ships `scripts/tproxy-gateway-linux.sh` (nftables) and
 `scripts/tproxy-gateway-macos.sh` (pf, experimental) to automate the gateway plumbing.
 The complete walkthrough — prerouting rules, DNS-mode trade-offs, and systemd wiring —
 is in
-[docs/tproxy-gateway.md](https://github.com/madeye/meow-rs/blob/main/docs/tproxy-gateway.md).
+[docs/tproxy-gateway.md](https://github.com/meow-rs/meow-rs/blob/main/docs/tproxy-gateway.md).
 :::
 
 ## Recovering domains

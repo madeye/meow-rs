@@ -1,3 +1,9 @@
+//! Outbound proxy protocol implementations and groups for the meow-rs kernel.
+//!
+//! Adapters for Shadowsocks, Trojan, VLESS, VMess, Hysteria2, Snell, AnyTLS,
+//! HTTP, SOCKS5, Direct, and Reject, plus Selector, URLTest, Fallback,
+//! LoadBalance, and Relay groups.
+
 pub mod direct;
 pub mod group;
 pub mod health;

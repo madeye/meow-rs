@@ -51,6 +51,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "net"] }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

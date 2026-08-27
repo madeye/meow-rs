@@ -113,6 +113,7 @@ jobs:
             --test tls_test \
             --test ws_test \
             --test crate_invariants_test \
+            --test crate_publish_metadata_test \
             -- --nocapture
 
       # ADR-0008 allocation-count gates. Release build: the thresholds are
@@ -269,6 +270,7 @@ jobs:
             --test trojan_integration \
             --test tls_test \
             --test ws_test \
+            --test crate_publish_metadata_test \
             -- --nocapture
 
       # TUN inbound tests: `listener-tun` is not a default feature, so the
@@ -306,6 +308,7 @@ jobs:
             --test trojan_integration \
             --test tls_test \
             --test ws_test \
+            --test crate_publish_metadata_test \
             -- --nocapture
 
       # `listener-tun` is not a default feature; this leg runs the tun

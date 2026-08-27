@@ -1,3 +1,8 @@
+//! YAML configuration parsing for the meow-rs proxy kernel.
+//!
+//! Turns a Clash Meta-style `config.yaml` into typed structs consumed by
+//! the tunnel, listeners, DNS, and API.
+
 pub mod auth;
 pub mod dns_parser;
 pub mod ech_dns;

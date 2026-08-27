@@ -1,3 +1,8 @@
+//! Inbound protocol listeners for the meow-rs proxy kernel.
+//!
+//! Mixed, HTTP, SOCKS5, and TProxy acceptors, plus an optional TUN device
+//! inbound (feature `listener-tun`).
+
 pub mod sniffer;
 
 pub const DEFAULT_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);

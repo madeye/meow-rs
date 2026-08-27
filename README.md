@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://madeye.github.io/meow-rs/logo.png" alt="meow-rs — a ginger cat peeking over a wall" width="160">
+  <img src="https://meow-rs.github.io/meow-rs/logo.png" alt="meow-rs — a ginger cat peeking over a wall" width="160">
 </div>
 
 # meow-rs
@@ -321,7 +321,7 @@ tail -f ~/Library/Logs/meow/meow.log
 
 Official `.ipk` packages for aarch64 routers — including a
 `luci-app-meow` that embeds the built-in web panel in LuCI — are attached
-to every [release](https://github.com/madeye/meow-rs/releases). See
+to every [release](https://github.com/meow-rs/meow-rs/releases). See
 [docs/openwrt.md](docs/openwrt.md).
 
 ### Open the Web UI

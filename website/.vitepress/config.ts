@@ -1,7 +1,7 @@
 import { defineConfig } from 'vitepress'
 
 // The landing page (docs/index.html) is served at the Pages site root
-// (https://madeye.github.io/meow-rs/). This VitePress site is built into
+// (https://meow-rs.github.io/meow-rs/). This VitePress site is built into
 // docs/guide/ and therefore lives one level down, at /meow-rs/guide/.
 const base = '/meow-rs/guide/'
 
@@ -21,7 +21,7 @@ export default defineConfig({
     ['link', { rel: 'icon', type: 'image/png', href: `${base}logo.png` }],
     ['link', {
       rel: 'apple-touch-icon',
-      href: 'https://madeye.github.io/meow-rs/appicon.png',
+      href: 'https://meow-rs.github.io/meow-rs/appicon.png',
     }],
     ['meta', { name: 'theme-color', content: '#ED7E2B' }],
     ['meta', { property: 'og:type', content: 'website' }],
@@ -30,7 +30,7 @@ export default defineConfig({
       'meta',
       {
         property: 'og:image',
-        content: 'https://madeye.github.io/meow-rs/appicon.png',
+        content: 'https://meow-rs.github.io/meow-rs/appicon.png',
       },
     ],
     [
@@ -49,7 +49,7 @@ export default defineConfig({
     nav: [
       // The landing page lives at the Pages site root, one level above this
       // VitePress base — an absolute URL is the only reliable way back to it.
-      { text: '← Landing', link: 'https://madeye.github.io/meow-rs/' },
+      { text: '← Landing', link: 'https://meow-rs.github.io/meow-rs/' },
       { text: 'Guide', link: '/guide/what-is-meow-rs' },
       { text: 'Configuration', link: '/guide/configuration' },
       { text: 'Rules', link: '/guide/rules' },
@@ -57,10 +57,10 @@ export default defineConfig({
       {
         text: 'Links',
         items: [
-          { text: 'GitHub', link: 'https://github.com/madeye/meow-rs' },
+          { text: 'GitHub', link: 'https://github.com/meow-rs/meow-rs' },
           {
             text: 'Releases',
-            link: 'https://github.com/madeye/meow-rs/releases/latest',
+            link: 'https://github.com/meow-rs/meow-rs/releases/latest',
           },
           {
             text: 'mihomo (upstream)',
@@ -106,11 +106,11 @@ export default defineConfig({
       },
     ],
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/madeye/meow-rs' },
+      { icon: 'github', link: 'https://github.com/meow-rs/meow-rs' },
     ],
     editLink: {
       pattern:
-        'https://github.com/madeye/meow-rs/edit/main/website/:path',
+        'https://github.com/meow-rs/meow-rs/edit/main/website/:path',
       text: 'Edit this page on GitHub',
     },
     search: { provider: 'local' },

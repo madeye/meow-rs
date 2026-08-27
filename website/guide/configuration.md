@@ -118,7 +118,7 @@ rules:
   - MATCH,Proxy
 ```
 
-The repository ships a fuller [`config.example.yaml`](https://github.com/madeye/meow-rs/blob/main/config.example.yaml)
+The repository ships a fuller [`config.example.yaml`](https://github.com/meow-rs/meow-rs/blob/main/config.example.yaml)
 you can copy as a starting point.
 
 ## Compatibility notes

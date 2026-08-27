@@ -2,6 +2,7 @@
 name = "meow-bench"
 version.workspace = true
 edition.workspace = true
+publish = false
 
 [[bin]]
 name = "meow-bench"

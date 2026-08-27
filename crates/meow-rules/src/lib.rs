@@ -1,3 +1,8 @@
+//! Rule matching engine and parser for the meow-rs proxy kernel.
+//!
+//! Domain, IP-CIDR, GeoIP, process, and logic (`AND`/`OR`/`NOT`) rules, plus
+//! the parser that turns Clash-style rule lines into matchers.
+
 pub mod asn_index;
 pub mod country_index;
 pub mod domain;

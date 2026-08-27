@@ -1,3 +1,8 @@
+//! DNS resolver, cache, snooping, and FakeIP for the meow-rs proxy kernel.
+//!
+//! Caching resolver with IP-to-domain reverse mapping, optional FakeIP
+//! allocation, and a DNS server used by transparent proxy and TUN.
+
 pub mod cache;
 pub mod client;
 pub mod fakeip;

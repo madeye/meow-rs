@@ -1,3 +1,8 @@
+//! Core routing engine for the meow-rs proxy kernel.
+//!
+//! TCP/UDP relay, rule-matching dispatch, and connection statistics.
+//! [`Tunnel`] is the shared engine listeners hand connections to.
+
 pub mod match_engine;
 pub mod relay;
 pub mod rule_ir;

@@ -1,3 +1,9 @@
+//! Core traits and types for the meow-rs proxy kernel.
+//!
+//! This is the workspace contract crate: [`ProxyAdapter`], [`Rule`],
+//! [`Metadata`], connection types, and shared error values used by every
+//! other meow crate.
+
 pub mod adapter;
 pub mod adapter_type;
 pub mod atomic;

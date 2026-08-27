@@ -1,3 +1,8 @@
+//! REST API server (Axum) for the meow-rs proxy kernel.
+//!
+//! Runtime control of proxies, rules, connections, config, traffic, and DNS,
+//! plus the built-in web dashboard.
+
 pub mod log_stream;
 pub mod routes;
 pub mod ui;

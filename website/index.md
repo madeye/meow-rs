@@ -17,7 +17,7 @@ hero:
       link: /guide/configuration
     - theme: alt
       text: View on GitHub
-      link: https://github.com/madeye/meow-rs
+      link: https://github.com/meow-rs/meow-rs
 
 features:
   - icon: 🧭

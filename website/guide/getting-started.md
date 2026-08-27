@@ -12,7 +12,7 @@ This page takes you from a fresh clone to a running proxy with a live dashboard.
 ## Build
 
 ```bash
-git clone https://github.com/madeye/meow-rs.git
+git clone https://github.com/meow-rs/meow-rs.git
 cd meow-rs
 cargo build --release
 ```
@@ -22,7 +22,7 @@ roughly 6 MiB; you can copy it to any matching host and run it directly.
 
 ::: tip Prebuilt binaries
 If you don't want to compile, grab a build from the
-[releases page](https://github.com/madeye/meow-rs/releases/latest). Builds are published
+[releases page](https://github.com/meow-rs/meow-rs/releases/latest). Builds are published
 for Linux (x86_64/aarch64 gnu+musl, armv7 gnu, riscv64 musl), macOS
 (x86_64/aarch64), and Windows MSVC (x86_64/aarch64/i686). Every binary
 ships with the default feature set (`full` + `boring-tls`).
