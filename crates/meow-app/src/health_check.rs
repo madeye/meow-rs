@@ -38,8 +38,14 @@ pub fn spawn_health_checks(tunnel: &Tunnel, specs: Vec<HealthCheckSpec>) {
     }
 }
 
+fn should_probe(lazy: bool, generation: u64, last_probed_generation: u64) -> bool {
+    !lazy || (generation != 0 && generation != last_probed_generation)
+}
+
 async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
     let mut ticker = tokio::time::interval(Duration::from_secs(spec.interval_secs));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_probed_generation = 0;
 
     if spec.lazy {
         ticker.tick().await;
@@ -57,6 +63,15 @@ async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
             );
             continue;
         };
+        let generation = group.usage_generation();
+        if !should_probe(spec.lazy, generation, last_probed_generation) {
+            debug!(
+                "health-check: lazy group '{}' has no traffic since its last probe, skipping tick",
+                spec.group_name
+            );
+            continue;
+        }
+        last_probed_generation = generation;
         let Some(member_names) = group.members() else {
             continue;
         };
@@ -110,5 +125,14 @@ mod tests {
         };
         let specs = extract_specs(&[group]);
         assert_eq!(specs[0].interval_secs, DEFAULT_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn lazy_probe_requires_new_group_use() {
+        assert!(!should_probe(true, 0, 0));
+        assert!(should_probe(true, 1, 0));
+        assert!(!should_probe(true, 1, 1));
+        assert!(should_probe(true, 2, 1));
+        assert!(should_probe(false, 0, 0));
     }
 }

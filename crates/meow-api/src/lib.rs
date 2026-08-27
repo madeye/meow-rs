@@ -113,6 +113,7 @@ impl ApiServer {
             listeners: self.listeners.clone(),
             external_ui: self.resolve_external_ui(),
             config_mutation_lock: tokio::sync::Mutex::new(()),
+            traffic_feed: Default::default(),
         });
 
         let app = routes::create_router(state);

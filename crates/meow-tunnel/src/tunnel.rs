@@ -413,17 +413,6 @@ impl Tunnel {
             udp::DEFAULT_UDP_IDLE,
             udp::DEFAULT_SWEEP_INTERVAL,
         );
-        let stats = Arc::clone(&self.inner.stats);
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
-            // Consume tokio's immediate first tick; the first rate bucket is a
-            // real one-second interval, matching mihomo's statistic manager.
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                stats.sample_traffic();
-            }
-        });
     }
 
     /// Store a running TUN listener handle. If a previous TUN listener was
@@ -575,5 +564,21 @@ mod tun_handle_tests {
             tokio::task::yield_now().await;
         }
         assert!(!tunnel.has_tun());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn background_tasks_do_not_sample_traffic_without_api_subscriber() {
+        let tunnel = test_tunnel();
+        tunnel.statistics().add_upload(123);
+        tunnel.statistics().add_download(456);
+        tunnel.spawn_background_tasks();
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        assert_eq!(
+            tunnel.statistics().traffic_snapshot(),
+            (0, 0, 0, 0),
+            "the API traffic feed owns sampling; an idle tunnel has no 1 Hz sampler"
+        );
+        assert_eq!(tunnel.statistics().snapshot(), (123, 456));
     }
 }

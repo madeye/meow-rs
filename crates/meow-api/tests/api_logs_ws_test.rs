@@ -45,6 +45,7 @@ fn make_state_with_cap(cap: usize) -> (Arc<AppState>, broadcast::Sender<LogMessa
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
         external_ui: None,
+        traffic_feed: Default::default(),
     });
     (state, log_tx)
 }

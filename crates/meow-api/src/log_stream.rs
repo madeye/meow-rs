@@ -72,6 +72,13 @@ impl<S: tracing::Subscriber> Layer<S> for LogBroadcastLayer {
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        // The broadcast sender exists for the process lifetime, but most
+        // deployments have no active /logs consumer. Avoid formatting fields,
+        // reading the clock, and constructing a heap-backed message when there
+        // is nobody to receive it.
+        if self.tx.receiver_count() == 0 {
+            return;
+        }
         let level = match *event.metadata().level() {
             tracing::Level::TRACE | tracing::Level::DEBUG => LogLevel::Debug,
             tracing::Level::INFO => LogLevel::Info,
@@ -227,17 +234,20 @@ mod tests {
     }
 
     #[test]
-    fn layer_send_with_no_subscribers_does_not_panic() {
-        // Documented contract: a send Err (no subscribers / channel full) is
-        // acceptable — verify we don't regress to a panicking `.unwrap()`.
+    fn layer_skips_event_recording_with_no_subscribers() {
+        struct PanicOnFormat;
+        impl std::fmt::Debug for PanicOnFormat {
+            fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                panic!("event fields must not be formatted without log subscribers");
+            }
+        }
+
         let (tx, rx) = broadcast::channel(1);
         drop(rx);
         let layer = LogBroadcastLayer { tx };
         let registry = tracing_subscriber::registry().with(layer);
         subscriber::with_default(registry, || {
-            tracing::info!("payload");
-            tracing::error!("oh no");
+            tracing::info!(message = ?PanicOnFormat);
         });
-        // No panic = pass.
     }
 }

@@ -56,6 +56,10 @@ where
         ))
     }
 }
+#[derive(Default)]
+pub struct TrafficFeed {
+    sender: std::sync::Mutex<Option<broadcast::Sender<Arc<str>>>>,
+}
 
 pub struct AppState {
     pub tunnel: Tunnel,
@@ -80,6 +84,9 @@ pub struct AppState {
     /// set_tun_handle has completed, leaving a running TUN device behind an
     /// `enable=false` config.
     pub config_mutation_lock: tokio::sync::Mutex<()>,
+    /// Shared on-demand traffic sampler. No timer runs until a client
+    /// subscribes to `/traffic`.
+    pub traffic_feed: TrafficFeed,
 }
 
 /// The API server owns one raw/runtime configuration, so all mutation
@@ -704,28 +711,89 @@ fn traffic_json(state: &AppState) -> String {
     .unwrap_or_default()
 }
 
+fn subscribe_traffic_feed(state: &Arc<AppState>) -> broadcast::Receiver<Arc<str>> {
+    let mut guard = state
+        .traffic_feed
+        .sender
+        .lock()
+        .expect("traffic feed lock poisoned");
+    if let Some(tx) = guard.as_ref() {
+        return tx.subscribe();
+    }
+
+    let (tx, rx) = broadcast::channel(2);
+    *guard = Some(tx.clone());
+    drop(guard);
+
+    // Establish a baseline before the first one-second window. Otherwise all
+    // traffic accumulated while nobody was subscribed would be reported as
+    // the first frame's instantaneous rate.
+    state.tunnel.statistics().sample_traffic();
+
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if tx.receiver_count() == 0 {
+                let mut guard = state
+                    .traffic_feed
+                    .sender
+                    .lock()
+                    .expect("traffic feed lock poisoned");
+                if tx.receiver_count() == 0 {
+                    *guard = None;
+                    break;
+                }
+            }
+            state.tunnel.statistics().sample_traffic();
+            let frame: Arc<str> = Arc::from(traffic_json(&state));
+            let _ = tx.send(frame);
+        }
+    });
+    rx
+}
+
 async fn get_traffic(
     State(state): State<Arc<AppState>>,
     MaybeWebSocket(ws): MaybeWebSocket,
 ) -> Response {
+    let feed = subscribe_traffic_feed(&state);
     if let Some(ws) = ws {
         return ws.on_upgrade(move |mut socket| async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(1));
-            ticker.tick().await;
+            let mut feed = feed;
             loop {
-                ticker.tick().await;
-                let frame = traffic_json(&state);
-                if socket.send(Message::Text(frame.into())).await.is_err() {
+                let frame = match feed.recv().await {
+                    Ok(frame) => frame,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                if socket
+                    .send(Message::Text(frame.as_ref().into()))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
         });
     }
 
-    let stream = futures::stream::unfold(state, |state| async move {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let line = format!("{}\n", traffic_json(&state));
-        Some((Ok::<String, std::convert::Infallible>(line), state))
+    let stream = futures::stream::unfold(feed, |mut feed| async move {
+        loop {
+            match feed.recv().await {
+                Ok(frame) => {
+                    return Some((
+                        Ok::<String, std::convert::Infallible>(format!("{frame}\n")),
+                        feed,
+                    ));
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        }
     });
     Response::builder()
         .header(header::CONTENT_TYPE, "application/json")

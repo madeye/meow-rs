@@ -1,4 +1,5 @@
 use super::selector_store::SelectorStore;
+use super::UsageTracker;
 use async_trait::async_trait;
 use meow_common::{
     AdapterType, DelayHistory, MeowError, Metadata, ProviderSlot, Proxy, ProxyAdapter, ProxyConn,
@@ -24,6 +25,7 @@ pub struct UrlTestGroup {
     /// promotes a new best.
     fastest: RwLock<Option<SmolStr>>,
     health: ProxyHealth,
+    usage: UsageTracker,
 }
 
 impl UrlTestGroup {
@@ -39,6 +41,7 @@ impl UrlTestGroup {
             expected_status: String::new(),
             fastest: RwLock::new(None),
             health: ProxyHealth::new(),
+            usage: UsageTracker::new(),
         }
     }
 
@@ -59,6 +62,7 @@ impl UrlTestGroup {
             expected_status: String::new(),
             fastest: RwLock::new(None),
             health: ProxyHealth::new(),
+            usage: UsageTracker::new(),
         }
     }
 
@@ -255,6 +259,7 @@ impl ProxyAdapter for UrlTestGroup {
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
+        self.usage.touch();
         let proxy = self
             .pick_for_dial()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
@@ -262,6 +267,7 @@ impl ProxyAdapter for UrlTestGroup {
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
+        self.usage.touch();
         let proxy = self
             .pick_for_dial()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
@@ -269,6 +275,7 @@ impl ProxyAdapter for UrlTestGroup {
     }
 
     fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
+        self.usage.touch();
         self.fastest_proxy()
     }
 
@@ -319,6 +326,10 @@ impl Proxy for UrlTestGroup {
 
     fn expected_status(&self) -> Option<&str> {
         Some(&self.expected_status)
+    }
+
+    fn usage_generation(&self) -> u64 {
+        self.usage.generation()
     }
 }
 
@@ -446,7 +457,9 @@ mod tests {
         let a_ref = Arc::clone(&a);
         let b_ref = Arc::clone(&b);
         let g = UrlTestGroup::new("ut", vec![a, b], 0);
+        assert_eq!(g.usage_generation(), 0, "unused group has no use");
         let _ = g.dial_tcp(&Metadata::default()).await;
+        assert_eq!(g.usage_generation(), 1, "dial records group use");
         assert_eq!(a_ref.dials(), 0);
         assert_eq!(b_ref.dials(), 1);
     }

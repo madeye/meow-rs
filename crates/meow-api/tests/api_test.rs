@@ -63,6 +63,7 @@ fn test_state(raw: RawConfig) -> Arc<AppState> {
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
         external_ui: None,
+        traffic_feed: Default::default(),
     })
 }
 
@@ -98,6 +99,7 @@ fn test_state_with_route(raw: RawConfig, named: Vec<(&str, Arc<dyn Proxy>)>) -> 
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
         external_ui: None,
+        traffic_feed: Default::default(),
     })
 }
 
@@ -135,6 +137,7 @@ fn test_state_with_secret(secret: &str) -> Arc<AppState> {
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
         external_ui: None,
+        traffic_feed: Default::default(),
     })
 }
 
@@ -217,6 +220,7 @@ async fn external_ui_serves_static_directory() {
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
         external_ui: Some(dir.path().to_path_buf()),
+        traffic_feed: Default::default(),
     });
     let app = create_router(state);
 
@@ -418,6 +422,8 @@ async fn patch_configs_invalid_mode() {
 #[tokio::test]
 async fn get_traffic() {
     let state = test_state_default();
+    state.tunnel.statistics().add_upload(123);
+    state.tunnel.statistics().add_download(456);
     let app = create_router(state);
     let resp = app
         .oneshot(
@@ -438,8 +444,8 @@ async fn get_traffic() {
         serde_json::from_slice(frame.data_ref().expect("traffic data frame")).unwrap();
     assert_eq!(json["up"], 0);
     assert_eq!(json["down"], 0);
-    assert_eq!(json["upTotal"], 0);
-    assert_eq!(json["downTotal"], 0);
+    assert_eq!(json["upTotal"], 123);
+    assert_eq!(json["downTotal"], 456);
 }
 
 #[tokio::test]
@@ -1852,6 +1858,7 @@ mod delay_support {
             rule_providers: Arc::new(RwLock::new(HashMap::new())),
             listeners: vec![],
             external_ui: None,
+            traffic_feed: Default::default(),
         })
     }
 
@@ -1906,6 +1913,7 @@ mod delay_support {
             rule_providers: Arc::new(RwLock::new(HashMap::new())),
             listeners: vec![],
             external_ui: None,
+            traffic_feed: Default::default(),
         })
     }
 }
@@ -2805,6 +2813,7 @@ fn test_state_with_hosts_entry() -> Arc<AppState> {
         rule_providers: Arc::new(RwLock::new(HashMap::new())),
         listeners: vec![],
         external_ui: None,
+        traffic_feed: Default::default(),
     })
 }
 

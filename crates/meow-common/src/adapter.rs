@@ -221,6 +221,12 @@ pub trait Proxy: ProxyAdapter {
     fn expected_status(&self) -> Option<&str> {
         None
     }
+
+    /// Monotonic traffic-use generation for genuinely lazy health checks.
+    /// Leaf adapters return zero; automatic groups increment on every dial.
+    fn usage_generation(&self) -> u64 {
+        0
+    }
 }
 
 #[cfg(test)]
