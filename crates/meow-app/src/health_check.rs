@@ -332,6 +332,7 @@ mod tests {
             meow_common::DnsMode::Normal,
             meow_trie::DomainTrie::new(),
             true,
+            false,
         ));
         let tunnel = Tunnel::new(resolver);
         let a = ProbeMock::named("a");
@@ -412,6 +413,7 @@ mod tests {
             meow_common::DnsMode::Normal,
             meow_trie::DomainTrie::new(),
             true,
+            false,
         ));
         let tunnel = Tunnel::new(resolver);
         let a = ProbeMock::named("a");
