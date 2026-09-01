@@ -56,8 +56,13 @@ pub async fn url_test(
     };
 
     let start = Instant::now();
+    // `Tunnel` marks this dial as a health probe rather than user traffic
+    // (mihomo runs its health checks as TUNNEL-type connections too).
+    // Automatic proxy groups use the marker to keep probe dials from
+    // counting as "use", which would defeat lazy health checks.
     let metadata = meow_common::Metadata {
         network: meow_common::Network::Tcp,
+        conn_type: meow_common::ConnType::Tunnel,
         host: parsed.host.as_str().into(),
         dst_port: parsed.port,
         ..Default::default()

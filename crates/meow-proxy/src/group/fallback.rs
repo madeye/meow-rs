@@ -165,7 +165,7 @@ impl ProxyAdapter for FallbackGroup {
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-        self.usage.touch();
+        self.usage.touch_user_traffic(metadata);
         let proxy = self
             .first_alive()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
@@ -182,7 +182,7 @@ impl ProxyAdapter for FallbackGroup {
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
-        self.usage.touch();
+        self.usage.touch_user_traffic(metadata);
         let proxy = self
             .first_alive()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
@@ -198,8 +198,8 @@ impl ProxyAdapter for FallbackGroup {
         }
     }
 
-    fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
-        self.usage.touch();
+    fn unwrap_proxy(&self, metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
+        self.usage.touch_user_traffic(metadata);
         self.first_alive()
     }
 
@@ -370,6 +370,26 @@ mod tests {
         assert_eq!(g.usage_generation(), 1, "dial records group use");
         assert_eq!(a_ref.dials(), 0);
         assert_eq!(b_ref.dials(), 1);
+    }
+
+    #[tokio::test]
+    async fn health_probe_dials_do_not_count_as_use() {
+        // Lazy health checks dial members with `ConnType::Tunnel`.  If those
+        // dials incremented the usage generation, a parent group probing a
+        // lazy child would keep the child's own probe loop awake forever.
+        let g = FallbackGroup::new("fb", vec![MockProxy::new("a")]);
+        let probe_meta = Metadata {
+            conn_type: meow_common::ConnType::Tunnel,
+            ..Default::default()
+        };
+        let _ = g.dial_tcp(&probe_meta).await;
+        assert_eq!(
+            g.usage_generation(),
+            0,
+            "probe dials must not mark the group as used"
+        );
+        let _ = g.dial_tcp(&Metadata::default()).await;
+        assert_eq!(g.usage_generation(), 1, "real traffic still marks use");
     }
 
     #[test]

@@ -262,7 +262,7 @@ impl ProxyAdapter for UrlTestGroup {
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-        self.usage.touch();
+        self.usage.touch_user_traffic(metadata);
         let proxy = self
             .pick_for_dial()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
@@ -279,7 +279,7 @@ impl ProxyAdapter for UrlTestGroup {
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
-        self.usage.touch();
+        self.usage.touch_user_traffic(metadata);
         let proxy = self
             .pick_for_dial()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
@@ -295,8 +295,8 @@ impl ProxyAdapter for UrlTestGroup {
         }
     }
 
-    fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
-        self.usage.touch();
+    fn unwrap_proxy(&self, metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
+        self.usage.touch_user_traffic(metadata);
         self.fastest_proxy()
     }
 
