@@ -465,4 +465,23 @@ mod tests {
             "direct members are exempt from failure tracking"
         );
     }
+
+    #[tokio::test]
+    async fn udp_unsupported_member_failures_are_exempt_from_escalation() {
+        // mihomo ignores ErrNotSupport failures; meow surfaces them as
+        // MeowError::UdpNotSupported (relay chains, dialer proxies). They
+        // describe a capability, not health, so UDP traffic must never mark
+        // an otherwise healthy member dead.
+        let a = MockProxy::new_udp_unsupported("r", AdapterType::Relay);
+        let a_ref = Arc::clone(&a);
+        let g = FallbackGroup::new("fb", vec![a]);
+
+        for _ in 0..10 {
+            let _ = g.dial_udp(&Metadata::default()).await;
+        }
+        assert!(
+            a_ref.alive(),
+            "structural UdpNotSupported errors are exempt from failure tracking"
+        );
+    }
 }

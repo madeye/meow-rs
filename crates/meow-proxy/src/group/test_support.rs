@@ -24,6 +24,7 @@ pub struct MockProxy {
     udp: bool,
     adapter_type: AdapterType,
     dial_error: Option<String>,
+    udp_unsupported: bool,
     pub dial_count: AtomicUsize,
 }
 
@@ -35,6 +36,7 @@ impl MockProxy {
             udp: false,
             adapter_type: AdapterType::Direct,
             dial_error: None,
+            udp_unsupported: false,
             dial_count: AtomicUsize::new(0),
         })
     }
@@ -46,6 +48,7 @@ impl MockProxy {
             udp: true,
             adapter_type: AdapterType::Direct,
             dial_error: None,
+            udp_unsupported: false,
             dial_count: AtomicUsize::new(0),
         })
     }
@@ -63,6 +66,23 @@ impl MockProxy {
             udp: false,
             adapter_type,
             dial_error: Some(error.to_string()),
+            udp_unsupported: false,
+            dial_count: AtomicUsize::new(0),
+        })
+    }
+
+    /// Mock whose `dial_udp` returns the structural
+    /// [`MeowError::UdpNotSupported`] that relay chains and dialer-proxy
+    /// members produce when they cannot carry UDP. Such errors describe a
+    /// capability, not health, and must never mark the member dead.
+    pub fn new_udp_unsupported(name: &str, adapter_type: AdapterType) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            health: ProxyHealth::new(),
+            udp: false,
+            adapter_type,
+            dial_error: None,
+            udp_unsupported: true,
             dial_count: AtomicUsize::new(0),
         })
     }
@@ -106,6 +126,9 @@ impl ProxyAdapter for MockProxy {
     }
     async fn dial_udp(&self, _m: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         self.dial_count.fetch_add(1, Ordering::Relaxed);
+        if self.udp_unsupported {
+            return Err(MeowError::UdpNotSupported);
+        }
         match &self.dial_error {
             Some(err) => Err(MeowError::Proxy(err.clone())),
             None => Err(MeowError::Proxy(format!("mock {} dial_udp", self.name))),

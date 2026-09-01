@@ -528,10 +528,14 @@ mod tests {
         let b_ref = Arc::clone(&b);
         let g = UrlTestGroup::new("ut", vec![a, b], 0);
 
-        for _ in 0..5 {
+        for i in 1..5 {
             let _ = g.dial_tcp(&Metadata::default()).await;
-            assert!(a_ref.alive() || b_ref.alive());
+            assert!(
+                a_ref.alive(),
+                "failure {i} is below the escalation threshold"
+            );
         }
+        let _ = g.dial_tcp(&Metadata::default()).await;
         // The first pick (a) has now failed five times in a row and is dead;
         // the next dial must be routed to b.
         assert!(

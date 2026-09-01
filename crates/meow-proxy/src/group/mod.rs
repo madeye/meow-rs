@@ -74,13 +74,16 @@ impl DialFailureTracker {
     /// Record a failed dial; returns `true` when the failure should escalate
     /// (the caller then marks the failed member dead).
     pub(super) fn on_failure(&self, err: &MeowError) -> bool {
-        // mihomo ignores C.ErrNotSupport failures outright.
-        if matches!(err, MeowError::NotSupported(_)) {
+        // mihomo ignores C.ErrNotSupport failures outright; meow splits that
+        // sentinel into `NotSupported` and `UdpNotSupported`. Both describe a
+        // member's capabilities, not its health (e.g. a relay chain without
+        // UDP support), so neither may count toward marking a member dead.
+        if matches!(err, MeowError::NotSupported(_) | MeowError::UdpNotSupported) {
             return false;
         }
-        // mihomo escalates immediately on "connection refused".
+        // mihomo escalates immediately on "connection refused" and leaves the
+        // streak untouched.
         if err.to_string().contains("refused") {
-            self.on_success();
             return true;
         }
         let mut state = self.state.lock();
@@ -177,6 +180,20 @@ mod tests {
     }
 
     #[test]
+    fn connection_refused_leaves_the_streak_intact() {
+        // mihomo's refused fast path does not touch failedTimes.
+        let tracker = DialFailureTracker::new();
+        for _ in 1..DIAL_FAILURE_THRESHOLD {
+            tracker.on_failure(&io_err("dial timed out"));
+        }
+        assert!(tracker.on_failure(&io_err("connection refused")));
+        assert!(
+            tracker.on_failure(&io_err("dial timed out")),
+            "the pre-refused streak still counts toward the threshold"
+        );
+    }
+
+    #[test]
     fn success_resets_the_streak() {
         let tracker = DialFailureTracker::new();
         for _ in 1..DIAL_FAILURE_THRESHOLD {
@@ -197,6 +214,14 @@ mod tests {
         let tracker = DialFailureTracker::new();
         for _ in 0..100 {
             assert!(!tracker.on_failure(&MeowError::NotSupported("udp".into())));
+        }
+    }
+
+    #[test]
+    fn udp_unsupported_failures_never_escalate() {
+        let tracker = DialFailureTracker::new();
+        for _ in 0..100 {
+            assert!(!tracker.on_failure(&MeowError::UdpNotSupported));
         }
     }
 
