@@ -102,7 +102,10 @@ pub async fn handle_tcp(tunnel: &TunnelInner, mut conn: Box<dyn ProxyConn>, meta
 /// Exported as `pub` from `meow-tunnel` so that `meow-listener` can call it
 /// directly from the SOCKS5/HTTP-CONNECT handlers. This is a workspace-internal
 /// API contract: both crates are in the same workspace and share the
-/// `TunnelInner` type, so the function is not intended for external consumers.
+/// `TunnelInner` type, so the function is not intended for external consumers —
+/// hence `#[doc(hidden)]`, which keeps it out of the public rustdoc surface
+/// without restricting the workspace-internal call path (review low item).
+#[doc(hidden)]
 pub async fn route_inbound_tcp<C: ProxyConn>(
     inner: &TunnelInner,
     conn: &mut C,
@@ -158,10 +161,14 @@ pub async fn route_inbound_tcp<C: ProxyConn>(
             let dn = Arc::clone(guard.counters());
             // Re-emit any bytes the listener already read past the handshake
             // (e.g. pipelined TLS ClientHello after a CONNECT 200). Counted
-            // as upload so the connection stats stay accurate.
+            // as upload so the connection stats stay accurate. A failure
+            // here kills the connection (the remote half is unusable), so it
+            // must be visible at `warn` — the pre-refactor code propagated
+            // it to the caller instead of swallowing it at `debug`
+            // (review M9).
             if !prefix.is_empty() {
                 if let Err(e) = remote.write_all(prefix).await {
-                    debug!(
+                    warn!(
                         "{} {} prefix write error: {}",
                         metadata.conn_type,
                         metadata.remote_address(),
