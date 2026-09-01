@@ -1,5 +1,5 @@
 use super::selector_store::SelectorStore;
-use super::UsageTracker;
+use super::{DialFailureTracker, UsageTracker};
 use async_trait::async_trait;
 use meow_common::{
     AdapterType, DelayHistory, MeowError, Metadata, ProviderSlot, Proxy, ProxyAdapter, ProxyConn,
@@ -26,6 +26,7 @@ pub struct UrlTestGroup {
     fastest: RwLock<Option<SmolStr>>,
     health: ProxyHealth,
     usage: UsageTracker,
+    dial_failures: DialFailureTracker,
 }
 
 impl UrlTestGroup {
@@ -42,6 +43,7 @@ impl UrlTestGroup {
             fastest: RwLock::new(None),
             health: ProxyHealth::new(),
             usage: UsageTracker::new(),
+            dial_failures: DialFailureTracker::new(),
         }
     }
 
@@ -63,6 +65,7 @@ impl UrlTestGroup {
             fastest: RwLock::new(None),
             health: ProxyHealth::new(),
             usage: UsageTracker::new(),
+            dial_failures: DialFailureTracker::new(),
         }
     }
 
@@ -263,7 +266,16 @@ impl ProxyAdapter for UrlTestGroup {
         let proxy = self
             .pick_for_dial()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
-        proxy.dial_tcp(metadata).await
+        match proxy.dial_tcp(metadata).await {
+            Ok(conn) => {
+                self.dial_failures.on_success();
+                Ok(conn)
+            }
+            Err(err) => {
+                super::record_dial_failure(&self.name, &self.dial_failures, &proxy, &err);
+                Err(err)
+            }
+        }
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
@@ -271,7 +283,16 @@ impl ProxyAdapter for UrlTestGroup {
         let proxy = self
             .pick_for_dial()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
-        proxy.dial_udp(metadata).await
+        match proxy.dial_udp(metadata).await {
+            Ok(conn) => {
+                self.dial_failures.on_success();
+                Ok(conn)
+            }
+            Err(err) => {
+                super::record_dial_failure(&self.name, &self.dial_failures, &proxy, &err);
+                Err(err)
+            }
+        }
     }
 
     fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
@@ -492,5 +513,47 @@ mod tests {
         ProxySelection::set(&g, "a").await.unwrap();
         assert_eq!(pick(&g), "b");
         assert_eq!(ProxySelection::fixed(&g).as_deref(), Some("a"));
+    }
+
+    #[tokio::test]
+    async fn repeated_dial_failures_mark_member_dead() {
+        // mihomo GroupBase.onDialFailed escalation, applied to the fastest
+        // member: five failures within the window mark it dead so routing
+        // moves to the next candidate until a probe revives it.
+        let a = MockProxy::new_failing("a", AdapterType::Shadowsocks, "dial timed out");
+        let b = MockProxy::new_failing("b", AdapterType::Shadowsocks, "dial timed out");
+        a.set_delay(10);
+        b.set_delay(20);
+        let a_ref = Arc::clone(&a);
+        let b_ref = Arc::clone(&b);
+        let g = UrlTestGroup::new("ut", vec![a, b], 0);
+
+        for _ in 0..5 {
+            let _ = g.dial_tcp(&Metadata::default()).await;
+            assert!(a_ref.alive() || b_ref.alive());
+        }
+        // The first pick (a) has now failed five times in a row and is dead;
+        // the next dial must be routed to b.
+        assert!(
+            !a_ref.alive(),
+            "the repeatedly failing member is marked dead"
+        );
+        let _ = g.dial_tcp(&Metadata::default()).await;
+        assert_eq!(a_ref.dials(), 5, "the dead member no longer receives dials");
+        assert_eq!(b_ref.dials(), 1, "routing moved past the dead member");
+    }
+
+    #[tokio::test]
+    async fn connection_refused_marks_member_dead_immediately() {
+        let a = MockProxy::new_failing("a", AdapterType::Shadowsocks, "connection refused");
+        a.set_delay(10);
+        let a_ref = Arc::clone(&a);
+        let b = MockProxy::new("b");
+        b.set_delay(20);
+        let g = UrlTestGroup::new("ut", vec![a, b], 0);
+
+        let _ = g.dial_tcp(&Metadata::default()).await;
+        assert!(!a_ref.alive(), "refused escalates on the first failure");
+        assert_eq!(pick(&g), "b", "the refused member is no longer selected");
     }
 }

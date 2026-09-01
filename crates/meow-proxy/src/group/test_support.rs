@@ -22,6 +22,8 @@ pub struct MockProxy {
     name: String,
     health: ProxyHealth,
     udp: bool,
+    adapter_type: AdapterType,
+    dial_error: Option<String>,
     pub dial_count: AtomicUsize,
 }
 
@@ -31,6 +33,8 @@ impl MockProxy {
             name: name.to_string(),
             health: ProxyHealth::new(),
             udp: false,
+            adapter_type: AdapterType::Direct,
+            dial_error: None,
             dial_count: AtomicUsize::new(0),
         })
     }
@@ -40,6 +44,25 @@ impl MockProxy {
             name: name.to_string(),
             health: ProxyHealth::new(),
             udp: true,
+            adapter_type: AdapterType::Direct,
+            dial_error: None,
+            dial_count: AtomicUsize::new(0),
+        })
+    }
+
+    /// Mock that fails every dial with `error` and reports `adapter_type`.
+    ///
+    /// The dial-failure escalation tests need a non-exempt adapter type
+    /// (Direct / Reject members are exempt from failure tracking) and an
+    /// error message they control — e.g. one containing "connection refused"
+    /// to exercise mihomo's immediate-escalation path.
+    pub fn new_failing(name: &str, adapter_type: AdapterType, error: &str) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_string(),
+            health: ProxyHealth::new(),
+            udp: false,
+            adapter_type,
+            dial_error: Some(error.to_string()),
             dial_count: AtomicUsize::new(0),
         })
     }
@@ -66,7 +89,7 @@ impl ProxyAdapter for MockProxy {
         &self.name
     }
     fn adapter_type(&self) -> AdapterType {
-        AdapterType::Direct
+        self.adapter_type
     }
     fn addr(&self) -> &str {
         ""
@@ -76,11 +99,17 @@ impl ProxyAdapter for MockProxy {
     }
     async fn dial_tcp(&self, _m: &Metadata) -> Result<Box<dyn ProxyConn>> {
         self.dial_count.fetch_add(1, Ordering::Relaxed);
-        Err(MeowError::Proxy(format!("mock {} dial_tcp", self.name)))
+        match &self.dial_error {
+            Some(err) => Err(MeowError::Proxy(err.clone())),
+            None => Err(MeowError::Proxy(format!("mock {} dial_tcp", self.name))),
+        }
     }
     async fn dial_udp(&self, _m: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         self.dial_count.fetch_add(1, Ordering::Relaxed);
-        Err(MeowError::Proxy(format!("mock {} dial_udp", self.name)))
+        match &self.dial_error {
+            Some(err) => Err(MeowError::Proxy(err.clone())),
+            None => Err(MeowError::Proxy(format!("mock {} dial_udp", self.name))),
+        }
     }
     fn health(&self) -> &ProxyHealth {
         &self.health

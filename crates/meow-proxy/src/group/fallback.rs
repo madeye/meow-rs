@@ -1,5 +1,5 @@
 use super::selector_store::SelectorStore;
-use super::UsageTracker;
+use super::{DialFailureTracker, UsageTracker};
 use async_trait::async_trait;
 use meow_common::{
     AdapterType, DelayHistory, MeowError, Metadata, ProviderSlot, Proxy, ProxyAdapter, ProxyConn,
@@ -19,6 +19,7 @@ pub struct FallbackGroup {
     expected_status: String,
     health: ProxyHealth,
     usage: UsageTracker,
+    dial_failures: DialFailureTracker,
 }
 
 impl FallbackGroup {
@@ -33,6 +34,7 @@ impl FallbackGroup {
             expected_status: String::new(),
             health: ProxyHealth::new(),
             usage: UsageTracker::new(),
+            dial_failures: DialFailureTracker::new(),
         }
     }
 
@@ -51,6 +53,7 @@ impl FallbackGroup {
             expected_status: String::new(),
             health: ProxyHealth::new(),
             usage: UsageTracker::new(),
+            dial_failures: DialFailureTracker::new(),
         }
     }
 
@@ -166,7 +169,16 @@ impl ProxyAdapter for FallbackGroup {
         let proxy = self
             .first_alive()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
-        proxy.dial_tcp(metadata).await
+        match proxy.dial_tcp(metadata).await {
+            Ok(conn) => {
+                self.dial_failures.on_success();
+                Ok(conn)
+            }
+            Err(err) => {
+                super::record_dial_failure(&self.name, &self.dial_failures, &proxy, &err);
+                Err(err)
+            }
+        }
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
@@ -174,7 +186,16 @@ impl ProxyAdapter for FallbackGroup {
         let proxy = self
             .first_alive()
             .ok_or_else(|| MeowError::Proxy("no proxy available".into()))?;
-        proxy.dial_udp(metadata).await
+        match proxy.dial_udp(metadata).await {
+            Ok(conn) => {
+                self.dial_failures.on_success();
+                Ok(conn)
+            }
+            Err(err) => {
+                super::record_dial_failure(&self.name, &self.dial_failures, &proxy, &err);
+                Err(err)
+            }
+        }
     }
 
     fn unwrap_proxy(&self, _metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
@@ -383,5 +404,65 @@ mod tests {
         b_ref.set_alive(false);
         assert_eq!(g.first_alive().unwrap().name(), "a");
         assert_eq!(ProxySelection::fixed(&g).as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn repeated_dial_failures_mark_member_dead() {
+        // mihomo GroupBase.onDialFailed: five failures within the window
+        // escalate; the escalation marks the failed member dead so routing
+        // skips it until the next probe revives it.
+        let a = MockProxy::new_failing("a", AdapterType::Shadowsocks, "dial timed out");
+        let b = MockProxy::new_failing("b", AdapterType::Shadowsocks, "dial timed out");
+        let a_ref = Arc::clone(&a);
+        let b_ref = Arc::clone(&b);
+        let g = FallbackGroup::new("fb", vec![a, b]);
+
+        for i in 1..5 {
+            let _ = g.dial_tcp(&Metadata::default()).await;
+            assert!(
+                a_ref.alive(),
+                "failure {i} is below the escalation threshold"
+            );
+        }
+        let _ = g.dial_tcp(&Metadata::default()).await;
+        assert!(
+            !a_ref.alive(),
+            "the repeatedly failing member is marked dead"
+        );
+        assert!(b_ref.alive(), "the untouched member stays alive");
+
+        // The dead member is skipped: the next dial reaches b instead.
+        let _ = g.dial_tcp(&Metadata::default()).await;
+        assert_eq!(b_ref.dials(), 1, "routing moved past the dead member");
+        assert_eq!(a_ref.dials(), 5);
+    }
+
+    #[tokio::test]
+    async fn connection_refused_marks_member_dead_immediately() {
+        // mihomo escalates "connection refused" without waiting for the
+        // failure streak.
+        let a = MockProxy::new_failing("a", AdapterType::Shadowsocks, "connection refused");
+        let a_ref = Arc::clone(&a);
+        let g = FallbackGroup::new("fb", vec![a, MockProxy::new("b")]);
+
+        let _ = g.dial_tcp(&Metadata::default()).await;
+        assert!(!a_ref.alive(), "refused escalates on the first failure");
+    }
+
+    #[tokio::test]
+    async fn direct_member_failures_are_exempt_from_escalation() {
+        // mihomo exempts Direct/Reject-family members: their dial errors
+        // describe the target, not the member.
+        let a = MockProxy::new_failing("d", AdapterType::Direct, "connection refused");
+        let a_ref = Arc::clone(&a);
+        let g = FallbackGroup::new("fb", vec![a]);
+
+        for _ in 0..10 {
+            let _ = g.dial_tcp(&Metadata::default()).await;
+        }
+        assert!(
+            a_ref.alive(),
+            "direct members are exempt from failure tracking"
+        );
     }
 }
