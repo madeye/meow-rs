@@ -44,6 +44,12 @@ fn should_probe(lazy: bool, generation: u64, last_probed_generation: u64) -> boo
 
 async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
     let mut ticker = tokio::time::interval(Duration::from_secs(spec.interval_secs));
+    // `Delay` (not tokio's default `Burst`) so a probe that outlives a short
+    // `interval` schedules the next tick a full interval from *now* instead
+    // of firing a back-to-back burst of catch-up probes. For the common
+    // `interval >= probe timeout` case (default 300 s vs 5 s) no tick is ever
+    // missed and the schedule is identical to before; this also prevents a
+    // missed-tick probe storm right after system suspend.
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_probed_generation = 0;
 
