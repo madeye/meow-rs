@@ -104,12 +104,16 @@ windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 serde_yaml = { workspace = true }
 meow-config = { workspace = true }
 meow-rules = { workspace = true }
+meow-trie = { workspace = true }
 maxminddb = { workspace = true }
 libc = "0.2"
+async-trait = { workspace = true }
+smol_str = { workspace = true }
 
 [lints]
 workspace = true

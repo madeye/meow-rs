@@ -2361,6 +2361,7 @@ name = "meow-app"
 version = "0.21.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
  "clap",
  "dashmap",
@@ -2374,10 +2375,12 @@ dependencies = [
  "meow-listener",
  "meow-proxy",
  "meow-rules",
+ "meow-trie",
  "meow-tunnel",
  "parking_lot",
  "rustls",
  "serde_yaml",
+ "smol_str",
  "tempfile",
  "tokio",
  "tracing",
