@@ -77,7 +77,6 @@ async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
             );
             continue;
         }
-        last_probed_generation = generation;
         let Some(member_names) = group.members() else {
             continue;
         };
@@ -108,6 +107,15 @@ async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
                     spec.group_name, name
                 );
             }
+        }
+
+        // Record the generation only now that a probe round actually ran
+        // (and only the pre-probe snapshot: any use that arrived *during*
+        // the probes must still trigger the next tick).  Consuming it
+        // earlier would let a tick with zero resolved members starve a
+        // lazy group of its next probe.
+        if total_count > 0 {
+            last_probed_generation = generation;
         }
 
         info!(
