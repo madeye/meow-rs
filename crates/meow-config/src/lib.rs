@@ -525,8 +525,11 @@ pub fn rebuild_from_raw_with_cache_dir(
 /// the dialer over TCP and is unaffected.
 ///
 /// Nested dialer-proxies are resolved deepest-first so each layer sees its
-/// dialer's final (already-rebuilt) form, and dialer-proxy cycles are detected
-/// and skipped with a warning (the outbound then dials directly).
+/// dialer's final (already-rebuilt) form. A self-referencing dialer, a
+/// reference to an unknown proxy, or a dialer cycle is a hard config error —
+/// silently falling back to a direct dial would let traffic egress from the
+/// real source path past a chain the user configured for policy/security
+/// reasons (Class A, ADR-0002).
 ///
 /// Note: this rewrites the registry entry, so direct rule references
 /// (`…,<proxy>`) and dialers that are groups both work. A proxy that is also a
@@ -537,13 +540,23 @@ fn apply_dialer_proxies(
     proxies: &mut HashMap<SmolStr, Arc<dyn Proxy>>,
     raw_proxies: &[HashMap<String, serde_yaml::Value>],
     ipv6: bool,
-) {
+) -> Result<(), anyhow::Error> {
     // Collect proxy -> dialer edges from the raw config.
+    //
+    // Iterate in reverse and keep only the first sighting (the *last* block in
+    // the file) per name: the registry-building loop uses `insert`, so for
+    // duplicate `name:` entries the last block is the effective definition.
+    // Collecting edges from superseded duplicates would apply a chain the
+    // effective block never declared.
     let mut pending: Vec<(SmolStr, SmolStr)> = Vec::new();
-    for raw_proxy in raw_proxies {
+    let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for raw_proxy in raw_proxies.iter().rev() {
         let Some(name) = raw_proxy.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
+        if !seen_names.insert(name) {
+            continue;
+        }
         let Some(dialer) = raw_proxy
             .get("dialer-proxy")
             .and_then(|v| v.as_str())
@@ -552,13 +565,12 @@ fn apply_dialer_proxies(
             continue;
         };
         if dialer == name {
-            warn!("proxy '{name}': dialer-proxy points to itself; dialing directly");
-            continue;
+            anyhow::bail!("proxy '{name}': dialer-proxy points to itself");
         }
         pending.push((SmolStr::from(name), SmolStr::from(dialer)));
     }
     if pending.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Names that declared a dialer-proxy — used to defer an edge until its
@@ -579,9 +591,7 @@ fn apply_dialer_proxies(
             }
             progressed = true;
             let Some(dialer_proxy) = proxies.get(&dialer).cloned() else {
-                warn!("proxy '{name}': dialer-proxy '{dialer}' not found; dialing directly");
-                resolved.insert(name);
-                continue;
+                anyhow::bail!("proxy '{name}': dialer-proxy '{dialer}' not found");
             };
             // Re-parse the raw block with a `ProxyDialer` injected (mihomo
             // model), so the adapter's own dial + handshake runs on the
@@ -632,7 +642,10 @@ fn apply_dialer_proxies(
                     }
                 }
             } else {
-                warn!(
+                // Unreachable in practice — edges are only collected from blocks
+                // in this same list — but refuse instead of silently dialing
+                // direct if the invariant ever breaks.
+                anyhow::bail!(
                     "proxy '{name}': dialer-proxy '{dialer}' not applied; no raw \
                      config block found for this name"
                 );
@@ -644,9 +657,14 @@ fn apply_dialer_proxies(
             break;
         }
     }
-    for (name, dialer) in pending {
-        warn!("proxy '{name}': dialer-proxy cycle involving '{dialer}' detected; dialing directly");
+    if !pending.is_empty() {
+        let edges: Vec<String> = pending
+            .iter()
+            .map(|(name, dialer)| format!("{name} -> {dialer}"))
+            .collect();
+        anyhow::bail!("dialer-proxy cycle detected: {}", edges.join(", "));
     }
+    Ok(())
 }
 
 fn rebuild_from_raw_impl(
@@ -785,7 +803,7 @@ fn rebuild_from_raw_impl(
 
     // Apply per-outbound `dialer-proxy` wrappers (issue #210). Runs after both
     // leaf proxies and groups are built so a dialer may reference either.
-    apply_dialer_proxies(&mut proxies, raw.proxies.as_deref().unwrap_or(&[]), ipv6);
+    apply_dialer_proxies(&mut proxies, raw.proxies.as_deref().unwrap_or(&[]), ipv6)?;
 
     let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
     // Per-provider `proxy:` overrides resolve against the full registry —
@@ -2000,38 +2018,77 @@ mod dialer_proxy_tests {
     fn wraps_proxy_with_dialer() {
         let mut proxies = registry(&["A", "fast"]);
         let before = proxies.clone();
-        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("fast"))], true);
+        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("fast"))], true)
+            .expect("valid chain applies");
         assert!(was_wrapped(&before, &proxies, "A"));
         assert!(!was_wrapped(&before, &proxies, "fast"));
     }
 
     #[test]
-    fn self_reference_is_skipped() {
+    fn self_reference_is_a_config_error() {
         let mut proxies = registry(&["A"]);
         let before = proxies.clone();
-        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("A"))], true);
+        let err = apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("A"))], true)
+            .expect_err("a self-referencing dialer must not silently dial direct");
+        assert!(
+            err.to_string().contains("points to itself"),
+            "unexpected: {err}"
+        );
         assert!(!was_wrapped(&before, &proxies, "A"));
     }
 
     #[test]
-    fn missing_dialer_is_skipped() {
+    fn missing_dialer_is_a_config_error() {
         let mut proxies = registry(&["A"]);
         let before = proxies.clone();
-        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("ghost"))], true);
+        let err = apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("ghost"))], true)
+            .expect_err("an unknown dialer must not silently dial direct");
+        assert!(err.to_string().contains("not found"), "unexpected: {err}");
         assert!(!was_wrapped(&before, &proxies, "A"));
     }
 
     #[test]
-    fn cycle_is_detected_and_skipped() {
+    fn cycle_is_a_config_error() {
         let mut proxies = registry(&["A", "B"]);
         let before = proxies.clone();
-        apply_dialer_proxies(
+        let err = apply_dialer_proxies(
             &mut proxies,
             &[raw_proxy("A", Some("B")), raw_proxy("B", Some("A"))],
             true,
-        );
+        )
+        .expect_err("a dialer cycle must not silently dial direct");
+        assert!(err.to_string().contains("cycle"), "unexpected: {err}");
         assert!(!was_wrapped(&before, &proxies, "A"));
         assert!(!was_wrapped(&before, &proxies, "B"));
+    }
+
+    /// Duplicate `name:` blocks: only the *last* block is the effective
+    /// definition, so a `dialer-proxy` declared only by an earlier duplicate
+    /// must not chain the effective block.
+    #[test]
+    fn stale_duplicate_dialer_edge_is_ignored() {
+        let mut proxies = registry(&["A", "front"]);
+        let before = proxies.clone();
+
+        let mut first = raw_socks5_proxy("A", Some("front"), false);
+        first.insert(
+            "port".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(1111)),
+        );
+        let mut last = raw_socks5_proxy("A", None, false);
+        last.insert(
+            "port".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(2222)),
+        );
+
+        apply_dialer_proxies(&mut proxies, &[first, last], true)
+            .expect("the effective block declares no dialer");
+
+        assert!(
+            !was_wrapped(&before, &proxies, "A"),
+            "the last duplicate block declares no dialer-proxy, so no chain \
+             may be applied"
+        );
     }
 
     #[test]
@@ -2043,7 +2100,8 @@ mod dialer_proxy_tests {
             &mut proxies,
             &[raw_proxy("A", Some("B")), raw_proxy("B", Some("C"))],
             true,
-        );
+        )
+        .expect("valid nested chain applies");
         assert!(was_wrapped(&before, &proxies, "A"));
         assert!(was_wrapped(&before, &proxies, "B"));
         assert!(!was_wrapped(&before, &proxies, "C"));
@@ -2103,7 +2161,8 @@ mod dialer_proxy_tests {
             &mut proxies,
             &[raw_socks5_proxy("A", Some("front"), true)],
             true,
-        );
+        )
+        .expect("valid chain applies");
 
         assert!(was_wrapped(&before, &proxies, "A"), "A should be re-parsed");
         assert!(
@@ -2147,7 +2206,8 @@ mod dialer_proxy_tests {
                 &mut proxies,
                 &[raw_typed_proxy("A", ty, Some("front"))],
                 true,
-            );
+            )
+            .expect("valid chain applies via the wrapper fallback");
 
             let after = proxies.get("A").expect("entry survives");
             assert!(
@@ -2185,7 +2245,8 @@ mod dialer_proxy_tests {
 
         // Must not panic and must not spawn: the parse is rejected before
         // `ShadowsocksAdapter::new` runs, so the fallback wrapper is used.
-        apply_dialer_proxies(&mut proxies, &[raw], true);
+        apply_dialer_proxies(&mut proxies, &[raw], true)
+            .expect("valid chain applies via the wrapper fallback");
 
         assert!(
             proxies.contains_key("A"),
@@ -2211,7 +2272,8 @@ mod dialer_proxy_tests {
             serde_yaml::Value::Number(serde_yaml::Number::from(2222)),
         );
 
-        apply_dialer_proxies(&mut proxies, &[first, last], true);
+        apply_dialer_proxies(&mut proxies, &[first, last], true)
+            .expect("valid chain applies");
 
         let rebuilt = proxies.get("A").expect("present after");
         assert_eq!(
@@ -2235,7 +2297,8 @@ mod dialer_proxy_tests {
         let before = proxies.clone();
 
         // raw_proxy has no `type` → parse_proxy_with_dialer fails → fallback.
-        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("front"))], true);
+        apply_dialer_proxies(&mut proxies, &[raw_proxy("A", Some("front"))], true)
+            .expect("valid chain applies via the wrapper fallback");
 
         assert!(
             was_wrapped(&before, &proxies, "A"),
@@ -2368,7 +2431,8 @@ mod dialer_proxy_tests {
             proxy_parser::parse_proxy(&raw_inner, true).expect("parse inner"),
         );
 
-        apply_dialer_proxies(&mut proxies, &[raw_front, raw_inner], true);
+        apply_dialer_proxies(&mut proxies, &[raw_front, raw_inner], true)
+            .expect("valid chain applies");
 
         // Dial a final target through `inner`; `inner` must reach its own
         // server (127.0.0.1:inner_port) *via* `front`.

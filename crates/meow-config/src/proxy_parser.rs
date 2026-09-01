@@ -310,7 +310,18 @@ fn is_external_sip003_plugin(plugin: Option<&str>) -> bool {
     if meow_proxy::shadowsocks_adapter::is_builtin_obfs_plugin(plugin) {
         return false;
     }
-    !matches!(plugin, "v2ray-plugin" | "ech-tls-tunnel")
+    if plugin == "v2ray-plugin" {
+        return false;
+    }
+    // Mirror `ShadowsocksAdapter::new` exactly: its `ech-tls-tunnel` arm is
+    // feature-gated, so without the feature the plugin falls through to the
+    // external-subprocess branch and must be classified external here too —
+    // otherwise an injected dialer would be accepted and silently ignored.
+    #[cfg(feature = "ech-tls-tunnel")]
+    if plugin == "ech-tls-tunnel" {
+        return false;
+    }
+    true
 }
 
 /// Reject a `ProxyDialer` for adapter types that do not thread it through.
@@ -320,8 +331,9 @@ fn is_external_sip003_plugin(plugin: Option<&str>) -> bool {
 /// None of them can honour an injected dialer, so accepting one here would
 /// silently drop the user's `dialer-proxy` and egress from the real source
 /// path — a Class A silent divergence (ADR-0002).  Returning `Err` instead
-/// lets `apply_dialer_proxies` surface a warning and keep the original
-/// (un-chained) entry rather than pretending the chain was applied.
+/// lets `apply_dialer_proxies` fall back to the relay-based
+/// `DialerProxyAdapter` wrapper, which fails loudly at dial time rather
+/// than pretending the chain was applied or dialing direct.
 ///
 /// A `DirectDialer` is always accepted: it is the no-op default, so nothing
 /// is lost by ignoring it.
