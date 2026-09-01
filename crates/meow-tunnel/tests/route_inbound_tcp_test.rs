@@ -101,6 +101,10 @@ async fn route_inbound_tcp_prefix_is_forwarded_to_remote() {
         "remote must receive the prefix bytes before the relay copy"
     );
 
+    // Half-close the client side so the relay exits promptly instead of
+    // waiting out RELAY_HALF_CLOSE_LINGER for more client data.
+    client_stream.shutdown().await.unwrap();
+
     // Wait for the relay to finish (echo server half-closes → relay ends).
     let _ = handle.await;
 }
@@ -141,6 +145,10 @@ async fn route_inbound_tcp_empty_prefix_is_no_op() {
         .expect("should receive echoed payload");
     assert_eq!(&received, payload, "relay should forward and echo data");
 
+    // Half-close the client side so the relay exits promptly instead of
+    // waiting out RELAY_HALF_CLOSE_LINGER for more client data.
+    client_stream.shutdown().await.unwrap();
+
     let _ = handle.await;
 }
 
@@ -174,6 +182,10 @@ async fn route_inbound_tcp_prefix_counts_as_upload() {
     let mut received = vec![0u8; prefix.len()];
     client_stream.read_exact(&mut received).await.unwrap();
     assert_eq!(received, prefix);
+
+    // Half-close the client side so the relay exits promptly instead of
+    // waiting out RELAY_HALF_CLOSE_LINGER for more client data.
+    client_stream.shutdown().await.unwrap();
 
     let _ = handle.await;
 
