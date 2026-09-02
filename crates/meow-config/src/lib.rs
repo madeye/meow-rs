@@ -2272,8 +2272,7 @@ mod dialer_proxy_tests {
             serde_yaml::Value::Number(serde_yaml::Number::from(2222)),
         );
 
-        apply_dialer_proxies(&mut proxies, &[first, last], true)
-            .expect("valid chain applies");
+        apply_dialer_proxies(&mut proxies, &[first, last], true).expect("valid chain applies");
 
         let rebuilt = proxies.get("A").expect("present after");
         assert_eq!(
