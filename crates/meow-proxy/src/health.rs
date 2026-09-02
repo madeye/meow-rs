@@ -56,10 +56,15 @@ pub async fn url_test(
     };
 
     let start = Instant::now();
-    // `Tunnel` marks this dial as a health probe rather than user traffic
-    // (mihomo runs its health checks as TUNNEL-type connections too).
-    // Automatic proxy groups use the marker to keep probe dials from
-    // counting as "use", which would defeat lazy health checks.
+    // `Tunnel` marks this dial as a health probe rather than user traffic.
+    // mihomo solves the same problem by threading an explicit `touch` flag
+    // through its group calls (`fast(false)` for probes); meow-rs'
+    // `ProxyAdapter` trait has no such parameter, so the marker rides on
+    // the metadata instead.  Groups skip the usage-generation bump for
+    // these dials — counting probes as "use" would defeat lazy health
+    // checks for nested groups.  No production dialer sets
+    // `ConnType::Tunnel` today; if a tunnel inbound ever reuses the
+    // variant, probes need their own explicit marker.
     let metadata = meow_common::Metadata {
         network: meow_common::Network::Tcp,
         conn_type: meow_common::ConnType::Tunnel,

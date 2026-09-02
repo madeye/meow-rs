@@ -22,11 +22,12 @@ impl UsageTracker {
 
     /// Record a use, but only for real user traffic.
     ///
-    /// Health-check probes dial with [`ConnType::Tunnel`] (mihomo's
-    /// convention).  Counting them as uses would defeat lazy mode for nested
-    /// groups: a parent group's periodic probes would mark a lazy child as
-    /// used and keep its own probe loop awake forever without any real
-    /// traffic.
+    /// Health-check probes dial with [`ConnType::Tunnel`] — an internal
+    /// marker set by `health::url_test` (no production dialer uses the
+    /// variant).  Counting probes as uses would defeat lazy mode for
+    /// nested groups: a parent group's periodic probes would mark a lazy
+    /// child as used and keep its own probe loop awake forever without
+    /// any real traffic.
     pub(super) fn touch_user_traffic(&self, metadata: &Metadata) {
         if metadata.conn_type == ConnType::Tunnel {
             return;
