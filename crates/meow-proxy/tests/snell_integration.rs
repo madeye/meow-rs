@@ -32,6 +32,9 @@ enum Behavior {
     /// Reply `RESPONSE_TUNNEL`, then echo every chunk back. Honours the
     /// zero-chunk half-close handshake so reuse-mode sessions work.
     Echo,
+    /// Send a tail and the server zero-chunk before the client half-closes,
+    /// then require the client zero-chunk before accepting another session.
+    PeerClosesFirst,
     /// Reply `RESPONSE_ERROR` with the given code/message, then close.
     ErrorReply { code: u8, msg: &'static str },
     /// Reply a single raw status byte, then close.
@@ -201,13 +204,32 @@ async fn serve_conn(
                 let _ = conn.flush().await;
                 return Ok(());
             }
-            Behavior::Echo => {
+            Behavior::Echo | Behavior::PeerClosesFirst => {
                 if conn.write_all(&[RESPONSE_TUNNEL]).await.is_err() || conn.flush().await.is_err()
                 {
                     return Ok(());
                 }
                 if cmd == COMMAND_UDP {
                     return serve_udp_echo(&mut conn, is_zero_chunk).await;
+                }
+                if matches!(behavior, Behavior::PeerClosesFirst) {
+                    if conn.write_all(b"tail").await.is_err()
+                        || send_zero_chunk(&mut conn).await.is_err()
+                    {
+                        return Ok(());
+                    }
+                    let mut buf = [0u8; 1024];
+                    match conn.read(&mut buf).await {
+                        Ok(0) => return Ok(()),
+                        Ok(n) => {
+                            return Err(format!(
+                                "received {n} payload bytes after peer half-close"
+                            ));
+                        }
+                        Err(e) if is_zero_chunk(&e) => {}
+                        Err(_) => return Ok(()),
+                    }
+                    continue;
                 }
                 let mut buf = vec![0u8; 64 * 1024];
                 loop {
@@ -376,6 +398,57 @@ async fn wait_for_pool_size(adapter: &SnellAdapter, want: usize) {
     .expect("reuse pool was not replenished in time");
 }
 
+async fn wait_for_accepted(server: &MockServer, want: usize) {
+    timeout(TIMEOUT, async {
+        while server.accepted.load(Ordering::SeqCst) < want {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("mock server did not accept enough connections in time");
+}
+
+/// Exercise the adapter behind a bidirectional relay. The local side
+/// half-closes first; the relay sends the client zero-chunk, consumes the
+/// server zero-chunk as EOF, and only then drops the proxy connection.
+async fn relay_roundtrip(adapter: &SnellAdapter, metadata: &Metadata, payload: &[u8]) {
+    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(metadata))
+        .await
+        .expect("dial timed out")
+        .expect("dial failed");
+    let (mut client, mut relay_side) = tokio::io::duplex(64 * 1024);
+
+    let relay = async {
+        tokio::io::copy_bidirectional(&mut relay_side, &mut conn)
+            .await
+            .expect("bidirectional relay failed");
+    };
+    let client_io = async {
+        client
+            .write_all(payload)
+            .await
+            .expect("client write failed");
+        client.flush().await.expect("client flush failed");
+        let mut echoed = vec![0u8; payload.len()];
+        client
+            .read_exact(&mut echoed)
+            .await
+            .expect("client echo read failed");
+        assert_eq!(echoed, payload);
+        client.shutdown().await.expect("client shutdown failed");
+        let mut trailing = Vec::new();
+        client
+            .read_to_end(&mut trailing)
+            .await
+            .expect("client EOF read failed");
+        assert!(trailing.is_empty());
+    };
+
+    timeout(TIMEOUT, async { tokio::join!(relay, client_io) })
+        .await
+        .expect("relay lifecycle timed out");
+}
+
 #[tokio::test]
 async fn tcp_connect_roundtrip_no_reuse() {
     let server = start_mock_server(PSK, Behavior::Echo).await;
@@ -508,37 +581,17 @@ async fn reuse_pool_reuses_tcp_connection() {
     let metadata = tcp_metadata("reuse.example.com", 443);
 
     // Session 1 — fresh dial.
-    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
-        .await
-        .expect("dial 1 timed out")
-        .expect("dial 1 failed");
-    roundtrip(&mut conn, b"session-1").await;
-    timeout(TIMEOUT, conn.shutdown())
-        .await
-        .expect("shutdown 1 timed out")
-        .expect("shutdown 1 failed");
-    drop(conn); // Drop drains the server zero-chunk and pools the conn.
+    relay_roundtrip(&adapter, &metadata, b"session-1").await;
     wait_for_pool_size(&adapter, 1).await;
 
     // Session 2 — must reuse the pooled TCP connection.
-    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
-        .await
-        .expect("dial 2 timed out")
-        .expect("dial 2 failed");
-    roundtrip(&mut conn, b"session-2").await;
+    relay_roundtrip(&adapter, &metadata, b"session-2").await;
     assert_eq!(
         server.accepted.load(Ordering::SeqCst),
         1,
         "session 2 must reuse the pooled TCP connection"
     );
-    timeout(TIMEOUT, conn.shutdown())
-        .await
-        .expect("shutdown 2 timed out")
-        .expect("shutdown 2 failed");
-    drop(conn);
-    // No synchronization needed here: `Pool::put` discards a conn at the
-    // 2-uses cap without ever inserting it, so the pool is empty whether or
-    // not the background drain task has finished.
+    // `Pool::put` discards a conn at the 2-uses cap without inserting it.
 
     // Session 3 — the 2-uses-per-conn cap forces a fresh dial.
     let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
@@ -560,6 +613,95 @@ async fn reuse_pool_reuses_tcp_connection() {
             "reuse mode must always send COMMAND_CONNECT_V2, got {requests:?}"
         );
     }
+    server.assert_no_violations();
+}
+
+#[tokio::test]
+async fn peer_half_close_is_acknowledged_before_pooling() {
+    let server = start_mock_server(PSK, Behavior::PeerClosesFirst).await;
+    let adapter = make_adapter(server.addr.port(), PSK, false, true);
+    let metadata = tcp_metadata("peer-close.example.com", 443);
+
+    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
+        .await
+        .expect("dial 1 timed out")
+        .expect("dial 1 failed");
+    let mut tail = [0u8; 4];
+    timeout(TIMEOUT, conn.read_exact(&mut tail))
+        .await
+        .expect("tail read timed out")
+        .expect("tail read failed");
+    assert_eq!(&tail, b"tail");
+    assert_eq!(
+        timeout(TIMEOUT, conn.read(&mut tail))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    drop(conn);
+    wait_for_pool_size(&adapter, 1).await;
+
+    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
+        .await
+        .expect("dial 2 timed out")
+        .expect("dial 2 failed");
+    timeout(TIMEOUT, conn.read_exact(&mut tail))
+        .await
+        .expect("reused tail read timed out")
+        .expect("reused tail read failed");
+    assert_eq!(&tail, b"tail");
+    assert_eq!(
+        server.accepted.load(Ordering::SeqCst),
+        1,
+        "second session must reuse the clean TCP connection"
+    );
+    assert_eq!(
+        timeout(TIMEOUT, conn.read(&mut tail))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    drop(conn);
+    server.assert_no_violations();
+}
+
+#[tokio::test]
+async fn unread_peer_tail_is_never_pooled() {
+    let server = start_mock_server(PSK, Behavior::PeerClosesFirst).await;
+    let adapter = make_adapter(server.addr.port(), PSK, false, true);
+    let metadata = tcp_metadata("dirty.example.com", 443);
+
+    let conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
+        .await
+        .expect("dial 1 timed out")
+        .expect("dial 1 failed");
+    // Leave the response, tail and server zero-chunk unread. Draining these
+    // in Drop would incorrectly make the still-unacknowledged session look
+    // reusable.
+    drop(conn);
+    assert_eq!(adapter.idle_pool_size(), 0);
+
+    let mut conn = timeout(TIMEOUT, adapter.dial_tcp(&metadata))
+        .await
+        .expect("dial 2 timed out")
+        .expect("dial 2 failed");
+    wait_for_accepted(&server, 2).await;
+    let mut tail = [0u8; 4];
+    timeout(TIMEOUT, conn.read_exact(&mut tail))
+        .await
+        .expect("fresh tail read timed out")
+        .expect("fresh tail read failed");
+    assert_eq!(&tail, b"tail");
+    assert_eq!(
+        timeout(TIMEOUT, conn.read(&mut tail))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    drop(conn);
     server.assert_no_violations();
 }
 

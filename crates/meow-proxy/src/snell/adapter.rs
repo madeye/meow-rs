@@ -9,15 +9,16 @@ use meow_common::{
     AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
 };
 use meow_transport::Stream as TransportStream;
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tracing::debug;
 
 use meow_transport::simple_obfs::client::{HttpObfs, TlsObfs};
 
-use super::pool::{drain_for_reuse, Pool, PoolStream};
+use super::pool::{Pool, PoolStream};
 use super::protocol::{write_header, write_udp_header, Snell};
 use super::udp::SnellPacketConn;
 
@@ -160,8 +161,8 @@ impl SnellAdapter {
 
     /// Number of idle connections currently parked in the reuse pool.
     /// Returns 0 when reuse is disabled. Exposed so integration tests can
-    /// synchronize with the background drain-and-return task that runs after
-    /// a pooled connection is dropped, instead of sleeping.
+    /// synchronize with the pool return that runs after a session completes,
+    /// instead of sleeping.
     pub fn idle_pool_size(&self) -> usize {
         self.pool.as_ref().map_or(0, |pool| pool.idle_count())
     }
@@ -286,6 +287,19 @@ struct PooledConn {
     inner: Option<PoolStream>,
     pool: Option<Arc<Pool>>,
     uses: u32,
+    local_half_close: LocalHalfClose,
+    reuse_failed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum LocalHalfClose {
+    Open,
+    WritingZero,
+    FlushingZero,
+    Sent,
+    ClosingTransport,
+    Closed,
+    Failed,
 }
 
 impl PooledConn {
@@ -294,7 +308,33 @@ impl PooledConn {
             inner: Some(snell),
             pool,
             uses,
+            local_half_close: LocalHalfClose::Open,
+            reuse_failed: false,
         }
+    }
+}
+
+/// Finish the protocol-level half-close after the peer has already sent its
+/// zero-chunk. `WritingZero` may represent either a partially-written zero
+/// frame or an older pending payload frame, so keep polling empty writes until
+/// the codec reports that the zero-byte input itself completed.
+async fn finish_local_half_close(snell: &mut PoolStream, state: LocalHalfClose) -> io::Result<()> {
+    match state {
+        LocalHalfClose::Open | LocalHalfClose::WritingZero => {
+            loop {
+                let n =
+                    std::future::poll_fn(|cx| Pin::new(&mut *snell).poll_write(cx, &[])).await?;
+                if n == 0 {
+                    break;
+                }
+            }
+            snell.flush().await
+        }
+        LocalHalfClose::FlushingZero => snell.flush().await,
+        LocalHalfClose::Sent => Ok(()),
+        LocalHalfClose::ClosingTransport | LocalHalfClose::Closed | LocalHalfClose::Failed => Err(
+            io::Error::other("snell: pooled connection cannot finish protocol half-close"),
+        ),
     }
 }
 
@@ -308,7 +348,11 @@ impl AsyncRead for PooledConn {
             .inner
             .as_mut()
             .expect("PooledConn::poll_read after take");
-        Pin::new(inner).poll_read(cx, buf)
+        let result = Pin::new(inner).poll_read(cx, buf);
+        if matches!(&result, Poll::Ready(Err(_))) {
+            self.reuse_failed = true;
+        }
+        result
     }
 }
 
@@ -322,27 +366,95 @@ impl AsyncWrite for PooledConn {
             .inner
             .as_mut()
             .expect("PooledConn::poll_write after take");
-        Pin::new(inner).poll_write(cx, buf)
+        let result = Pin::new(inner).poll_write(cx, buf);
+        if matches!(&result, Poll::Ready(Err(_))) {
+            self.reuse_failed = true;
+        }
+        result
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let inner = self
             .inner
             .as_mut()
             .expect("PooledConn::poll_flush after take");
-        Pin::new(inner).poll_flush(cx)
+        let result = Pin::new(inner).poll_flush(cx);
+        if matches!(&result, Poll::Ready(Err(_))) {
+            self.reuse_failed = true;
+        }
+        result
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let inner = self
-            .inner
-            .as_mut()
-            .expect("PooledConn::poll_shutdown after take");
-        // Send the half-close zero chunk via the v4 codec (empty write =>
-        // zero-chunk frame). After the frame drains we report Ready, and
-        // the pool-return logic runs in `Drop`.
-        match Pin::new(inner).poll_write(cx, &[]) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+        let this = &mut *self;
+        loop {
+            match this.local_half_close {
+                LocalHalfClose::Open => {
+                    this.local_half_close = LocalHalfClose::WritingZero;
+                }
+                LocalHalfClose::WritingZero => {
+                    let inner = this
+                        .inner
+                        .as_mut()
+                        .expect("PooledConn::poll_shutdown after take");
+                    match Pin::new(inner).poll_write(cx, &[]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => {
+                            this.local_half_close = LocalHalfClose::Failed;
+                            return Poll::Ready(Err(e));
+                        }
+                        // A non-zero result completes an older buffered
+                        // payload. Poll once more to stage the zero-chunk.
+                        Poll::Ready(Ok(n)) if n > 0 => continue,
+                        Poll::Ready(Ok(_)) => {
+                            this.local_half_close = LocalHalfClose::FlushingZero;
+                        }
+                    }
+                }
+                LocalHalfClose::FlushingZero => {
+                    let inner = this
+                        .inner
+                        .as_mut()
+                        .expect("PooledConn::poll_shutdown after take");
+                    match Pin::new(inner).poll_flush(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => {
+                            this.local_half_close = LocalHalfClose::Failed;
+                            return Poll::Ready(Err(e));
+                        }
+                        Poll::Ready(Ok(())) => {
+                            this.local_half_close = LocalHalfClose::Sent;
+                        }
+                    }
+                }
+                LocalHalfClose::Sent if this.pool.is_some() => return Poll::Ready(Ok(())),
+                LocalHalfClose::Sent => {
+                    // Non-pooled sessions still need the underlying write
+                    // side closed after their protocol zero-chunk is flushed.
+                    this.local_half_close = LocalHalfClose::ClosingTransport;
+                }
+                LocalHalfClose::ClosingTransport => {
+                    let inner = this
+                        .inner
+                        .as_mut()
+                        .expect("PooledConn::poll_shutdown after take");
+                    match Pin::new(inner).poll_shutdown(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => {
+                            this.local_half_close = LocalHalfClose::Failed;
+                            return Poll::Ready(Err(e));
+                        }
+                        Poll::Ready(Ok(())) => {
+                            this.local_half_close = LocalHalfClose::Closed;
+                        }
+                    }
+                }
+                LocalHalfClose::Closed => return Poll::Ready(Ok(())),
+                LocalHalfClose::Failed => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "snell: previous shutdown attempt failed",
+                    )));
+                }
+            }
         }
     }
 }
@@ -356,23 +468,38 @@ impl Drop for PooledConn {
             return;
         };
         let uses = self.uses;
-        // Spawn a background task to drain the server's tail bytes + the
-        // zero-chunk half-close, then push the conn back. Failures simply
-        // drop the conn — its underlying TCP is closed by `Snell`'s drop.
-        //
-        // Requires an active tokio runtime; the meow-rs binary always runs
-        // inside #[tokio::main], so this is safe in production. In unit
-        // tests that drop a PooledConn outside any runtime, `tokio::spawn`
-        // panics — those tests should use a #[tokio::test] runtime.
+
+        // A raw TCP EOF or unread server tail is not reusable. In particular,
+        // never drain arbitrary bytes here: doing so can swallow an old
+        // session and then feed the next CONNECT_V2 header into that session.
+        if self.reuse_failed || !snell.peer_half_closed() {
+            return;
+        }
+
+        if matches!(self.local_half_close, LocalHalfClose::Sent) {
+            let mut snell = snell;
+            snell.reset_reply_state();
+            pool.put(snell, uses);
+            return;
+        }
+
+        let state = self.local_half_close;
+        if matches!(
+            state,
+            LocalHalfClose::ClosingTransport | LocalHalfClose::Closed | LocalHalfClose::Failed
+        ) {
+            return;
+        }
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
         tokio::spawn(async move {
             let mut snell = snell;
-            if drain_for_reuse(&mut snell).await {
-                snell.reset_reply_state();
-                pool.put(snell, uses);
+            if finish_local_half_close(&mut snell, state).await.is_err() {
+                return;
             }
+            snell.reset_reply_state();
+            pool.put(snell, uses);
         });
     }
 }
