@@ -999,7 +999,25 @@ async fn udp_exchange(
     wire: &[u8],
     expected: &ExpectedResponse,
 ) -> Result<Message, ClientError> {
-    let sock = factory().bind_udp().await?;
+    // A loopback upstream (e.g. the resolver's own `dns.listen` socket,
+    // which some subscriptions name in `proxy-server-nameserver`) must be
+    // dialed from a loopback-bound socket, not the wildcard the factory
+    // binds for internet upstreams. Inside an iOS packet-tunnel extension
+    // the process's wildcard-bound sockets are scoped to the physical
+    // interface so they bypass the tunnel, and a scoped route lookup for
+    // 127.0.0.1 fails at once — the query never reaches the listener.
+    // Binding to the loopback address selects `lo0` explicitly; it also
+    // needs no VPN `protect()` on Android because loopback is never routed
+    // into the tunnel.
+    let sock = if addr.ip().is_loopback() {
+        let local: SocketAddr = match addr {
+            SocketAddr::V4(_) => SocketAddr::from(([127, 0, 0, 1], 0)),
+            SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 0)),
+        };
+        UdpSocket::bind(local).await?
+    } else {
+        factory().bind_udp().await?
+    };
     sock.connect(addr).await?;
     sock.send(wire).await?;
     let mut buf = vec![0u8; 4096];

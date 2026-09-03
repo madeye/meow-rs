@@ -454,7 +454,10 @@ async fn query_pool_set(
     }
     let mut pending = FuturesUnordered::new();
     for client in clients {
-        pending.push(async move { client.lookup_set(host, want, ipv6_enabled).await });
+        pending.push(async move {
+            let result = client.lookup_set(host, want, ipv6_enabled).await;
+            (client, result)
+        });
     }
     let mut negative: Option<FamilySet> = None;
     let mut negative_deadline: Option<tokio::time::Instant> = None;
@@ -474,12 +477,23 @@ async fn query_pool_set(
         } else {
             pending.next().await
         };
-        let Some(result) = next else {
+        let Some((client, result)) = next else {
             break;
         };
         let set = match result {
             Ok(set) => set.clamped(),
-            Err(_) => continue,
+            Err(error) => {
+                // Upstream failures are otherwise invisible: the pool
+                // returns `None` and the caller reports "no address" with
+                // no hint of which server failed or why.
+                debug!(
+                    host,
+                    upstream = %client.upstream_label(),
+                    %error,
+                    "DNS upstream query failed"
+                );
+                continue;
+            }
         };
         if set.has_positive() {
             // A positive answer always wins, regardless of grace state.
