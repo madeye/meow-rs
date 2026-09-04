@@ -157,7 +157,7 @@ WebSocket transport is included. External plugin binaries are not supported
 
 ### Trojan
 
-Fully supported. TLS via rustls (not OpenSSL). WebSocket transport via the
+Fully supported. TLS via BoringSSL. WebSocket transport via the
 built-in transport layer. gRPC transport is available through the shared
 transport layer.
 

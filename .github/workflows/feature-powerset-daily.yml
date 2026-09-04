@@ -54,8 +54,8 @@ jobs:
           - crate: meow-proxy
             hack_args: --depth 4
           - crate: meow-transport
-            # boring-tls vendors BoringSSL and needs a C++ toolchain; that
-            # leg is covered by clippy --all-features in test.yml's lint job.
+            # `boring-tls` is a no-op alias of `tls` (BoringSSL is the only
+            # backend); skip the duplicate leg.
             hack_args: --depth 4 --exclude-features boring-tls
           - crate: meow-listener
             hack_args: ""

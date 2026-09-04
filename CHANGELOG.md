@@ -10,6 +10,38 @@ the canonical, in-repo source a release is cut from.
 
 ### Changed
 
+- **BoringSSL is now the only TLS backend; rustls is gone from the TLS path.**
+  Previously a binary built with `boring-tls` (the default) still handshook
+  with rustls unless a proxy set `client-fingerprint` or `ech-opts`, and four
+  more places carried their own rustls client: URL-test health probes, the
+  internal HTTP fetcher, DoT/DoH upstreams, and the vendored anytls client;
+  `reqwest` (rustls-tls) did the direct subscription/provider/geodata fetches.
+  All of that now goes through `meow_transport::tls::TlsLayer` on BoringSSL:
+  every non-REALITY handshake (Trojan, VLESS, VMess, HTTP/SOCKS5-over-TLS,
+  SS plugins, ECH tunnel, AnyTLS), health probes, DoT/DoH, and every internal
+  HTTP(S) fetch (direct or via proxy — `reqwest` is removed; the in-tree
+  client gained direct dialing through the host's resolver/`SocketProtector`
+  hooks, custom headers, and a Content-Length precheck). The BoringSSL
+  `SSL_CTX` is shared across proxies with the same
+  `(client-fingerprint, alpn, skip-cert-verify)` key, and IP-literal server
+  names no longer emit an SNI extension (RFC 6066 §3). rustls remains in the
+  dependency graph for one reason: quinn, the QUIC stack under `hysteria2`,
+  has no BoringSSL backend (a port to Cloudflare's BoringSSL-native `quiche`
+  is the follow-up). The loopback TLS servers in the test suites are also
+  rustls-based, as dev-dependencies only.
+  **Build/feature changes:** the `boring-tls` features (meow-transport,
+  meow-config, meow-app) are now no-op aliases — `tls` *is* BoringSSL — and
+  the rustls-side `ech` feature is removed (ECH is native). `boring-sys` is
+  therefore a hard build requirement (cmake 3.14+ and a C++ compiler); the
+  `--no-default-features --features full` rustls fallback for targets that
+  cannot link BoringSSL (MIPS, 32-bit musl time64, windows-gnu) no longer
+  exists. `meow-anytls` gained a `server` feature (off by default) that gates
+  its rustls-based server side; its client takes a `TlsConnect` hook instead
+  of a rustls connector. Observable runtime differences: BoringSSL's default
+  ClientHello replaces rustls' for proxies without `client-fingerprint`, and
+  TLS session resumption is per `SSL_CTX` (64-entry cache) instead of per
+  rustls `ClientConfig`.
+
 - **`ipv6` is now effective end-to-end and keeps the `false` default.** The
   `ipv6` flag previously only gated a handful of code paths — the resolver
   queried A and AAAA regardless — so the documented `false` default and

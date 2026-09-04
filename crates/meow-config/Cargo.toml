@@ -23,8 +23,9 @@ vmess = ["meow-proxy/vmess"]
 anytls = ["meow-proxy/anytls"]
 hysteria2 = ["meow-proxy/hysteria2"]
 snell = ["meow-proxy/snell"]
-boring-tls = ["meow-transport/boring-tls"]
-ech = ["meow-transport/ech"]
+# Compatibility alias: BoringSSL is the only TLS backend now, so this is a
+# no-op kept for existing `--features boring-tls` invocations.
+boring-tls = []
 ech-tls-tunnel = ["ss", "meow-proxy/ech-tls-tunnel"]
 # sing-mux multiplexing (forwarded to meow-proxy; opt-out in `minimal`).
 mux = ["meow-proxy/mux"]
@@ -40,15 +41,13 @@ meow-trie = { workspace = true }
 meow-dns = { workspace = true, features = ["encrypted"] }
 meow-rules = { workspace = true }
 meow-proxy = { workspace = true, default-features = false }
-meow-transport = { workspace = true, features = ["grpc", "h2", "httpupgrade"] }
+meow-transport = { workspace = true, features = ["tls", "ws", "grpc", "h2", "httpupgrade"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
-reqwest = { workspace = true, features = ["stream"] }
-futures-util = { workspace = true }
 maxminddb = { workspace = true }
 ipnet = { workspace = true }
 base64 = { workspace = true }
@@ -56,9 +55,6 @@ regex = { workspace = true }
 parking_lot = { workspace = true }
 hickory-proto = { workspace = true }
 smol_str = { workspace = true }
-tokio-rustls = { workspace = true }
-rustls = { workspace = true }
-webpki-roots = { workspace = true }
 url = "2"
 httparse = "1"
 # Optional: only compiled when the `external-ui-download` feature is enabled.

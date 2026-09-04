@@ -245,46 +245,27 @@ impl ProxyProvider {
                 )
             }),
             Vehicle::Http { url, cache_path } => {
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
-                    .build()
-                    .map_err(|e| {
-                        format!(
-                            "proxy-provider '{}': failed to build HTTP client: {}",
-                            self.name, e
-                        )
-                    })?;
-                let mut req = client.get(url);
-                for (k, v) in &self.header {
-                    req = req.header(k.as_str(), v.as_str());
-                }
-                match req.send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        match crate::internal_http::response_text_with_limit(resp).await {
-                            Ok(text) => {
-                                // Cache to disk for offline fallback
-                                if let Some(cache_path) = cache_path {
-                                    if let Some(parent) = cache_path.parent() {
-                                        let _ = tokio::fs::create_dir_all(parent).await;
-                                    }
-                                    let _ = tokio::fs::write(cache_path, &text).await;
-                                }
-                                Ok(text)
+                let headers: Vec<(String, String)> = self
+                    .header
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let fetched = crate::internal_http::fetch(url, None, &headers)
+                    .await
+                    .and_then(|bytes| {
+                        String::from_utf8(bytes)
+                            .map_err(|e| anyhow::anyhow!("response body is not UTF-8: {e}"))
+                    });
+                match fetched {
+                    Ok(text) => {
+                        // Cache to disk for offline fallback
+                        if let Some(cache_path) = cache_path {
+                            if let Some(parent) = cache_path.parent() {
+                                let _ = tokio::fs::create_dir_all(parent).await;
                             }
-                            Err(e) => {
-                                warn!(provider = %self.name, error = %e, "HTTP body read failed, trying cache");
-                                read_cache(cache_path.as_deref(), &self.name).await
-                            }
+                            let _ = tokio::fs::write(cache_path, &text).await;
                         }
-                    }
-                    Ok(resp) => {
-                        warn!(
-                            provider = %self.name,
-                            status = %resp.status(),
-                            "HTTP provider returned non-2xx, trying cache"
-                        );
-                        read_cache(cache_path.as_deref(), &self.name).await
+                        Ok(text)
                     }
                     Err(e) => {
                         warn!(provider = %self.name, error = %e, "HTTP provider fetch failed, trying cache");

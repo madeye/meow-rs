@@ -14,30 +14,28 @@ description = "Reusable composable stream-transport layers (TLS, WS, gRPC, H2, H
 
 [features]
 default = ["tls", "ws"]
+# tls: the `TlsLayer` client transport, backed by BoringSSL (boring +
+# tokio-boring; boring-sys vendors and builds BoringSSL, so cmake 3.14+ and a
+# C++ compiler are required at build time). Plain TLS, uTLS fingerprint
+# shaping, ECH (with server retry_configs self-healing), mTLS and ALPN are all
+# native here. There is no rustls backend: rustls is linked only by quinn for
+# the hysteria2 outbound (meow-proxy) and by the loopback test servers under
+# [dev-dependencies].
 tls = [
-    "dep:tokio-rustls",
-    "dep:rustls",
-    "dep:webpki-roots",
-]
-# boring-tls: enables BoringSSL-backed TLS for ECH and uTLS fingerprinting.
-# Requires cmake 3.14+ and a C++ compiler at build time (boring-sys vendors BoringSSL).
-# When absent, TlsConfig.fingerprint keeps the existing stub-warn behaviour and
-# TlsConfig.ech returns TransportError::Config at construction time.
-boring-tls = [
-    "tls",
-    "reality",
     "dep:boring",
     "dep:tokio-boring",
     "dep:boring-sys",
     "dep:rand",
     "dep:webpki-root-certs",
 ]
+# boring-tls: compatibility alias for `tls` (+ `reality`, which it always
+# implied) so existing `--features boring-tls` invocations and downstream
+# manifests keep building. New code should enable `tls`.
+boring-tls = ["tls", "reality"]
 # reality: xray REALITY client handshake (issue #377). The record layer, the
 # X25519 / HKDF / AES-GCM crypto and the ClientHello builder are all in-tree
 # (`reality_tls.rs`) on top of the always-present aes-gcm/hmac/sha2 deps, so
-# this is independent of `boring-tls` — REALITY has to keep working on the
-# targets where boring-sys cannot be built (armv7/i686 musl time64, MIPS,
-# windows-gnu, iOS). `boring-tls` implies it for backwards compatibility.
+# this does not touch BoringSSL at all.
 reality = [
     "tls",
     "dep:rand",
@@ -47,14 +45,6 @@ ws = [
     "dep:tokio-tungstenite",
     "dep:futures-util",
     "dep:base64",
-]
-# ech: enable rustls-side Encrypted Client Hello using aws-lc-rs HPKE primitives.
-# Adds ~1 MB to the binary (aws-lc-rs static crypto blob) — off by default.
-# Strictly additive: the rest of the TLS path keeps using ring.
-ech = [
-    "tls",
-    "rustls/aws_lc_rs",
-    "tokio-rustls/aws_lc_rs",
 ]
 grpc = [
     "dep:h2",
@@ -88,11 +78,6 @@ aes-gcm = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 
-# tls feature
-tokio-rustls    = { workspace = true, optional = true }
-rustls          = { workspace = true, optional = true }
-webpki-roots    = { workspace = true, optional = true }
-
 # ws feature
 tokio-tungstenite = { workspace = true, optional = true }
 futures-util      = { workspace = true, optional = true }
@@ -106,11 +91,10 @@ rand = { workspace = true, optional = true }
 # httpupgrade feature
 httparse = { version = "1", optional = true }
 
-# reality feature — pure-Rust X25519 so the REALITY handshake does not need
-# BoringSSL's `X25519` FFI (boring-sys does not build on every release target).
+# reality feature — pure-Rust X25519 for the REALITY handshake.
 x25519-dalek = { workspace = true, optional = true }
 
-# boring-tls feature
+# tls feature (BoringSSL)
 boring             = { workspace = true, optional = true }
 tokio-boring       = { workspace = true, optional = true }
 boring-sys         = { version = "5.0.2", optional = true }
@@ -128,6 +112,8 @@ webpki-root-certs  = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio        = { workspace = true }
+# Test-only: the loopback TLS *servers* in tests/ (SNI/ALPN/mTLS capture) are
+# rustls-based. Not linked into any binary.
 tokio-rustls = { workspace = true }
 rustls       = { workspace = true }
 rcgen        = "0.13"
@@ -142,7 +128,7 @@ base64 = { workspace = true }
 
 [[test]]
 name = "boring_tls_test"
-required-features = ["boring-tls"]
+required-features = ["tls"]
 
 [[test]]
 name = "grpc_test"

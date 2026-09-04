@@ -4,7 +4,6 @@ use anyhow::anyhow;
 use meow_common::adapter::Proxy;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{info, warn};
 
 const DEFAULT_MMDB_URL: &str =
@@ -117,20 +116,9 @@ pub async fn download_and_replace(
         info!("auto-update: downloading {} from {}", dest.display(), url);
     }
 
-    let bytes = if let Some(p) = proxy {
-        internal_http::fetch_via_proxy(url, p).await?
-    } else {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
-            .build()?;
-        let resp = client.get(url).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(anyhow!("HTTP {status} fetching {url}"));
-        }
-        internal_http::response_bytes_with_limit(resp).await?
-    };
+    let bytes = internal_http::fetch(url, proxy, &[])
+        .await
+        .map_err(|e| anyhow!("fetching {url}: {e}"))?;
 
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;

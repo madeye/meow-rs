@@ -26,7 +26,7 @@ exist yet.
 | Feature | Crate | What it gates |
 |---------|-------|---------------|
 | `ss` | `meow-proxy` | Shadowsocks adapter + `shadowsocks` crate dep |
-| `trojan` | `meow-proxy` | Trojan adapter + `tokio-rustls` dep |
+| `trojan` | `meow-proxy` | Trojan adapter (TLS via `meow-transport`'s `tls` layer) |
 | `vless` | `meow-proxy` | VLESS adapter (M1.B-2) |
 | `http-outbound` | `meow-proxy` | HTTP CONNECT outbound |
 | `socks5-outbound` | `meow-proxy` | SOCKS5 outbound |
@@ -37,7 +37,7 @@ exist yet.
 
 | Feature | Crate | What it gates |
 |---------|-------|---------------|
-| `transport-tls` | `meow-transport` | TLS layer + `rustls`/`tokio-rustls` deps |
+| `transport-tls` | `meow-transport` | TLS layer (BoringSSL; `boring-tls` is a no-op alias) |
 | `transport-ws` | `meow-transport` | WebSocket layer |
 | `transport-grpc` | `meow-transport` | gRPC/gun layer |
 | `transport-h2` | `meow-transport` | H2 + HTTP-upgrade layers |

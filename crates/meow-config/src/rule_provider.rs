@@ -689,27 +689,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 }
 
 pub(crate) async fn fetch_http_async(url: &str, proxy: Option<&Arc<dyn Proxy>>) -> Result<Vec<u8>> {
-    if let Some(p) = proxy {
-        return internal_http::fetch_via_proxy(url, p).await;
-    }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let resp = client.get(url).send().await?;
-    let status = resp.status();
-    let bytes = internal_http::response_bytes_with_limit(resp).await?;
-    if !status.is_success() {
-        return Err(anyhow!(
-            "HTTP {}: {}",
-            status,
-            String::from_utf8_lossy(&bytes)
-                .chars()
-                .take(200)
-                .collect::<String>()
-        ));
-    }
-    Ok(bytes)
+    internal_http::fetch(url, proxy, &[]).await
 }
 
 fn write_cache(path: &Path, bytes: &[u8]) {

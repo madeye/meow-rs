@@ -1,7 +1,9 @@
 pub mod auth;
-/// Certificate analysis and information extraction
+/// Certificate analysis and information extraction (server side)
+#[cfg(feature = "server")]
 pub mod cert_analyzer;
-/// Certificate reloader with hot reload support
+/// Certificate reloader with hot reload support (server side)
+#[cfg(feature = "server")]
 pub mod cert_reloader;
 pub mod dns_cache;
 /// Error types and Result alias
@@ -14,7 +16,9 @@ pub mod string_map;
 pub mod tls;
 
 pub use auth::*;
+#[cfg(feature = "server")]
 pub use cert_analyzer::*;
+#[cfg(feature = "server")]
 pub use cert_reloader::*;
 pub use dns_cache::*;
 pub use error::*;

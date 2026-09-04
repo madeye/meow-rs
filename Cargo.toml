@@ -88,6 +88,10 @@ serde_yaml = "0.9"
 # madeye fork removes the registry/git dependency entirely. See #262 and
 # crates/meow-anytls/README.md.
 shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "stream-cipher"] }
+# rustls is NOT a TLS backend in meow-rs any more (BoringSSL is — see
+# meow-transport). It stays for exactly two reasons: quinn — the QUIC stack
+# under the hysteria2 outbound — has no BoringSSL backend, and the loopback
+# TLS *servers* in the test suites are rustls-based (dev-dependencies only).
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 quinn = { version = "0.11", default-features = false, features = ["log", "ring", "runtime-tokio", "rustls-ring"] }
@@ -209,15 +213,12 @@ http = "1"
 # Temporary files (tests)
 tempfile = "3"
 
-# HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-
 # Parking lot for sync primitives
 parking_lot = "0.12"
 
 # Wait-free read / atomic swap for hot-path rule-set + proxy-provider refreshes
 
-# BoringSSL (pulled in by meow-transport's boring-tls feature)
+# BoringSSL — the TLS backend (meow-transport `tls` feature)
 boring      = { version = "5.0.2" }
 tokio-boring = { version = "5.0.0" }
 
@@ -244,7 +245,9 @@ meow-trie = { path = "crates/meow-trie", version = "0.21.2" }
 meow-anytls = { path = "crates/meow-anytls", version = "0.21.2" }
 meow-dns = { path = "crates/meow-dns", version = "0.21.2", default-features = false }
 meow-rules = { path = "crates/meow-rules", version = "0.21.2" }
-meow-transport = { path = "crates/meow-transport", version = "0.21.2" }
+# default-features = false so each consumer names the layers it needs
+# (meow-dns wants only `tls`; meow-listener only `simple-obfs`).
+meow-transport = { path = "crates/meow-transport", version = "0.21.2", default-features = false }
 meow-proxy = { path = "crates/meow-proxy", version = "0.21.2", default-features = false }
 meow-tunnel = { path = "crates/meow-tunnel", version = "0.21.2" }
 meow-listener = { path = "crates/meow-listener", version = "0.21.2", default-features = false }

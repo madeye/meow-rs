@@ -21,7 +21,10 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex as AsyncMutex;
 
 #[cfg(feature = "encrypted")]
-use {rustls::pki_types::ServerName, std::convert::TryFrom, tokio_rustls::TlsConnector};
+use meow_transport::{
+    tls::{TlsConfig, TlsLayer},
+    Transport as _,
+};
 
 /// Default per-query timeout (matches the hickory-resolver value previously
 /// used in `Resolver::build_*`).
@@ -257,14 +260,12 @@ enum Transport {
     Dot {
         addr: SocketAddr,
         sni: Arc<str>,
-        tls: Arc<rustls::ClientConfig>,
     },
     #[cfg(feature = "encrypted")]
     Doh {
         addr: SocketAddr,
         sni: Arc<str>,
         path: Arc<str>,
-        tls: Arc<rustls::ClientConfig>,
     },
     RCode {
         code: ResponseCode,
@@ -312,7 +313,6 @@ impl DnsClient {
             transport: Transport::Dot {
                 addr,
                 sni: Arc::from(sni),
-                tls: tls_client_config("dot"),
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
@@ -329,7 +329,6 @@ impl DnsClient {
                 addr,
                 sni: Arc::from(sni),
                 path: Arc::from(path),
-                tls: tls_client_config("doh"),
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
             proxy: None,
@@ -748,18 +747,13 @@ impl DnsClient {
                 "rcode transport should not perform network exchange",
             )),
             #[cfg(feature = "encrypted")]
-            Transport::Dot { addr, sni, tls } => {
-                let response = dot_exchange(*addr, sni, Arc::clone(tls), wire).await?;
+            Transport::Dot { addr, sni } => {
+                let response = dot_exchange(*addr, sni, wire).await?;
                 decode_validated_response(&response, expected)
             }
             #[cfg(feature = "encrypted")]
-            Transport::Doh {
-                addr,
-                sni,
-                path,
-                tls,
-            } => {
-                let response = doh_exchange(*addr, sni, path, Arc::clone(tls), wire).await?;
+            Transport::Doh { addr, sni, path } => {
+                let response = doh_exchange(*addr, sni, path, wire).await?;
                 decode_validated_response(&response, expected)
             }
         }
@@ -1058,18 +1052,11 @@ async fn read_lp<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<u8>, ClientEr
 }
 
 #[cfg(feature = "encrypted")]
-async fn dot_exchange(
-    addr: SocketAddr,
-    sni: &str,
-    tls: Arc<rustls::ClientConfig>,
-    wire: &[u8],
-) -> Result<Vec<u8>, ClientError> {
+async fn dot_exchange(addr: SocketAddr, sni: &str, wire: &[u8]) -> Result<Vec<u8>, ClientError> {
+    let tls = tls_layer(sni, "dot")?;
     let tcp = factory().connect_tcp(addr).await?;
-    let connector = TlsConnector::from(tls);
-    let server_name = ServerName::try_from(sni.to_string())
-        .map_err(|e| ClientError::Tls(format!("invalid SNI: {e}")))?;
-    let mut stream = connector
-        .connect(server_name, tcp)
+    let mut stream = tls
+        .connect(Box::new(tcp))
         .await
         .map_err(|e| ClientError::Tls(e.to_string()))?;
     write_lp(&mut stream, wire).await?;
@@ -1119,15 +1106,12 @@ async fn doh_exchange(
     addr: SocketAddr,
     sni: &str,
     path: &str,
-    tls: Arc<rustls::ClientConfig>,
     wire: &[u8],
 ) -> Result<Vec<u8>, ClientError> {
+    let tls = tls_layer(sni, "http/1.1")?;
     let tcp = factory().connect_tcp(addr).await?;
-    let connector = TlsConnector::from(tls);
-    let server_name = ServerName::try_from(sni.to_string())
-        .map_err(|e| ClientError::Tls(format!("invalid SNI: {e}")))?;
-    let mut stream = connector
-        .connect(server_name, tcp)
+    let mut stream = tls
+        .connect(Box::new(tcp))
         .await
         .map_err(|e| ClientError::Tls(e.to_string()))?;
 
@@ -1182,35 +1166,21 @@ fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
 }
 
+/// Build the TLS layer for one DoT/DoH exchange.
+///
+/// Goes through `meow_transport::tls::TlsLayer`, so DNS uses the same
+/// backend as every proxy handshake in the binary (BoringSSL by default,
+/// rustls when `boring-tls` is not compiled in).  Both backends memoise
+/// their per-process TLS context keyed on `(alpn, skip_cert_verify)`, so
+/// this is a hash lookup plus a refcount bump per query — negligible next
+/// to the fresh TCP + TLS handshake each exchange performs.
 #[cfg(feature = "encrypted")]
-fn tls_client_config(alpn: &str) -> Arc<rustls::ClientConfig> {
-    use std::sync::OnceLock;
-    static DOT: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    static DOH: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    let slot = match alpn {
-        "dot" => &DOT,
-        _ => &DOH,
+fn tls_layer(sni: &str, alpn: &str) -> Result<TlsLayer, ClientError> {
+    let config = TlsConfig {
+        alpn: vec![alpn.to_owned()],
+        ..TlsConfig::new(sni)
     };
-    Arc::clone(slot.get_or_init(|| {
-        let root_store = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-        // Be explicit about the provider — when both `ring` and `aws_lc_rs`
-        // are linked (e.g. by meow-transport's `ech` feature), the default
-        // `ClientConfig::builder()` panics on the auto-detect.
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("rustls protocol versions are safe defaults")
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        cfg.alpn_protocols = match alpn {
-            "dot" => vec![b"dot".to_vec()],
-            // h2 first, but the client speaks http/1.1 so include it too.
-            _ => vec![b"http/1.1".to_vec()],
-        };
-        Arc::new(cfg)
-    }))
+    TlsLayer::new(&config).map_err(|e| ClientError::Tls(format!("invalid SNI '{sni}': {e}")))
 }
 
 #[cfg(test)]

@@ -192,7 +192,8 @@ See [docs/benchmarks/index.md](docs/benchmarks/index.md) for a collated table of
 ## Key Dependencies
 
 - **Async runtime**: tokio (multi-threaded)
-- **Proxy protocols**: `shadowsocks` crate for SS; `tokio-rustls`/`rustls` for Trojan TLS
+- **Proxy protocols**: `shadowsocks` crate for SS; TLS for Trojan/VLESS/VMess/HTTP/SOCKS5 goes through `meow_transport::tls::TlsLayer`
+- **TLS backend**: BoringSSL (`boring`/`tokio-boring`) — the only backend; `meow-transport`'s `tls` feature *is* BoringSSL and `boring-tls` is a no-op alias. Health probes, the internal HTTP fetcher (`meow-config/src/internal_http.rs`, which replaced `reqwest`), DoT/DoH, and the vendored anytls client (via its `TlsConnect` hook) all reuse the same `TlsLayer`. rustls is in the graph only as quinn's QUIC crypto under `hysteria2` (no BoringSSL QUIC backend exists; `quiche` is the candidate) and as the loopback test servers' dev-dependency. `boring-sys` needs cmake + a C++ compiler on every build
 - **DNS**: `hickory-resolver`/`hickory-server`/`hickory-proto`
 - **Web framework**: axum + tower
 - **GeoIP**: `maxminddb`

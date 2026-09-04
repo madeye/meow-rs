@@ -22,12 +22,14 @@ use anytls_rs::client::UDP_OVER_TCP_MAGIC_ADDR;
 use anytls_rs::padding::PaddingFactory;
 use anytls_rs::protocol::{Command, Frame};
 use anytls_rs::session::{Session, Stream as AnytlsStream, StreamReader};
+use anytls_rs::{AsyncStream, TlsConnect, TlsConnectFuture};
 use async_trait::async_trait;
 use bytes::Bytes;
+use meow_transport::tls::{TlsConfig, TlsLayer};
+use meow_transport::Transport as _;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::TlsConnector;
+use tokio::net::TcpStream;
 
 use meow_common::{
     AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
@@ -71,21 +73,20 @@ impl AnytlsAdapter {
 
         let effective_sni = sni.filter(|s| !s.trim().is_empty()).unwrap_or(server);
         let server_name =
-            build_server_name(effective_sni).map_err(|e| format!("anytls[{name}]: {e}"))?;
+            normalize_server_name(effective_sni).map_err(|e| format!("anytls[{name}]: {e}"))?;
 
-        let tls_config = build_tls_client_config(skip_cert_verify)
-            .map_err(|e| format!("anytls[{name}]: tls config: {e}"))?;
-        let tls_connector = Arc::new(TlsConnector::from(tls_config));
+        // Same BoringSSL TlsLayer every other TLS outbound uses; the
+        // SSL_CTX is shared across proxies with the same shaping key.
+        let tls_layer = TlsLayer::new(&TlsConfig {
+            skip_cert_verify,
+            ..TlsConfig::new(server_name)
+        })
+        .map_err(|e| format!("anytls[{name}]: tls config: {e}"))?;
+        let tls: Arc<dyn TlsConnect> = Arc::new(MeowTlsConnect { layer: tls_layer });
 
         let padding = PaddingFactory::default();
 
-        let client = AnytlsClient::new(
-            password,
-            server_addr.clone(),
-            server_name,
-            tls_connector,
-            padding,
-        );
+        let client = AnytlsClient::new(password, server_addr.clone(), tls, padding);
 
         Ok(Self {
             name: name.to_string(),
@@ -621,90 +622,33 @@ impl Drop for AnytlsPacketConn {
     }
 }
 
-fn build_server_name(value: &str) -> std::result::Result<ServerName<'static>, String> {
+/// Normalise the SNI / verification name: trim whitespace and IPv6 brackets;
+/// an IP literal is verified against the certificate's `iPAddress` SAN and
+/// (per RFC 6066 §3) not sent as SNI — `TlsLayer` handles both.
+fn normalize_server_name(value: &str) -> std::result::Result<String, String> {
     let normalized = value.trim().trim_start_matches('[').trim_end_matches(']');
     if normalized.is_empty() {
         return Err("SNI cannot be empty".to_string());
     }
-    if let Ok(ip) = normalized.parse::<std::net::IpAddr>() {
-        return Ok(ServerName::IpAddress(ip.into()));
-    }
-    ServerName::try_from(normalized.to_string()).map_err(|_| format!("invalid SNI '{normalized}'"))
+    Ok(normalized.to_string())
 }
 
-fn build_tls_client_config(
-    skip_cert_verify: bool,
-) -> std::result::Result<Arc<rustls::ClientConfig>, String> {
-    use rustls::RootCertStore;
+/// Bridges `meow_transport::tls::TlsLayer` into anytls-rs's [`TlsConnect`]
+/// hook so the vendored client links no TLS library of its own.
+struct MeowTlsConnect {
+    layer: TlsLayer,
+}
 
-    let root_store = RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-
-    let config_builder = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .map_err(|e| format!("rustls builder: {e}"))?;
-
-    let mut config = config_builder
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    if skip_cert_verify {
-        use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified};
-        use rustls::pki_types::{CertificateDer, ServerName as RsServerName, UnixTime};
-        use rustls::{DigitallySignedStruct, SignatureScheme};
-
-        #[derive(Debug)]
-        struct NoVerify;
-        impl rustls::client::danger::ServerCertVerifier for NoVerify {
-            fn verify_server_cert(
-                &self,
-                _: &CertificateDer<'_>,
-                _: &[CertificateDer<'_>],
-                _: &RsServerName<'_>,
-                _: &[u8],
-                _: UnixTime,
-            ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-                Ok(ServerCertVerified::assertion())
-            }
-            fn verify_tls12_signature(
-                &self,
-                _: &[u8],
-                _: &CertificateDer<'_>,
-                _: &DigitallySignedStruct,
-            ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-                Ok(HandshakeSignatureValid::assertion())
-            }
-            fn verify_tls13_signature(
-                &self,
-                _: &[u8],
-                _: &CertificateDer<'_>,
-                _: &DigitallySignedStruct,
-            ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-                Ok(HandshakeSignatureValid::assertion())
-            }
-            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-                vec![
-                    SignatureScheme::ECDSA_NISTP256_SHA256,
-                    SignatureScheme::ECDSA_NISTP384_SHA384,
-                    SignatureScheme::ED25519,
-                    SignatureScheme::RSA_PSS_SHA256,
-                    SignatureScheme::RSA_PSS_SHA384,
-                    SignatureScheme::RSA_PSS_SHA512,
-                    SignatureScheme::RSA_PKCS1_SHA256,
-                    SignatureScheme::RSA_PKCS1_SHA384,
-                    SignatureScheme::RSA_PKCS1_SHA512,
-                ]
-            }
-        }
-        config
-            .dangerous()
-            .set_certificate_verifier(Arc::new(NoVerify));
+impl TlsConnect for MeowTlsConnect {
+    fn connect(&self, tcp: TcpStream) -> TlsConnectFuture<'_> {
+        Box::pin(async move {
+            let stream =
+                self.layer.connect(Box::new(tcp)).await.map_err(|e| {
+                    anytls_rs::AnyTlsError::Tls(format!("TLS handshake failed: {e}"))
+                })?;
+            Ok(Box::new(stream) as Box<dyn AsyncStream>)
+        })
     }
-
-    Ok(Arc::new(config))
 }
 
 // ─── meow_common ⇄ anytls_rs protector bridge ────────────────────────────────

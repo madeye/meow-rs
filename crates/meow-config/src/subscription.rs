@@ -11,20 +11,9 @@ pub struct SubscriptionData {
 
 /// Fetch a Clash YAML subscription and extract proxies, groups, and rules.
 pub async fn fetch_subscription(url: &str) -> Result<SubscriptionData, anyhow::Error> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .user_agent(concat!("clash.meta/", env!("CARGO_PKG_VERSION")))
-        .build()?;
-    let resp = client.get(url).send().await?;
-    let status = resp.status();
-    let text = crate::internal_http::response_text_with_limit(resp).await?;
-    if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "HTTP {}: {}",
-            status,
-            text.chars().take(200).collect::<String>()
-        ));
-    }
+    let bytes = crate::internal_http::fetch_direct(url).await?;
+    let text = String::from_utf8(bytes)
+        .map_err(|e| anyhow::anyhow!("subscription body is not UTF-8: {e}"))?;
     parse_subscription_yaml(&text)
 }
 
