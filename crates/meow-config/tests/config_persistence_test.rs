@@ -203,6 +203,100 @@ fn rebuild_from_raw_with_groups() {
 }
 
 #[test]
+fn auto_global_defaults_to_final_match_group() {
+    let raw: RawConfig = serde_yaml::from_str(
+        r#"
+proxies:
+  - {name: "137.15 G | 500.00 G", type: socks5, server: 127.0.0.1, port: 1}
+  - {name: "HK 01", type: socks5, server: 127.0.0.1, port: 2}
+proxy-groups:
+  - {name: AutoSelect, type: url-test, proxies: ["HK 01"]}
+  - {name: Proxies, type: select, proxies: [AutoSelect, "HK 01"]}
+rules:
+  - DOMAIN,example.com,DIRECT
+  - MATCH,Proxies
+"#,
+    )
+    .unwrap();
+
+    let (proxies, _) = rebuild_from_raw(&raw).unwrap();
+    let global = proxies.get("GLOBAL").expect("auto-created GLOBAL");
+
+    assert_eq!(global.current().as_deref(), Some("Proxies"));
+    let members = global.members().expect("GLOBAL selector members");
+    assert_eq!(members.first().map(String::as_str), Some("Proxies"));
+    assert!(members.contains(&"137.15 G | 500.00 G".to_string()));
+    assert!(members.contains(&"AutoSelect".to_string()));
+    assert!(members.contains(&"HK 01".to_string()));
+    assert!(members.contains(&"DIRECT".to_string()));
+    assert!(members.contains(&"REJECT".to_string()));
+}
+
+#[test]
+fn auto_global_falls_back_to_first_declared_outbound() {
+    let group_first: RawConfig = serde_yaml::from_str(
+        r#"
+proxies:
+  - {name: "HK 01", type: socks5, server: 127.0.0.1, port: 2}
+proxy-groups:
+  - {name: Proxies, type: select, proxies: ["HK 01"]}
+rules:
+  - MATCH,DIRECT
+"#,
+    )
+    .unwrap();
+    let (proxies, _) = rebuild_from_raw(&group_first).unwrap();
+    assert_eq!(
+        proxies
+            .get("GLOBAL")
+            .and_then(|global| global.current())
+            .as_deref(),
+        Some("Proxies")
+    );
+
+    let proxy_only: RawConfig = serde_yaml::from_str(
+        r#"
+proxies:
+  - {name: "HK 01", type: socks5, server: 127.0.0.1, port: 2}
+rules:
+  - MATCH,DIRECT
+"#,
+    )
+    .unwrap();
+    let (proxies, _) = rebuild_from_raw(&proxy_only).unwrap();
+    assert_eq!(
+        proxies
+            .get("GLOBAL")
+            .and_then(|global| global.current())
+            .as_deref(),
+        Some("HK 01")
+    );
+}
+
+#[test]
+fn user_declared_global_keeps_its_own_default() {
+    let raw: RawConfig = serde_yaml::from_str(
+        r#"
+proxies:
+  - {name: "HK 01", type: socks5, server: 127.0.0.1, port: 2}
+proxy-groups:
+  - {name: Proxies, type: select, proxies: ["HK 01"]}
+  - {name: GLOBAL, type: select, proxies: [DIRECT, Proxies]}
+rules:
+  - MATCH,Proxies
+"#,
+    )
+    .unwrap();
+    let (proxies, _) = rebuild_from_raw(&raw).unwrap();
+    let global = proxies.get("GLOBAL").expect("user GLOBAL");
+    assert_eq!(global.current().as_deref(), Some("DIRECT"));
+    assert_eq!(
+        global.members().expect("GLOBAL members"),
+        vec!["DIRECT".to_string(), "Proxies".to_string()]
+    );
+}
+
+#[test]
 fn rebuild_from_raw_skips_invalid_proxy() {
     let mut raw = minimal_raw_config();
     let mut bad_proxy = HashMap::new();
