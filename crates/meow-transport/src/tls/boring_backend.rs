@@ -255,25 +255,44 @@ fn resolve_fingerprint(fp: &str) -> Option<&'static FingerprintParams> {
     }
 }
 
-/// Process-global Mozilla CA root store shared across all BoringSSL
-/// TlsLayer instances. `X509Store::clone()` is a refcount bump
-/// (`X509_STORE_up_ref`), so each SslConnector shares the same C-level
-/// store rather than duplicating ~150 KB of parsed DER certificates.
-static BORING_ROOT_STORE: OnceLock<boring::x509::store::X509Store> = OnceLock::new();
+/// Process-global parsed Mozilla CA roots. Parsed once from DER; each `X509`
+/// is refcount-shared (`X509_up_ref` on clone), so building a per-connector
+/// store from these is cheap and never re-parses the ~150 KB of DER. (boring's
+/// `X509Store` is not `Clone`, so the store itself cannot be shared directly;
+/// the certs are.)
+static BORING_ROOTS: OnceLock<Vec<boring::x509::X509>> = OnceLock::new();
 
-fn shared_root_store() -> boring::x509::store::X509Store {
-    BORING_ROOT_STORE
-        .get_or_init(|| {
-            let mut builder =
-                boring::x509::store::X509StoreBuilder::new().expect("X509StoreBuilder::new");
-            for cert in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-                let x509 = boring::x509::X509::from_der(cert.as_ref())
-                    .expect("webpki_root_certs: invalid CA cert");
-                builder.add_cert(x509).expect("webpki_root_certs: add_cert");
-            }
-            builder.build()
-        })
-        .clone()
+fn boring_roots() -> &'static [boring::x509::X509] {
+    BORING_ROOTS.get_or_init(|| {
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .map(|cert| {
+                boring::x509::X509::from_der(cert.as_ref())
+                    .expect("webpki_root_certs: invalid CA cert")
+            })
+            .collect()
+    })
+}
+
+/// Build a fresh Mozilla-roots `X509StoreBuilder`, optionally seeded with extra
+/// DER roots. Called once per distinct connector cache key, not per proxy.
+fn build_root_store(additional_roots: &[Vec<u8>]) -> Result<boring::x509::store::X509StoreBuilder> {
+    let mut builder = boring::x509::store::X509StoreBuilder::new()
+        .map_err(|e| TransportError::Config(format!("X509StoreBuilder::new: {e}")))?;
+    for cert in boring_roots() {
+        builder
+            .add_cert(cert.clone())
+            .map_err(|e| TransportError::Config(format!("root store add_cert: {e}")))?;
+    }
+    for der in additional_roots {
+        let x509 = boring::x509::X509::from_der(der).map_err(|e| {
+            TransportError::Config(format!("additional_roots: invalid CA cert (boring): {e}"))
+        })?;
+        builder.add_cert(x509).map_err(|e| {
+            TransportError::Config(format!("additional_roots: add_cert (boring): {e}"))
+        })?;
+    }
+    Ok(builder)
 }
 
 /// Cache key for [`CONNECTOR_CACHE`] — the [`TlsConfig`] fields that shape
@@ -445,33 +464,12 @@ impl BoringInner {
             b.set_verify(boring::ssl::SslVerifyMode::NONE);
         } else {
             b.set_verify(boring::ssl::SslVerifyMode::PEER);
-            // Use the process-global Mozilla CA bundle (refcount-shared,
-            // not duplicated per connector). `set_cert_store` makes the
-            // store immutable on this builder, which is fine — we only
-            // need to add `additional_roots` on top, and those go into
-            // a separate verify store.
-            if config.additional_roots.is_empty() {
-                b.set_cert_store(shared_root_store());
-            } else {
-                // When extra roots are needed, clone the shared store
-                // into a mutable builder and append.
-                let mut store = boring::x509::store::X509StoreBuilder::new()
-                    .map_err(|e| TransportError::Config(format!("X509StoreBuilder::new: {e}")))?;
-                // Seed from the shared Mozilla bundle via the verify store.
-                b.set_cert_store(shared_root_store());
-                for der in &config.additional_roots {
-                    let x509 = boring::x509::X509::from_der(der).map_err(|e| {
-                        TransportError::Config(format!(
-                            "additional_roots: invalid CA cert (boring): {e}"
-                        ))
-                    })?;
-                    store.add_cert(x509).map_err(|e| {
-                        TransportError::Config(format!("additional_roots: add_cert (boring): {e}"))
-                    })?;
-                }
-                b.set_verify_cert_store(store.build())
-                    .map_err(|e| TransportError::Config(format!("set_verify_cert_store: {e}")))?;
-            }
+            // Mozilla CA bundle (plus any `additional_roots`) as the verify
+            // store, rebuilt per distinct connector cache key from the shared,
+            // pre-parsed root certs. `set_cert_store_builder` is the
+            // non-deprecated setter on boring 4.x.
+            let store = build_root_store(&config.additional_roots)?;
+            b.set_cert_store_builder(store);
         }
 
         // ── Client certificate (mTLS) ────────────────────────────────────────

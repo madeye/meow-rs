@@ -24,7 +24,7 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 ### TLS & Privacy
 - **ECH (Encrypted Client Hello)** -- DNS-based ECH config fetching from HTTPS/SVCB records; BoringSSL backend (`boring-tls` feature)
 - **uTLS Fingerprinting** -- Chrome, Firefox, Safari, iOS, Android, Edge profiles to bypass TLS fingerprint detection
-- **BoringSSL** is the single TLS stack: every proxy handshake, health check, DoT/DoH upstream, and internal HTTP(S) fetch goes through it (uTLS fingerprints and ECH included). rustls is not used for TLS; it remains only as quinn's QUIC crypto under `hysteria2`
+- **BoringSSL** is the single crypto library for the whole app. Every proxy handshake, health check, DoT/DoH upstream, internal HTTP(S) fetch (uTLS fingerprints and ECH included), and the Hysteria2 QUIC transport link one vendored BoringSSL. rustls is not used at runtime at all
 
 ### Proxy Groups
 - **Selector** -- Manual proxy selection via REST API or web UI

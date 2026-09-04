@@ -97,7 +97,7 @@ x25519-dalek = { workspace = true, optional = true }
 # tls feature (BoringSSL)
 boring             = { workspace = true, optional = true }
 tokio-boring       = { workspace = true, optional = true }
-boring-sys         = { version = "5.0.2", optional = true }
+boring-sys         = { version = "=4.22.0", optional = true }
 # Mozilla CA bundle for boring's X509Store. The BoringSSL connector
 # starts with an *empty* trust store; sandboxed runtimes (iOS
 # NetworkExtension, sealed app extensions) don't pick up system roots

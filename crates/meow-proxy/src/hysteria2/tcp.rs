@@ -1,64 +1,60 @@
-use super::{proto, Error, Result};
-use quinn::{RecvStream, SendStream};
-use std::future::Future;
+//! `DuplexStream`: an `AsyncRead`/`AsyncWrite` view of one proxied TCP stream,
+//! bridged to the quiche driver over channels. Reads pull decoded payload from a
+//! per-stream channel the driver fills (the hysteria2 TCP response is parsed and
+//! stripped by the driver); writes are forwarded to the driver as `Cmd::Write`,
+//! with backpressure from the bounded command channel.
+
+use super::driver::{Cmd, ReadItem};
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-
-type ReadResponseFuture = Pin<Box<dyn Future<Output = (RecvStream, Result<()>)> + Send>>;
-type WriteOpenFuture = Pin<Box<dyn Future<Output = (SendStream, io::Result<()>)> + Send>>;
+use tokio::sync::mpsc;
+use tokio::sync::Notify;
+use tokio_util::sync::PollSender;
 
 pub struct DuplexStream {
-    target: String,
-    read_state: ReadState,
-    write_state: WriteState,
+    id: u64,
+    read_rx: mpsc::Receiver<ReadItem>,
+    read_notify: Arc<Notify>,
+    writer: PollSender<Cmd>,
+    cmd_tx: mpsc::Sender<Cmd>,
+    leftover: Vec<u8>,
+    leftover_pos: usize,
+    read_done: bool,
+    shutdown_sent: bool,
 }
 
 impl DuplexStream {
     pub(crate) fn new(
-        send: SendStream,
-        recv: RecvStream,
-        target: String,
-        request_written: bool,
+        id: u64,
+        read_rx: mpsc::Receiver<ReadItem>,
+        read_notify: Arc<Notify>,
+        cmd_tx: mpsc::Sender<Cmd>,
     ) -> Self {
         Self {
-            target,
-            read_state: ReadState::NeedResponse(Some(recv)),
-            write_state: if request_written {
-                WriteState::Open(send)
-            } else {
-                WriteState::NeedRequest(Some(send))
-            },
+            id,
+            read_rx,
+            read_notify,
+            writer: PollSender::new(cmd_tx.clone()),
+            cmd_tx,
+            leftover: Vec::new(),
+            leftover_pos: 0,
+            read_done: false,
+            shutdown_sent: false,
         }
     }
 
-    fn poll_open_write(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        loop {
-            match &mut this.write_state {
-                WriteState::Open(_) => return Poll::Ready(Ok(())),
-                WriteState::NeedRequest(_) => {
-                    return Poll::Ready(Ok(()));
-                }
-                WriteState::Opening { future, .. } => {
-                    let (send, result) = match future.as_mut().poll(cx) {
-                        Poll::Ready(result) => result,
-                        Poll::Pending => return Poll::Pending,
-                    };
-                    this.write_state = match result {
-                        Ok(()) => WriteState::Open(send),
-                        Err(e) => WriteState::Failed(e.kind()),
-                    };
-                }
-                WriteState::Failed(kind) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        *kind,
-                        "hysteria2 TCP stream write failed",
-                    )));
-                }
-            }
+    fn drain_leftover(&mut self, buf: &mut ReadBuf<'_>) -> bool {
+        if self.leftover_pos >= self.leftover.len() {
+            return false;
         }
+        let avail = &self.leftover[self.leftover_pos..];
+        let n = avail.len().min(buf.remaining());
+        buf.put_slice(&avail[..n]);
+        self.leftover_pos += n;
+        true
     }
 }
 
@@ -69,32 +65,30 @@ impl AsyncRead for DuplexStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        loop {
-            match &mut this.read_state {
-                ReadState::NeedResponse(recv) => {
-                    let recv = recv
-                        .take()
-                        .ok_or_else(|| io::Error::other("hysteria2 TCP receive stream missing"))?;
-                    this.read_state = ReadState::Reading(read_response(recv));
-                }
-                ReadState::Reading(future) => {
-                    let (recv, result) = match future.as_mut().poll(cx) {
-                        Poll::Ready(result) => result,
-                        Poll::Pending => return Poll::Pending,
-                    };
-                    match result {
-                        Ok(()) => this.read_state = ReadState::Open(recv),
-                        Err(e) => {
-                            this.read_state = ReadState::Failed;
-                            return Poll::Ready(Err(error_to_io(e)));
-                        }
-                    }
-                }
-                ReadState::Open(recv) => return Pin::new(recv).poll_read(cx, buf),
-                ReadState::Failed => {
-                    return Poll::Ready(Err(io::Error::other("hysteria2 TCP stream read failed")));
-                }
+        if this.drain_leftover(buf) {
+            return Poll::Ready(Ok(()));
+        }
+        if this.read_done {
+            return Poll::Ready(Ok(()));
+        }
+        match this.read_rx.poll_recv(cx) {
+            Poll::Ready(Some(ReadItem::Data(v))) => {
+                this.leftover = v;
+                this.leftover_pos = 0;
+                // Free the driver to read more into this stream's channel.
+                this.read_notify.notify_one();
+                this.drain_leftover(buf);
+                Poll::Ready(Ok(()))
             }
+            Poll::Ready(Some(ReadItem::Eof)) | Poll::Ready(None) => {
+                this.read_done = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Some(ReadItem::Err(kind))) => {
+                this.read_done = true;
+                Poll::Ready(Err(io::Error::new(kind, "hysteria2 stream error")))
+            }
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -106,140 +100,59 @@ impl AsyncWrite for DuplexStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        loop {
-            match &mut this.write_state {
-                WriteState::NeedRequest(send) => {
-                    let send = send
-                        .take()
-                        .ok_or_else(|| io::Error::other("hysteria2 TCP send stream missing"))?;
-                    let frame =
-                        proto::encode_tcp_request(&this.target, buf).map_err(error_to_io)?;
-                    let payload_len = buf.len();
-                    this.write_state = WriteState::Opening {
-                        future: write_open(send, frame),
-                        payload_len,
-                    };
-                }
-                WriteState::Opening {
-                    future,
-                    payload_len,
-                } => {
-                    let (send, result) = match future.as_mut().poll(cx) {
-                        Poll::Ready(result) => result,
-                        Poll::Pending => return Poll::Pending,
-                    };
-                    match result {
-                        Ok(()) => {
-                            let n = *payload_len;
-                            this.write_state = WriteState::Open(send);
-                            return Poll::Ready(Ok(n));
-                        }
-                        Err(e) => {
-                            let kind = e.kind();
-                            this.write_state = WriteState::Failed(kind);
-                            return Poll::Ready(Err(e));
-                        }
-                    }
-                }
-                WriteState::Open(send) => {
-                    return tokio::io::AsyncWrite::poll_write(Pin::new(send), cx, buf);
-                }
-                WriteState::Failed(kind) => {
-                    return Poll::Ready(Err(io::Error::new(
-                        *kind,
-                        "hysteria2 TCP stream write failed",
-                    )));
+        match this.writer.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => {
+                match this.writer.send_item(Cmd::Write {
+                    id: this.id,
+                    data: buf.to_vec(),
+                }) {
+                    Ok(()) => Poll::Ready(Ok(buf.len())),
+                    Err(_) => Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "hysteria2 connection closed",
+                    ))),
                 }
             }
+            Poll::Ready(Err(_)) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "hysteria2 connection closed",
+            ))),
+            Poll::Pending => Poll::Pending,
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut this = self;
-        match this.as_mut().poll_open_write(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        }
-
-        match &mut this.get_mut().write_state {
-            WriteState::Open(send) => Pin::new(send).poll_flush(cx),
-            WriteState::NeedRequest(_) => Poll::Ready(Ok(())),
-            WriteState::Opening { .. } => Poll::Pending,
-            WriteState::Failed(kind) => Poll::Ready(Err(io::Error::new(
-                *kind,
-                "hysteria2 TCP stream write failed",
-            ))),
-        }
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut this = self;
-        match this.as_mut().poll_open_write(cx) {
-            Poll::Ready(Ok(())) => {}
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
+        let this = self.get_mut();
+        if this.shutdown_sent {
+            return Poll::Ready(Ok(()));
         }
-
-        match &mut this.get_mut().write_state {
-            WriteState::Open(send) => Pin::new(send).poll_shutdown(cx),
-            WriteState::NeedRequest(send) => {
-                let Some(mut send) = send.take() else {
-                    return Poll::Ready(Err(io::Error::other("hysteria2 TCP send stream missing")));
-                };
-                Poll::Ready(send.finish().map_err(io::Error::from))
+        match this.writer.poll_reserve(cx) {
+            Poll::Ready(Ok(())) => {
+                let _ = this.writer.send_item(Cmd::Shutdown { id: this.id });
+                this.shutdown_sent = true;
+                Poll::Ready(Ok(()))
             }
-            WriteState::Opening { .. } => Poll::Pending,
-            WriteState::Failed(kind) => Poll::Ready(Err(io::Error::new(
-                *kind,
-                "hysteria2 TCP stream write failed",
-            ))),
+            Poll::Ready(Err(_)) => {
+                this.shutdown_sent = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for DuplexStream {
+    fn drop(&mut self) {
+        if !self.shutdown_sent {
+            // Half-close the write side so the driver fins the stream and
+            // reclaims its state; best-effort.
+            let _ = self.cmd_tx.try_send(Cmd::Shutdown { id: self.id });
         }
     }
 }
 
 impl Unpin for DuplexStream {}
-
-enum ReadState {
-    NeedResponse(Option<RecvStream>),
-    Reading(ReadResponseFuture),
-    Open(RecvStream),
-    Failed,
-}
-
-enum WriteState {
-    NeedRequest(Option<SendStream>),
-    Opening {
-        future: WriteOpenFuture,
-        payload_len: usize,
-    },
-    Open(SendStream),
-    Failed(io::ErrorKind),
-}
-
-fn read_response(mut recv: RecvStream) -> ReadResponseFuture {
-    Box::pin(async move {
-        let result = proto::read_tcp_response(&mut recv).await;
-        (recv, result)
-    })
-}
-
-fn write_open(mut send: SendStream, frame: Vec<u8>) -> WriteOpenFuture {
-    Box::pin(async move {
-        let result = send.write_all(&frame).await.map_err(io::Error::from);
-        (send, result)
-    })
-}
-
-pub(crate) async fn write_initial_request(send: &mut SendStream, target: &str) -> Result<()> {
-    let frame = proto::encode_tcp_request(target, &[])?;
-    send.write_all(&frame).await.map_err(io::Error::from)?;
-    Ok(())
-}
-
-fn error_to_io(error: Error) -> io::Error {
-    match error {
-        Error::Io(e) => e,
-        other => io::Error::other(other),
-    }
-}

@@ -1,12 +1,10 @@
 use super::{Error, Result};
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub const FRAME_TYPE_TCP_REQUEST: u64 = 0x401;
 pub const MAX_ADDRESS_LENGTH: usize = 2048;
 pub const MAX_MESSAGE_LENGTH: usize = 2048;
 pub const MAX_PADDING_LENGTH: usize = 4096;
 pub const MAX_UDP_SIZE: usize = 4096;
-pub const DEFAULT_UDP_MTU: usize = 1200 - 3;
 
 const AUTH_PADDING_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
@@ -51,38 +49,73 @@ pub fn encode_tcp_request(addr: &str, payload: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub async fn read_tcp_response<R>(reader: &mut R) -> Result<()>
-where
-    R: AsyncRead + Unpin,
-{
-    let status = reader.read_u8().await?;
-    let message_len = read_varint_async(reader).await? as usize;
+/// Parse a hysteria2 TCP response from the front of `buf` without consuming it.
+///
+/// The response is `status(1) || varint msg_len || msg || varint pad_len ||
+/// pad`. Returns `Ok(Some(n))` when a complete response occupies the first `n`
+/// bytes (status 0), `Ok(None)` when more bytes are needed, or `Err` when the
+/// server signalled a TCP error (status 1) or the frame is malformed. Used by
+/// the quiche driver, which parses the response off the stream before
+/// forwarding any payload to the caller.
+pub fn parse_tcp_response(buf: &[u8]) -> Result<Option<usize>> {
+    let mut pos = 0usize;
+    let Some(status) = buf.first().copied() else {
+        return Ok(None);
+    };
+    pos += 1;
+    let Some((message_len, n)) = read_varint_opt(&buf[pos..]) else {
+        return Ok(None);
+    };
+    pos += n;
+    let message_len = message_len as usize;
     if message_len > MAX_MESSAGE_LENGTH {
         return Err(Error::protocol("invalid TCP response message length"));
     }
-
-    let mut message = vec![0u8; message_len];
-    if message_len > 0 {
-        reader.read_exact(&mut message).await?;
+    let msg_end = pos
+        .checked_add(message_len)
+        .ok_or_else(|| Error::protocol("TCP response length overflow"))?;
+    if buf.len() < msg_end {
+        return Ok(None);
     }
-
-    let padding_len = read_varint_async(reader).await? as usize;
+    let message = &buf[pos..msg_end];
+    pos = msg_end;
+    let Some((padding_len, n)) = read_varint_opt(&buf[pos..]) else {
+        return Ok(None);
+    };
+    pos += n;
+    let padding_len = padding_len as usize;
     if padding_len > MAX_PADDING_LENGTH {
         return Err(Error::protocol("invalid TCP response padding length"));
     }
-    if padding_len > 0 {
-        let mut padding = vec![0u8; padding_len];
-        reader.read_exact(&mut padding).await?;
+    let end = pos
+        .checked_add(padding_len)
+        .ok_or_else(|| Error::protocol("TCP response length overflow"))?;
+    if buf.len() < end {
+        return Ok(None);
     }
-
     match status {
-        0 => Ok(()),
+        0 => Ok(Some(end)),
         1 => Err(Error::protocol(format!(
             "remote TCP error: {}",
-            String::from_utf8_lossy(&message)
+            String::from_utf8_lossy(message)
         ))),
         _ => Err(Error::protocol("invalid TCP response status")),
     }
+}
+
+/// Read a QUIC varint from the front of `input`, returning `(value, len)` or
+/// `None` if `input` does not yet hold the whole varint.
+fn read_varint_opt(input: &[u8]) -> Option<(u64, usize)> {
+    let first = *input.first()?;
+    let len = 1usize << (first >> 6);
+    if input.len() < len {
+        return None;
+    }
+    let mut value = u64::from(first & 0x3f);
+    for b in &input[1..len] {
+        value = (value << 8) | u64::from(*b);
+    }
+    Some((value, len))
 }
 
 pub fn udp_header_len(addr: &str) -> Result<usize> {
@@ -199,19 +232,6 @@ pub fn read_varint(input: &[u8], pos: &mut usize) -> Result<u64> {
     Ok(value)
 }
 
-async fn read_varint_async<R>(reader: &mut R) -> Result<u64>
-where
-    R: AsyncRead + Unpin,
-{
-    let first = reader.read_u8().await?;
-    let len = 1usize << (first >> 6);
-    let mut value = u64::from(first & 0x3f);
-    for _ in 1..len {
-        value = (value << 8) | u64::from(reader.read_u8().await?);
-    }
-    Ok(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +257,22 @@ mod tests {
         );
         assert_eq!(read_varint(&encoded, &mut pos).unwrap(), 15);
         assert_eq!(&encoded[pos..pos + 15], b"example.com:443");
+    }
+
+    #[test]
+    fn tcp_response_parse_needs_more_then_completes() {
+        // status=0, msg_len=0, pad_len=3, pad="abc"
+        let full = [0u8, 0u8, 3u8, b'a', b'b', b'c'];
+        assert_eq!(parse_tcp_response(&full[..1]).unwrap(), None);
+        assert_eq!(parse_tcp_response(&full[..5]).unwrap(), None);
+        assert_eq!(parse_tcp_response(&full).unwrap(), Some(6));
+    }
+
+    #[test]
+    fn tcp_response_error_status_is_reported() {
+        // status=1 (error), msg_len=2 "no", pad_len=0
+        let full = [1u8, 2u8, b'n', b'o', 0u8];
+        assert!(parse_tcp_response(&full).is_err());
     }
 
     #[test]

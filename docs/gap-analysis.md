@@ -41,7 +41,7 @@ Upstream lives in `adapter/outbound/`. Current Rust adapters live in `crates/meo
 | VLESS           | Yes      | No        | **Gap** | High priority; includes XTLS/Reality upstream |
 | Snell           | Yes      | No        | **Gap** | Medium priority |
 | Hysteria v1     | Yes      | No        | **Gap** | Medium priority, QUIC-based |
-| Hysteria2       | Yes      | No        | **Gap** | High priority (modern QUIC), needs quinn |
+| Hysteria2       | Yes      | Yes       | OK      | QUIC via quiche (BoringSSL-native) |
 | TUIC            | Yes      | No        | **Gap** | QUIC-based, medium priority |
 | WireGuard       | Yes      | No        | **Gap** | Upstream uses `wireguard-go`; Rust can use `boringtun` |
 | SSH             | Yes      | No        | **Gap** | Niche |
