@@ -33,22 +33,30 @@ impl ReconnectableClient {
 
     pub async fn tcp_connect(&self, target: &str) -> Result<DuplexStream> {
         let client = self.connection().await?;
-        let (mut send, recv) = client
-            .connection
-            .open_bi()
+        let (mut send, mut recv) = timeout(CONNECT_TIMEOUT, client.connection.open_bi())
             .await
+            .map_err(|_| Error::Quic(format!("open stream timeout after {CONNECT_TIMEOUT:?}")))?
             .map_err(|e| Error::Quic(e.to_string()))?;
 
-        if !self.cfg.fast_open {
-            tcp::write_initial_request(&mut send, target).await?;
-        }
+        timeout(
+            CONNECT_TIMEOUT,
+            tcp::write_initial_request(&mut send, target),
+        )
+        .await
+        .map_err(|_| Error::Quic(format!("TCP request timeout after {CONNECT_TIMEOUT:?}")))??;
 
-        Ok(DuplexStream::new(
-            send,
-            recv,
-            target.to_string(),
-            !self.cfg.fast_open,
-        ))
+        let response_read = if self.cfg.fast_open {
+            false
+        } else {
+            timeout(CONNECT_TIMEOUT, tcp::read_initial_response(&mut recv))
+                .await
+                .map_err(|_| {
+                    Error::Quic(format!("TCP response timeout after {CONNECT_TIMEOUT:?}"))
+                })??;
+            true
+        };
+
+        Ok(DuplexStream::new(send, recv, response_read))
     }
 
     pub async fn udp(&self) -> Result<UdpSession> {
@@ -164,10 +172,31 @@ async fn connect_addr(
         .map_err(|_| Error::Quic(format!("connect timeout after {CONNECT_TIMEOUT:?}")))?
         .map_err(|e| Error::Quic(format!("connect: {e}")))?;
 
-    let (h3_conn, mut send_request) =
-        h3::client::new(h3_quinn::Connection::new(connection.clone()))
-            .await
-            .map_err(|e| Error::Http3(e.to_string()))?;
+    let (h3_conn, mut send_request) = timeout(
+        CONNECT_TIMEOUT,
+        h3::client::new(h3_quinn::Connection::new(connection.clone())),
+    )
+    .await
+    .map_err(|_| Error::Http3(format!("client setup timeout after {CONNECT_TIMEOUT:?}")))?
+    .map_err(|e| Error::Http3(e.to_string()))?;
+
+    let udp_enabled = match timeout(CONNECT_TIMEOUT, authenticate(&cfg, &mut send_request)).await {
+        Ok(Ok(udp_enabled)) => udp_enabled,
+        Ok(Err(e)) => {
+            connection.close(0u32.into(), b"auth failed");
+            return Err(e);
+        }
+        Err(_) => {
+            connection.close(0u32.into(), b"auth timeout");
+            return Err(Error::Http3(format!(
+                "authentication timeout after {CONNECT_TIMEOUT:?}"
+            )));
+        }
+    };
+
+    // Authentication owns `h3_conn` locally, so cancellation before this point
+    // drops every connection handle instead of detaching a task that keeps the
+    // unauthenticated QUIC session alive.
     let h3_driver = tokio::spawn(async move {
         // Keep the HTTP/3 session alive for the lifetime of the QUIC connection.
         // Driving `poll_close` here would tear down the connection and break
@@ -175,15 +204,6 @@ async fn connect_addr(
         let _ = h3_conn;
         pending::<()>().await;
     });
-
-    let udp_enabled = match authenticate(&cfg, &mut send_request).await {
-        Ok(udp_enabled) => udp_enabled,
-        Err(e) => {
-            connection.close(0u32.into(), b"auth failed");
-            h3_driver.abort();
-            return Err(e);
-        }
-    };
 
     let udp_router = Arc::new(UdpRouter::new());
     let udp_driver =
@@ -294,6 +314,24 @@ impl ServerTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use tokio::sync::oneshot;
+
+    fn h3_server_config() -> quinn::ServerConfig {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified_key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let cert = CertificateDer::from(certified_key.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certified_key.key_pair.serialize_der(),
+        ));
+        let mut tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        tls.alpn_protocols = vec![b"h3".to_vec()];
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+        quinn::ServerConfig::with_crypto(Arc::new(crypto))
+    }
 
     #[test]
     fn parses_domain_server_target() {
@@ -307,5 +345,61 @@ mod tests {
         let target = ServerTarget::parse("[::1]:443").unwrap();
         assert_eq!(target.host, "::1");
         assert_eq!(target.port, 443);
+    }
+
+    #[tokio::test]
+    async fn cancelling_authentication_closes_the_quic_connection() {
+        let endpoint =
+            Endpoint::server(h3_server_config(), "127.0.0.1:0".parse().unwrap()).unwrap();
+        let server_addr = endpoint.local_addr().unwrap();
+        let (auth_seen_tx, auth_seen_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let incoming = endpoint.accept().await.expect("client must connect");
+            let connection = incoming.await.expect("QUIC handshake must succeed");
+            let mut h3 = h3::server::Connection::<_, bytes::Bytes>::new(h3_quinn::Connection::new(
+                connection.clone(),
+            ))
+            .await
+            .expect("HTTP/3 handshake must succeed");
+            let resolver = h3
+                .accept()
+                .await
+                .expect("auth request must be accepted")
+                .expect("auth request stream must exist");
+            let (request, request_stream) = resolver
+                .resolve_request()
+                .await
+                .expect("auth request must be valid");
+            assert_eq!(request.uri().path(), "/auth");
+            auth_seen_tx.send(()).unwrap();
+
+            let reason = connection.closed().await;
+            drop((h3, request_stream));
+            reason
+        });
+
+        let cfg = Arc::new(Config {
+            server_addr: server_addr.to_string(),
+            server_name: "localhost".into(),
+            auth: "test-password".into(),
+            insecure: true,
+            rx_bps: 1_000_000,
+            ..Default::default()
+        });
+        let dial = tokio::spawn(connect_addr(cfg, server_addr, "localhost"));
+        timeout(Duration::from_secs(2), auth_seen_rx)
+            .await
+            .expect("authentication request timed out")
+            .expect("server stopped before receiving authentication");
+
+        dial.abort();
+        let Err(join_error) = dial.await else {
+            panic!("dial task completed before it could be cancelled")
+        };
+        assert!(join_error.is_cancelled());
+        timeout(Duration::from_secs(2), server)
+            .await
+            .expect("cancelled authentication leaked the QUIC connection")
+            .expect("server task failed");
     }
 }

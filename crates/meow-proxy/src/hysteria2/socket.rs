@@ -7,6 +7,7 @@ use quinn::{
     udp::{RecvMeta, Transmit},
     AsyncUdpSocket, Runtime, UdpPoller,
 };
+use smallvec::SmallVec;
 use std::{
     fmt,
     io::{self, IoSliceMut},
@@ -18,7 +19,6 @@ use std::{
 };
 
 const SALAMANDER_SALT_LEN: usize = 8;
-const MAX_DATAGRAM_SIZE: usize = 65_535;
 const HY2_MIN_HOP_INTERVAL_SECS: u64 = 5;
 const HY2_DEFAULT_HOP_INTERVAL_SECS: u64 = 30;
 
@@ -28,6 +28,7 @@ pub struct Hy2UdpSocket {
     server_addr: SocketAddr,
     hop: Option<Mutex<HopState>>,
     obfs: Option<Salamander>,
+    recv_buffer: Mutex<Vec<u8>>,
 }
 
 impl Hy2UdpSocket {
@@ -52,6 +53,7 @@ impl Hy2UdpSocket {
             hop: HopState::new(hop_ports, hop_interval_min_secs, hop_interval_max_secs)?
                 .map(Mutex::new),
             obfs: (!obfs_password.is_empty()).then(|| Salamander::new(obfs_password.as_bytes())),
+            recv_buffer: Mutex::new(Vec::new()),
         }))
     }
 
@@ -151,48 +153,103 @@ impl AsyncUdpSocket for Hy2UdpSocket {
             )));
         }
 
+        let mut encrypted = self
+            .recv_buffer
+            .lock()
+            .expect("hysteria2 receive buffer mutex poisoned");
+        let buffer_count = bufs.len().min(meta.len()).min(quinn::udp::BATCH_SIZE);
+        let salt_overhead = SALAMANDER_SALT_LEN.saturating_mul(self.inner.max_receive_segments());
+        let slot_size = bufs
+            .iter()
+            .take(buffer_count)
+            .map(|buf| buf.len())
+            .max()
+            .unwrap_or_default()
+            .saturating_add(salt_overhead);
+        let Some(required) = slot_size.checked_mul(buffer_count) else {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "receive buffer size overflow",
+            )));
+        };
+        if encrypted.len() < required {
+            encrypted.resize(required, 0);
+        }
+
         loop {
-            let mut encrypted = vec![0u8; MAX_DATAGRAM_SIZE];
-            let mut encrypted_bufs = [IoSliceMut::new(&mut encrypted)];
-            let mut encrypted_meta = [RecvMeta::default()];
-            let n = match self
-                .inner
-                .poll_recv(cx, &mut encrypted_bufs, &mut encrypted_meta)
-            {
+            let mut encrypted_bufs: SmallVec<[IoSliceMut<'_>; 32]> = encrypted
+                .chunks_mut(slot_size)
+                .take(buffer_count)
+                .map(IoSliceMut::new)
+                .collect();
+            let mut encrypted_meta = [RecvMeta::default(); quinn::udp::BATCH_SIZE];
+            let n = match self.inner.poll_recv(
+                cx,
+                &mut encrypted_bufs,
+                &mut encrypted_meta[..buffer_count],
+            ) {
                 Poll::Ready(Ok(n)) => n,
                 other => return other,
             };
+            drop(encrypted_bufs);
             if n == 0 {
                 return Poll::Ready(Ok(0));
             }
 
-            let raw_len = encrypted_meta[0].len;
-            let stride = encrypted_meta[0].stride.max(raw_len);
-            let mut offset = 0usize;
-            while offset < raw_len {
-                let end = (offset + stride).min(raw_len);
-                let received = &encrypted[offset..end];
-                let Some(plain) = obfs.decode(received) else {
-                    offset = end;
+            let mut output_count = 0usize;
+            for (input_index, encrypted_meta) in encrypted_meta.iter().copied().take(n).enumerate()
+            {
+                let raw_len = encrypted_meta.len;
+                let stride = encrypted_meta.stride;
+                if stride <= SALAMANDER_SALT_LEN || stride > raw_len || raw_len > slot_size {
                     continue;
-                };
-
-                if plain.len() > bufs[0].len() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "received UDP datagram exceeds buffer",
-                    )));
                 }
-                bufs[0][..plain.len()].copy_from_slice(&plain);
-                let source = self.incoming_source(encrypted_meta[0].addr);
-                meta[0] = RecvMeta {
-                    addr: source,
-                    len: plain.len(),
-                    stride: plain.len(),
-                    ecn: encrypted_meta[0].ecn,
-                    dst_ip: encrypted_meta[0].dst_ip,
+
+                let input_start = input_index * slot_size;
+                let input = &encrypted[input_start..input_start + raw_len];
+                let output = &mut bufs[output_count];
+                let mut input_offset = 0usize;
+                let mut written = 0usize;
+                while input_offset < raw_len {
+                    let input_end = (input_offset + stride).min(raw_len);
+                    let received = &input[input_offset..input_end];
+                    let plain_len = received.len().saturating_sub(SALAMANDER_SALT_LEN);
+                    if plain_len == 0 {
+                        input_offset = input_end;
+                        continue;
+                    }
+
+                    let Some(output_end) = written.checked_add(plain_len) else {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "received UDP datagram length overflow",
+                        )));
+                    };
+                    if output_end > output.len() {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "received UDP datagram exceeds buffer",
+                        )));
+                    }
+                    obfs.decode_into(received, &mut output[written..output_end]);
+                    written = output_end;
+                    input_offset = input_end;
+                }
+
+                if written == 0 {
+                    continue;
+                }
+                meta[output_count] = RecvMeta {
+                    addr: self.incoming_source(encrypted_meta.addr),
+                    len: written,
+                    stride: stride - SALAMANDER_SALT_LEN,
+                    ecn: encrypted_meta.ecn,
+                    dst_ip: encrypted_meta.dst_ip,
                 };
-                return Poll::Ready(Ok(1));
+                output_count += 1;
+            }
+            if output_count != 0 {
+                return Poll::Ready(Ok(output_count));
             }
         }
     }
@@ -210,11 +267,7 @@ impl AsyncUdpSocket for Hy2UdpSocket {
     }
 
     fn max_receive_segments(&self) -> usize {
-        if self.obfs.is_some() {
-            1
-        } else {
-            self.inner.max_receive_segments()
-        }
+        self.inner.max_receive_segments()
     }
 
     fn may_fragment(&self) -> bool {
@@ -248,19 +301,20 @@ impl Salamander {
         out
     }
 
-    fn decode(&self, payload: &[u8]) -> Option<Vec<u8>> {
-        if payload.len() <= SALAMANDER_SALT_LEN {
-            return None;
-        }
+    fn decode_into(&self, payload: &[u8], output: &mut [u8]) {
         let (salt, ciphertext) = payload.split_at(SALAMANDER_SALT_LEN);
+        debug_assert_eq!(ciphertext.len(), output.len());
         let key = self.key(salt);
-        Some(
-            ciphertext
-                .iter()
-                .enumerate()
-                .map(|(i, b)| b ^ key[i % key.len()])
-                .collect(),
-        )
+        for (index, (source, destination)) in ciphertext.iter().zip(output).enumerate() {
+            *destination = source ^ key[index % key.len()];
+        }
+    }
+
+    #[cfg(test)]
+    fn decode(&self, payload: &[u8]) -> Option<Vec<u8>> {
+        let mut output = vec![0; payload.len().checked_sub(SALAMANDER_SALT_LEN)?];
+        self.decode_into(payload, &mut output);
+        Some(output)
     }
 
     fn key(&self, salt: &[u8]) -> [u8; 32] {
@@ -418,6 +472,58 @@ fn parse_port(raw: &str) -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::task::noop_waker_ref;
+    use std::collections::VecDeque;
+
+    type MockBatch = VecDeque<(Vec<u8>, RecvMeta)>;
+
+    #[derive(Debug)]
+    struct MockUdpSocket {
+        batch: Mutex<MockBatch>,
+        max_receive_segments: usize,
+    }
+
+    impl AsyncUdpSocket for MockUdpSocket {
+        fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+            Box::pin(ReadyUdpPoller)
+        }
+
+        fn try_send(&self, _transmit: &Transmit<'_>) -> io::Result<()> {
+            unreachable!("send is not used by this receive-path test")
+        }
+
+        fn poll_recv(
+            &self,
+            _cx: &mut Context<'_>,
+            bufs: &mut [IoSliceMut<'_>],
+            meta: &mut [RecvMeta],
+        ) -> Poll<io::Result<usize>> {
+            let mut batch = self.batch.lock().unwrap();
+            let count = batch.len().min(bufs.len()).min(meta.len());
+            for (index, (payload, item_meta)) in batch.drain(..count).enumerate() {
+                bufs[index][..payload.len()].copy_from_slice(&payload);
+                meta[index] = item_meta;
+            }
+            Poll::Ready(Ok(count))
+        }
+
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok("127.0.0.1:0".parse().unwrap())
+        }
+
+        fn max_receive_segments(&self) -> usize {
+            self.max_receive_segments
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReadyUdpPoller;
+
+    impl UdpPoller for ReadyUdpPoller {
+        fn poll_writable(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn salamander_round_trip() {
@@ -425,6 +531,79 @@ mod tests {
         let encoded = obfs.encode(b"payload");
         assert_ne!(&encoded[SALAMANDER_SALT_LEN..], b"payload");
         assert_eq!(obfs.decode(&encoded).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn salamander_receive_preserves_gro_segments_and_batch_entries() {
+        let obfs = Salamander::new(b"secret");
+        let first = obfs.encode(b"first");
+        let second = obfs.encode(b"two");
+        let third = obfs.encode(b"third");
+        let stride = first.len();
+        let mut gro = first;
+        gro.extend_from_slice(&second);
+        let source: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let socket = Hy2UdpSocket {
+            inner: Arc::new(MockUdpSocket {
+                batch: Mutex::new(VecDeque::from([
+                    (
+                        gro.clone(),
+                        RecvMeta {
+                            addr: source,
+                            len: gro.len(),
+                            stride,
+                            ecn: None,
+                            dst_ip: None,
+                        },
+                    ),
+                    (
+                        third.clone(),
+                        RecvMeta {
+                            addr: source,
+                            len: third.len(),
+                            stride: third.len(),
+                            ecn: None,
+                            dst_ip: None,
+                        },
+                    ),
+                ])),
+                max_receive_segments: 2,
+            }),
+            server_addr: source,
+            hop: None,
+            obfs: Some(obfs),
+            recv_buffer: Mutex::new(Vec::new()),
+        };
+
+        let mut received = Vec::new();
+        while received.len() < 2 {
+            let mut first_output = [0u8; 64];
+            let mut second_output = [0u8; 64];
+            let mut meta = [RecvMeta::default(); 2];
+            let count = {
+                let mut bufs = [
+                    IoSliceMut::new(&mut first_output),
+                    IoSliceMut::new(&mut second_output),
+                ];
+                let mut cx = Context::from_waker(noop_waker_ref());
+                let Poll::Ready(Ok(count)) = socket.poll_recv(&mut cx, &mut bufs, &mut meta) else {
+                    panic!("mock receive must complete")
+                };
+                count
+            };
+            assert_ne!(count, 0);
+            let outputs = [&first_output[..], &second_output[..]];
+            for index in 0..count {
+                received.push((outputs[index][..meta[index].len].to_vec(), meta[index]));
+            }
+        }
+
+        assert_eq!(received[0].1.len, 8);
+        assert_eq!(received[0].1.stride, 5);
+        assert_eq!(received[0].0, b"firsttwo");
+        assert_eq!(received[1].1.len, 5);
+        assert_eq!(received[1].1.stride, 5);
+        assert_eq!(received[1].0, b"third");
     }
 
     #[test]
