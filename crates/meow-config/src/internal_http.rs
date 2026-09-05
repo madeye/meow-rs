@@ -75,13 +75,28 @@ async fn fetch_capped(
     limit: usize,
 ) -> Result<Vec<u8>> {
     let mut current = Url::parse(url).map_err(|e| anyhow!("invalid URL '{url}': {e}"))?;
+    let mut headers = headers.to_vec();
     for _ in 0..=MAX_REDIRECTS {
-        match fetch_one(&current, proxy, headers, limit).await? {
+        match fetch_one(&current, proxy, &headers, limit).await? {
             Outcome::Body(bytes) => return Ok(bytes),
             Outcome::Redirect(next) => {
-                current = current
+                let next = current
                     .join(&next)
                     .map_err(|e| anyhow!("bad redirect Location '{next}': {e}"))?;
+                if current.origin() != next.origin() {
+                    headers.retain(|(name, _)| {
+                        ![
+                            "authorization",
+                            "cookie",
+                            "cookie2",
+                            "proxy-authorization",
+                            "www-authenticate",
+                        ]
+                        .iter()
+                        .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
+                    });
+                }
+                current = next;
             }
         }
     }
@@ -271,6 +286,7 @@ fn parse_response(buf: &[u8], limit: usize) -> Result<Outcome> {
     }
     // A declared Content-Length above the cap is rejected outright (issue
     // #431) — a dishonest or huge value must not be trusted over the cap.
+    let mut content_length = None;
     for h in resp.headers.iter() {
         if h.name.eq_ignore_ascii_case("content-length") {
             let declared = std::str::from_utf8(h.value)
@@ -280,6 +296,10 @@ fn parse_response(buf: &[u8], limit: usize) -> Result<Outcome> {
             if declared > limit as u64 {
                 bail!("response exceeds max body size ({limit} bytes)");
             }
+            if content_length.is_some_and(|previous| previous != declared) {
+                bail!("conflicting Content-Length headers");
+            }
+            content_length = Some(declared);
         }
     }
     let chunked = resp.headers.iter().any(|header| {
@@ -294,6 +314,9 @@ fn parse_response(buf: &[u8], limit: usize) -> Result<Outcome> {
         decode_chunked(&buf[body_start..], limit)?
     } else {
         let body = &buf[body_start..];
+        if content_length.is_some_and(|declared| declared != body.len() as u64) {
+            bail!("response body length does not match Content-Length");
+        }
         if body.len() > limit {
             bail!("response exceeds max body size ({limit} bytes)");
         }
@@ -492,5 +515,83 @@ mod tests {
         let url = spawn_raw_http_server(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").await;
         let bytes = fetch_capped(&url, None, &[], 16).await.unwrap();
         assert_eq!(bytes, b"hello");
+    }
+
+    #[tokio::test]
+    async fn direct_fetch_rejects_truncated_content_length() {
+        let url = spawn_raw_http_server(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc").await;
+        let error = fetch_direct(&url).await.unwrap_err();
+        assert!(error.to_string().contains("does not match Content-Length"));
+    }
+
+    #[test]
+    fn content_length_framing_rejects_extra_bytes_and_conflicting_lengths() {
+        for response in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nabc"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc"[..],
+        ] {
+            assert!(parse_response(response, MAX_BODY_BYTES).is_err());
+        }
+        assert!(
+            matches!(parse_response(b"HTTP/1.1 200 OK\r\n\r\nabc", MAX_BODY_BYTES).unwrap(), Outcome::Body(body) if body == b"abc")
+        );
+    }
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        String::from_utf8(request).unwrap().to_ascii_lowercase()
+    }
+
+    #[tokio::test]
+    async fn redirects_preserve_same_origin_headers_and_strip_cross_origin_credentials() {
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/start", origin.local_addr().unwrap());
+        let destination = format!("http://{}/end", other.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for location in ["/same-origin", &destination] {
+                let (mut stream, _) = origin.accept().await.unwrap();
+                let request = read_request(&mut stream).await;
+                assert!(request.contains("authorization: bearer test-token\r\n"));
+                assert!(request.contains("cookie: session=test\r\n"));
+                stream.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
+            }
+            let (mut stream, _) = other.accept().await.unwrap();
+            let request = read_request(&mut stream).await;
+            for name in [
+                "authorization",
+                "cookie",
+                "cookie2",
+                "proxy-authorization",
+                "www-authenticate",
+            ] {
+                assert!(!request.contains(&format!("\r\n{name}:")), "leaked {name}");
+            }
+            assert!(request.contains("x-custom: retained\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        let headers = [
+            ("AuThOrIzAtIoN", "Bearer test-token"),
+            ("Cookie", "session=test"),
+            ("Cookie2", "test"),
+            ("Proxy-Authorization", "test"),
+            ("WWW-Authenticate", "test"),
+            ("X-Custom", "retained"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string()));
+        let body = tokio::time::timeout(Duration::from_secs(5), fetch(&url, None, &headers))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, b"ok");
+        server.await.unwrap();
     }
 }

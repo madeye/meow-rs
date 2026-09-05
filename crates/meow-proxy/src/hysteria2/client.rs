@@ -31,21 +31,24 @@ impl ReconnectableClient {
 
     pub async fn tcp_connect(&self, target: &str) -> Result<DuplexStream> {
         let handle = self.handle().await?;
-        // Always send the TCP-request frame at open and parse the response off
-        // the stream in the driver. Writes are never gated on the response, so
-        // this covers both fast-open and non-fast-open semantics.
         let first_frame = proto::encode_tcp_request(target, &[])?;
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
-            .cmd_tx
-            .send(Cmd::OpenTcp {
-                first_frame,
-                expect_response: true,
-                reply: reply_tx,
-            })
-            .await
-            .map_err(|_| Error::Closed)?;
-        reply_rx.await.map_err(|_| Error::Closed)?
+        timeout(CONNECT_TIMEOUT, async {
+            handle
+                .cmd_tx
+                .send(Cmd::OpenTcp {
+                    first_frame,
+                    fast_open: self.cfg.fast_open,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| Error::Closed)?;
+            let mut stream = reply_rx.await.map_err(|_| Error::Closed)??;
+            stream.wait_connected().await?;
+            Ok(stream)
+        })
+        .await
+        .map_err(|_| Error::Quic(format!("TCP connect timeout after {CONNECT_TIMEOUT:?}")))?
     }
 
     pub async fn udp(&self) -> Result<UdpSession> {

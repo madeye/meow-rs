@@ -12,7 +12,7 @@
 
 use super::obfs::{HopState, Salamander};
 use super::proto::{self, UdpMessage};
-use super::tcp::DuplexStream;
+use super::tcp::{DuplexStream, WRITE_BUFFER_BYTES};
 use super::{Config, Error, Result};
 use quiche::h3::NameValue as _;
 use std::collections::{HashMap, VecDeque};
@@ -22,21 +22,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, Semaphore};
 
 /// App → driver commands.
 pub(crate) enum Cmd {
     OpenTcp {
         first_frame: Vec<u8>,
-        expect_response: bool,
+        fast_open: bool,
         reply: oneshot::Sender<Result<DuplexStream>>,
     },
     Write {
         id: u64,
         data: Vec<u8>,
-    },
-    Shutdown {
-        id: u64,
+        permit: OwnedSemaphorePermit,
     },
     RegisterUdp {
         reply: oneshot::Sender<(u32, mpsc::Receiver<UdpMessage>)>,
@@ -63,7 +61,16 @@ pub(crate) struct ConnHandle {
     pub(crate) cmd_tx: mpsc::Sender<Cmd>,
     pub(crate) udp_enabled: bool,
     closed: Arc<AtomicBool>,
-    _task: tokio::task::JoinHandle<()>,
+    _task: DriverTask,
+}
+
+/// Own the task before the first await, including during authentication.
+struct DriverTask(tokio::task::JoinHandle<()>);
+
+impl Drop for DriverTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl ConnHandle {
@@ -75,16 +82,21 @@ impl ConnHandle {
 const CMD_CHANNEL_CAP: usize = 256;
 const STREAM_READ_CHANNEL_CAP: usize = 16;
 const UDP_SESSION_QUEUE: usize = 64;
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Id 0 is the HTTP/3 auth request; proxy bidi streams start at 4, step 4.
 const FIRST_PROXY_STREAM_ID: u64 = 4;
 
 struct StreamState {
     read_tx: mpsc::Sender<ReadItem>,
-    out_buf: VecDeque<u8>,
-    out_fin_requested: bool,
+    out_buf: VecDeque<WriteChunk>,
+    capacity: Arc<Semaphore>,
+    connected: Option<oneshot::Sender<Result<()>>>,
+    fast_open: bool,
+    failure: Option<std::io::ErrorKind>,
+    shutdown: Arc<AtomicBool>,
     out_fin_sent: bool,
-    /// Non-fast-open streams parse the hysteria2 TCP response before any payload
-    /// is forwarded to the caller.
+    /// Every stream strips the TCP response before forwarding payload; a
+    /// non-fast-open dial additionally waits for it before returning.
     expect_response: bool,
     resp_buf: Vec<u8>,
     /// Decoded payload chunks waiting for `read_tx` capacity.
@@ -94,14 +106,36 @@ struct StreamState {
     read_closed: bool,
 }
 
+struct WriteChunk {
+    data: Vec<u8>,
+    offset: usize,
+    // Returning this permit makes the corresponding bytes writable again.
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
 impl StreamState {
-    fn new(read_tx: mpsc::Sender<ReadItem>, first_frame: Vec<u8>, expect_response: bool) -> Self {
+    fn new(
+        read_tx: mpsc::Sender<ReadItem>,
+        first_frame: Vec<u8>,
+        fast_open: bool,
+        capacity: Arc<Semaphore>,
+        connected: oneshot::Sender<Result<()>>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             read_tx,
-            out_buf: first_frame.into_iter().collect(),
-            out_fin_requested: false,
+            out_buf: VecDeque::from([WriteChunk {
+                data: first_frame,
+                offset: 0,
+                _permit: None,
+            }]),
+            capacity,
+            connected: Some(connected),
+            fast_open,
+            failure: None,
+            shutdown,
             out_fin_sent: false,
-            expect_response,
+            expect_response: true,
             resp_buf: Vec::new(),
             inbound_pending: VecDeque::new(),
             eof_pending: false,
@@ -113,6 +147,30 @@ impl StreamState {
     fn finished(&self) -> bool {
         self.out_fin_sent && (self.eof_sent || self.read_closed)
     }
+
+    fn connected(&mut self, result: Result<()>) {
+        if let Some(reply) = self.connected.take() {
+            let _ = reply.send(result);
+        }
+    }
+
+    fn fail(&mut self, kind: std::io::ErrorKind, error: Error) {
+        if self.failure.is_some() {
+            return;
+        }
+        self.failure = Some(kind);
+        self.capacity.close();
+        self.out_buf.clear();
+        self.out_fin_sent = true;
+        self.eof_pending = true;
+        self.connected(Err(error));
+    }
+}
+
+impl Drop for StreamState {
+    fn drop(&mut self) {
+        self.capacity.close();
+    }
 }
 
 /// Driver state that is NOT the `quiche::Connection`, so helpers can borrow it
@@ -122,7 +180,7 @@ struct State {
     local: SocketAddr,
     obfs: Option<Salamander>,
     hop: Option<HopState>,
-    cmd_tx: mpsc::Sender<Cmd>,
+    cmd_tx: mpsc::WeakSender<Cmd>,
     cmd_rx: mpsc::Receiver<Cmd>,
     read_notify: Arc<Notify>,
     streams: HashMap<u64, StreamState>,
@@ -164,7 +222,7 @@ pub(crate) async fn spawn(
         local,
         obfs,
         hop,
-        cmd_tx: cmd_tx.clone(),
+        cmd_tx: cmd_tx.downgrade(),
         cmd_rx,
         read_notify,
         streams: HashMap::new(),
@@ -181,10 +239,10 @@ pub(crate) async fn spawn(
         rx_bps: cfg.rx_bps,
     };
     let closed_task = Arc::clone(&closed);
-    let task = tokio::spawn(async move {
+    let task = DriverTask(tokio::spawn(async move {
         run(state, conn, auth, ready_tx).await;
         closed_task.store(true, Ordering::Relaxed);
-    });
+    }));
 
     let udp_enabled = ready_rx
         .await
@@ -211,6 +269,11 @@ async fn run(
     let mut udp_enabled = false;
     let mut recv_buf = vec![0u8; 65535];
     let mut send_buf = vec![0u8; 1500];
+    let mut keep_alive = tokio::time::interval_at(
+        tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
+        KEEP_ALIVE_INTERVAL,
+    );
+    keep_alive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     if let Err(e) = flush_send(&mut st, &mut conn, &mut send_buf).await {
         fail(
@@ -224,7 +287,6 @@ async fn run(
     loop {
         let timeout = conn.timeout();
         tokio::select! {
-            biased;
             r = st.socket.recv_from(&mut recv_buf) => {
                 match r {
                     Ok((n, from)) => {
@@ -245,6 +307,9 @@ async fn run(
             }
             _ = sleep_opt(timeout) => { conn.on_timeout(); }
             _ = st.read_notify.notified() => {}
+            _ = keep_alive.tick(), if auth_done => {
+                let _ = conn.send_ack_eliciting();
+            }
         }
 
         if conn.is_established() && h3.is_none() {
@@ -278,6 +343,7 @@ async fn run(
             }
         }
 
+        cleanup_streams(&mut st, &mut conn);
         if auth_done {
             pump_reads(&mut st, &mut conn);
             pump_datagrams(&mut st, &mut conn);
@@ -295,9 +361,9 @@ async fn run(
     }
 
     fail(&mut ready_tx, &mut st, Error::Closed);
-    for (_, s) in st.streams.drain() {
-        let _ = s.read_tx.try_send(ReadItem::Eof);
-    }
+    // Only a received QUIC FIN is a clean EOF. Closing channels here makes
+    // the stream report connection failure after any already queued data.
+    st.streams.clear();
     st.udp_sessions.clear();
     st.closed.store(true, Ordering::Relaxed);
 }
@@ -306,26 +372,50 @@ fn handle_cmd(st: &mut State, conn: &mut quiche::Connection, cmd: Cmd) {
     match cmd {
         Cmd::OpenTcp {
             first_frame,
-            expect_response,
+            fast_open,
             reply,
         } => {
             let id = st.next_stream_id;
             st.next_stream_id += 4;
             let (read_tx, read_rx) = mpsc::channel(STREAM_READ_CHANNEL_CAP);
-            st.streams
-                .insert(id, StreamState::new(read_tx, first_frame, expect_response));
-            let stream =
-                DuplexStream::new(id, read_rx, Arc::clone(&st.read_notify), st.cmd_tx.clone());
+            let (connected_tx, connected_rx) = oneshot::channel();
+            let capacity = Arc::new(Semaphore::new(WRITE_BUFFER_BYTES as usize));
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let Some(cmd_tx) = st.cmd_tx.upgrade() else {
+                let _ = reply.send(Err(Error::Closed));
+                return;
+            };
+            st.streams.insert(
+                id,
+                StreamState::new(
+                    read_tx,
+                    first_frame,
+                    fast_open,
+                    Arc::clone(&capacity),
+                    connected_tx,
+                    Arc::clone(&shutdown),
+                ),
+            );
+            let stream = DuplexStream::new(
+                id,
+                read_rx,
+                Arc::clone(&st.read_notify),
+                cmd_tx,
+                capacity,
+                connected_rx,
+                shutdown,
+            );
             let _ = reply.send(Ok(stream));
         }
-        Cmd::Write { id, data } => {
+        Cmd::Write { id, data, permit } => {
             if let Some(s) = st.streams.get_mut(&id) {
-                s.out_buf.extend(data);
-            }
-        }
-        Cmd::Shutdown { id } => {
-            if let Some(s) = st.streams.get_mut(&id) {
-                s.out_fin_requested = true;
+                if s.failure.is_none() {
+                    s.out_buf.push_back(WriteChunk {
+                        data,
+                        offset: 0,
+                        _permit: Some(permit),
+                    });
+                }
             }
         }
         Cmd::RegisterUdp { reply } => {
@@ -438,28 +528,41 @@ fn pump_writes(st: &mut State, conn: &mut quiche::Connection) {
         // first `stream_send`, and capacity on an unopened stream is 0. Send
         // the buffered bytes directly; quiche opens the stream and accepts as
         // much as flow control allows, returning the count.
-        while !s.out_buf.is_empty() {
-            s.out_buf.make_contiguous();
-            let chunk = s.out_buf.as_slices().0;
-            match conn.stream_send(id, chunk, false) {
-                Ok(0) | Err(quiche::Error::Done) => break,
+        while let Some(chunk) = s.out_buf.front_mut() {
+            match conn.stream_send(id, &chunk.data[chunk.offset..], false) {
+                Ok(0) | Err(quiche::Error::Done | quiche::Error::StreamLimit) => break,
                 Ok(w) => {
-                    s.out_buf.drain(..w);
+                    chunk.offset += w;
+                    if chunk.offset == chunk.data.len() {
+                        s.out_buf.pop_front();
+                    }
                 }
                 Err(e) => {
                     tracing::debug!("hysteria2 stream {id} send failed: {e}");
-                    s.out_buf.clear();
-                    s.read_closed = true;
+                    s.fail(
+                        std::io::ErrorKind::BrokenPipe,
+                        Error::Quic(format!("stream send: {e}")),
+                    );
+                    let _ = conn.stream_shutdown(id, quiche::Shutdown::Read, 0);
+                    let _ = conn.stream_shutdown(id, quiche::Shutdown::Write, 0);
                     break;
                 }
             }
         }
-        if s.out_buf.is_empty() && s.out_fin_requested && !s.out_fin_sent {
+        if s.out_buf.is_empty() && s.fast_open && s.failure.is_none() {
+            s.connected(Ok(()));
+        }
+        if s.out_buf.is_empty() && s.shutdown.load(Ordering::Acquire) && !s.out_fin_sent {
             match conn.stream_send(id, &[], true) {
-                Err(quiche::Error::Done) => {}
-                _ => s.out_fin_sent = true,
+                Err(quiche::Error::Done | quiche::Error::StreamLimit) => {}
+                Ok(_) => s.out_fin_sent = true,
+                Err(e) => s.fail(
+                    std::io::ErrorKind::BrokenPipe,
+                    Error::Quic(format!("stream finish: {e}")),
+                ),
             }
         }
+        let _ = flush_pending(s);
     }
 }
 
@@ -471,7 +574,7 @@ fn pump_reads(st: &mut State, conn: &mut quiche::Connection) {
     let mut buf = [0u8; 16384];
     for id in ids {
         if let Some(s) = st.streams.get_mut(&id) {
-            if !flush_pending(s) {
+            if !flush_pending(s) || s.failure.is_some() {
                 continue;
             }
             loop {
@@ -481,18 +584,28 @@ fn pump_reads(st: &mut State, conn: &mut quiche::Connection) {
                             ingest(s, &buf[..n]);
                         }
                         if fin {
-                            s.eof_pending = true;
+                            if s.expect_response {
+                                s.fail(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    Error::protocol("truncated TCP response"),
+                                );
+                            } else {
+                                s.eof_pending = true;
+                            }
                         }
                         if !flush_pending(s) {
                             break;
                         }
-                        if fin {
+                        if fin || s.failure.is_some() {
                             break;
                         }
                     }
                     Err(quiche::Error::Done) => break,
-                    Err(_) => {
-                        s.eof_pending = true;
+                    Err(e) => {
+                        s.fail(
+                            std::io::ErrorKind::ConnectionReset,
+                            Error::Quic(format!("stream receive: {e}")),
+                        );
                         let _ = flush_pending(s);
                         break;
                     }
@@ -512,7 +625,7 @@ fn pump_reads(st: &mut State, conn: &mut quiche::Connection) {
 }
 
 /// Feed received stream bytes into a proxy stream, parsing the hysteria2 TCP
-/// response first on non-fast-open streams.
+/// response before forwarding payload on either kind of stream.
 fn ingest(s: &mut StreamState, bytes: &[u8]) {
     if s.expect_response {
         s.resp_buf.extend_from_slice(bytes);
@@ -521,18 +634,15 @@ fn ingest(s: &mut StreamState, bytes: &[u8]) {
                 let leftover = s.resp_buf.split_off(consumed);
                 s.resp_buf = Vec::new();
                 s.expect_response = false;
+                s.connected(Ok(()));
                 if !leftover.is_empty() {
                     s.inbound_pending.push_back(leftover);
                 }
             }
             Ok(None) => {}
-            Err(_) => {
+            Err(e) => {
                 s.inbound_pending.clear();
-                s.eof_pending = true;
-                let _ = s
-                    .read_tx
-                    .try_send(ReadItem::Err(std::io::ErrorKind::InvalidData));
-                s.read_closed = true;
+                s.fail(std::io::ErrorKind::InvalidData, e);
             }
         }
     } else {
@@ -560,7 +670,8 @@ fn flush_pending(s: &mut StreamState) -> bool {
         }
     }
     if s.eof_pending && !s.eof_sent && !s.read_closed {
-        match s.read_tx.try_send(ReadItem::Eof) {
+        let terminal = s.failure.map_or(ReadItem::Eof, ReadItem::Err);
+        match s.read_tx.try_send(terminal) {
             Ok(()) => s.eof_sent = true,
             Err(TrySendError::Full(_)) => return false,
             Err(TrySendError::Closed(_)) => s.read_closed = true,
@@ -644,11 +755,19 @@ fn cleanup_streams(st: &mut State, conn: &mut quiche::Connection) {
     let done: Vec<u64> = st
         .streams
         .iter()
-        .filter(|(_, s)| s.finished())
+        .filter(|(_, s)| {
+            s.finished()
+                || (s.read_tx.is_closed()
+                    && (!s.shutdown.load(Ordering::Acquire) || s.out_fin_sent))
+        })
         .map(|(&id, _)| id)
         .collect();
     for id in done {
-        st.streams.remove(&id);
+        if let Some(s) = st.streams.remove(&id) {
+            if !s.shutdown.load(Ordering::Acquire) || s.failure.is_some() {
+                let _ = conn.stream_shutdown(id, quiche::Shutdown::Write, 0);
+            }
+        }
         let _ = conn.stream_shutdown(id, quiche::Shutdown::Read, 0);
     }
 }
@@ -698,3 +817,7 @@ fn fail(ready_tx: &mut Option<oneshot::Sender<Result<bool>>>, _st: &mut State, e
         let _ = tx.send(Err(err));
     }
 }
+
+#[cfg(test)]
+#[path = "driver_tests.rs"]
+mod tests;

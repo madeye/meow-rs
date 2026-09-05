@@ -59,6 +59,14 @@ the canonical, in-repo source a release is cut from.
 
 ### Fixed
 
+- Internal HTTP downloads strip authentication and cookie headers when a
+  redirect changes origin, and reject bodies that do not match Content-Length
+  before replacing provider caches.
+- Hysteria2 bounds queued TCP writes by bytes, retries exhausted QUIC stream
+  limits without discarding requests, and propagates terminal stream errors.
+  Restored idle keepalive and the remote response wait for `fast-open: false`;
+  cancelling authentication or dropping a client releases its driver socket.
+
 - **`merge_family` no longer revives an expired sibling family.** When a new
   A answer merged into an entry whose AAAA had already expired, the old code
   unconditionally marked AAAA as `queried`, which `family_hit()` then read as a
