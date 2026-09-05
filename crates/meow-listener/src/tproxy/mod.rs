@@ -3,7 +3,7 @@ mod orig_dest;
 
 use crate::sniffer::SnifferRuntime;
 use firewall::FirewallGuard;
-use meow_common::{ConnType, Metadata, Network};
+use meow_common::{with_dial_timeout, ConnType, Metadata, Network};
 use meow_tunnel::{copy_bidirectional_buf_tracked, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
 use smallvec::smallvec;
 use std::collections::HashSet;
@@ -348,7 +348,7 @@ async fn handle_tproxy_conn(
     let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];
     let mut relay_buf_dn = [0u8; RELAY_BUF_SIZE];
 
-    match proxy.dial_tcp(&metadata).await {
+    match with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await {
         Ok(mut remote) => {
             let up = Arc::clone(_guard.counters());
             let dn = Arc::clone(_guard.counters());

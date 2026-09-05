@@ -23,7 +23,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use ipnet::Ipv4Net;
 use lwip::UdpSocket;
-use meow_common::{ConnType, Metadata, Network, ProxyAdapter};
+use meow_common::{with_dial_timeout, ConnType, Metadata, Network, ProxyAdapter};
 use meow_dns::server::{hex_prefix, DnsServer};
 use meow_tunnel::Tunnel;
 use tokio::sync::mpsc;
@@ -221,8 +221,7 @@ async fn relay_flow(
         }
     };
 
-    let conn = proxy
-        .dial_udp(&metadata)
+    let conn = with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata))
         .await
         .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?;
 

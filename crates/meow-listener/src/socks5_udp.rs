@@ -21,7 +21,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use meow_common::{ConnType, Metadata, Network, ProxyAdapter, ProxyPacketConn};
+use meow_common::{with_dial_timeout, ConnType, Metadata, Network, ProxyAdapter, ProxyPacketConn};
 use meow_tunnel::Tunnel;
 use smallvec::SmallVec;
 use tokio::io::AsyncReadExt;
@@ -226,8 +226,7 @@ async fn handle_client_datagram(
     };
 
     let conn: Arc<dyn ProxyPacketConn> = Arc::from(
-        proxy
-            .dial_udp(&metadata)
+        with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata))
             .await
             .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
     );

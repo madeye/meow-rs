@@ -2,7 +2,7 @@ use crate::tunnel::TunnelInner;
 use dashmap::DashMap;
 use meow_common::adapter::ProxyAdapter;
 use meow_common::atomic::AtomicU;
-use meow_common::{Metadata, ProxyPacketConn};
+use meow_common::{with_dial_timeout, Metadata, ProxyPacketConn};
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -220,7 +220,10 @@ pub async fn handle_udp(
         proxy.name()
     );
 
-    match proxy.dial_udp(&metadata).await {
+    // Bounded like mihomo's `C.DefaultUDPTimeout`. An unbounded dial here is
+    // worse than on TCP: the key is still unclaimed (see below), so every
+    // datagram of the flow starts its own stalled dial.
+    match with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata)).await {
         Ok(conn) => {
             let session = Arc::new(UdpSession::new(conn, Arc::from(proxy.name())));
             // Claim the key atomically before the first write. The dial above
@@ -652,6 +655,85 @@ mod tests {
         assert!(
             current.is_some_and(|s| Arc::ptr_eq(&s, &replacement)),
             "the fresh replacement session must survive the failed session's eviction"
+        );
+    }
+
+    /// A proxy whose dial never resolves — a server that completes the TCP/QUIC
+    /// handshake and then goes silent mid-protocol.
+    struct StalledDialProxy {
+        health: ProxyHealth,
+    }
+
+    #[async_trait]
+    impl ProxyAdapter for StalledDialProxy {
+        fn name(&self) -> &str {
+            "stalled-mock"
+        }
+        fn adapter_type(&self) -> AdapterType {
+            AdapterType::Direct
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn support_udp(&self) -> bool {
+            true
+        }
+        async fn dial_tcp(&self, _metadata: &Metadata) -> MeowResult<Box<dyn ProxyConn>> {
+            std::future::pending().await
+        }
+        async fn dial_udp(&self, _metadata: &Metadata) -> MeowResult<Box<dyn ProxyPacketConn>> {
+            std::future::pending().await
+        }
+        fn health(&self) -> &ProxyHealth {
+            &self.health
+        }
+    }
+
+    impl Proxy for StalledDialProxy {
+        fn alive(&self) -> bool {
+            true
+        }
+        fn alive_for_url(&self, _url: &str) -> bool {
+            true
+        }
+        fn last_delay(&self) -> u16 {
+            0
+        }
+        fn last_delay_for_url(&self, _url: &str) -> u16 {
+            0
+        }
+        fn delay_history(&self) -> Vec<DelayHistory> {
+            Vec::new()
+        }
+    }
+
+    /// A dial that never completes must not park the caller forever. Without
+    /// the `DIAL_TIMEOUT` bound this test hangs: every datagram of the flow
+    /// spawns another immortal task, since the NAT key is only claimed after
+    /// the dial returns.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_dial_gives_up_instead_of_parking_the_flow() {
+        let tunnel = mk_tunnel();
+        tunnel.set_mode(TunnelMode::Global);
+        let mut proxies: HashMap<SmolStr, Arc<dyn Proxy>> = HashMap::new();
+        proxies.insert(
+            SmolStr::new_static("GLOBAL"),
+            Arc::new(StalledDialProxy {
+                health: ProxyHealth::new(),
+            }) as Arc<dyn Proxy>,
+        );
+        tunnel.update_proxies(proxies);
+
+        let src = SocketAddr::from(([127, 0, 0, 1], 8888));
+        let dst = SocketAddr::from(([198, 51, 100, 10], 443));
+
+        let start = tokio::time::Instant::now();
+        handle_udp(tunnel.inner(), b"ping", src, mk_metadata(src, dst)).await;
+
+        assert_eq!(start.elapsed(), meow_common::DIAL_TIMEOUT);
+        assert!(
+            tunnel.inner().nat_table.is_empty(),
+            "a dial that never completed must not leave a session behind"
         );
     }
 }

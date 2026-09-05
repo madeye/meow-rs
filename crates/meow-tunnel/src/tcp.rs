@@ -1,7 +1,7 @@
 use crate::relay::{copy_bidirectional_buf_tracked, RELAY_BUF_SIZE};
 use crate::statistics::Statistics;
 use crate::tunnel::TunnelInner;
-use meow_common::{Metadata, ProxyConn};
+use meow_common::{with_dial_timeout, Metadata, ProxyConn};
 use smallvec::{smallvec, SmallVec};
 use smol_str::SmolStr;
 use std::sync::Arc;
@@ -164,8 +164,10 @@ pub async fn route_inbound_tcp<C>(
     let mut buf_up = [0u8; RELAY_BUF_SIZE];
     let mut buf_dn = [0u8; RELAY_BUF_SIZE];
 
-    // Dial the remote via proxy
-    match proxy.dial_tcp(&metadata).await {
+    // Dial the remote via proxy, bounded like mihomo's `C.DefaultTCPTimeout`:
+    // a server that accepts and then stalls mid-handshake would otherwise pin
+    // this task, its inbound socket and its stats entry forever.
+    match with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await {
         Ok(mut remote) => {
             let up = Arc::clone(guard.counters());
             let dn = Arc::clone(guard.counters());

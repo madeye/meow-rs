@@ -1,6 +1,6 @@
 use crate::sniffer::SnifferRuntime;
 use base64::Engine;
-use meow_common::{AuthConfig, ConnType, Metadata, Network};
+use meow_common::{with_dial_timeout, AuthConfig, ConnType, Metadata, Network};
 use meow_tunnel::{
     copy_bidirectional_buf_tracked, route_inbound_tcp, ConnectionGuard, Tunnel, RELAY_BUF_SIZE,
 };
@@ -263,7 +263,7 @@ async fn handle_http_inner(
             smallvec![Arc::from(proxy.name())],
         );
 
-        match proxy.dial_tcp(&metadata).await {
+        match with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await {
             Ok(mut remote) => {
                 // Rewrite the request line: remove the absolute URI scheme+host,
                 // keep the path. Rebuild headers without Proxy-* headers while

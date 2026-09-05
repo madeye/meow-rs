@@ -342,7 +342,7 @@ fn build_metadata(peer: SocketAddr, target: &Address, in_name: &str, in_port: u1
 // dropped, aborting its reply task and freeing the outbound conn.
 
 use meow_common::atomic::{AtomicU, Uint};
-use meow_common::{ProxyAdapter, ProxyPacketConn};
+use meow_common::{with_dial_timeout, ProxyAdapter, ProxyPacketConn};
 use meow_tunnel::udp::DEFAULT_UDP_IDLE;
 use shadowsocks::relay::udprelay::{DatagramReceive, DatagramSend};
 use std::collections::HashMap;
@@ -537,8 +537,7 @@ where
     };
 
     let conn: Arc<dyn ProxyPacketConn> = Arc::from(
-        proxy
-            .dial_udp(&metadata)
+        with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata))
             .await
             .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
     );
