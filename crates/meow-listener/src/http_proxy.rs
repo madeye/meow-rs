@@ -1,9 +1,7 @@
 use crate::sniffer::SnifferRuntime;
 use base64::Engine;
 use meow_common::{with_dial_timeout, AuthConfig, ConnType, Metadata, Network};
-use meow_tunnel::{
-    copy_bidirectional_buf_tracked, route_inbound_tcp, ConnectionGuard, Tunnel, RELAY_BUF_SIZE,
-};
+use meow_tunnel::{copy_bidirectional_buf_tracked, route_inbound_tcp, Tunnel, RELAY_BUF_SIZE};
 use smallvec::smallvec;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -240,6 +238,7 @@ async fn handle_http_inner(
 
         let inner = tunnel.inner();
         inner.pre_handle_metadata(&mut metadata);
+        let admission = inner.tcp_admission();
         let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy_lazy(&mut metadata).await
         else {
             write_bad_gateway(stream).await?;
@@ -255,13 +254,14 @@ async fn handle_http_inner(
             proxy.name()
         );
 
-        let _guard = ConnectionGuard::track(
-            &inner.stats,
+        let Some(_guard) = admission.track(
             metadata.pure(),
             rule_name,
             rule_payload,
             smallvec![Arc::from(proxy.name())],
-        );
+        ) else {
+            return Ok(());
+        };
 
         _guard
             .run_until_closed(async {

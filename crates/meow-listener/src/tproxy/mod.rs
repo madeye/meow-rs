@@ -4,7 +4,7 @@ mod orig_dest;
 use crate::sniffer::SnifferRuntime;
 use firewall::FirewallGuard;
 use meow_common::{with_dial_timeout, ConnType, Metadata, Network};
-use meow_tunnel::{copy_bidirectional_buf_tracked, ConnectionGuard, Tunnel, RELAY_BUF_SIZE};
+use meow_tunnel::{copy_bidirectional_buf_tracked, Tunnel, RELAY_BUF_SIZE};
 use smallvec::smallvec;
 use std::collections::HashSet;
 use std::future::Future;
@@ -323,6 +323,7 @@ async fn handle_tproxy_conn(
     );
 
     let inner = tunnel.inner();
+    let admission = inner.tcp_admission();
     let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
         return Err("no matching rule".into());
     };
@@ -336,13 +337,14 @@ async fn handle_tproxy_conn(
         proxy.name()
     );
 
-    let _guard = ConnectionGuard::track(
-        &inner.stats,
+    let Some(_guard) = admission.track(
         metadata.pure(),
         rule_name,
         rule_payload,
         smallvec![Arc::from(proxy.name())],
-    );
+    ) else {
+        return Ok(());
+    };
 
     // Relay buffers on the future's stack — zero per-relay heap allocation (ADR-0011 T6).
     let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];

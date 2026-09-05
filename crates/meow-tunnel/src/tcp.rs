@@ -75,6 +75,47 @@ impl Drop for ConnectionGuard<'_> {
     }
 }
 
+/// A TCP setup's cold-reload generation, captured before reading routing state.
+/// This is a value, not a held lock, so DNS enrichment may safely await.
+#[must_use]
+pub struct TcpAdmission<'a> {
+    inner: &'a TunnelInner,
+    generation: u64,
+}
+
+impl TunnelInner {
+    /// Start TCP routing setup. Call before resolving the proxy, then register
+    /// through the returned token so cold reload cannot miss the connection.
+    pub fn tcp_admission(&self) -> TcpAdmission<'_> {
+        TcpAdmission {
+            inner: self,
+            generation: *self.tcp_generation.read(),
+        }
+    }
+}
+
+impl<'a> TcpAdmission<'a> {
+    /// Register only if no cold reload has crossed this routing decision.
+    /// The read lock covers both validation and insertion: a reload cannot
+    /// close the table between these operations and leave an old flow alive.
+    pub fn track(
+        self,
+        metadata: Metadata,
+        rule: SmolStr,
+        rule_payload: SmolStr,
+        chains: SmallVec<[Arc<str>; 1]>,
+    ) -> Option<ConnectionGuard<'a>> {
+        let generation = self.inner.tcp_generation.read();
+        if *generation != self.generation {
+            debug!("TCP routing setup invalidated by cold reload");
+            return None;
+        }
+        let guard = ConnectionGuard::track(&self.inner.stats, metadata, rule, rule_payload, chains);
+        drop(generation);
+        Some(guard)
+    }
+}
+
 pub async fn handle_tcp(tunnel: &TunnelInner, mut conn: Box<dyn ProxyConn>, metadata: Metadata) {
     route_inbound_tcp(tunnel, &mut conn, metadata, &[]).await;
 }
@@ -137,6 +178,8 @@ pub async fn route_inbound_tcp<C>(
     // snooping-cache hostname fill-in).
     inner.pre_handle_metadata(&mut metadata);
 
+    let admission = inner.tcp_admission();
+
     // Match rules with lazy enrichment: DNS pre-resolution and process
     // lookup run only if the scan reaches a rule that demands them.
     let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy_lazy(&mut metadata).await
@@ -162,13 +205,14 @@ pub async fn route_inbound_tcp<C>(
     // the abort case where the manual close call below would never run.
     // `rule_name` / `rule_payload` are moved in (already `SmolStr`); the
     // chains vec carries one `Arc<str>` for the proxy name.
-    let guard = ConnectionGuard::track(
-        &inner.stats,
+    let Some(guard) = admission.track(
         metadata.pure(),
         rule_name,
         rule_payload,
         smallvec![Arc::from(proxy.name())],
-    );
+    ) else {
+        return;
+    };
 
     // Declare relay buffers on the future's stack frame — zero per-relay heap
     // allocation (ADR-0011 T6). Paid once at task-spawn, not at relay-call time.
@@ -267,6 +311,71 @@ mod tests {
             host: "example.com".into(),
             dst_port: 443,
             ..Default::default()
+        }
+    }
+
+    fn test_tunnel() -> crate::Tunnel {
+        crate::Tunnel::new(Arc::new(meow_dns::Resolver::new(
+            vec![],
+            vec![],
+            meow_common::DnsMode::Normal,
+            meow_trie::DomainTrie::new(),
+            false,
+            false,
+        )))
+    }
+
+    #[tokio::test]
+    async fn cold_reload_rejects_late_registration_and_cancels_earlier_registration() {
+        let tunnel = test_tunnel();
+        let inner = tunnel.inner();
+        let late = inner.tcp_admission();
+        let registered = inner
+            .tcp_admission()
+            .track(metadata(), "MATCH".into(), "".into(), smallvec![])
+            .unwrap();
+
+        assert_eq!(tunnel.reload_routing(Default::default(), vec![], None), 1);
+        // Same configuration and mode across multiple reloads: a boolean
+        // running flag (or config equality) must not admit the old decision.
+        assert_eq!(tunnel.reload_routing(Default::default(), vec![], None), 0);
+        assert!(late
+            .track(metadata(), "MATCH".into(), "".into(), smallvec![])
+            .is_none());
+        assert!(registered
+            .run_until_closed(async { "dial" })
+            .await
+            .is_none());
+
+        let fresh = inner
+            .tcp_admission()
+            .track(metadata(), "MATCH".into(), "".into(), smallvec![])
+            .unwrap();
+        assert_eq!(fresh.run_until_closed(async { "dial" }).await, Some("dial"));
+        assert_eq!(inner.stats.active_connection_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_registration_cannot_escape_cold_reload() {
+        let tunnel = test_tunnel();
+        for _ in 0..64 {
+            let start = std::sync::Barrier::new(2);
+            let admission = tunnel.inner().tcp_admission();
+            // Race the final registration against closure on actual threads.
+            // Either it is rejected, or its exact cancellation handle is set.
+            let guard = std::thread::scope(|scope| {
+                let registration = scope.spawn(|| {
+                    start.wait();
+                    admission.track(metadata(), "MATCH".into(), "".into(), smallvec![])
+                });
+                start.wait();
+                tunnel.reload_routing(Default::default(), vec![], None);
+                registration.join().unwrap()
+            });
+            if let Some(guard) = guard {
+                assert!(guard.run_until_closed(async { "dial" }).await.is_none());
+            }
+            assert_eq!(tunnel.statistics().active_connection_count(), 0);
         }
     }
 
