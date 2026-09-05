@@ -9,6 +9,14 @@ See also: roadmap M3 "hot config reload without dropping connections" — this
 M1 spec is the cold-reload endpoint; M3 upgrades it to hot-reload.
 Upstream reference: `hub/server.go::patchConfig`, `component/profile/profile.go`.
 
+Implementation status (PR #509): cold reload requests immediate cancellation
+of tracked TCP connections before updating routing configuration. It does not
+stop listener admission or wait for graceful draining. The stop-listeners →
+drain (up to 5 seconds) → force-close → restart sequence below, including
+test-plan cases C3/C4, remains follow-up work in
+[#510](https://github.com/meow-rs/meow-rs/issues/510). UDP sessions are not tracked by
+the connection statistics table and are outside this TCP closure fix.
+
 ## Motivation
 
 The REST API has no way to reload configuration at runtime — operators must

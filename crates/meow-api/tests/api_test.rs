@@ -3120,18 +3120,18 @@ async fn delete_all_connections_terminates_both_stream_directions() {
 }
 
 #[tokio::test]
-async fn cold_reload_drains_then_terminates_live_stream() {
+async fn cold_reload_terminates_live_stream_without_drain_delay() {
     let state = test_state(RawConfig {
         rules: Some(vec!["MATCH,DIRECT".into()]),
         ..Default::default()
     });
     let (mut client, mut remote, task) = live_connection(&state).await;
-    let start = std::time::Instant::now();
     use base64::Engine as _;
     let payload =
         base64::engine::general_purpose::STANDARD.encode("mode: rule\nrules:\n  - MATCH,REJECT\n");
-    let response = create_router(Arc::clone(&state))
-        .oneshot(
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        create_router(Arc::clone(&state)).oneshot(
             Request::builder()
                 .method("PUT")
                 .uri("/configs")
@@ -3140,11 +3140,12 @@ async fn cold_reload_drains_then_terminates_live_stream() {
                     serde_json::json!({"payload": payload}).to_string(),
                 ))
                 .unwrap(),
-        )
-        .await
-        .unwrap();
+        ),
+    )
+    .await
+    .expect("cold reload must not wait for live connections to finish")
+    .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert!(start.elapsed() >= std::time::Duration::from_secs(5));
     assert_socket_closed(&mut client).await;
     assert_socket_closed(&mut remote).await;
     task.await.unwrap();

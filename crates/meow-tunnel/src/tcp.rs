@@ -301,35 +301,26 @@ mod tests {
         assert!(rx.await.is_err(), "cancelled future must release resources");
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn drain_allows_natural_completion_and_times_out_stalled_connections() {
+    #[tokio::test]
+    async fn close_all_counts_requests_and_cancels_each_connection() {
         let stats = Statistics::new();
-        let guard =
+        let first =
             ConnectionGuard::track(&stats, metadata(), "MATCH".into(), "".into(), smallvec![]);
-        let start = tokio::time::Instant::now();
-        let complete = async {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            drop(guard);
-        };
-        let (closed, ()) = tokio::join!(
-            stats.drain_connections(std::time::Duration::from_secs(5)),
-            complete
-        );
-        assert_eq!(closed, 0);
-        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        let second =
+            ConnectionGuard::track(&stats, metadata(), "MATCH".into(), "".into(), smallvec![]);
+        let completed =
+            ConnectionGuard::track(&stats, metadata(), "MATCH".into(), "".into(), smallvec![]);
+        drop(completed);
 
-        let guard =
-            ConnectionGuard::track(&stats, metadata(), "MATCH".into(), "".into(), smallvec![]);
-        let start = tokio::time::Instant::now();
-        assert_eq!(
-            stats
-                .drain_connections(std::time::Duration::from_secs(5))
-                .await,
-            1
-        );
-        assert_eq!(start.elapsed(), std::time::Duration::from_secs(5));
-        assert!(guard
-            .run_until_closed(std::future::pending::<()>())
+        assert_eq!(stats.close_all_connections_counted(), 2);
+        assert_eq!(stats.active_connection_count(), 0);
+        assert_eq!(stats.close_all_connections_counted(), 0);
+        assert!(first
+            .run_until_closed(async { panic!("first closed connection started dialing") })
+            .await
+            .is_none());
+        assert!(second
+            .run_until_closed(async { panic!("second closed connection started dialing") })
             .await
             .is_none());
     }

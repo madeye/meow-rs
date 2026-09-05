@@ -3,6 +3,12 @@
 Status: **draft** — owner: pm. Last updated: 2026-04-18.
 Tracks: task #23. Companion to `docs/specs/api-config-reload.md`.
 
+Implementation status (PR #509): the live-socket regression covers immediate
+TCP cancellation on cold reload and the new routing policy taking effect.
+It does not fulfill C3/C4: graceful draining depends on stopping listener
+admission and remains follow-up work with the listener lifecycle below in
+[#510](https://github.com/meow-rs/meow-rs/issues/510).
+
 This is the QA-owned acceptance test plan. The spec's `§Test plan` section
 is the PM's starting point; this document is the final shape engineer should
 implement against. If the spec and this document disagree, **this document

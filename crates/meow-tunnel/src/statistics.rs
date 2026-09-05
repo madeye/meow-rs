@@ -315,7 +315,9 @@ impl Statistics {
         self.close_all_connections_counted();
     }
 
-    fn close_all_connections_counted(&self) -> usize {
+    /// Request closure of all tracked TCP connections and remove their entries.
+    /// Returns the number of closure requests, not completed socket teardowns.
+    pub fn close_all_connections_counted(&self) -> usize {
         let mut closed = 0;
         // Signal and remove under the same shard lock. A separate iteration
         // followed by clear could erase newly inserted, unsignalled entries.
@@ -325,23 +327,6 @@ impl Statistics {
             false
         });
         closed
-    }
-
-    /// Allow active streams to finish, then cancel any remaining dials/relays.
-    /// Returns the number of connections for which closure was requested.
-    pub async fn drain_connections(&self, timeout: std::time::Duration) -> usize {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while self.active_connection_count() > 0 {
-            if tokio::time::Instant::now() >= deadline {
-                return self.close_all_connections_counted();
-            }
-            tokio::time::sleep_until(std::cmp::min(
-                deadline,
-                tokio::time::Instant::now() + std::time::Duration::from_millis(10),
-            ))
-            .await;
-        }
-        0
     }
 }
 
