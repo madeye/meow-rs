@@ -1,6 +1,6 @@
 //! BoringSSL-backed TLS tests: fingerprint profile connections and JA3 capture.
 //!
-//! Required features: `boring-tls`.
+//! Required features: `tls`.
 //!
 //! Each named profile test:
 //!   1. Connects to a rustls loopback server using the boring backend.
@@ -556,17 +556,15 @@ async fn boring_deferred_fingerprint_connects_with_warn() {
     );
 }
 
-// ─── B9: TlsLayer::new succeeds with ECH config (no boring-tls absent error) ──
+// ─── B9: TlsLayer::new succeeds with ECH config ─────────────────────────────
 //
 // When the `ech` feature is also on, TlsLayer routes ECH through rustls
 // (not boring) and eagerly validates the config bytes, so this test only
 // applies when boring is the sole ECH backend.
-#[cfg(not(feature = "ech"))]
 #[tokio::test]
 async fn boring_ech_construction_ok() {
-    // TlsLayer::new must NOT return Err here.  The "ech-opts requires boring-tls"
-    // error only fires on the rustls path (boring-tls absent); since this test
-    // file is compiled with boring-tls, construction must succeed.
+    // ECH wire-format validation is deferred to connect-time, so construction
+    // must succeed even with placeholder config bytes.
     let config = TlsConfig {
         skip_cert_verify: true,
         ech: Some(EchOpts::Config(vec![0x00, 0x04, 0xfe, 0x0d, 0x00, 0x00])),
@@ -575,13 +573,12 @@ async fn boring_ech_construction_ok() {
     let layer = TlsLayer::new(&config);
     assert!(
         layer.is_ok(),
-        "TlsLayer::new must succeed when boring-tls is enabled: {:?}",
+        "TlsLayer::new must succeed with ECH config: {:?}",
         layer.err()
     );
 }
 
 // ─── B10: set_ech_config_list is called on ConnectConfiguration ───────────────
-#[cfg(not(feature = "ech"))]
 #[tokio::test]
 async fn boring_ech_connect_path_exercised() {
     // Passes ECH bytes through BoringInner::connect so that
@@ -774,40 +771,6 @@ async fn c9_fingerprint_with_skip_cert_verify() {
     assert!(connected, "safari with skip_cert_verify must connect");
 }
 
-// ─── C10: Fingerprint dedup warning (rustls-only path) ───────────────────────
-//
-// NOTE: This test only applies when boring-tls is absent. With boring-tls,
-// deferred fingerprints are routed to the boring backend (which uses defaults)
-// and don't warn. The dedup warning is a rustls-path behavior.
-// See tls_test.rs A11-A13 for the rustls path version.
-
-#[test]
-#[cfg(not(feature = "boring-tls"))]
-fn c10_fingerprint_dedup_warn() {
-    use support::log_capture::capture_logs;
-
-    install_crypto_provider();
-    let fp = "deferred_test_unique_c10";
-
-    let logs = capture_logs(|| {
-        let _ = TlsLayer::new(&TlsConfig {
-            fingerprint: Some(fp.into()),
-            ..TlsConfig::new("localhost")
-        });
-        let _ = TlsLayer::new(&TlsConfig {
-            fingerprint: Some(fp.into()),
-            ..TlsConfig::new("localhost")
-        });
-    });
-
-    // Should warn exactly once for deferred fingerprints
-    let warn_count = logs.count_containing(&["uTLS fingerprint spoofing", "not"]);
-    assert_eq!(
-        warn_count, 1,
-        "deferred fingerprint should warn exactly once"
-    );
-}
-
 // ─── C11: Invalid fingerprint value error ────────────────────────────────────
 
 #[test]
@@ -852,7 +815,7 @@ async fn c12_ech_valid_config_construction() {
         ..TlsConfig::new("localhost")
     };
 
-    // TlsLayer::new should succeed when boring-tls is enabled
+    // TlsLayer::new should succeed
     let layer = TlsLayer::new(&config);
     assert!(
         layer.is_ok() || layer.is_err(),
@@ -1049,7 +1012,6 @@ async fn c15_ech_retry_config_on_mismatch() {
 //      retry_configs containing A.  Layer self-heals: stored ECH now == A.
 //   3. Fresh TCP, second `connect()` on the *same* `TlsLayer` → handshake
 //      now uses A → succeeds with `ech_accepted == true`.
-#[cfg(not(feature = "ech"))]
 #[tokio::test]
 async fn c16_ech_self_heal_uses_retry_configs_on_next_connect() {
     install_crypto_provider();

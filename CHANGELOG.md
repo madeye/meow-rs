@@ -10,6 +10,32 @@ the canonical, in-repo source a release is cut from.
 
 ### Changed
 
+- **BoringSSL is now the only crypto library; rustls is gone from the runtime.**
+  Two changes land together. First, every TLS handshake moved off rustls onto
+  BoringSSL (`meow_transport::tls::TlsLayer`): proxy handshakes (Trojan, VLESS,
+  VMess, HTTP/SOCKS5-over-TLS, SS plugins, ECH tunnel, AnyTLS), URL-test health
+  probes, DoT/DoH upstreams, and every internal HTTP(S) fetch (`reqwest`
+  removed; the in-tree client gained direct dialing through the host
+  resolver/`SocketProtector` hooks, custom headers, and a Content-Length
+  precheck). Second, the **Hysteria2 outbound was ported from quinn (rustls) to
+  quiche**, Cloudflare's BoringSSL-native QUIC + HTTP/3 stack, using quiche's
+  `boringssl-boring-crate` feature so it links the SAME vendored BoringSSL as
+  the TLS layer. rustls, tokio-rustls, quinn, h3, h3-quinn, reqwest,
+  and webpki-roots are no longer runtime dependencies; rustls remains only as a
+  dev-dependency for the loopback TLS test servers.
+  **Build change:** the `boring` crate is pinned to `=4.22.0`, the version
+  quiche's boring-crate feature accepts (`^4.3`), so that quiche and
+  meow-transport share one `links = "boringssl"` copy. 4.22 carries every ECH
+  and uTLS API the transport backend uses; `boring-sys` (cmake + a C++ compiler)
+  is a hard build requirement on every target. The `boring-tls`/`ech` features
+  are no-op aliases. The Hysteria2 quiche client is a single driver task that
+  bridges quiche's synchronous state machine to the async `DuplexStream` (TCP)
+  and `UdpSession` (UDP datagrams) with real QUIC-flow-control backpressure;
+  Salamander obfs and port-hopping are applied on the driver's own UDP socket.
+  Observable runtime differences: BoringSSL's default ClientHello replaces
+  rustls' for proxies without `client-fingerprint`; TLS session resumption is
+  per BoringSSL `SSL_CTX` (64-entry cache); the QUIC ClientHello is now quiche's.
+
 - **`ipv6` is now effective end-to-end and keeps the `false` default.** The
   `ipv6` flag previously only gated a handful of code paths — the resolver
   queried A and AAAA regardless — so the documented `false` default and
@@ -33,6 +59,13 @@ the canonical, in-repo source a release is cut from.
 
 ### Fixed
 
+- Internal HTTP downloads strip authentication and cookie headers when a
+  redirect changes origin, and reject bodies that do not match Content-Length
+  before replacing provider caches.
+- Hysteria2 bounds queued TCP writes by bytes, retries exhausted QUIC stream
+  limits without discarding requests, and propagates terminal stream errors.
+  Restored idle keepalive and the remote response wait for `fast-open: false`;
+  cancelling authentication or dropping a client releases its driver socket.
 - **Auto-created `GLOBAL` selectors now default to the config's primary
   outbound.** Global mode always dispatches through `GLOBAL`, but the implicit
   selector previously sorted every registry key and used the first one when no

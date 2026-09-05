@@ -25,6 +25,23 @@ readme = "README.md"
 name = "anytls_rs"
 path = "src/lib.rs"
 
+[features]
+default = []
+# server: the AnyTLS *server* side (rustls acceptor, certificate hot-reload
+# and analysis). meow ships only the client — whose TLS is supplied by the
+# host through `util::tls::TlsConnect` (meow-transport's BoringSSL layer) —
+# so this is off by default and is the only place rustls is used. Enabled by
+# meow-proxy's dev-dependencies for the loopback integration tests.
+server = [
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-pemfile",
+    "dep:rcgen",
+    "dep:notify",
+    "dep:x509-parser",
+    "dep:chrono",
+]
+
 [dependencies]
 meow-common = { path = "../meow-common", version = "0.21.2" }
 tokio = { version = "1.48", features = [
@@ -39,16 +56,12 @@ tokio = { version = "1.48", features = [
     "fs",
 ] }
 
-# TLS — pinned to the `ring` crypto provider to match the rest of the workspace
-# (meow-proxy/meow-transport use ring, not the default aws-lc-rs), so this crate
-# does not independently request a second provider. meow installs ring as the
-# process default at startup (meow-app/main.rs), and the adapter builds its TLS
-# config with an explicit ring provider, so this crate's own `builder()`-based
-# helpers (used only by the dropped fork bins) are not on meow's runtime path.
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
-rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
-rustls-pemfile = "2"
+# Server-side TLS only (`server` feature): rustls acceptor + cert tooling.
+# The client never touches rustls — see `util::tls::TlsConnect`.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"], optional = true }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
 
 serde = { version = "1", features = ["derive"] }
 
@@ -69,9 +82,9 @@ trust-dns-resolver = { version = "0.23", default-features = false, features = ["
 thiserror = "2.0"
 anyhow = "1.0"
 
-notify = "8.2"
-x509-parser = "0.18"
-chrono = "0.4"
+notify = { version = "8.2", optional = true }
+x509-parser = { version = "0.18", optional = true }
+chrono = { version = "0.4", optional = true }
 
 # libc is only used by the Android socket-protect helper (EINPROGRESS check on
 # the non-blocking connect). Off-Android the helper compiles down to a direct

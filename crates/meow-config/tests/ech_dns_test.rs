@@ -242,12 +242,9 @@ proxies:
 
 // ─── E9: well-formed inline base64 loads cleanly through parse_vless ──────
 //
-// Requires `boring-tls` *without* `ech`: the boring backend defers ECH
-// wire-format validation to connect-time, so junk bytes are accepted at
-// parse time. When the `ech` feature is also on, rustls eagerly validates
-// the ECH config list and rejects the dummy bytes, causing the proxy to be
-// dropped — that path is correct but makes this test fail.
-#[cfg(all(feature = "vless", feature = "boring-tls", not(feature = "ech")))]
+// The BoringSSL backend defers ECH wire-format validation to connect-time,
+// so junk bytes are accepted at parse time.
+#[cfg(feature = "vless")]
 #[tokio::test]
 async fn parse_vless_ech_inline_valid_base64_loads() {
     let blob = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01\x02\x03");
@@ -269,39 +266,6 @@ proxies:
         .await
         .expect("inline base64 ECH must load through parse_vless");
     assert!(cfg.proxies.contains_key("ech-on"));
-}
-
-// ─── E9b: without boring-tls, inline ECH must be loudly rejected ──────────
-//
-// Mirror of E9 for the default feature set. Without `boring-tls`, ECH
-// support is not compiled in — silently dropping the proxy would leave
-// users thinking their ECH is on when it isn't, so the parser must
-// surface this via the proxy-skip log path.
-#[cfg(all(feature = "vless", not(feature = "boring-tls")))]
-#[tokio::test]
-async fn parse_vless_ech_inline_without_boring_tls_skips_proxy() {
-    let blob = base64::engine::general_purpose::STANDARD.encode(b"\x00\x01\x02\x03");
-    let yaml = format!(
-        r#"
-proxies:
-  - name: ech-on
-    type: vless
-    server: example.com
-    port: 443
-    uuid: b831381d-6324-4d53-ad4f-8cda48b30811
-    tls: true
-    ech-opts:
-      enable: true
-      config: "{blob}"
-"#
-    );
-    let cfg = load_config_from_str(&yaml)
-        .await
-        .expect("config still loads (proxy is skipped, not aborted)");
-    assert!(
-        !cfg.proxies.contains_key("ech-on"),
-        "without boring-tls, a proxy with ECH must NOT register"
-    );
 }
 
 // ─── E10: mixed batch — iterate all proxies, mutate only the ones that ────

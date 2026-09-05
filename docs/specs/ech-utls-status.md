@@ -15,8 +15,8 @@ Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are imp
 
 ### In scope (v1)
 
-- `boring-tls` cargo feature gate (optional; default builds unaffected)
-- `TlsBackend` enum dispatch: boring activates when `fingerprint` or `ech` is set; rustls path is unchanged
+- `boring-tls` cargo feature gate (optional at v1; on by default for `meow-app` since 0.20; a no-op alias of `tls` since the rustls backend was removed)
+- `TlsBackend` enum dispatch (v1): boring activated when `fingerprint` or `ech` was set; rustls path unchanged. **Superseded** — see "Added since v1": the backend is now chosen at compile time and BoringSSL serves every handshake when `boring-tls` is on
 - Six named fingerprint profiles: `chrome` / `chrome120`, `firefox` / `firefox120`, `safari` / `safari16`, `ios`, `android`, `edge`
 - `random` meta-profile (weighted pick at `TlsLayer::new` time: chrome×6, safari×3, ios×2, firefox×1)
 - `TlsConfig.ech: Option<EchOpts>` with `EchOpts::Config(Vec<u8>)` for inline ECH config list
@@ -26,6 +26,15 @@ Encrypted Client Hello (ECH) and uTLS-style browser fingerprint spoofing are imp
 - Feature-gated test suite: `boring_tls_test` (20 cases including real C13–C15), plus retained rustls suite (11 cases); 31 total passing
 
 ### Added since v1
+
+- **BoringSSL is the only TLS backend.** The rustls backend and the rustls
+  `ech` feature are removed; `tls` *is* BoringSSL and `boring-tls` is a
+  no-op alias. The `SslConnector` is memoised per
+  `(fingerprint, alpn, skip_cert_verify)` and SNI is omitted for IP-literal
+  server names. URL-test health probes, the internal HTTP fetcher (which
+  replaced `reqwest`), DoT/DoH and the vendored anytls client all go
+  through the same `TlsLayer`. rustls survives only as quinn's QUIC crypto
+  under `hysteria2`.
 
 - **DNS-sourced ECH** (`ech-opts.enable: true` with no inline `config:`) — async pre-resolution pass over the proxy YAML map (`meow_config::ech_dns::preresolve_ech`) uses `hickory-resolver` against the system DNS config to fetch the wire-format `ECHConfigList` from the HTTPS (RR 65) record, then writes it back as base64 so the sync `parse_proxy` path stays sync. Wired into `build_config`, the API config-reload handlers, the proxy-provider refresh, and the subscription auto-update path.
 - **ECH retry self-heal** — when the server returns `ech_required` with fresh `retry_configs`, `BoringInner` (now holding `ech: Mutex<Option<EchOpts>>`) rotates its stored ECH bytes to the server-signed key. The current connect still fails (the inner stream is consumed by `tokio_boring::connect`), but every subsequent connect through the same `TlsLayer` uses the refreshed key. Validated end-to-end by `c16_ech_self_heal_uses_retry_configs_on_next_connect`.

@@ -1,22 +1,26 @@
-//! Tiny HTTP/1.1 GET client that tunnels through a meow-rs `Proxy` adapter.
+//! Tiny HTTP/1.1 GET client for every internal fetch (subscriptions,
+//! proxy/rule providers, geodata, the optional external UI).
 //!
-//! Used by rule-provider and geodata downloaders so that internal HTTP fetches
-//! (which often target GFW-blocked hosts like `raw.githubusercontent.com` and
-//! `github.com` release assets) can route through one of the user's configured
-//! upstream nodes instead of going direct.
+//! Dials either directly — through `meow_common::connect_tcp_host`, so the
+//! host app's resolver / `SocketProtector` hooks apply — or through a meow
+//! `Proxy` adapter, so fetches that target GFW-blocked hosts like
+//! `raw.githubusercontent.com` can route through one of the user's upstream
+//! nodes. HTTPS goes through `meow_transport::tls::TlsLayer` (BoringSSL), the
+//! same stack the proxies use; there is no separate HTTP-client TLS.
 //!
 //! Scope is intentionally minimal:
 //!   * `GET` only.
 //!   * HTTP/1.1, `Connection: close`, `Accept-Encoding: identity`.
 //!   * Follows up to 5 redirects (`3xx` with `Location`).
-//!   * No streaming — full body buffered in memory (matches the existing
-//!     `reqwest::bytes()` semantics on every call site).
+//!   * No streaming — full body buffered in memory, capped at
+//!     `MAX_BODY_BYTES` (256 MiB).
 
 use anyhow::{anyhow, bail, Result};
-use futures_util::StreamExt;
 use meow_common::adapter::Proxy;
 use meow_common::metadata::Metadata;
-use meow_common::{ConnType, Network};
+use meow_common::{connect_tcp_host, ConnType, Network};
+use meow_transport::tls::{TlsConfig, TlsLayer};
+use meow_transport::Transport as _;
 use smol_str::SmolStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,59 +37,66 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 const USER_AGENT: &str = concat!("clash.meta/", env!("CARGO_PKG_VERSION"));
 pub(crate) const MAX_BODY_BYTES: usize = 256 * 1024 * 1024; // 256 MiB hard ceiling
-
-/// Consume `resp`'s body into a `Vec<u8>`, rejecting it before or during the
-/// read if it exceeds `MAX_BODY_BYTES`.
-///
-/// Checks `Content-Length` up front when present, then streams the body and
-/// bails as soon as the accumulated length would cross the cap — so a
-/// dishonest or absent `Content-Length` can't be used to smuggle an
-/// oversized body past the precheck.
-pub(crate) async fn response_bytes_with_limit(resp: reqwest::Response) -> Result<Vec<u8>> {
-    response_bytes_capped(resp, MAX_BODY_BYTES).await
-}
-
-/// Same as [`response_bytes_with_limit`] but with the cap as a parameter, so
-/// tests can exercise the precheck and streaming-cap paths against a small
-/// limit instead of transferring hundreds of megabytes.
-async fn response_bytes_capped(resp: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
-    if resp
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
-        bail!("response exceeds max body size ({limit} bytes)");
-    }
-
-    let mut bytes = Vec::new();
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if chunk.len() > limit.saturating_sub(bytes.len()) {
-            bail!("response exceeds max body size ({limit} bytes)");
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
-}
-
-pub(crate) async fn response_text_with_limit(resp: reqwest::Response) -> Result<String> {
-    let bytes = response_bytes_with_limit(resp).await?;
-    String::from_utf8(bytes).map_err(|e| anyhow!("response body is not UTF-8: {e}"))
-}
+/// Headroom on top of the body cap for the status line + headers.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 /// Fetch `url` via `proxy` and return the response body.
 ///
 /// Follows up to 5 redirects (302/301/307/308). Returns an
 /// error for non-2xx terminal responses, oversize bodies, or transport errors.
 pub async fn fetch_via_proxy(url: &str, proxy: &Arc<dyn Proxy>) -> Result<Vec<u8>> {
+    fetch(url, Some(proxy), &[]).await
+}
+
+/// Fetch `url` over a direct connection (no proxy) and return the body.
+pub async fn fetch_direct(url: &str) -> Result<Vec<u8>> {
+    fetch(url, None, &[]).await
+}
+
+/// Fetch `url`, directly or via `proxy`, sending `headers` in addition to the
+/// defaults, and return the response body.
+///
+/// Follows up to 5 redirects (302/301/307/308). Returns an error for non-2xx
+/// terminal responses, oversize bodies, or transport errors.
+pub async fn fetch(
+    url: &str,
+    proxy: Option<&Arc<dyn Proxy>>,
+    headers: &[(String, String)],
+) -> Result<Vec<u8>> {
+    fetch_capped(url, proxy, headers, MAX_BODY_BYTES).await
+}
+
+/// [`fetch`] with the body cap as a parameter, so tests can exercise the
+/// oversize paths without transferring hundreds of megabytes.
+async fn fetch_capped(
+    url: &str,
+    proxy: Option<&Arc<dyn Proxy>>,
+    headers: &[(String, String)],
+    limit: usize,
+) -> Result<Vec<u8>> {
     let mut current = Url::parse(url).map_err(|e| anyhow!("invalid URL '{url}': {e}"))?;
+    let mut headers = headers.to_vec();
     for _ in 0..=MAX_REDIRECTS {
-        match fetch_one(&current, proxy).await? {
+        match fetch_one(&current, proxy, &headers, limit).await? {
             Outcome::Body(bytes) => return Ok(bytes),
             Outcome::Redirect(next) => {
-                current = current
+                let next = current
                     .join(&next)
                     .map_err(|e| anyhow!("bad redirect Location '{next}': {e}"))?;
+                if current.origin() != next.origin() {
+                    headers.retain(|(name, _)| {
+                        ![
+                            "authorization",
+                            "cookie",
+                            "cookie2",
+                            "proxy-authorization",
+                            "www-authenticate",
+                        ]
+                        .iter()
+                        .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
+                    });
+                }
+                current = next;
             }
         }
     }
@@ -97,7 +108,12 @@ enum Outcome {
     Redirect(String),
 }
 
-async fn fetch_one(url: &Url, proxy: &Arc<dyn Proxy>) -> Result<Outcome> {
+async fn fetch_one(
+    url: &Url,
+    proxy: Option<&Arc<dyn Proxy>>,
+    headers: &[(String, String)],
+    limit: usize,
+) -> Result<Outcome> {
     let scheme = url.scheme();
     let is_https = match scheme {
         "https" => true,
@@ -116,54 +132,82 @@ async fn fetch_one(url: &Url, proxy: &Arc<dyn Proxy>) -> Result<Outcome> {
         None => url.path().to_string(),
     };
 
-    let metadata = Metadata {
-        network: Network::Tcp,
-        conn_type: ConnType::Http,
-        host: SmolStr::from(&host),
-        dst_port: port,
-        ..Metadata::default()
+    let conn: Box<dyn meow_transport::Stream> = match proxy {
+        Some(proxy) => {
+            let metadata = Metadata {
+                network: Network::Tcp,
+                conn_type: ConnType::Http,
+                host: SmolStr::from(&host),
+                dst_port: port,
+                ..Metadata::default()
+            };
+            let conn = tokio::time::timeout(CONNECT_TIMEOUT, proxy.dial_tcp(&metadata))
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "dial via proxy '{}' timed out after {CONNECT_TIMEOUT:?}",
+                        proxy.name()
+                    )
+                })?
+                .map_err(|e| anyhow!("dial via proxy '{}': {e}", proxy.name()))?;
+            Box::new(conn)
+        }
+        None => {
+            // Resolver-aware direct dial: honours the host app's
+            // `HostResolver` / `SocketProtector` hooks (VPN apps), then falls
+            // back to the system resolver.
+            let host_str = host.trim_start_matches('[').trim_end_matches(']');
+            let conn = tokio::time::timeout(CONNECT_TIMEOUT, connect_tcp_host(host_str, port))
+                .await
+                .map_err(|_| {
+                    anyhow!("connect to {host}:{port} timed out after {CONNECT_TIMEOUT:?}")
+                })?
+                .map_err(|e| anyhow!("connect to {host}:{port}: {e}"))?;
+            Box::new(conn)
+        }
     };
 
-    let conn = tokio::time::timeout(CONNECT_TIMEOUT, proxy.dial_tcp(&metadata))
-        .await
-        .map_err(|_| {
-            anyhow!(
-                "dial via proxy '{}' timed out after {CONNECT_TIMEOUT:?}",
-                proxy.name()
-            )
-        })?
-        .map_err(|e| anyhow!("dial via proxy '{}': {e}", proxy.name()))?;
-
-    let request = format!(
+    let mut request = format!(
         "GET {path} HTTP/1.1\r\n\
          Host: {host_header}\r\n\
          User-Agent: {ua}\r\n\
          Accept: */*\r\n\
          Accept-Encoding: identity\r\n\
-         Connection: close\r\n\
-         \r\n",
+         Connection: close\r\n",
         path = path_and_query,
         host_header = host_header(&host, port, is_https),
         ua = USER_AGENT,
     );
+    for (name, value) in headers {
+        if name.is_empty()
+            || name.bytes().any(|b| b == b'\r' || b == b'\n' || b == b':')
+            || value.bytes().any(|b| b == b'\r' || b == b'\n')
+        {
+            bail!("invalid HTTP header {name:?}");
+        }
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
 
-    if is_https {
-        let tls = tls_connector();
-        let server_name = rustls::pki_types::ServerName::try_from(host.clone())
-            .map_err(|e| anyhow!("invalid TLS server name '{host}': {e}"))?;
-        let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, tls.connect(server_name, conn))
+    let mut stream = if is_https {
+        // Same TlsLayer the proxies dial with (BoringSSL).
+        let tls = TlsLayer::new(&TlsConfig::new(
+            host.trim_start_matches('[').trim_end_matches(']'),
+        ))
+        .map_err(|e| anyhow!("invalid TLS server name '{host}': {e}"))?;
+        tokio::time::timeout(CONNECT_TIMEOUT, tls.connect(conn))
             .await
             .map_err(|_| anyhow!("TLS handshake to {host} timed out after {CONNECT_TIMEOUT:?}"))?
-            .map_err(|e| anyhow!("TLS handshake to {host}: {e}"))?;
-        stream.write_all(request.as_bytes()).await?;
-        stream.flush().await?;
-        read_response(&mut stream).await
+            .map_err(|e| anyhow!("TLS handshake to {host}: {e}"))?
     } else {
-        let mut stream = conn;
-        stream.write_all(request.as_bytes()).await?;
-        stream.flush().await?;
-        read_response(&mut stream).await
-    }
+        conn
+    };
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
+    read_response(&mut stream, limit).await
 }
 
 fn host_header(host: &str, port: u16, is_https: bool) -> String {
@@ -175,12 +219,15 @@ fn host_header(host: &str, port: u16, is_https: bool) -> String {
     }
 }
 
-async fn read_response<S>(stream: &mut S) -> Result<Outcome>
+async fn read_response<S>(stream: &mut S, limit: usize) -> Result<Outcome>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     // Read until EOF with a wall-clock timeout. Connection: close means
-    // the server signals end-of-body by closing the socket.
+    // the server signals end-of-body by closing the socket. The read cap is
+    // the body cap plus header headroom; the exact body-size checks happen
+    // in `parse_response` once the framing is known.
+    let read_cap = limit.saturating_add(MAX_HEADER_BYTES);
     let mut buf = Vec::with_capacity(64 * 1024);
     let read = async {
         let mut tmp = [0u8; 16 * 1024];
@@ -189,8 +236,8 @@ where
             if n == 0 {
                 break;
             }
-            if buf.len() + n > MAX_BODY_BYTES {
-                bail!("response exceeds max body size ({MAX_BODY_BYTES} bytes)");
+            if buf.len() + n > read_cap {
+                bail!("response exceeds max body size ({limit} bytes)");
             }
             buf.extend_from_slice(&tmp[..n]);
         }
@@ -200,10 +247,10 @@ where
         .await
         .map_err(|_| anyhow!("response read timed out after {READ_TIMEOUT:?}"))??;
 
-    parse_response(&buf)
+    parse_response(&buf, limit)
 }
 
-fn parse_response(buf: &[u8]) -> Result<Outcome> {
+fn parse_response(buf: &[u8], limit: usize) -> Result<Outcome> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut resp = httparse::Response::new(&mut headers);
     let parsed = resp
@@ -228,7 +275,32 @@ fn parse_response(buf: &[u8]) -> Result<Outcome> {
         bail!("HTTP {status} redirect without Location header");
     }
     if !(200..300).contains(&status) {
-        bail!("HTTP {status}");
+        let snippet: String = String::from_utf8_lossy(&buf[body_start..])
+            .chars()
+            .take(200)
+            .collect();
+        if snippet.is_empty() {
+            bail!("HTTP {status}");
+        }
+        bail!("HTTP {status}: {snippet}");
+    }
+    // A declared Content-Length above the cap is rejected outright (issue
+    // #431) — a dishonest or huge value must not be trusted over the cap.
+    let mut content_length = None;
+    for h in resp.headers.iter() {
+        if h.name.eq_ignore_ascii_case("content-length") {
+            let declared = std::str::from_utf8(h.value)
+                .ok()
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .ok_or_else(|| anyhow!("invalid Content-Length header"))?;
+            if declared > limit as u64 {
+                bail!("response exceeds max body size ({limit} bytes)");
+            }
+            if content_length.is_some_and(|previous| previous != declared) {
+                bail!("conflicting Content-Length headers");
+            }
+            content_length = Some(declared);
+        }
     }
     let chunked = resp.headers.iter().any(|header| {
         header.name.eq_ignore_ascii_case("transfer-encoding")
@@ -239,14 +311,21 @@ fn parse_response(buf: &[u8]) -> Result<Outcome> {
             })
     });
     let body = if chunked {
-        decode_chunked(&buf[body_start..])?
+        decode_chunked(&buf[body_start..], limit)?
     } else {
-        buf[body_start..].to_vec()
+        let body = &buf[body_start..];
+        if content_length.is_some_and(|declared| declared != body.len() as u64) {
+            bail!("response body length does not match Content-Length");
+        }
+        if body.len() > limit {
+            bail!("response exceeds max body size ({limit} bytes)");
+        }
+        body.to_vec()
     };
     Ok(Outcome::Body(body))
 }
 
-fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
+fn decode_chunked(mut input: &[u8], limit: usize) -> Result<Vec<u8>> {
     let mut body = Vec::new();
     loop {
         let line_end = input
@@ -267,8 +346,8 @@ fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
             }
             bail!("incomplete chunked response trailers");
         }
-        if size > MAX_BODY_BYTES.saturating_sub(body.len()) {
-            bail!("response exceeds max body size ({MAX_BODY_BYTES} bytes)");
+        if size > limit.saturating_sub(body.len()) {
+            bail!("response exceeds max body size ({limit} bytes)");
         }
         if input.len() < size + 2 || &input[size..size + 2] != b"\r\n" {
             bail!("incomplete chunk data");
@@ -276,15 +355,6 @@ fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
         body.extend_from_slice(&input[..size]);
         input = &input[size + 2..];
     }
-}
-
-fn tls_connector() -> tokio_rustls::TlsConnector {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tokio_rustls::TlsConnector::from(Arc::new(config))
 }
 
 /// Pick the first proxy named in the user's `proxies:` config block and look
@@ -309,7 +379,7 @@ mod tests {
     #[test]
     fn parse_response_decodes_chunked_body_and_extensions() {
         let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4;foo=bar\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Trailer: yes\r\n\r\n";
-        match parse_response(response).unwrap() {
+        match parse_response(response, MAX_BODY_BYTES).unwrap() {
             Outcome::Body(body) => assert_eq!(body, b"Wikipedia"),
             Outcome::Redirect(_) => panic!("unexpected redirect"),
         }
@@ -318,7 +388,7 @@ mod tests {
     #[test]
     fn parse_response_rejects_truncated_chunk() {
         let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabc";
-        assert!(parse_response(response).is_err());
+        assert!(parse_response(response, MAX_BODY_BYTES).is_err());
     }
 
     /// `Proxy` whose `dial_tcp` never completes — models an adapter dialing an
@@ -417,8 +487,7 @@ mod tests {
     async fn response_bytes_capped_rejects_oversize_content_length() {
         let url =
             spawn_raw_http_server(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nshort").await;
-        let resp = reqwest::get(&url).await.unwrap();
-        let err = response_bytes_capped(resp, 16).await.unwrap_err();
+        let err = fetch_capped(&url, None, &[], 16).await.unwrap_err();
         assert!(
             err.to_string().contains("exceeds max body size"),
             "unexpected error: {err}"
@@ -434,8 +503,7 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10\r\n0123456789abcdef\r\n0\r\n\r\n",
         )
         .await;
-        let resp = reqwest::get(&url).await.unwrap();
-        let err = response_bytes_capped(resp, 8).await.unwrap_err();
+        let err = fetch_capped(&url, None, &[], 8).await.unwrap_err();
         assert!(
             err.to_string().contains("exceeds max body size"),
             "unexpected error: {err}"
@@ -445,8 +513,85 @@ mod tests {
     #[tokio::test]
     async fn response_bytes_capped_accepts_body_within_limit() {
         let url = spawn_raw_http_server(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello").await;
-        let resp = reqwest::get(&url).await.unwrap();
-        let bytes = response_bytes_capped(resp, 16).await.unwrap();
+        let bytes = fetch_capped(&url, None, &[], 16).await.unwrap();
         assert_eq!(bytes, b"hello");
+    }
+
+    #[tokio::test]
+    async fn direct_fetch_rejects_truncated_content_length() {
+        let url = spawn_raw_http_server(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc").await;
+        let error = fetch_direct(&url).await.unwrap_err();
+        assert!(error.to_string().contains("does not match Content-Length"));
+    }
+
+    #[test]
+    fn content_length_framing_rejects_extra_bytes_and_conflicting_lengths() {
+        for response in [
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nabc"[..],
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc"[..],
+        ] {
+            assert!(parse_response(response, MAX_BODY_BYTES).is_err());
+        }
+        assert!(
+            matches!(parse_response(b"HTTP/1.1 200 OK\r\n\r\nabc", MAX_BODY_BYTES).unwrap(), Outcome::Body(body) if body == b"abc")
+        );
+    }
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        String::from_utf8(request).unwrap().to_ascii_lowercase()
+    }
+
+    #[tokio::test]
+    async fn redirects_preserve_same_origin_headers_and_strip_cross_origin_credentials() {
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/start", origin.local_addr().unwrap());
+        let destination = format!("http://{}/end", other.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for location in ["/same-origin", &destination] {
+                let (mut stream, _) = origin.accept().await.unwrap();
+                let request = read_request(&mut stream).await;
+                assert!(request.contains("authorization: bearer test-token\r\n"));
+                assert!(request.contains("cookie: session=test\r\n"));
+                stream.write_all(format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
+            }
+            let (mut stream, _) = other.accept().await.unwrap();
+            let request = read_request(&mut stream).await;
+            for name in [
+                "authorization",
+                "cookie",
+                "cookie2",
+                "proxy-authorization",
+                "www-authenticate",
+            ] {
+                assert!(!request.contains(&format!("\r\n{name}:")), "leaked {name}");
+            }
+            assert!(request.contains("x-custom: retained\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        let headers = [
+            ("AuThOrIzAtIoN", "Bearer test-token"),
+            ("Cookie", "session=test"),
+            ("Cookie2", "test"),
+            ("Proxy-Authorization", "test"),
+            ("WWW-Authenticate", "test"),
+            ("X-Custom", "retained"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string()));
+        let body = tokio::time::timeout(Duration::from_secs(5), fetch(&url, None, &headers))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, b"ok");
+        server.await.unwrap();
     }
 }

@@ -7,9 +7,10 @@
 //! - **protocol**: Frame and codec implementation
 //! - **session**: Session and stream management
 //! - **padding**: Traffic obfuscation padding
-//! - **util**: Utilities (error handling, auth, TLS config)
-//! - **client**: Client implementation
-//! - **server**: Server implementation
+//! - **util**: Utilities (error handling, auth, the `TlsConnect` hook)
+//! - **client**: Client implementation — TLS is supplied by the host via
+//!   [`util::tls::TlsConnect`], so the client links no TLS library itself
+//! - **server**: Server implementation (feature `server`, rustls-based)
 
 /// Client implementation
 pub mod client;
@@ -17,7 +18,8 @@ pub mod client;
 pub mod padding;
 /// Protocol layer: Frame and codec implementation
 pub mod protocol;
-/// Server implementation
+/// Server implementation (feature `server`; rustls-based)
+#[cfg(feature = "server")]
 pub mod server;
 /// Session layer: Session and stream management
 pub mod session;

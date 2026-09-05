@@ -3,18 +3,22 @@
 use crate::client::{SessionPool, SessionPoolConfig};
 use crate::padding::PaddingFactory;
 use crate::session::{Session, SessionHeartbeatConfig};
-use crate::util::{AnyTlsError, Result, configure_tcp_stream, hash_password, send_authentication};
+use crate::util::{
+    AnyTlsError, Result, TlsConnect, configure_tcp_stream, hash_password, send_authentication,
+};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use tokio::time::Duration;
-use tokio_rustls::rustls::pki_types::ServerName;
 
 /// Client manages connections to AnyTLS servers
+///
+/// TLS is supplied by the host through [`TlsConnect`]; the client dials TCP,
+/// hands the socket to the hook, and speaks AnyTLS over whatever stream
+/// comes back.
 pub struct Client {
     password_hash: [u8; 32],
     server_addr: String,
-    server_name: ServerName<'static>,
-    tls_config: Arc<tokio_rustls::TlsConnector>,
+    tls: Arc<dyn TlsConnect>,
     padding: Arc<PaddingFactory>,
     session_pool: Arc<SessionPool>,
     pool_config: SessionPoolConfig,
@@ -25,15 +29,13 @@ impl Client {
     pub fn new(
         password: &str,
         server_addr: String,
-        server_name: ServerName<'static>,
-        tls_config: Arc<tokio_rustls::TlsConnector>,
+        tls: Arc<dyn TlsConnect>,
         padding: Arc<PaddingFactory>,
     ) -> Self {
         Self::with_pool_config(
             password,
             server_addr,
-            server_name,
-            tls_config,
+            tls,
             padding,
             crate::client::SessionPoolConfig::default(),
         )
@@ -43,8 +45,7 @@ impl Client {
     pub fn with_pool_config(
         password: &str,
         server_addr: String,
-        server_name: ServerName<'static>,
-        tls_config: Arc<tokio_rustls::TlsConnector>,
+        tls: Arc<dyn TlsConnect>,
         padding: Arc<PaddingFactory>,
         pool_config: crate::client::SessionPoolConfig,
     ) -> Self {
@@ -56,8 +57,7 @@ impl Client {
         Self {
             password_hash,
             server_addr,
-            server_name,
-            tls_config,
+            tls,
             padding,
             session_pool,
             pool_config,
@@ -275,20 +275,12 @@ impl Client {
             self.server_addr
         );
 
-        // Perform TLS handshake
-        let server_name = self.server_name.clone();
-        tracing::trace!(
-            "[Client] Starting TLS handshake using SNI {:?}",
-            server_name
-        );
-        let tls_stream = self
-            .tls_config
-            .connect(server_name, tcp_stream)
-            .await
-            .map_err(|e| {
-                tracing::error!("[Client] TLS handshake failed: {}", e);
-                AnyTlsError::Tls(format!("TLS handshake failed: {}", e))
-            })?;
+        // Perform TLS handshake through the host-supplied hook
+        tracing::trace!("[Client] Starting TLS handshake");
+        let tls_stream = self.tls.connect(tcp_stream).await.map_err(|e| {
+            tracing::error!("[Client] TLS handshake failed: {}", e);
+            e
+        })?;
         tracing::debug!("[Client] TLS handshake successful");
 
         // Send authentication

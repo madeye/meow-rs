@@ -343,9 +343,6 @@ fn run_application_inner(
 ) -> Result<()> {
     info!("meow-rs starting...");
 
-    // Initialize rustls crypto provider (required for TLS-based proxy protocols)
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     // Propagate -d to the process-wide home directory so all resource-path
     // helpers (default_geoip_path, default_asn_path, default_geosite_path, …)
     // resolve under that directory instead of $XDG_CONFIG_HOME/meow.

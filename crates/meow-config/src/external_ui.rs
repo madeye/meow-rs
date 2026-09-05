@@ -18,14 +18,9 @@ use tracing::info;
 /// — a failed download is non-fatal (the server falls back to the built-in UI).
 pub async fn download_external_ui(url: &str, dir: &Path) -> anyhow::Result<()> {
     info!("Downloading external UI from {url} into {}", dir.display());
-    let bytes = reqwest::get(url)
+    let bytes = crate::internal_http::fetch_direct(url)
         .await
-        .with_context(|| format!("request to {url} failed"))?
-        .error_for_status()
-        .with_context(|| format!("{url} returned an error status"))?
-        .bytes()
-        .await
-        .context("reading response body")?;
+        .with_context(|| format!("request to {url} failed"))?;
 
     let dir_owned = dir.to_path_buf();
     // Zip extraction is synchronous and CPU/IO bound; keep it off the runtime.

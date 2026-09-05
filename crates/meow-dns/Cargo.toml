@@ -10,7 +10,11 @@ homepage.workspace = true
 
 [features]
 default = ["encrypted", "dns-server"]
-encrypted = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots"]
+# DoT / DoH upstreams. TLS goes through `meow_transport::tls::TlsLayer`, so
+# DNS shares the process-wide backend (BoringSSL when the app is built with
+# `boring-tls` — the default — rustls otherwise) instead of carrying its own
+# rustls client config.
+encrypted = ["dep:meow-transport"]
 # `dns-server` historically gated hickory-server; the in-tree server now uses
 # only `hickory-proto`, so the feature is a no-op kept for API stability.
 dns-server = []
@@ -20,9 +24,7 @@ meow-common = { workspace = true }
 meow-trie = { workspace = true }
 tokio = { workspace = true }
 hickory-proto = { workspace = true }
-tokio-rustls = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
-webpki-roots = { workspace = true, optional = true }
+meow-transport = { workspace = true, features = ["tls"], optional = true }
 rand = { workspace = true }
 lru = { workspace = true }
 dashmap = { workspace = true }

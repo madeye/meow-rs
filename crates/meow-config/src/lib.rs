@@ -1239,12 +1239,6 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
 /// subsequent parser-context build will hard-error if the file is still
 /// absent, giving a clear diagnostic.
 async fn ensure_geodata(raw: &raw::RawConfig, geo: &GeoDataConfig, scan_lines: &[String]) {
-    // The direct download path (no proxy) uses reqwest which needs a rustls
-    // CryptoProvider. Install ring as the default — idempotent if main.rs
-    // already did this, and harmless in --all-features builds where both
-    // ring and aws-lc-rs are compiled in.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let needs_geoip = scan_lines.iter().any(|l| line_references_geoip(l));
     let needs_asn = scan_lines.iter().any(|l| line_references_asn(l));
     let needs_geosite =

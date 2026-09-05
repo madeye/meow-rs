@@ -10,7 +10,7 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 
 ### Proxy Protocols
 - **Shadowsocks** -- TCP and UDP relay, AEAD and stream ciphers (aes-256-gcm, chacha20-ietf-poly1305, etc.)
-- **Trojan** -- TLS 1.2/1.3 via rustls, SNI, optional skip-cert-verify
+- **Trojan** -- TLS 1.2/1.3 (BoringSSL), SNI, optional skip-cert-verify
 - **Hysteria2** -- QUIC-based TCP and UDP relay, Salamander obfs, port hopping, down bandwidth auth hint, SNI, skip-cert-verify, and certificate pinning
 - **VLESS** -- Plain VLESS and XTLS-Vision splice; TLS, WebSocket, gRPC, H2, HTTPUpgrade transports
 - **VMess** -- AEAD VMess outbound with TCP/WebSocket transports
@@ -24,7 +24,7 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 ### TLS & Privacy
 - **ECH (Encrypted Client Hello)** -- DNS-based ECH config fetching from HTTPS/SVCB records; BoringSSL backend (`boring-tls` feature)
 - **uTLS Fingerprinting** -- Chrome, Firefox, Safari, iOS, Android, Edge profiles to bypass TLS fingerprint detection
-- **rustls** default backend with optional BoringSSL for advanced features
+- **BoringSSL** is the single crypto library for the whole app. Every proxy handshake, health check, DoT/DoH upstream, internal HTTP(S) fetch (uTLS fingerprints and ECH included), and the Hysteria2 QUIC transport link one vendored BoringSSL. rustls is not used at runtime at all
 
 ### Proxy Groups
 - **Selector** -- Manual proxy selection via REST API or web UI
@@ -192,7 +192,7 @@ flowchart TD
 |-------|---------|
 | `meow-common` | Core traits and types (ProxyAdapter, Rule, Metadata) |
 | `meow-trie` | Domain trie for efficient pattern matching |
-| `meow-transport` | TLS (rustls + BoringSSL), WebSocket, gRPC, H2, HTTPUpgrade layers |
+| `meow-transport` | TLS (BoringSSL), WebSocket, gRPC, H2, HTTPUpgrade layers |
 | `meow-proxy` | Proxy protocol implementations and groups |
 | `meow-rules` | Rule matching engine and parser |
 | `meow-dns` | DNS resolver, cache, DNS snooping, server |

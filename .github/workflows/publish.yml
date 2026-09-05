@@ -37,7 +37,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # BoringSSL (boring-tls, on by default for meow-config / meow-app) needs cmake.
+      # BoringSSL (the TLS backend behind meow-transport's `tls` feature) needs cmake.
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake
 

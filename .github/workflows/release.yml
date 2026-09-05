@@ -22,10 +22,9 @@ jobs:
       matrix:
         include:
           # Every release target builds with the meow-app default feature set
-          # (`full` + `boring-tls`). Targets that cannot link boring-sys
-          # (MIPS, 32-bit musl, windows-gnu) are intentionally not shipped —
-          # operators who need them can cross-build from source with
-          # `--no-default-features --features full`.
+          # (`full`; TLS is BoringSSL). Targets that cannot link boring-sys
+          # (MIPS, 32-bit musl, windows-gnu) are not shipped and — since the
+          # rustls backend was removed — cannot be built with TLS at all.
           # Linux musl
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
@@ -108,7 +107,7 @@ jobs:
       - name: Build release binary
         shell: bash
         run: |
-          # Default features = full + boring-tls (meow-app/Cargo.toml).
+          # Default features = full (meow-app/Cargo.toml); TLS is BoringSSL.
           if [ "${{ runner.os }}" = "Linux" ]; then
             cargo zigbuild --release --locked --target ${{ matrix.target }} --bin meow
           else

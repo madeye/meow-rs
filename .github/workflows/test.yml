@@ -39,8 +39,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       # Also stands in for the per-crate `cargo check --all-features` legs
-      # that used to run in the test job (transport G7 incl. boring-tls,
-      # VLESS G3): clippy is a strict superset of check.
+      # that used to run in the test job (transport G7, VLESS G3): clippy is
+      # a strict superset of check.
       - name: Clippy (all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
@@ -189,8 +189,8 @@ jobs:
       # --all-features legs (transport G7, VLESS G3) are covered by clippy
       # --all-features in the lint job.
       - name: Feature powerset (depth 2) — meow-transport
-        # boring-tls excluded: requires C++ toolchain at build time; covered
-        # via clippy --all-features in the lint job.
+        # `tls` is BoringSSL (boring-sys builds once and is cached across
+        # legs); `boring-tls` is a no-op alias of it, so skip that duplicate.
         run: cargo hack check -p meow-transport --feature-powerset --depth 2 --no-dev-deps --exclude-features boring-tls
 
       - name: Feature powerset (depth 2) — meow-proxy

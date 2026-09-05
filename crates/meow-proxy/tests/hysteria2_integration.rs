@@ -198,10 +198,10 @@ fn start_hysteria_server(port: u16) -> Option<HysteriaServer> {
         }
     };
 
-    // Run hysteria in-process on the test host. Quinn cannot complete the QUIC
-    // handshake against a server started with `docker --network container:…`
-    // in nested container environments (e.g. Gitpod), while quic-go clients
-    // such as mihomo are unaffected.
+    // Run hysteria in-process on the test host. The quiche client dials the
+    // server over loopback; running the server on the host (rather than via
+    // `docker --network container:…`) keeps the QUIC path simple in nested
+    // container environments (e.g. Gitpod).
     let stdout = log_file.try_clone().map_or(Stdio::null(), Stdio::from);
     let child = match Command::new(&hysteria_bin)
         .args(["server", "-c", &config_path.to_string_lossy()])

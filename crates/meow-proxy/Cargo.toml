@@ -34,38 +34,40 @@ vless-encryption = [
 # UDP-over-TCP, and an opt-in v4/v5 reuse pool (CommandConnectV2).
 snell = ["dep:argon2", "dep:aes-gcm", "meow-transport/simple-obfs"]
 # Opt-in anytls outbound (uses the vendored `meow-anytls` crate, lib name
-# `anytls_rs`). Adds ~one extra TLS provider to the binary because the vendored
-# crate keeps the fork's default rustls features — accept the bloat in exchange
-# for not re-implementing the wire protocol. Off by default.
+# `anytls_rs`). The client's TLS is supplied by meow-transport's BoringSSL
+# TlsLayer through anytls-rs's `TlsConnect` hook, so no second TLS stack.
 anytls = ["dep:meow-anytls"]
-# Hysteria2 outbound implemented in-tree on top of Quinn.
-hysteria2 = ["dep:quinn", "dep:h3", "dep:h3-quinn", "dep:blake2"]
+# Hysteria2 outbound implemented in-tree on top of quiche (BoringSSL-native
+# QUIC + HTTP/3), so it links no rustls and no second crypto library.
+hysteria2 = ["dep:quiche", "dep:boring", "dep:blake2", "dep:webpki-root-certs", "dep:tokio-util"]
 # sing-mux connection multiplexing for VLESS/Trojan/Shadowsocks/VMess. Pulls h2 + yamux +
 # tokio-util/compat — opt-out in `minimal` builds (ADR-0007 binary-size caps).
 mux = ["dep:h2", "dep:yamux", "dep:tokio-util", "meow-transport/h2"]
 # Native client for the `ech-tls-tunnel` SIP003 plugin
-# (https://github.com/shadowsocks/ech-tls-tunnel). Requires ECH on rustls,
-# which pulls aws-lc-rs in via meow-transport.
-ech-tls-tunnel = ["ss", "meow-transport/ech"]
+# (https://github.com/shadowsocks/ech-tls-tunnel). ECH is native to the
+# BoringSSL TlsLayer, so no extra TLS deps.
+ech-tls-tunnel = ["ss"]
 
 [dependencies]
 meow-common = { workspace = true }
 meow-dns = { workspace = true }
-meow-transport = { workspace = true }
+meow-transport = { workspace = true, features = ["tls", "ws"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true, optional = true }
 yamux = { workspace = true, optional = true }
 h2 = { version = "0.4", optional = true }
 meow-anytls = { workspace = true, optional = true }
-quinn = { workspace = true, optional = true }
-h3 = { workspace = true, optional = true }
-h3-quinn = { workspace = true, optional = true }
+# quiche = QUIC + HTTP/3 for the hysteria2 outbound, on BoringSSL (shares the
+# `boring` crate's vendored copy). No rustls, no second crypto library.
+quiche = { workspace = true, optional = true }
+# BoringSSL SslContextBuilder for the quiche TLS config (cert verify / pin).
+# Same `boring` crate (and vendored library) meow-transport links.
+boring = { workspace = true, optional = true }
+# Mozilla CA roots for the hysteria2 quiche verify store (mirrors meow-transport).
+webpki-root-certs = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
 shadowsocks = { workspace = true, optional = true }
 argon2 = { workspace = true, optional = true }
-tokio-rustls = { workspace = true }
-rustls = { workspace = true }
-webpki-roots = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 async-trait = { workspace = true }
@@ -95,6 +97,8 @@ ctr = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# Loopback anytls *server* for the integration tests (rustls-based, test-only).
+meow-anytls = { workspace = true, features = ["server"] }
 meow-trie = { workspace = true }
 rcgen = "0.13"
 tokio-rustls = { workspace = true }

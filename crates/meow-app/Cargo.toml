@@ -12,12 +12,15 @@ keywords = ["proxy", "clash", "mihomo", "vpn", "networking"]
 categories = ["network-programming", "command-line-utilities"]
 
 [features]
-# Default = everything a release binary ships: all protocols/listeners/DNS
-# plus BoringSSL (ECH/uTLS). Targets that cannot link boring-sys are not
-# published (see .github/workflows/release.yml); build those from source with
-# `--no-default-features --features full` if needed.
-default = ["full", "boring-tls"]
-boring-tls = ["meow-config/boring-tls"]
+# Default = everything a release binary ships: all protocols/listeners/DNS.
+# TLS is BoringSSL everywhere (proxies, health probes, DoT/DoH, provider
+# fetches; ECH/uTLS included) — boring-sys is a hard requirement of the
+# `full` and `minimal` bundles alike, so every build needs cmake + a C++
+# compiler. rustls is linked only by quinn under `hysteria2`.
+default = ["full"]
+# Compatibility alias: BoringSSL is the only TLS backend now, so this is a
+# no-op kept for existing `--features boring-tls` invocations.
+boring-tls = []
 # Auto-download a third-party dashboard from `external-ui-url` (issue #223).
 # Off by default — adds the `zip` dependency (ADR-0007 binary-size caps).
 # Force-disabled at compile time on iOS/Android even if enabled.
@@ -98,7 +101,6 @@ anyhow = { workspace = true }
 serde_yaml = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
-rustls = { workspace = true }
 libc = "0.2"
 dhat = { workspace = true, optional = true }
 

@@ -646,7 +646,7 @@ pub async fn spawn_ws_server() -> (
 // ─── BoringSSL loopback servers (feature-gated) ──────────────────────────────
 
 /// Metadata captured from a BoringSSL TLS handshake (fingerprint tests).
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 #[derive(Debug, Default)]
 pub struct BoringConnInfo {
     /// SNI name sent by the client (None if no SNI).
@@ -662,7 +662,7 @@ pub struct BoringConnInfo {
 }
 
 /// Configuration for [`spawn_boring_server`].
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub struct BoringServerOptions {
     pub cert_der: CertificateDer<'static>,
     pub key_der: PrivateKeyDer<'static>,
@@ -679,7 +679,7 @@ pub struct BoringServerOptions {
 /// The `keys_handle` keeps the `SSL_ECH_KEYS*` alive until the server context
 /// installs it (via `SSL_CTX_set1_ech_keys`, which increments the ref-count).
 /// After installation the handle can be dropped safely.
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub struct BoringEchConfig {
     /// Raw EncodedECHConfigList bytes (public key) — give these to the client's
     /// [`EchOpts::Config`](meow_transport::tls::EchOpts::Config).
@@ -692,15 +692,15 @@ pub struct BoringEchConfig {
 ///
 /// Calls `SSL_ECH_KEYS_free` on drop.  Kept alive until
 /// `SSL_CTX_set1_ech_keys` is called (which takes its own ref-counted copy).
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub struct EchKeysHandle(pub *mut boring_sys::SSL_ECH_KEYS);
 
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 // SAFETY: `SSL_ECH_KEYS*` is ref-counted and internally synchronised; safe to
 // send across threads as long as no aliases exist (upheld by ownership here).
 unsafe impl Send for EchKeysHandle {}
 
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 impl Drop for EchKeysHandle {
     fn drop(&mut self) {
         if !self.0.is_null() {
@@ -730,10 +730,10 @@ impl Drop for EchKeysHandle {
 ///   presence of ciphers/extensions/GREASE, order-agnostic) rather than fixed hashes.
 ///   Other profiles (firefox, safari, ios, android, edge) have fixed extension
 ///   order and use fixed JA3 hash assertions.
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub struct JA3Helper;
 
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 impl JA3Helper {
     /// Parse ClientHello bytes and compute canonical JA3 string (Salesforce spec).
     ///
@@ -793,10 +793,10 @@ impl JA3Helper {
 ///
 /// Generates ECH keys at test startup, ensuring server and client share the same
 /// keypair without embedding static magic bytes or hand-encoding wire formats.
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub struct EchKeyPairGenerator;
 
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 impl EchKeyPairGenerator {
     /// Generate a self-consistent ECH keypair for loopback tests.
     ///
@@ -824,7 +824,7 @@ impl EchKeyPairGenerator {
     ///
     /// Returns: `(ech_config_list_bytes, keys_handle)` — the config bytes for the
     /// client and an owning handle for the server's SSL_ECH_KEYS*.
-    #[cfg(feature = "boring-tls")]
+    #[cfg(feature = "tls")]
     unsafe fn generate_ech_key_and_config(public_name: &str) -> Option<(Vec<u8>, EchKeysHandle)> {
         use boring_sys::*;
         use std::ffi::CString;
@@ -918,12 +918,12 @@ impl EchKeyPairGenerator {
 ///
 /// Replaces tokio::time::pause() for handshake timeouts.
 /// Guarantees wall-clock timeout even if tokio::time is paused.
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub struct WallClockTimeout {
     deadline: std::time::Instant,
 }
 
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 impl WallClockTimeout {
     pub fn new(duration: std::time::Duration) -> Self {
         Self {
@@ -946,7 +946,7 @@ impl WallClockTimeout {
 /// Convert a rustls `CertificateDer` to a `boring::x509::X509`.
 ///
 /// Uses `X509::from_der` which calls BoringSSL's `d2i_X509` internally.
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 fn rustls_cert_to_boring(cert_der: &CertificateDer) -> Result<boring::x509::X509, String> {
     boring::x509::X509::from_der(cert_der.as_ref())
         .map_err(|e| format!("boring: X509::from_der failed: {e}"))
@@ -957,7 +957,7 @@ fn rustls_cert_to_boring(cert_der: &CertificateDer) -> Result<boring::x509::X509
 /// Uses `PKey::private_key_from_der` which calls BoringSSL's `d2i_AutoPrivateKey`.
 /// BoringSSL's auto-detect handles PKCS#8 (used by rcgen), PKCS#1 (RSA), and
 /// SEC1 (EC traditional) formats transparently.
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 fn rustls_key_to_boring(
     key_der: &PrivateKeyDer,
 ) -> Result<boring::pkey::PKey<boring::pkey::Private>, String> {
@@ -1000,7 +1000,7 @@ fn rustls_key_to_boring(
 ///
 /// Panics if boring SSL context setup fails (which indicates a test
 /// configuration error, not a runtime issue).
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub async fn spawn_boring_server(
     opts: BoringServerOptions,
 ) -> (
@@ -1107,7 +1107,7 @@ pub async fn spawn_boring_server(
 /// # Panics
 ///
 /// Panics if boring SSL context setup or ECH configuration fails.
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub async fn spawn_ech_server(
     opts: BoringServerOptions,
 ) -> (
@@ -1198,7 +1198,7 @@ pub async fn spawn_ech_server(
 /// connection through the returned `mpsc` receiver. Used by the ECH
 /// self-heal test (C16) which drives two connects through the same server
 /// to validate retry-config rotation.
-#[cfg(feature = "boring-tls")]
+#[cfg(feature = "tls")]
 pub async fn spawn_ech_server_multi(
     opts: BoringServerOptions,
     count: usize,

@@ -15,9 +15,9 @@ issuance, ECH key publication) is not bundled — run upstream
 
 ## Build with the feature
 
-The native client is gated behind the `ech-tls-tunnel` cargo feature. It
-brings in `aws-lc-rs` for HPKE primitives (rustls' `ring` provider does
-not expose HPKE):
+The native client is gated behind the `ech-tls-tunnel` cargo feature,
+which is part of the default `full` bundle. ECH is performed natively by
+the BoringSSL `TlsLayer`, so the feature adds no extra TLS dependencies:
 
 ```bash
 cargo build --release --features meow-app/ech-tls-tunnel
@@ -96,17 +96,16 @@ form internally, so you can equally write the opts as a single string.
 
 ```
 TcpStream(server, 443)
-  → rustls TLS 1.3 with ECH (outer SNI = public_name from ECHConfigList,
+  → TLS 1.3 with ECH        (outer SNI = public_name from ECHConfigList,
                             inner SNI = `sni` opt, ALPN = http/1.1)
   → HTTP/1.1 WebSocket upgrade (Host = `sni`, path = `path`)
   → Shadowsocks ProxyClientStream (aead cipher around the WS frames)
 ```
 
-ECH is wired up via rustls 0.23's stable `EchMode::Enable(EchConfig)`
-API. Because rustls' `ring` provider does not implement HPKE, the
-`ech-tls-tunnel` feature switches **just the ECH `ClientConfig`** to
-`aws-lc-rs`; every other rustls path in the workspace (Trojan, VLESS,
-plain SS+TLS, DoT, DoH, …) keeps using `ring`.
+The handshake goes through `meow_transport::tls::TlsLayer` (BoringSSL):
+the ECH config list is applied per connection, and a server
+`ech_required` rejection rotates the layer to the server-supplied
+`retry_configs` so the next connect self-heals.
 
 ## What's not implemented
 
@@ -123,9 +122,8 @@ plain SS+TLS, DoT, DoH, …) keeps using `ring`.
   `ech.config_list` file passed through `cat` (binary garbled). Use
   `base64 -w0 < ech.config_list` (Linux) or `base64 < ech.config_list`
   (macOS).
-- *"rustls ECH: parse config list: NoCompatibleConfig"* — the
-  `ECHConfigList` advertises HPKE suites that `aws-lc-rs` does not
-  implement, or the list is malformed. Re-generate with default
+- *"boring: set_ech_config_list"* — the `ECHConfigList` advertises HPKE
+  suites BoringSSL does not implement, or the list is malformed. Re-generate with default
   parameters (`ech-gen-keys --public-name ...`).
 - TLS handshake fails — verify the cert on `sni` (NOT the public name)
   is what `ssserver` is presenting; ECH replaces SNI, but cert

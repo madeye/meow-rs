@@ -88,12 +88,19 @@ serde_yaml = "0.9"
 # madeye fork removes the registry/git dependency entirely. See #262 and
 # crates/meow-anytls/README.md.
 shadowsocks = { version = "1.21", default-features = false, features = ["aead-cipher", "aead-cipher-2022", "stream-cipher"] }
+# rustls is no longer a TLS backend or QUIC crypto in meow-rs. BoringSSL is the
+# single crypto library: meow-transport's `tls` layer and quiche's QUIC (under
+# the hysteria2 outbound) both link the SAME vendored BoringSSL via the `boring`
+# crate. rustls survives only as a dev-dependency for the loopback TLS *servers*
+# in the test suites.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-quinn = { version = "0.11", default-features = false, features = ["log", "ring", "runtime-tokio", "rustls-ring"] }
-h3 = "0.0.8"
-h3-quinn = "0.0.10"
+# QUIC for the hysteria2 outbound. quiche is built on BoringSSL and shares the
+# `boring` crate's vendored copy via `boringssl-boring-crate`, so no rustls and
+# no second crypto lib. `qlog` off; congestion control + h3 are in defaults.
+quiche = { version = "0.29", default-features = false, features = ["boringssl-boring-crate"] }
 webpki-roots = "0.26"
+webpki-root-certs = "1"
 
 # DNS — only hickory-proto for wire-format encode/decode; the upstream
 # transport (UDP/TCP/DoT/DoH) is implemented in-tree in `meow-dns::client`
@@ -209,17 +216,18 @@ http = "1"
 # Temporary files (tests)
 tempfile = "3"
 
-# HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-
 # Parking lot for sync primitives
 parking_lot = "0.12"
 
 # Wait-free read / atomic swap for hot-path rule-set + proxy-provider refreshes
 
-# BoringSSL (pulled in by meow-transport's boring-tls feature)
-boring      = { version = "5.0.2" }
-tokio-boring = { version = "5.0.0" }
+# BoringSSL — the single TLS/crypto backend for the whole app: meow-transport's
+# `tls` layer and quiche's QUIC (hysteria2). Pinned to 4.22 because quiche's
+# `boringssl-boring-crate` feature accepts `boring ^4.3`; this lets quiche and
+# meow-transport share ONE vendored BoringSSL (`links = "boringssl"` permits a
+# single copy). 4.22 carries every ECH / uTLS API the transport backend uses.
+boring      = { version = "=4.22.0" }
+tokio-boring = { version = "=4.22.0" }
 
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -244,7 +252,9 @@ meow-trie = { path = "crates/meow-trie", version = "0.21.2" }
 meow-anytls = { path = "crates/meow-anytls", version = "0.21.2" }
 meow-dns = { path = "crates/meow-dns", version = "0.21.2", default-features = false }
 meow-rules = { path = "crates/meow-rules", version = "0.21.2" }
-meow-transport = { path = "crates/meow-transport", version = "0.21.2" }
+# default-features = false so each consumer names the layers it needs
+# (meow-dns wants only `tls`; meow-listener only `simple-obfs`).
+meow-transport = { path = "crates/meow-transport", version = "0.21.2", default-features = false }
 meow-proxy = { path = "crates/meow-proxy", version = "0.21.2", default-features = false }
 meow-tunnel = { path = "crates/meow-tunnel", version = "0.21.2" }
 meow-listener = { path = "crates/meow-listener", version = "0.21.2", default-features = false }
