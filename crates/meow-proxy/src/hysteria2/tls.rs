@@ -56,17 +56,12 @@ pub fn build_client_config(config: &Config) -> Result<ClientConfig> {
 /// Pick the certificate verifier for a client config. `None` means "no custom
 /// verifier" — validate against the bundled WebPKI roots as usual.
 ///
-/// Precedence matches mihomo's `ca.GetTLSConfig`, which applies
-/// `GetSpecifiedFingerprintTLSConfig` *after* `skip-cert-verify` and thereby
-/// lets a configured `fingerprint` override it: pinning is a stricter promise
-/// than "trust anything", so a config carrying both must not silently degrade
-/// to no verification at all.
+/// A configured fingerprint remains mandatory even when `insecure` is set.
 ///
-/// A pin also *replaces* chain and hostname validation rather than adding to
-/// it (mihomo and hysteria both set `InsecureSkipVerify` alongside the pin
-/// callback). Requiring a WebPKI chain on top would reject exactly the setup
-/// pinning exists for: the self-signed certificate that a typical hysteria2
-/// server generates.
+/// A leaf pin replaces chain and hostname validation in meow-rs, matching
+/// mihomo's leaf-fingerprint path and allowing self-signed certificates.
+/// Hysteria's CLI differs: its pin is an additional leaf check, while its
+/// `insecure` setting independently controls chain and hostname validation.
 fn server_cert_verifier(
     insecure: bool,
     pin: Option<[u8; 32]>,
@@ -153,20 +148,16 @@ impl ServerCertVerifier for NoVerify {
 /// Trust exactly one certificate, identified by the SHA-256 digest of its DER
 /// encoding (`fingerprint` / `pin-sha256`).
 ///
-/// Only the *end-entity* certificate is compared. mihomo and hysteria both
-/// accept a match against any certificate the server sent, which a MITM
-/// defeats by appending the pinned certificate to a chain fronted by its own
-/// leaf — the handshake signature is then checked against the attacker's key.
-/// Pinning the leaf is what users actually configure, and it is the only form
-/// that holds.
+/// Only the end-entity certificate is compared. This is a leaf-certificate
+/// pin, not a trust-anchor pin: unrelated appended certificates cannot satisfy
+/// it. Hysteria also compares the leaf; mihomo additionally supports a pinned
+/// CA by verifying the leaf's chain against that anchor.
 #[derive(Debug)]
 struct PinVerifier {
     expected: [u8; 32],
-    /// Signature verification is still real: `ServerCertVerifier` owns it in
-    /// rustls (unlike Go, where the TLS stack checks it before the
-    /// `VerifyPeerCertificate` hook runs). Asserting it blindly here would
-    /// make the pin worthless — certificates are public, so anyone could
-    /// replay the pinned one without holding its private key.
+    /// rustls exposes handshake-signature verification through this same
+    /// verifier trait. The certificate digest alone does not prove possession
+    /// of the private key: certificates are public and can be replayed.
     supported_algs: rustls::crypto::WebPkiSupportedAlgorithms,
 }
 
@@ -496,5 +487,85 @@ mod tests {
                 .is_err(),
             "a signature that does not cover the transcript must be rejected"
         );
+    }
+}
+#[cfg(test)]
+mod quic_pin_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn production_quic_config_pin_matrix() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let ck = rcgen::generate_simple_self_signed(vec!["hy2.example".into()]).unwrap();
+        let cert = CertificateDer::from(ck.cert.der().to_vec());
+        let pin = hex::encode(Sha256::digest(cert.as_ref()));
+        for (insecure, fingerprint, expected) in [
+            (false, pin.clone(), true),
+            (true, pin.clone(), true),
+            (false, "11".repeat(32), false),
+            (true, "11".repeat(32), false),
+            (false, String::new(), false),
+            (true, String::new(), true),
+        ] {
+            let key = rustls::pki_types::PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der());
+            let mut server_tls = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.clone()], key.into())
+                .unwrap();
+            server_tls.alpn_protocols = vec![b"h3".to_vec()];
+            let server_crypto =
+                quinn::crypto::rustls::QuicServerConfig::try_from(server_tls).unwrap();
+            let server = quinn::Endpoint::server(
+                quinn::ServerConfig::with_crypto(Arc::new(server_crypto)),
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .unwrap();
+            let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+            client.set_default_client_config(
+                build_client_config(&Config {
+                    insecure,
+                    pin_sha256: fingerprint.clone(),
+                    ..Default::default()
+                })
+                .unwrap(),
+            );
+            let addr = server.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let incoming = server.accept().await.unwrap();
+                let result = incoming.await;
+                (server, result)
+            });
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.connect(addr, "hy2.example").unwrap(),
+            )
+            .await
+            .expect("local QUIC handshake must finish");
+            assert_eq!(
+                result.is_ok(),
+                expected,
+                "insecure={insecure}, pin={}, result={result:?}",
+                !fingerprint.is_empty()
+            );
+            client.close(0u32.into(), b"test complete");
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    #[test]
+    fn appending_pinned_certificate_does_not_authenticate_another_leaf() {
+        let pinned = rcgen::generate_simple_self_signed(vec!["hy2.example".into()]).unwrap();
+        let other = rcgen::generate_simple_self_signed(vec!["hy2.example".into()]).unwrap();
+        let hash: [u8; 32] = Sha256::digest(pinned.cert.der().as_ref()).into();
+        let verifier = server_cert_verifier(true, Some(hash)).unwrap();
+        let result = verifier.verify_server_cert(
+            other.cert.der(),
+            &[pinned.cert.der().clone()],
+            &ServerName::try_from("hy2.example").unwrap(),
+            &[],
+            UnixTime::now(),
+        );
+        assert!(result.is_err());
     }
 }
