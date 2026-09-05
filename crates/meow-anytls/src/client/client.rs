@@ -1,7 +1,7 @@
 //! AnyTLS Client implementation
 
 use crate::client::{SessionPool, SessionPoolConfig};
-use crate::padding::PaddingFactory;
+use crate::padding::{PaddingFactory, SharedPaddingFactory};
 use crate::session::{Session, SessionHeartbeatConfig};
 use crate::util::{AnyTlsError, Result, configure_tcp_stream, hash_password, send_authentication};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -15,7 +15,10 @@ pub struct Client {
     server_addr: String,
     server_name: ServerName<'static>,
     tls_config: Arc<tokio_rustls::TlsConnector>,
-    padding: Arc<PaddingFactory>,
+    /// Padding factory in force for this server, shared with every session the
+    /// client opens so an `UpdatePaddingScheme` push outlives the session that
+    /// received it.
+    padding: SharedPaddingFactory,
     session_pool: Arc<SessionPool>,
     pool_config: SessionPoolConfig,
 }
@@ -58,7 +61,7 @@ impl Client {
             server_addr,
             server_name,
             tls_config,
-            padding,
+            padding: padding.into_shared(),
             session_pool,
             pool_config,
         }
@@ -295,7 +298,11 @@ impl Client {
         // Split TLS stream into reader and writer
         let (reader, mut writer) = tokio::io::split(tls_stream);
         tracing::trace!("[Client] Sending authentication");
-        send_authentication(&mut writer, &self.password_hash, &self.padding).await?;
+        let padding = {
+            let guard = self.padding.read().await;
+            Arc::clone(&guard)
+        };
+        send_authentication(&mut writer, &self.password_hash, &padding).await?;
         tracing::debug!("[Client] Authentication sent successfully");
 
         // Create session with reader and writer
@@ -306,7 +313,7 @@ impl Client {
         let session = Arc::new(Session::new_client(
             reader,
             writer,
-            self.padding.clone(),
+            Arc::clone(&self.padding),
             Some(heartbeat_config),
         ));
 

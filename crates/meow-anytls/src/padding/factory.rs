@@ -1,6 +1,7 @@
 use crate::padding::CHECK_MARK;
 use crate::util::StringMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Default padding scheme
 pub const DEFAULT_PADDING_SCHEME: &str = r#"stop=8
@@ -22,8 +23,20 @@ pub struct PaddingFactory {
     md5: String,
 }
 
-/// Global padding factory
+/// The built-in default scheme, parsed once. Immutable: a scheme pushed by one
+/// server must not leak into sessions of another, so runtime updates go to the
+/// per-client `SharedPaddingFactory` cell instead.
 static DEFAULT_FACTORY: std::sync::OnceLock<Arc<PaddingFactory>> = std::sync::OnceLock::new();
+
+/// A padding factory that the peer can replace while a session is running.
+///
+/// An AnyTLS server answers any session whose advertised `padding-md5` differs
+/// from its own scheme with an `UpdatePaddingScheme` frame. One cell is shared
+/// by a client and every session it opens, so a pushed scheme applies to the
+/// live session and to sessions opened later — the same ownership anytls-go
+/// gets from handing its sessions the client's
+/// `atomic.TypedValue[*padding.PaddingFactory]`.
+pub type SharedPaddingFactory = Arc<RwLock<Arc<PaddingFactory>>>;
 
 impl PaddingFactory {
     /// Create a new PaddingFactory from raw scheme bytes
@@ -63,12 +76,9 @@ impl PaddingFactory {
             .clone()
     }
 
-    /// Update the default padding factory
-    pub fn update_default(raw_scheme: &[u8]) -> Result<(), String> {
-        let factory = Arc::new(Self::new(raw_scheme)?);
-        DEFAULT_FACTORY
-            .set(factory)
-            .map_err(|_| "failed to update default factory".to_string())
+    /// Wrap this factory in a cell that a client and its sessions share.
+    pub fn into_shared(self: Arc<Self>) -> SharedPaddingFactory {
+        Arc::new(RwLock::new(self))
     }
 
     /// Get the stop value
