@@ -1825,3 +1825,69 @@ mod tests {
         assert_eq!(session.padding.read().await.md5(), before);
     }
 }
+#[cfg(test)]
+mod padding_bounds_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn maximum_padding_keeps_the_next_frame_aligned() {
+        use tokio::io::AsyncReadExt;
+        let (writer, mut reader) = tokio::io::duplex(2 * u16::MAX as usize);
+        let padding =
+            Arc::new(PaddingFactory::new(b"stop=2\n1=65535-65535").unwrap()).into_shared();
+        let session = Session::new_client(tokio::io::empty(), writer, padding, None);
+        session
+            .pkt_counter
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        session.write_with_padding(BytesMut::new()).await.unwrap();
+        // The next unpadded frame must start after the declared Waste payload,
+        // even at the largest representable length.
+        let next = [Command::Waste as u8, 0, 0, 0, 0, 0, 0];
+        session
+            .write_with_padding(BytesMut::from(next.as_slice()))
+            .await
+            .unwrap();
+        let mut header = [0u8; 7];
+        reader.read_exact(&mut header).await.unwrap();
+        assert_eq!(header, [Command::Waste as u8, 0, 0, 0, 0, 255, 255]);
+        let mut payload = vec![1u8; u16::MAX as usize];
+        reader.read_exact(&mut payload).await.unwrap();
+        assert!(payload.iter().all(|b| *b == 0));
+        reader.read_exact(&mut header).await.unwrap();
+        assert_eq!(header, next);
+    }
+
+    #[tokio::test]
+    async fn oversized_pushed_scheme_is_rejected_before_the_next_write() {
+        let padding = PaddingFactory::default().into_shared();
+        let session = Arc::new(Session::new_client(
+            tokio::io::empty(),
+            tokio::io::sink(),
+            Arc::clone(&padding),
+            None,
+        ));
+        // A short, otherwise well-formed UpdatePaddingScheme received before
+        // packet 1. No large allocation is performed by this probe.
+        session
+            .pkt_counter
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        session
+            .handle_frame(Frame::with_data(
+                Command::UpdatePaddingScheme,
+                0,
+                Bytes::from_static(b"stop=2\n1=2147483648-2147483648"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(padding.read().await.md5(), PaddingFactory::default().md5());
+        let result = tokio::spawn(async move {
+            session
+                .write_with_padding(BytesMut::from(&b"payload"[..]))
+                .await
+        })
+        .await;
+        result
+            .expect("server-pushed padding must not panic")
+            .unwrap();
+    }
+}
