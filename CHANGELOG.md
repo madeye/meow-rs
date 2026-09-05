@@ -66,6 +66,15 @@ the canonical, in-repo source a release is cut from.
   limits without discarding requests, and propagates terminal stream errors.
   Restored idle keepalive and the remote response wait for `fast-open: false`;
   cancelling authentication or dropping a client releases its driver socket.
+- **Auto-created `GLOBAL` selectors now default to the config's primary
+  outbound.** Global mode always dispatches through `GLOBAL`, but the implicit
+  selector previously sorted every registry key and used the first one when no
+  choice was stored. That made global mode silently select `DIRECT` or route
+  through an alphabetically-first quota/expiry pseudo-node. The generated
+  selector still lists every proxy for mihomo-compatible dashboards, while its
+  first member is now the final valid `MATCH` target, falling back to the first
+  declared group or leaf proxy. Explicit user-defined `GLOBAL` groups remain
+  unchanged.
 
 - **`merge_family` no longer revives an expired sibling family.** When a new
   A answer merged into an entry whose AAAA had already expired, the old code

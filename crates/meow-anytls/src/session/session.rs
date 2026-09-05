@@ -3,6 +3,7 @@
 use crate::padding::PaddingFactory;
 use crate::protocol::{Command, Frame, FrameCodec};
 use crate::session::Stream;
+use crate::session::writer::{StreamWriter, WriteRequest};
 use crate::util::{AnyTlsError, Result, StringMap};
 use bytes::{Bytes, BytesMut};
 use md5;
@@ -33,7 +34,7 @@ struct HeartbeatState {
 }
 
 /// Session manages multiple streams over a single TLS connection
-type StreamDataReceiver = mpsc::UnboundedReceiver<(u32, Bytes)>;
+type StreamDataReceiver = mpsc::UnboundedReceiver<WriteRequest>;
 
 pub struct Session {
     id: u64,
@@ -46,7 +47,7 @@ pub struct Session {
     stream_id: Arc<std::sync::atomic::AtomicU32>,
 
     // Channel for receiving data from streams
-    stream_data_tx: mpsc::UnboundedSender<(u32, Bytes)>,
+    stream_data_tx: StreamWriter,
     stream_data_rx: Arc<tokio::sync::Mutex<Option<StreamDataReceiver>>>,
 
     // Channel for sending data to streams (stream_id -> sender)
@@ -115,7 +116,7 @@ impl Session {
         R: AsyncRead + Send + Unpin + 'static,
         W: AsyncWrite + Send + Unpin + 'static,
     {
-        let (stream_data_tx, stream_data_rx) = mpsc::unbounded_channel();
+        let (stream_data_tx, stream_data_rx) = StreamWriter::channel();
         #[allow(
             clippy::useless_conversion,
             reason = "identity on 64-bit; widens u32 on targets without 64-bit atomics"
@@ -162,7 +163,7 @@ impl Session {
         R: AsyncRead + Send + Unpin + 'static,
         W: AsyncWrite + Send + Unpin + 'static,
     {
-        let (stream_data_tx, stream_data_rx) = mpsc::unbounded_channel();
+        let (stream_data_tx, stream_data_rx) = StreamWriter::channel();
         #[allow(
             clippy::useless_conversion,
             reason = "identity on 64-bit; widens u32 on targets without 64-bit atomics"
@@ -239,6 +240,7 @@ impl Session {
         if already_closed {
             return Ok(());
         }
+        self.stream_data_tx.close();
         self.close_notify.notify_waiters();
 
         // Close stream data receiver so process_stream_data exits
@@ -728,20 +730,9 @@ impl Session {
                     "Unknown alert".to_string()
                 };
                 tracing::error!("[Session] Received Alert frame (fatal): {}", alert_msg);
-                // Close all streams
-                let mut streams = self.streams.write().await;
-                for (stream_id, stream) in streams.drain() {
-                    let error = AnyTlsError::Protocol(format!(
-                        "Session closed due to alert: {}",
-                        alert_msg
-                    ));
-                    stream.close_with_error(error).await;
-                    tracing::debug!("[Session] Closed stream {} due to alert", stream_id);
-                }
-                drop(streams);
-                // Mark session as closed
-                self.is_closed
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                // Close admission and wake the writer too, not just the flag:
+                // a blocked physical write must stop with the entire session.
+                self.close().await?;
                 return Err(AnyTlsError::Protocol(format!("Alert: {}", alert_msg)));
             }
             Command::HeartRequest => {
@@ -817,17 +808,17 @@ impl Session {
 
         let stream = Arc::new(stream);
 
-        // Store the receive_tx for sending data to this stream
-        {
-            let mut receive_map = self.stream_receive_tx.write().await;
-            receive_map.insert(stream_id, receive_tx);
-        }
-
-        // Store the stream
+        // Acquire both locks before mutating either map, in close()'s order.
         {
             let mut streams = self.streams.write().await;
+            let mut receive_map = self.stream_receive_tx.write().await;
+            if self.is_closed() {
+                return Err(AnyTlsError::SessionClosed);
+            }
+            receive_map.insert(stream_id, receive_tx);
             streams.insert(stream_id, stream.clone());
         }
+        let mut guard = crate::session::stream::OpeningStreamGuard::new(Arc::clone(&stream));
 
         tracing::trace!("[Session] Stream {} stored in session", stream_id);
 
@@ -837,6 +828,7 @@ impl Session {
         self.write_frame(frame).await?;
         tracing::debug!("[Session] SYN frame sent for stream {}", stream_id);
 
+        guard.disarm();
         Ok((stream, synack_rx))
     }
 
@@ -867,6 +859,12 @@ impl Session {
 
     /// Write a frame to the connection
     pub async fn write_frame(&self, frame: Frame) -> Result<()> {
+        self.stream_data_tx.write_frame(frame).await
+    }
+
+    // Only the session writer task performs wire I/O. start_client also calls
+    // this before spawning tasks, solely to buffer the initial Settings.
+    async fn write_frame_inner(&self, frame: Frame) -> Result<()> {
         use tokio_util::codec::Encoder;
         let frame_cmd = frame.cmd;
         let frame_stream_id = frame.stream_id;
@@ -927,9 +925,11 @@ impl Session {
             }
         }
 
-        // Log what we're about to send
+        // Per-frame wire details are intentionally trace-only: AnyTLS emits a
+        // frame for every relay chunk, so info-level logging is a hot-path
+        // throughput bottleneck under the application's default filter.
         if buffer.len() >= 7 {
-            tracing::info!(
+            tracing::trace!(
                 "[Session] About to send frame header: cmd={}, stream_id={:?}, data_len={:?}, total_buffer_len={}",
                 buffer[0],
                 u32::from_be_bytes([buffer[1], buffer[2], buffer[3], buffer[4]]),
@@ -956,12 +956,12 @@ impl Session {
             );
             let mut writer = self.writer.lock().await;
             if let Err(e) = writer.write_all(&buffer).await {
-                return Err(self.handle_io_error("write_without_padding", e).await);
+                return Err(AnyTlsError::Io(e));
             }
             if let Err(e) = writer.flush().await {
-                return Err(self.handle_io_error("flush_without_padding", e).await);
+                return Err(AnyTlsError::Io(e));
             }
-            tracing::info!(
+            tracing::trace!(
                 "[Session] write_with_padding: Successfully wrote {} bytes to connection",
                 buffer.len()
             );
@@ -984,10 +984,10 @@ impl Session {
             // For now, just write directly
             let mut writer = self.writer.lock().await;
             if let Err(e) = writer.write_all(&buffer).await {
-                return Err(self.handle_io_error("write_no_padding_stop", e).await);
+                return Err(AnyTlsError::Io(e));
             }
             if let Err(e) = writer.flush().await {
-                return Err(self.handle_io_error("flush_no_padding_stop", e).await);
+                return Err(AnyTlsError::Io(e));
             }
             return Ok(());
         }
@@ -999,10 +999,10 @@ impl Session {
         if pkt_sizes.is_empty() {
             let mut writer = self.writer.lock().await;
             if let Err(e) = writer.write_all(&buffer).await {
-                return Err(self.handle_io_error("write_no_padding_sizes", e).await);
+                return Err(AnyTlsError::Io(e));
             }
             if let Err(e) = writer.flush().await {
-                return Err(self.handle_io_error("flush_no_padding_sizes", e).await);
+                return Err(AnyTlsError::Io(e));
             }
             return Ok(());
         }
@@ -1045,7 +1045,7 @@ impl Session {
                     );
                 }
                 if let Err(e) = writer.write_all(&buffer[..size]).await {
-                    return Err(self.handle_io_error("write_padding_split_payload", e).await);
+                    return Err(AnyTlsError::Io(e));
                 }
                 buffer = buffer.split_off(size);
             } else if remain_payload_len > 0 {
@@ -1066,7 +1066,7 @@ impl Session {
                 }
 
                 if let Err(e) = writer.write_all(&buffer).await {
-                    return Err(self.handle_io_error("write_padding_payload_frame", e).await);
+                    return Err(AnyTlsError::Io(e));
                 }
                 buffer.clear();
             } else {
@@ -1078,7 +1078,7 @@ impl Session {
                 padding_frame.put_slice(&vec![0u8; size]); // padding data (zeros)
 
                 if let Err(e) = writer.write_all(&padding_frame).await {
-                    return Err(self.handle_io_error("write_padding_frame_only", e).await);
+                    return Err(AnyTlsError::Io(e));
                 }
             }
         }
@@ -1090,13 +1090,13 @@ impl Session {
                 buffer.len()
             );
             if let Err(e) = writer.write_all(&buffer).await {
-                return Err(self.handle_io_error("write_remaining_payload", e).await);
+                return Err(AnyTlsError::Io(e));
             }
         }
 
         tracing::trace!("[Session] write_with_padding: Flushing writer");
         if let Err(e) = writer.flush().await {
-            return Err(self.handle_io_error("flush_with_padding", e).await);
+            return Err(AnyTlsError::Io(e));
         }
         tracing::debug!("[Session] write_with_padding: Successfully wrote and flushed data");
         Ok(())
@@ -1120,7 +1120,7 @@ impl Session {
 
         self.buffering
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.write_frame(frame).await?;
+        self.write_frame_inner(frame).await?;
 
         // Start receive loop in background
         let session = Arc::clone(&self);
@@ -1244,143 +1244,81 @@ impl Session {
         Ok(())
     }
 
-    /// Process stream data from channels (should be run in a task)
+    /// Run the sole wire writer. Cancelling a producer never cancels a frame.
     pub async fn process_stream_data(&self) -> Result<()> {
-        let session_id = self.id();
-        let role = if self.is_client { "client" } else { "server" };
-        let process_span = info_span!(
-            "anytls.session.process_stream_data",
-            session_id,
-            role = %role,
-            bytes_out = field::Empty,
-            iterations = field::Empty
-        );
-        let _process_guard = process_span.enter();
-        tracing::debug!(
-            session_id = session_id,
-            is_client = self.is_client,
-            "[Session] process_stream_data started"
-        );
-        let mut iteration = 0u64;
-        let mut total_bytes_out: usize = 0;
-        let close_notify = Arc::clone(&self.close_notify);
-        let receiver = {
-            let mut guard = self.stream_data_rx.lock().await;
-            guard.take()
-        };
-
-        let Some(mut receiver) = receiver else {
-            tracing::debug!(
-                session_id = session_id,
-                "[Session] process_stream_data: Receiver already taken, nothing to process"
-            );
+        let Some(mut receiver) = self.stream_data_rx.lock().await.take() else {
             return Ok(());
         };
-        // Process data from streams and send as frames
         loop {
-            iteration += 1;
-            tracing::trace!(
-                session_id = session_id,
-                "[Session] process_stream_data: Waiting for data from streams (iteration {})",
-                iteration
-            );
-            let result = tokio::select! {
+            let closed = self.close_notify.notified();
+            tokio::pin!(closed);
+            closed.as_mut().enable();
+            if self.is_closed() {
+                break;
+            }
+            let request = tokio::select! {
                 biased;
-                _ = close_notify.notified() => {
-                    tracing::debug!(
-                        session_id = session_id,
-                        "[Session] process_stream_data: Received close notification (iteration {})",
-                        iteration
-                    );
-                    break;
-                }
-                result = receiver.recv() => result,
+                _ = &mut closed => break,
+                request = receiver.recv() => match request {
+                    Some(request) => request,
+                    None => break,
+                },
             };
-
-            match result {
-                Some((stream_id, data)) => {
-                    if self.is_closed() {
-                        tracing::debug!(
-                            session_id = session_id,
-                            "[Session] process_stream_data: Session closed, breaking (iteration {})",
-                            iteration
-                        );
-                        break;
-                    }
-                    if data.is_empty() {
-                        // Stream-close sentinel (see `Stream::close`): emit a
-                        // FIN for this stream so the peer evicts its slot, then
-                        // drop our own stream maps. This keeps `streams` /
-                        // `stream_receive_tx` bounded over a long-lived session
-                        // instead of growing one entry per opened stream.
-                        tracing::debug!(
-                            session_id = session_id,
-                            "[Session] process_stream_data: closing stream {} (FIN)",
-                            stream_id
-                        );
-                        let _ = self
-                            .write_control_frame(Frame::control(Command::Fin, stream_id))
-                            .await;
-                        self.streams.write().await.remove(&stream_id);
-                        self.stream_receive_tx.write().await.remove(&stream_id);
-                        continue;
-                    }
-                    let data_len = data.len();
-                    tracing::debug!(
-                        session_id = session_id,
-                        "[Session] process_stream_data: Received {} bytes from stream {} (iteration {})",
-                        data_len,
-                        stream_id,
-                        iteration
-                    );
-                    // Send data frame
-                    let write_result = self.write_data_frame(stream_id, data).await;
-                    match write_result {
-                        Ok(_) => {
-                            total_bytes_out += data_len;
-                            tracing::debug!(
-                                session_id = session_id,
-                                "[Session] process_stream_data: Successfully wrote data frame for stream {} (iteration {})",
-                                stream_id,
-                                iteration
-                            );
+            let (completion, result) = tokio::select! {
+                biased;
+                // Partial frames may only be abandoned when this entire
+                // session is already closed and will never be pooled again.
+                _ = &mut closed => break,
+                result = async {
+                    match request {
+                        WriteRequest::Frame { frame, _permit, completion } => {
+                            let fin = frame.cmd == Command::Fin;
+                            let stream_id = frame.stream_id;
+                            if fin {
+                                // A cancelled initial dial must not leave its
+                                // Settings/SYN/FIN buffered until another dial.
+                                self.disable_buffering();
+                            }
+                            let result = self.write_frame_inner(frame).await;
+                            if fin {
+                                self.streams.write().await.remove(&stream_id);
+                                self.stream_receive_tx.write().await.remove(&stream_id);
+                            }
+                            // Hold capacity through the physical write/flush.
+                            drop(_permit);
+                            (completion, result)
                         }
-                        Err(e) => {
-                            tracing::error!(
-                                session_id = session_id,
-                                "[Session] process_stream_data: Failed to write data frame for stream {}: {} (iteration {})",
-                                stream_id,
-                                e,
-                                iteration
-                            );
-                            return Err(e);
+                        WriteRequest::Flush(completion) => {
+                            let result = self.flush_inner().await;
+                            (Some(completion), result)
                         }
                     }
-                }
-                None => {
-                    tracing::debug!(
-                        session_id = session_id,
-                        "[Session] process_stream_data: Channel closed, exiting after {} iterations",
-                        iteration
-                    );
-                    break;
-                }
+                } => result,
+            };
+            let failed = result.is_err();
+            if let Err(error) = &result {
+                tracing::debug!(session_id = self.id(), %error, "AnyTLS session writer failed");
+            }
+            if let Some(completion) = completion {
+                let _ = completion.send(result);
+            }
+            if failed {
+                // No writer lock is held here; close() can safely shut it down.
+                self.close().await?;
+                return Err(AnyTlsError::SessionClosed);
             }
         }
+        Ok(())
+    }
 
-        tracing::debug!(
-            session_id = session_id,
-            "[Session] process_stream_data: Exiting after {} iterations",
-            iteration
-        );
-        tracing::info!(
-            session_id = session_id,
-            bytes_out = total_bytes_out as u64,
-            iterations = iteration,
-            "[Session] process_stream_data completed"
-        );
-        process_span.record("bytes_out", total_bytes_out as u64);
-        process_span.record("iterations", iteration);
+    async fn flush_inner(&self) -> Result<()> {
+        self.disable_buffering();
+        let buffered = std::mem::take(&mut *self.buffer.lock().await);
+        if !buffered.is_empty() {
+            self.write_with_padding(BytesMut::from(buffered.as_slice()))
+                .await?;
+        }
+        self.writer.lock().await.flush().await?;
         Ok(())
     }
 
@@ -1424,6 +1362,176 @@ mod tests {
     fn create_test_padding() -> Arc<PaddingFactory> {
         use crate::padding::DEFAULT_PADDING_SCHEME;
         Arc::new(PaddingFactory::new(DEFAULT_PADDING_SCHEME.as_bytes()).unwrap())
+    }
+
+    async fn read_frame(peer: &mut DuplexStream) -> Frame {
+        time::timeout(Duration::from_secs(2), async {
+            let mut header = [0; 7];
+            peer.read_exact(&mut header).await.unwrap();
+            let mut data = vec![0; u16::from_be_bytes([header[5], header[6]]) as usize];
+            peer.read_exact(&mut data).await.unwrap();
+            Frame::with_data(
+                Command::from(header[0]),
+                u32::from_be_bytes(header[1..5].try_into().unwrap()),
+                Bytes::from(data),
+            )
+        })
+        .await
+        .expect("frame writer stalled")
+    }
+
+    #[tokio::test]
+    async fn cancelled_open_finishes_syn_and_retires_stream() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+        let (io, mut peer) = duplex(4);
+        let (reader, writer) = tokio::io::split(io);
+        let session = Arc::new(Session::new_server(reader, writer, create_test_padding()));
+        let worker = Arc::clone(&session);
+        let task = tokio::spawn(async move { worker.process_stream_data().await });
+        let mut open = Box::pin(session.open_stream());
+        assert!(
+            open.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        // SYN is seven bytes but the wire only holds four. Cancel after the
+        // first byte was observed, while write_all still has work to do.
+        assert_eq!(peer.read_u8().await.unwrap(), u8::from(Command::Syn));
+        drop(open);
+        let mut tail = [0; 6];
+        peer.read_exact(&mut tail).await.unwrap();
+        assert_eq!(tail, [0, 0, 0, 1, 0, 0]);
+        assert_eq!(read_frame(&mut peer).await, Frame::control(Command::Fin, 1));
+        assert!(!session.has_active_streams().await);
+        assert!(session.stream_receive_tx.read().await.is_empty());
+
+        let next_session = Arc::clone(&session);
+        let next = tokio::spawn(async move { next_session.open_stream().await.unwrap().0 });
+        assert_eq!(read_frame(&mut peer).await, Frame::control(Command::Syn, 2));
+        next.await.unwrap().close();
+        assert_eq!(read_frame(&mut peer).await, Frame::control(Command::Fin, 2));
+        session.close().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn writer_error_closes_session_without_relocking_itself() {
+        let (io, peer) = duplex(4);
+        drop(peer);
+        let (reader, writer) = tokio::io::split(io);
+        let session = Arc::new(Session::new_server(reader, writer, create_test_padding()));
+        let worker = Arc::clone(&session);
+        let task = tokio::spawn(async move { worker.process_stream_data().await });
+        assert!(
+            time::timeout(
+                Duration::from_secs(2),
+                session.write_data_frame(1, Bytes::from_static(b"failure"))
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        assert!(
+            time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(session.is_closed());
+        assert!(
+            session
+                .write_data_frame(2, Bytes::from_static(b"closed"))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_alert_stops_writer_and_notifies_opening_streams() {
+        let (io, _peer) = duplex(64);
+        let (reader, writer) = tokio::io::split(io);
+        let session = Arc::new(Session::new_server(reader, writer, create_test_padding()));
+        let worker = Arc::clone(&session);
+        let task = tokio::spawn(async move { worker.process_stream_data().await });
+        let (stream, synack) = session.open_stream().await.unwrap();
+        assert!(
+            session
+                .handle_frame(Frame::with_data(
+                    Command::Alert,
+                    0,
+                    Bytes::from_static(b"stop")
+                ))
+                .await
+                .is_err()
+        );
+        assert!(stream.is_closed());
+        assert!(synack.await.unwrap().is_err());
+        time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(session.stream_data_tx.budget.is_closed());
+        assert!(session.stream_receive_tx.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_interrupts_blocked_writer_and_releases_budget() {
+        let (io, _peer) = duplex(4);
+        let (reader, writer) = tokio::io::split(io);
+        let session = Arc::new(Session::new_server(reader, writer, create_test_padding()));
+        let worker = Arc::clone(&session);
+        let task = tokio::spawn(async move { worker.process_stream_data().await });
+        let pending_session = Arc::clone(&session);
+        let pending = tokio::spawn(async move {
+            pending_session
+                .write_data_frame(1, Bytes::from(vec![0; 512]))
+                .await
+        });
+        tokio::task::yield_now().await;
+        time::timeout(Duration::from_secs(2), session.close())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(pending.await.unwrap().is_err());
+        task.await.unwrap().unwrap();
+        assert!(session.stream_data_tx.budget.is_closed());
+    }
+
+    #[tokio::test]
+    async fn frame_hot_path_emits_no_info_events() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::{Layer, layer::SubscriberExt};
+        struct CountInfo(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> Layer<S> for CountInfo {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::INFO {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CountInfo(Arc::clone(&count)));
+        async {
+            let session =
+                Session::new_server(tokio::io::empty(), tokio::io::sink(), create_test_padding());
+            for _ in 0..100 {
+                session
+                    .write_frame_inner(Frame::data(1, Bytes::from_static(b"data")))
+                    .await
+                    .unwrap();
+            }
+        }
+        .with_subscriber(subscriber)
+        .await;
+        assert_eq!(count.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]

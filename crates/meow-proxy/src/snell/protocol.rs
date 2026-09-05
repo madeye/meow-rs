@@ -96,7 +96,15 @@ pub async fn write_udp_header<W: AsyncWrite + Unpin>(stream: &mut W) -> io::Resu
 /// half-close signal recognized by the peer. The Snell codecs turn a
 /// zero-byte `poll_write` into a zero-chunk frame, so this is a thin wrapper.
 pub async fn write_zero_chunk<W: AsyncWrite + Unpin>(stream: &mut W) -> io::Result<()> {
-    stream.write_all(&[]).await
+    // A codec may first finish an in-flight payload write and report that
+    // payload's consumed length. Keep polling until the empty input itself
+    // completes, which is reported as zero bytes consumed.
+    loop {
+        if std::future::poll_fn(|cx| Pin::new(&mut *stream).poll_write(cx, &[])).await? == 0 {
+            break;
+        }
+    }
+    stream.flush().await
 }
 
 // ─── Snell stream wrapper ────────────────────────────────────────────────────
@@ -163,6 +171,10 @@ pub struct Snell<S> {
     /// `false` by [`Snell::reset_reply_state`] when a pooled connection is
     /// re-used for a fresh request.
     reply_consumed: bool,
+    /// The current session ended with the peer's zero-chunk. Unlike a raw TCP
+    /// EOF, this makes a v4/v5 connection eligible for protocol-level reuse
+    /// once our own zero-chunk has also been sent.
+    peer_half_closed: bool,
 }
 
 impl<S> Snell<S> {
@@ -170,6 +182,7 @@ impl<S> Snell<S> {
         Self {
             inner: SnellInner::V4(inner),
             reply_consumed: false,
+            peer_half_closed: false,
         }
     }
 
@@ -177,6 +190,7 @@ impl<S> Snell<S> {
         Self {
             inner: SnellInner::V3(inner),
             reply_consumed: false,
+            peer_half_closed: false,
         }
     }
 
@@ -187,6 +201,7 @@ impl<S> Snell<S> {
         Self {
             inner: SnellInner::V4(V4Conn::new(inner, psk)),
             reply_consumed: false,
+            peer_half_closed: false,
         }
     }
 
@@ -197,6 +212,7 @@ impl<S> Snell<S> {
         Self {
             inner: SnellInner::V3(V3Conn::new(inner, psk)),
             reply_consumed: false,
+            peer_half_closed: false,
         }
     }
 
@@ -204,10 +220,11 @@ impl<S> Snell<S> {
     /// pending again — reset the flag so the next `read` consumes it.
     pub fn reset_reply_state(&mut self) {
         self.reply_consumed = false;
+        self.peer_half_closed = false;
     }
 
-    pub fn mark_reply_consumed(&mut self) {
-        self.reply_consumed = true;
+    pub fn peer_half_closed(&self) -> bool {
+        self.peer_half_closed
     }
 
     /// Stage a single frame carrying `buf` verbatim as a UDP datagram
@@ -302,18 +319,6 @@ impl<S> Snell<S> {
             }
         }
     }
-
-    /// Read from the raw version-specific codec without the status-byte
-    /// guard or zero-chunk-to-EOF mapping. The reuse pool needs this so it
-    /// can tell a peer half-close from a dead TCP stream.
-    pub async fn read_raw_for_reuse(&mut self, buf: &mut [u8]) -> io::Result<usize>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-    {
-        let mut rb = ReadBuf::new(buf);
-        std::future::poll_fn(|cx| self.inner.poll_read_inner(cx, &mut rb)).await?;
-        Ok(rb.filled().len())
-    }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Snell<S> {
@@ -379,6 +384,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Snell<S> {
         // a tiny scratch buffer, then we recurse on the body read in the
         // same poll once the reply is consumed.
         let this = &mut *self;
+        if this.peer_half_closed {
+            return Poll::Ready(Ok(()));
+        }
         if !this.reply_consumed {
             let mut buf = [0u8; 1];
             let mut rb = ReadBuf::new(&mut buf);
@@ -418,7 +426,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for Snell<S> {
         // Map the v4 zero-chunk into a clean EOF for the caller.
         match this.inner.poll_read_inner(cx, out) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) if is_zero_chunk(&e) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(e)) if is_zero_chunk(&e) => {
+                this.peer_half_closed = true;
+                Poll::Ready(Ok(()))
+            }
             other => other,
         }
     }
@@ -462,12 +473,6 @@ mod tests {
         let (a, b) = tokio::io::duplex(1 << 16);
         let psk: Arc<[u8]> = Arc::from(b"test-psk".as_slice());
         (Snell::new(a, Arc::clone(&psk)), V4Conn::new(b, psk))
-    }
-
-    /// Emit a zero chunk by hand: tokio's `write_all(&[])` short-circuits
-    /// without calling `poll_write`, so drive the poll directly.
-    async fn emit_zero_chunk(conn: &mut V4Conn<DuplexStream>) -> io::Result<usize> {
-        std::future::poll_fn(|cx| Pin::new(&mut *conn).poll_write(cx, &[])).await
     }
 
     #[tokio::test]
@@ -580,8 +585,7 @@ mod tests {
         let (mut client, mut peer) = rig();
         within(peer.write_all(&[RESPONSE_TUNNEL])).await.unwrap();
         within(peer.flush()).await.unwrap();
-        within(emit_zero_chunk(&mut peer)).await.unwrap();
-        within(peer.flush()).await.unwrap();
+        within(write_zero_chunk(&mut peer)).await.unwrap();
 
         let mut buf = [0u8; 8];
         let n = within(client.read(&mut buf)).await.unwrap();

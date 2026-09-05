@@ -59,6 +59,7 @@ impl Client {
         // Send the initial request
         stream
             .send_data(initial_request)
+            .await
             .map_err(|e| AnyTlsError::Protocol(format!("Failed to send initial request: {}", e)))?;
 
         tracing::debug!(
@@ -192,7 +193,7 @@ async fn udp_to_stream(
         let packet = encode_udp_packet(&buf[..len])?;
 
         // Send to stream
-        stream.send_data(packet).map_err(|e| {
+        stream.send_data(packet).await.map_err(|e| {
             tracing::error!("[UDP Client] Failed to send to stream: {}", e);
             AnyTlsError::Protocol("Channel send failed".into())
         })?;

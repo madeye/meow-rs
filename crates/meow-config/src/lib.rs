@@ -707,6 +707,68 @@ fn apply_dialer_proxies(
     Ok(())
 }
 
+/// Policy names resolved internally rather than declared as usable outbounds.
+/// They must not become the default member of an auto-created `GLOBAL` group:
+/// choosing `DIRECT` would make global mode silently bypass every proxy.
+const BUILTIN_GLOBAL_POLICIES: [&str; 7] = [
+    "DIRECT",
+    "REJECT",
+    "REJECT-DROP",
+    "PASS",
+    "COMPATIBLE",
+    "GLOBAL",
+    "BLOCK",
+];
+
+fn is_usable_global_target(name: &str, proxies: &HashMap<SmolStr, Arc<dyn Proxy>>) -> bool {
+    !BUILTIN_GLOBAL_POLICIES
+        .iter()
+        .any(|policy| name.eq_ignore_ascii_case(policy))
+        && proxies.contains_key(name)
+}
+
+/// Find the outbound a config is built around, preserving declaration order.
+/// The final valid `MATCH` target is authoritative; otherwise prefer the first
+/// successfully-built group, then the first successfully-built leaf proxy.
+fn primary_global_target<'a>(
+    raw: &'a raw::RawConfig,
+    proxies: &HashMap<SmolStr, Arc<dyn Proxy>>,
+) -> Option<&'a str> {
+    let match_target = raw
+        .rules
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .rev()
+        .find_map(|rule| {
+            let mut parts = rule.split(',').map(str::trim);
+            if !parts.next()?.eq_ignore_ascii_case("MATCH") {
+                return None;
+            }
+            parts.next()
+        });
+    if let Some(target) = match_target.filter(|target| is_usable_global_target(target, proxies)) {
+        return Some(target);
+    }
+
+    if let Some(group) = raw
+        .proxy_groups
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .find(|group| is_usable_global_target(&group.name, proxies))
+    {
+        return Some(&group.name);
+    }
+
+    raw.proxies
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|proxy| proxy.get("name").and_then(serde_yaml::Value::as_str))
+        .find(|name| is_usable_global_target(name, proxies))
+}
+
 fn rebuild_from_raw_impl(
     raw: &raw::RawConfig,
     cache_dir: Option<&Path>,
@@ -815,12 +877,23 @@ fn rebuild_from_raw_impl(
 
     // Auto-create GLOBAL selector if not defined by user (mihomo compatibility).
     // clash-nyanpasu and other frontends depend on GLOBAL to build proxy tree.
+    // Keep the complete sorted list they expect, but put the config's primary
+    // outbound first: SelectorGroup uses its first member when no choice has
+    // been stored, and sorting every registry key previously made global mode
+    // default to DIRECT or an alphabetically-first quota/expiry pseudo-node.
     if !proxies.contains_key("GLOBAL") {
         let mut all_proxy_names: Vec<String> = proxies
             .keys()
             .map(std::string::ToString::to_string)
             .collect();
         all_proxy_names.sort();
+        let primary = primary_global_target(raw, &proxies).map(str::to_string);
+        if let Some(primary) = primary.as_deref() {
+            if let Some(position) = all_proxy_names.iter().position(|name| name == primary) {
+                all_proxy_names.remove(position);
+                all_proxy_names.insert(0, primary.to_string());
+            }
+        }
         let global_config = raw::RawProxyGroup {
             name: "GLOBAL".to_string(),
             group_type: "select".to_string(),
@@ -835,7 +908,10 @@ fn rebuild_from_raw_impl(
         ) {
             Ok(group) => {
                 proxies.insert(SmolStr::new_static("GLOBAL"), group);
-                info!("Auto-created GLOBAL selector with all proxies");
+                info!(
+                    primary = primary.as_deref().unwrap_or("DIRECT"),
+                    "Auto-created GLOBAL selector with all proxies"
+                );
             }
             Err(e) => warn!("Failed to create GLOBAL selector: {}", e),
         }

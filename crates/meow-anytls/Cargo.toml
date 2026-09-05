@@ -66,7 +66,7 @@ rustls-pemfile = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 
 bytes = "1.10.1"
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
 
 sha2 = "0.10"
 md5 = "0.8"

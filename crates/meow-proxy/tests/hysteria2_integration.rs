@@ -245,6 +245,19 @@ async fn start_tcp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     (addr, handle)
 }
 
+async fn start_tcp_banner_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _ = stream.write_all(b"server banner").await;
+            });
+        }
+    });
+    (addr, handle)
+}
+
 async fn start_udp_echo_server() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = socket.local_addr().unwrap();
@@ -310,8 +323,24 @@ async fn hysteria2_docker_tcp_and_udp_round_trip() {
     };
     sleep(Duration::from_millis(500)).await;
     let (tcp_echo, _tcp_h) = start_tcp_echo_server().await;
+    let (tcp_banner, _tcp_banner_h) = start_tcp_banner_server().await;
     let (udp_echo, _udp_h) = start_udp_echo_server().await;
     let adapter = adapter(server_port);
+
+    // Fast Open must send the TCP request while dialing, even when the local
+    // client has no bytes to write. Otherwise server-speaks-first protocols
+    // deadlock before their banner reaches the client.
+    let banner_metadata = metadata_for(tcp_banner, Network::Tcp);
+    let mut banner_conn = timeout(T, dial_tcp_with_retry(&adapter, &banner_metadata))
+        .await
+        .expect("hysteria2 banner TCP dial timed out")
+        .unwrap_or_else(|e| panic!("hysteria2 banner TCP dial failed: {e}\n{}", server.logs()));
+    let mut banner = [0u8; 13];
+    timeout(T, banner_conn.read_exact(&mut banner))
+        .await
+        .expect("server-first banner read timed out")
+        .expect("server-first banner read failed");
+    assert_eq!(&banner, b"server banner");
 
     let tcp_metadata = metadata_for(tcp_echo, Network::Tcp);
     let mut conn = match timeout(T, dial_tcp_with_retry(&adapter, &tcp_metadata)).await {
