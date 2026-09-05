@@ -20,6 +20,7 @@
 use std::future::Future;
 use std::io;
 use std::time::Duration;
+use tokio::time::Instant;
 
 use crate::error::{MeowError, Result};
 
@@ -31,26 +32,47 @@ use crate::error::{MeowError, Result};
 /// long as both peers keep it open.
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
+tokio::task_local! {
+    static DIAL_DEADLINE: Instant;
+}
+
+/// Deadline of the outbound dial currently being polled on this task.
+///
+/// Proxy groups capture it before awaiting a member so their cancellation
+/// guards can distinguish deadline expiry from an early caller cancellation.
+/// The scope follows the dial future; newly spawned tasks do not inherit it.
+pub fn dial_deadline() -> Option<Instant> {
+    DIAL_DEADLINE.try_with(|deadline| *deadline).ok()
+}
+
 /// Run a `dial_tcp`/`dial_udp` future under [`DIAL_TIMEOUT`].
 ///
 /// `via` names the proxy for the error message; it is only formatted on the
 /// timeout path.
 ///
-/// Expiry surfaces as [`io::ErrorKind::TimedOut`] rather than a new
-/// [`MeowError`] variant, so every existing dial-failure classifier — group
-/// health, failure escalation, the listener error arms — treats a stalled
-/// server exactly like a refused connection without having to learn about it.
+/// Nested calls reuse the original deadline, including time spent on earlier
+/// relay hops. Expiry surfaces as [`io::ErrorKind::TimedOut`]. Since timeout
+/// drops the pending future, group failure tracking must also handle expiry
+/// in a cancellation guard; an ordinary `Err` arm alone cannot observe it.
 pub async fn with_dial_timeout<F, T>(via: &str, fut: F) -> Result<T>
 where
     F: Future<Output = Result<T>>,
 {
-    match tokio::time::timeout(DIAL_TIMEOUT, fut).await {
-        Ok(result) => result,
-        Err(_) => Err(MeowError::Io(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("dial via {via} timed out after {}s", DIAL_TIMEOUT.as_secs()),
-        ))),
-    }
+    let deadline = dial_deadline().unwrap_or_else(|| Instant::now() + DIAL_TIMEOUT);
+    DIAL_DEADLINE
+        .scope(deadline, async {
+            match tokio::time::timeout_at(deadline, fut).await {
+                Ok(result) => result,
+                Err(_) => Err(MeowError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "dial via {via} exceeded the {}s deadline",
+                        DIAL_TIMEOUT.as_secs()
+                    ),
+                ))),
+            }
+        })
+        .await
 }
 
 #[cfg(test)]
@@ -107,5 +129,24 @@ mod tests {
         })
         .await;
         assert!(too_slow.is_err());
+    }
+    #[tokio::test(start_paused = true)]
+    async fn nested_dials_share_the_original_budget() {
+        let start = Instant::now();
+        with_dial_timeout::<_, ()>("outer", async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            with_dial_timeout("inner", async {
+                assert_eq!(dial_deadline(), Some(start + DIAL_TIMEOUT));
+                pending().await
+            })
+            .await
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(start.elapsed(), DIAL_TIMEOUT);
+        assert!(
+            dial_deadline().is_none(),
+            "deadline must not leak out of its scope"
+        );
     }
 }
