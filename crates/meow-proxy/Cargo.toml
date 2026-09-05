@@ -96,7 +96,9 @@ ctr = { workspace = true, optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 meow-trie = { workspace = true }
+meow-transport = { workspace = true, features = ["xhttp"] }
 rcgen = "0.13"
+http = "1"
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 sha2 = { workspace = true }

@@ -312,14 +312,19 @@ async fn spawn_grpc_server_inner(
 
 // ─── HTTP/2 (plain) loopback server ──────────────────────────────────────────
 
-/// Metadata captured from a single h2 request received by the loopback server.
-#[cfg(feature = "h2")]
-#[derive(Debug)]
+#[cfg(any(feature = "h2", feature = "xhttp"))]
+#[derive(Debug, Clone)]
 pub struct H2ReqInfo {
+    /// The HTTP method sent by the client (e.g. `POST`).
+    pub method: String,
+    /// The `:scheme` pseudo-header sent by the client.
+    pub scheme: Option<String>,
     /// The `:authority` pseudo-header sent by the client (e.g. `"example.com"`).
     pub authority: Option<String>,
-    /// The `:path` pseudo-header sent by the client (e.g. `"/custom"`).
-    pub path: String,
+    /// The request path and query (e.g. `"/custom?ed=1"`).
+    pub path_and_query: String,
+    /// Request headers.
+    pub headers: http::HeaderMap,
 }
 
 /// Spawn a multi-accept plain-HTTP/2 loopback server.
@@ -336,7 +341,7 @@ pub struct H2ReqInfo {
 ///
 /// Using mpsc (not oneshot) allows multi-connection tests (e.g. D2 with 1000
 /// connections) to collect all metadata via a single receiver.
-#[cfg(feature = "h2")]
+#[cfg(any(feature = "h2", feature = "xhttp"))]
 pub async fn spawn_h2_server(
     max_connections: usize,
 ) -> (std::net::SocketAddr, tokio::sync::mpsc::Receiver<H2ReqInfo>) {
@@ -347,14 +352,72 @@ pub async fn spawn_h2_server(
 /// client's first DATA frame arrives, the way mihomo's h2 handler behaves.
 /// A client that awaits the response inside `connect()` deadlocks here
 /// (issue #377).
-#[cfg(feature = "h2")]
+#[cfg(any(feature = "h2", feature = "xhttp"))]
 pub async fn spawn_h2_server_deferred_response(
     max_connections: usize,
 ) -> (std::net::SocketAddr, tokio::sync::mpsc::Receiver<H2ReqInfo>) {
     spawn_h2_server_inner(max_connections, true).await
 }
+/// Spawn one H2 echo connection and report the exact request body after a
+/// clean request-body EOS. A reset drops the sender without a value.
+#[cfg(any(feature = "h2", feature = "xhttp"))]
+pub async fn spawn_h2_server_with_body_result() -> (
+    std::net::SocketAddr,
+    tokio::sync::oneshot::Receiver<std::result::Result<Vec<u8>, String>>,
+) {
+    let (body_tx, body_rx) = tokio::sync::oneshot::channel();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("h2 body-result bind");
+    let addr = listener.local_addr().expect("local_addr");
 
-#[cfg(feature = "h2")]
+    tokio::spawn(async move {
+        let result = async {
+            let (tcp, _) = listener.accept().await.map_err(|e| e.to_string())?;
+            let mut conn = h2::server::handshake(tcp)
+                .await
+                .map_err(|e| e.to_string())?;
+            let (request, mut respond) = conn
+                .accept()
+                .await
+                .ok_or_else(|| "connection closed before request".to_string())?
+                .map_err(|e| e.to_string())?;
+            respond
+                .send_response(http::Response::new(()), false)
+                .map_err(|e| e.to_string())?
+                .send_data(bytes::Bytes::from_static(b"!"), true)
+                .map_err(|e| e.to_string())?;
+            let mut body = request.into_body();
+            let read_body = async {
+                let mut received = Vec::new();
+                loop {
+                    match body.data().await {
+                        Some(Ok(bytes)) => {
+                            let _ = body.flow_control().release_capacity(bytes.len());
+                            received.extend_from_slice(&bytes);
+                        }
+                        Some(Err(error)) => return Err(error.to_string()),
+                        None => return Ok(received),
+                    }
+                }
+            };
+            let drive = async {
+                while conn.accept().await.is_some() {}
+                std::future::pending::<()>().await;
+            };
+            tokio::select! {
+                result = read_body => result,
+                () = drive => unreachable!("drive future never resolves"),
+            }
+        }
+        .await;
+        let _ = body_tx.send(result);
+    });
+
+    (addr, body_rx)
+}
+
+#[cfg(any(feature = "h2", feature = "xhttp"))]
 async fn spawn_h2_server_inner(
     max_connections: usize,
     defer_response: bool,
@@ -380,7 +443,7 @@ async fn spawn_h2_server_inner(
     (addr, rx)
 }
 
-#[cfg(feature = "h2")]
+#[cfg(any(feature = "h2", feature = "xhttp"))]
 async fn h2_handle_conn(
     tcp: tokio::net::TcpStream,
     tx: tokio::sync::mpsc::Sender<H2ReqInfo>,
@@ -396,13 +459,26 @@ async fn h2_handle_conn(
         return;
     };
 
+    let method = req.method().to_string();
+    let scheme = req.uri().scheme().map(std::string::ToString::to_string);
     let authority = req.uri().authority().map(std::string::ToString::to_string);
-    let path = req.uri().path().to_string();
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map_or_else(|| "/".to_string(), std::string::ToString::to_string);
+    let headers = req.headers().clone();
 
     // Publish the request metadata as soon as the HEADERS arrive, so tests can
     // assert on it without depending on when the response is sent.
-    let _ = tx.send(H2ReqInfo { authority, path }).await;
-
+    let _ = tx
+        .send(H2ReqInfo {
+            method,
+            scheme,
+            authority,
+            path_and_query,
+            headers,
+        })
+        .await;
     // Drive the h2 connection (SETTINGS, WINDOW_UPDATE, …) in background.
     tokio::spawn(async move { while conn.accept().await.is_some() {} });
 
