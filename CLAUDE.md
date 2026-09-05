@@ -139,6 +139,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 # test (e.g. the ADR-0001 guard in `crate_invariants_test`) passes locally and
 # lands `main` red.
 cargo test --lib --bin meow \
+  --test socks5_udp_user \
   --test common_test --test dns_cache_test --test config_test \
   --test statistics_test --test rules_test --test api_test \
   --test config_persistence_test --test systemd_config_test \

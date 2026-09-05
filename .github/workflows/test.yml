@@ -98,6 +98,7 @@ jobs:
         run: |
           cargo test --lib --bin meow \
             --test common_test \
+            --test socks5_udp_user \
             --test dns_cache_test \
             --test config_test \
             --test statistics_test \
