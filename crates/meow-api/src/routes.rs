@@ -1933,12 +1933,12 @@ async fn put_configs(
 
     // Cold reload: close all connections with structured log (Class A divergence from upstream)
     let stats = state.tunnel.statistics();
-    let dropped = stats.active_connection_count();
-    stats.close_all_connections();
+    const RELOAD_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let dropped = stats.drain_connections(RELOAD_DRAIN_TIMEOUT).await;
     if dropped > 0 {
         tracing::warn!(
             connections_dropped = dropped,
-            "connections force-closed after reload drain timeout"
+            "connection closure requested after reload drain timeout"
         );
     }
 

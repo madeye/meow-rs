@@ -36,14 +36,25 @@ impl<'a> ConnectionGuard<'a> {
         rule_payload: SmolStr,
         chains: SmallVec<[Arc<str>; 1]>,
     ) -> Self {
-        let id = stats.track_connection(metadata, rule, rule_payload, chains);
-        // Entry was just inserted; the fallback Arc only exists to keep this
-        // infallible if a concurrent close_all ever races connection setup.
-        let counters = stats.connection_counters(id).unwrap_or_default();
+        // Obtain the handle before publishing the entry. A concurrent DELETE
+        // must cancel this exact handle, even before its first poll.
+        let (id, counters) =
+            stats.track_connection_with_counters(metadata, rule, rule_payload, chains);
         Self {
             stats,
             id,
             counters,
+        }
+    }
+
+    /// Run the complete dial/write/relay lifetime until an API close request.
+    /// Dropping the future releases its remote stream; callers then return to
+    /// the listener so the owned inbound stream is dropped as well.
+    pub async fn run_until_closed<F: std::future::Future>(&self, future: F) -> Option<F::Output> {
+        tokio::select! {
+            biased;
+            () = self.counters.closed() => None,
+            output = future => Some(output),
         }
     }
 
@@ -167,77 +178,81 @@ pub async fn route_inbound_tcp<C>(
     // Dial the remote via proxy, bounded like mihomo's `C.DefaultTCPTimeout`:
     // a server that accepts and then stalls mid-handshake would otherwise pin
     // this task, its inbound socket and its stats entry forever.
-    match with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await {
-        Ok(mut remote) => {
-            let up = Arc::clone(guard.counters());
-            let dn = Arc::clone(guard.counters());
-            // Re-emit any bytes the listener already read past the handshake
-            // (e.g. pipelined TLS ClientHello after a CONNECT 200). Counted
-            // as upload so the connection stats stay accurate. A failure
-            // here kills the connection (the remote half is unusable), so it
-            // must be visible at `warn` — the pre-refactor code propagated
-            // it to the caller instead of swallowing it at `debug`
-            // (review M9).
-            if !prefix.is_empty() {
-                if let Err(e) = remote.write_all(prefix).await {
-                    warn!(
-                        "{} {} prefix write error: {}",
-                        metadata.conn_type,
-                        metadata.remote_address(),
-                        e
-                    );
-                    return;
-                }
-                inner
-                    .stats
-                    .record_upload(&up, prefix.len() as meow_common::atomic::Int);
-            }
-            match copy_bidirectional_buf_tracked(
-                conn,
-                &mut remote,
-                &mut buf_up,
-                &mut buf_dn,
-                |n| {
-                    inner
-                        .stats
-                        .record_upload(&up, n as meow_common::atomic::Int);
-                },
-                |n| {
-                    inner
-                        .stats
-                        .record_download(&dn, n as meow_common::atomic::Int);
-                },
-            )
-            .await
-            {
-                Ok((up, down)) => {
-                    debug!(
-                        "{} {} relay closed: up={} down={}",
-                        metadata.conn_type,
-                        metadata.remote_address(),
-                        up,
-                        down
-                    );
+    guard
+        .run_until_closed(async {
+            match with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await {
+                Ok(mut remote) => {
+                    let up = Arc::clone(guard.counters());
+                    let dn = Arc::clone(guard.counters());
+                    // Re-emit any bytes the listener already read past the handshake
+                    // (e.g. pipelined TLS ClientHello after a CONNECT 200). Counted
+                    // as upload so the connection stats stay accurate. A failure
+                    // here kills the connection (the remote half is unusable), so it
+                    // must be visible at `warn` — the pre-refactor code propagated
+                    // it to the caller instead of swallowing it at `debug`
+                    // (review M9).
+                    if !prefix.is_empty() {
+                        if let Err(e) = remote.write_all(prefix).await {
+                            warn!(
+                                "{} {} prefix write error: {}",
+                                metadata.conn_type,
+                                metadata.remote_address(),
+                                e
+                            );
+                            return;
+                        }
+                        inner
+                            .stats
+                            .record_upload(&up, prefix.len() as meow_common::atomic::Int);
+                    }
+                    match copy_bidirectional_buf_tracked(
+                        conn,
+                        &mut remote,
+                        &mut buf_up,
+                        &mut buf_dn,
+                        |n| {
+                            inner
+                                .stats
+                                .record_upload(&up, n as meow_common::atomic::Int);
+                        },
+                        |n| {
+                            inner
+                                .stats
+                                .record_download(&dn, n as meow_common::atomic::Int);
+                        },
+                    )
+                    .await
+                    {
+                        Ok((up, down)) => {
+                            debug!(
+                                "{} {} relay closed: up={} down={}",
+                                metadata.conn_type,
+                                metadata.remote_address(),
+                                up,
+                                down
+                            );
+                        }
+                        Err(e) => {
+                            debug!(
+                                "{} {} relay error: {}",
+                                metadata.conn_type,
+                                metadata.remote_address(),
+                                e
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
-                    debug!(
-                        "{} {} relay error: {}",
+                    warn!(
+                        "{} {} dial error: {}",
                         metadata.conn_type,
                         metadata.remote_address(),
                         e
                     );
                 }
             }
-        }
-        Err(e) => {
-            warn!(
-                "{} {} dial error: {}",
-                metadata.conn_type,
-                metadata.remote_address(),
-                e
-            );
-        }
-    }
+        })
+        .await;
 }
 
 #[cfg(test)]
@@ -253,6 +268,70 @@ mod tests {
             dst_port: 443,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn close_before_first_poll_does_not_start_dial() {
+        let stats = Statistics::new();
+        let guard =
+            ConnectionGuard::track(&stats, metadata(), "MATCH".into(), "".into(), smallvec![]);
+        stats.close_connection(guard.id());
+        assert!(guard
+            .run_until_closed(async { panic!("closed connection started dialing") })
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn close_cancels_pending_future_and_drops_its_resources() {
+        let stats = Statistics::new();
+        let guard =
+            ConnectionGuard::track(&stats, metadata(), "MATCH".into(), "".into(), smallvec![]);
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let pending = guard.run_until_closed(async move {
+            let _resource = tx;
+            std::future::pending::<()>().await;
+        });
+        let close = async {
+            tokio::task::yield_now().await;
+            stats.close_connection(guard.id());
+        };
+        let (result, ()) = tokio::join!(pending, close);
+        assert!(result.is_none());
+        assert!(rx.await.is_err(), "cancelled future must release resources");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_allows_natural_completion_and_times_out_stalled_connections() {
+        let stats = Statistics::new();
+        let guard =
+            ConnectionGuard::track(&stats, metadata(), "MATCH".into(), "".into(), smallvec![]);
+        let start = tokio::time::Instant::now();
+        let complete = async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            drop(guard);
+        };
+        let (closed, ()) = tokio::join!(
+            stats.drain_connections(std::time::Duration::from_secs(5)),
+            complete
+        );
+        assert_eq!(closed, 0);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+
+        let guard =
+            ConnectionGuard::track(&stats, metadata(), "MATCH".into(), "".into(), smallvec![]);
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            stats
+                .drain_connections(std::time::Duration::from_secs(5))
+                .await,
+            1
+        );
+        assert_eq!(start.elapsed(), std::time::Duration::from_secs(5));
+        assert!(guard
+            .run_until_closed(std::future::pending::<()>())
+            .await
+            .is_none());
     }
 
     #[test]

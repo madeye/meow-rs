@@ -348,36 +348,40 @@ async fn handle_tproxy_conn(
     let mut relay_buf_up = [0u8; RELAY_BUF_SIZE];
     let mut relay_buf_dn = [0u8; RELAY_BUF_SIZE];
 
-    match with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await {
-        Ok(mut remote) => {
-            let up = Arc::clone(_guard.counters());
-            let dn = Arc::clone(_guard.counters());
-            match copy_bidirectional_buf_tracked(
-                &mut stream,
-                &mut remote,
-                &mut relay_buf_up,
-                &mut relay_buf_dn,
-                |n| {
-                    inner
-                        .stats
-                        .record_upload(&up, n as meow_common::atomic::Int);
-                },
-                |n| {
-                    inner
-                        .stats
-                        .record_download(&dn, n as meow_common::atomic::Int);
-                },
-            )
-            .await
-            {
-                Ok((up, down)) => {
-                    debug!("TProxy relay closed: up={up} down={down}");
+    _guard
+        .run_until_closed(async {
+            match with_dial_timeout(proxy.name(), proxy.dial_tcp(&metadata)).await {
+                Ok(mut remote) => {
+                    let up = Arc::clone(_guard.counters());
+                    let dn = Arc::clone(_guard.counters());
+                    match copy_bidirectional_buf_tracked(
+                        &mut stream,
+                        &mut remote,
+                        &mut relay_buf_up,
+                        &mut relay_buf_dn,
+                        |n| {
+                            inner
+                                .stats
+                                .record_upload(&up, n as meow_common::atomic::Int);
+                        },
+                        |n| {
+                            inner
+                                .stats
+                                .record_download(&dn, n as meow_common::atomic::Int);
+                        },
+                    )
+                    .await
+                    {
+                        Ok((up, down)) => {
+                            debug!("TProxy relay closed: up={up} down={down}");
+                        }
+                        Err(e) => debug!("TProxy relay error: {e}"),
+                    }
                 }
-                Err(e) => debug!("TProxy relay error: {e}"),
+                Err(e) => warn!("TProxy dial error: {e}"),
             }
-        }
-        Err(e) => warn!("TProxy dial error: {e}"),
-    }
+        })
+        .await;
     // _guard drops here, removing the entry from Statistics.
     Ok(())
 }
