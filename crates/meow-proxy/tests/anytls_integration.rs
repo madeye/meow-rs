@@ -142,6 +142,50 @@ async fn anytls_round_trip_through_upstream_server() {
 }
 
 #[tokio::test]
+async fn anytls_ip_only_destination_round_trips() {
+    install_crypto_provider();
+
+    let (echo_addr, _echo_h) = start_echo_server().await;
+    let (cert, key) = self_signed_cert();
+    let (server_addr, _server_h) = start_anytls_server(cert, key).await;
+    let adapter = AnytlsAdapter::new(
+        "test-anytls-ip-only",
+        &server_addr.ip().to_string(),
+        server_addr.port(),
+        PASSWORD,
+        Some("localhost"),
+        true,
+        true,
+    )
+    .expect("adapter must build");
+
+    // SOCKS5 IP literals and transparent inbounds without a reverse-table hit
+    // carry no hostname. The adapter must encode dst_ip rather than an empty
+    // domain or a sniffed rule-only hostname.
+    let metadata = Metadata {
+        network: Network::Tcp,
+        host: smol_str::SmolStr::default(),
+        dst_ip: Some(echo_addr.ip()),
+        dst_port: echo_addr.port(),
+        sniff_host: smol_str::SmolStr::from("must-not-be-dialed.invalid"),
+        ..Default::default()
+    };
+
+    let mut conn = timeout(T, adapter.dial_tcp(&metadata))
+        .await
+        .expect("dial_tcp must not stall")
+        .expect("IP-only dial must succeed");
+    let payload = b"ip-only-anytls";
+    conn.write_all(payload).await.unwrap();
+    let mut echoed = vec![0; payload.len()];
+    timeout(T, conn.read_exact(&mut echoed))
+        .await
+        .expect("echo must not stall")
+        .expect("echo must succeed");
+    assert_eq!(echoed, payload);
+}
+
+#[tokio::test]
 async fn anytls_concurrent_dials_each_get_independent_streams() {
     install_crypto_provider();
     let (echo_addr, _echo_h) = start_echo_server().await;

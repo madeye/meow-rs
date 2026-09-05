@@ -26,13 +26,6 @@ impl Decoder for FrameCodec {
         // Save position before parsing header
         let before_header = src.len();
 
-        // Save first few bytes for debugging
-        let header_preview = if src.len() >= 20 {
-            format!("{:?}", &src[..20])
-        } else {
-            format!("{:?}", &src[..])
-        };
-
         // Parse header WITHOUT consuming bytes (use peek methods)
         // We'll only consume them if we have enough payload
         let mut header_reader = &src[..HEADER_OVERHEAD_SIZE];
@@ -41,10 +34,13 @@ impl Decoder for FrameCodec {
         let stream_id = header_reader.get_u32();
         let data_len = header_reader.get_u16() as usize;
 
-        tracing::debug!(
-            "[FrameCodec] decode: Parsing header (buffer had {} bytes, preview: {})",
+        // Keep the preview as a borrowed tracing field. Formatting it eagerly
+        // allocated a String for every decoded frame even when debug logs were
+        // disabled.
+        tracing::trace!(
+            preview = ?&src[..src.len().min(20)],
+            "[FrameCodec] decode: Parsing header (buffer had {} bytes)",
             before_header,
-            header_preview
         );
         tracing::debug!(
             "[FrameCodec] decode: Parsed header cmd={:?} (byte={}), stream_id={}, data_len={}",
@@ -97,6 +93,12 @@ impl Encoder<Frame> for FrameCodec {
 
     fn encode(&mut self, item: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
         let data_len = item.data.len();
+        if data_len > u16::MAX as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "AnyTLS frame payload exceeds u16 length",
+            ));
+        }
 
         // Reserve space: header + data
         dst.reserve(HEADER_OVERHEAD_SIZE + data_len);
@@ -118,6 +120,17 @@ impl Encoder<Frame> for FrameCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_frame_is_rejected_without_modifying_output() {
+        let mut output = BytesMut::from(&b"prefix"[..]);
+        let frame = Frame::data(1, Bytes::from(vec![0; u16::MAX as usize + 1]));
+        assert_eq!(
+            FrameCodec.encode(frame, &mut output).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(&output[..], b"prefix");
+    }
 
     #[tokio::test]
     async fn test_encode_decode() {

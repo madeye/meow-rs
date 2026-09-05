@@ -82,6 +82,7 @@ impl Client {
 
         // Open a new stream in the session
         let (stream, synack_rx) = session.open_stream().await?;
+        let mut guard = crate::session::stream::OpeningStreamGuard::new(Arc::clone(&stream));
         tracing::debug!(
             "[Client] Opened stream {} in session, waiting for SYNACK",
             stream.id()
@@ -160,6 +161,7 @@ impl Client {
 
         match tokio::time::timeout(DEFAULT_SYNACK_TIMEOUT, synack_rx).await {
             Ok(Ok(Ok(()))) => {
+                guard.disarm();
                 tracing::debug!(
                     "[Client] SYNACK received for stream {} - stream ready",
                     stream_id

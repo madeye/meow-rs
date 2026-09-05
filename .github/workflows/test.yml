@@ -143,6 +143,12 @@ jobs:
             --test snell_server_docker_integration \
             -- --nocapture
 
+      - name: AnyTLS unit and integration tests (embedded server)
+        run: |
+          cargo test -p meow-anytls --lib
+          cargo test -p meow-proxy --features anytls --lib \
+            --test anytls_integration --test anytls_leak
+
       # One invocation/feature set for the feature-gated transport suites.
       # Per-feature-combination *compile* coverage (the old G1-G6 matrix)
       # lives in the feature-powerset job; the nightly coverage workflow

@@ -1,165 +1,234 @@
-//! Stream implementation for AnyTLS protocol
-//!
-//! Stream provides a duplex communication channel that implements AsyncRead and AsyncWrite
+//! A multiplexed AnyTLS stream with bounded, cancellation-safe writes.
 
+use crate::protocol::{Command, Frame};
 use crate::session::StreamReader;
+use crate::session::writer::{MAX_FRAME_PAYLOAD, StreamWriter};
 use crate::util::{AnyTlsError, Result};
 use bytes::Bytes;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, oneshot};
+use tokio_util::sync::PollSemaphore;
 
-/// Stream represents a single data stream within a Session
-/// It implements AsyncRead and AsyncWrite to be used as a connection
+struct WriteState {
+    closed: bool,
+    fin_sent: bool,
+    permits: PollSemaphore,
+    flush: Option<oneshot::Receiver<Result<()>>>,
+    waker: Option<Waker>,
+}
+
+/// Retire a registered stream if opening it fails or its dial is cancelled.
+pub(crate) struct OpeningStreamGuard(Option<Arc<Stream>>);
+
+impl OpeningStreamGuard {
+    pub(crate) fn new(stream: Arc<Stream>) -> Self {
+        Self(Some(stream))
+    }
+    pub(crate) fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for OpeningStreamGuard {
+    fn drop(&mut self) {
+        if let Some(stream) = &self.0 {
+            stream.close();
+        }
+    }
+}
+
+/// Stream represents a single data stream within a Session.
 pub struct Stream {
     id: u32,
-
-    // ===== 读取部分：使用独立的 StreamReader =====
-    // Arc<Mutex<>> 是为了在 poll_read 中获取 &mut
     reader: Arc<tokio::sync::Mutex<StreamReader>>,
-
-    // ===== 写入部分：直接使用 channel，无需锁 =====
-    writer_tx: mpsc::UnboundedSender<(u32, Bytes)>,
-
-    // ===== SYNACK 通知 (用于超时检测) =====
-    synack_tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<Result<()>>>>>,
-
-    // ===== 状态管理 =====
-    is_closed: Arc<AtomicBool>,
-    close_error: Arc<tokio::sync::Mutex<Option<AnyTlsError>>>,
-
-    // Guards the one-shot stream-close sentinel so a FIN is emitted at most
-    // once regardless of how many times `close()`/`poll_shutdown` fire.
-    fin_sent: Arc<AtomicBool>,
+    writer: StreamWriter,
+    // Only synchronous admission and close operations run under this lock.
+    // In particular, no network I/O or await occurs while it is held.
+    write_state: Mutex<WriteState>,
+    close_notify: Notify,
+    synack_tx: tokio::sync::Mutex<Option<oneshot::Sender<Result<()>>>>,
+    close_error: tokio::sync::Mutex<Option<AnyTlsError>>,
 }
 
 impl Stream {
-    /// Create a new stream
-    ///
-    /// # Arguments
-    /// * `id` - Stream ID
-    /// * `reader` - StreamReader 用于读取数据
-    /// * `writer_tx` - 发送数据到 Session 的 channel
-    ///
-    /// # Returns
-    /// (Stream, Receiver) - The receiver can be used to wait for SYNACK
     pub fn new(
         id: u32,
         reader: StreamReader,
-        writer_tx: mpsc::UnboundedSender<(u32, Bytes)>,
+        writer: StreamWriter,
     ) -> (Self, oneshot::Receiver<Result<()>>) {
         let (synack_tx, synack_rx) = oneshot::channel();
-
-        let stream = Self {
-            id,
-            reader: Arc::new(tokio::sync::Mutex::new(reader)),
-            writer_tx,
-            synack_tx: Arc::new(tokio::sync::Mutex::new(Some(synack_tx))),
-            is_closed: Arc::new(AtomicBool::new(false)),
-            close_error: Arc::new(tokio::sync::Mutex::new(None)),
-            fin_sent: Arc::new(AtomicBool::new(false)),
-        };
-
-        (stream, synack_rx)
+        let permits = PollSemaphore::new(Arc::clone(&writer.budget));
+        (
+            Self {
+                id,
+                reader: Arc::new(tokio::sync::Mutex::new(reader)),
+                writer,
+                write_state: Mutex::new(WriteState {
+                    closed: false,
+                    fin_sent: false,
+                    permits,
+                    flush: None,
+                    waker: None,
+                }),
+                close_notify: Notify::new(),
+                synack_tx: tokio::sync::Mutex::new(Some(synack_tx)),
+                close_error: tokio::sync::Mutex::new(None),
+            },
+            synack_rx,
+        )
     }
 
-    /// Notify that SYNACK has been received
-    ///
-    /// # Arguments
-    /// * `result` - Ok(()) for success, Err for error
     pub async fn notify_synack(&self, result: Result<()>) {
-        let mut tx_guard = self.synack_tx.lock().await;
-        match tx_guard.take() {
-            Some(tx) => {
-                let result_clone = match &result {
-                    Ok(()) => Ok(()),
-                    Err(e) => Err(AnyTlsError::Protocol(e.to_string())),
-                };
-                let _ = tx.send(result_clone);
-                tracing::debug!(
-                    "[Stream] SYNACK notified for stream {}: {:?}",
-                    self.id,
-                    result.is_ok()
-                );
-            }
-            _ => {
-                tracing::warn!("[Stream] SYNACK already notified for stream {}", self.id);
-            }
+        if let Some(tx) = self.synack_tx.lock().await.take() {
+            let _ = tx.send(result);
         }
     }
 
-    /// Get stream ID
     pub fn id(&self) -> u32 {
         self.id
     }
 
-    /// Close the stream with error (can be called with `Arc<Stream>`)
     pub async fn close_with_error(&self, err: AnyTlsError) {
-        if self
-            .is_closed
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            tracing::warn!(
-                stream_id = self.id,
-                cause = %err,
-                "[Stream] Closing stream with error"
-            );
-            *self.close_error.lock().await = Some(err);
-        }
+        self.mark_closed(false);
+        *self.close_error.lock().await = Some(err);
     }
 
-    /// Check if stream is closed
     pub fn is_closed(&self) -> bool {
-        self.is_closed.load(Ordering::Relaxed)
+        self.write_state.lock().unwrap().closed
     }
 
-    /// Gracefully close this client stream.
-    ///
-    /// Signals the owning session (via the writer channel's empty-`Bytes`
-    /// sentinel — see `Session::process_stream_data`) to emit a `Fin` frame
-    /// for this stream id and evict it from the session's stream maps. Without
-    /// this, client streams were never removed from `Session::streams` /
-    /// `Session::stream_receive_tx` and never FIN-acked to the peer, so both
-    /// maps grew unbounded for the life of the (long-lived, pooled) session.
-    ///
-    /// Lock-free and idempotent, so it is safe to call from `poll_shutdown`
-    /// or a `Drop` impl on a wrapper type.
-    pub fn close(&self) {
-        self.is_closed.store(true, Ordering::Relaxed);
-        if self
-            .fin_sent
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            // Best-effort: if the session writer task is already gone the
-            // stream is being torn down anyway, so a send error is harmless.
-            let _ = self.writer_tx.send((self.id, Bytes::new()));
+    fn mark_closed(&self, send_fin: bool) {
+        let mut state = self.write_state.lock().unwrap();
+        state.closed = true;
+        // Drop a pending semaphore acquisition, releasing its reserved permits.
+        state.permits = PollSemaphore::new(Arc::clone(&self.writer.budget));
+        if send_fin && !state.fin_sent {
+            state.fin_sent = true;
+            // A pending flush may precede FIN. Shutdown must acknowledge a
+            // fresh barrier after it, even if an earlier flush was cancelled.
+            state.flush = None;
+            let _ = self
+                .writer
+                .enqueue(Frame::control(Command::Fin, self.id), None, None);
         }
+        let waker = state.waker.take();
+        drop(state);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        self.close_notify.notify_waiters();
     }
 
-    /// Get a reference to the reader (for direct access in handlers)
+    /// Queue exactly one FIN after all accepted writes, including from Drop.
+    pub fn close(&self) {
+        self.mark_closed(true);
+    }
+
     pub fn reader(&self) -> &Arc<tokio::sync::Mutex<StreamReader>> {
         &self.reader
     }
 
-    /// Send data through the writer channel (无锁方式)
-    ///
-    /// 这个方法可以被多个任务并发调用，无需任何锁
-    pub fn send_data(
+    /// Accept one frame with session-wide backpressure. Cancellation either
+    /// enqueues the entire frame or none of it; the session owns physical I/O.
+    pub async fn send_data(&self, data: Bytes) -> Result<()> {
+        if data.len() > MAX_FRAME_PAYLOAD {
+            return Err(AnyTlsError::Protocol(
+                "frame payload exceeds u16 length".into(),
+            ));
+        }
+        let closed = self.close_notify.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        if self.is_closed() {
+            return Err(AnyTlsError::StreamClosed);
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+        let permit = tokio::select! {
+            biased;
+            _ = &mut closed => return Err(AnyTlsError::StreamClosed),
+            permit = Arc::clone(&self.writer.budget).acquire_owned() =>
+                permit.map_err(|_| AnyTlsError::SessionClosed)?,
+        };
+        let state = self.write_state.lock().unwrap();
+        if state.closed {
+            return Err(AnyTlsError::StreamClosed);
+        }
+        self.writer
+            .enqueue(Frame::data(self.id, data), Some(permit), None)
+    }
+
+    fn poll_pending_flush(
+        state: &mut WriteState,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if let Some(flush) = state.flush.as_mut() {
+            let result = std::task::ready!(Pin::new(flush).poll(cx));
+            state.flush = None;
+            return Poll::Ready(match result {
+                Ok(result) => result.map_err(std::io::Error::other),
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session writer closed",
+                )),
+            });
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    pub fn poll_write_data(
         &self,
-        data: Bytes,
-    ) -> std::result::Result<(), mpsc::error::SendError<(u32, Bytes)>> {
-        self.writer_tx.send((self.id, data))
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let mut state = self.write_state.lock().unwrap();
+        if state.closed {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stream closed",
+            )));
+        }
+        // Do not let a cancelled flush become a stale barrier for later writes.
+        std::task::ready!(Self::poll_pending_flush(&mut state, cx))?;
+        state.waker = Some(cx.waker().clone());
+        let permit = std::task::ready!(state.permits.poll_acquire(cx)).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "session writer closed")
+        })?;
+        let len = buf.len().min(MAX_FRAME_PAYLOAD);
+        self.writer
+            .enqueue(
+                Frame::data(self.id, Bytes::copy_from_slice(&buf[..len])),
+                Some(permit),
+                None,
+            )
+            .map_err(std::io::Error::other)?;
+        Poll::Ready(Ok(len))
+    }
+
+    pub fn poll_flush_data(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        let mut state = self.write_state.lock().unwrap();
+        // A caller may cancel a backpressured write and then flush instead.
+        // Release any capacity reserved by that abandoned acquisition.
+        state.permits = PollSemaphore::new(Arc::clone(&self.writer.budget));
+        if state.flush.is_none() {
+            state.flush = Some(self.writer.flush().map_err(std::io::Error::other)?);
+        }
+        Self::poll_pending_flush(&mut state, cx)
+    }
+
+    pub fn poll_shutdown_data(&self, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.close();
+        self.poll_flush_data(cx)
     }
 }
-
-// Stream is not meant to be cloned - use Arc<Stream> instead
-// This implementation is only for compatibility with HashMap storage
 
 impl AsyncRead for Stream {
     fn poll_read(
@@ -211,130 +280,164 @@ impl AsyncRead for Stream {
 impl AsyncWrite for Stream {
     fn poll_write(
         self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let stream_id = self.id;
-        let buf_len = buf.len();
-        tracing::trace!(
-            "[Stream] poll_write: stream_id={}, buf_len={}",
-            stream_id,
-            buf_len
-        );
-
-        if self.is_closed.load(Ordering::Relaxed) {
-            tracing::warn!("[Stream] poll_write: Stream {} is closed", stream_id);
-            return Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "stream closed",
-            )));
-        }
-
-        // Send data to session via channel
-        let data = Bytes::copy_from_slice(buf);
-        tracing::trace!(
-            "[Stream] poll_write: Sending {} bytes to channel for stream {}",
-            buf_len,
-            stream_id
-        );
-        match self.writer_tx.send((self.id, data)) {
-            Ok(_) => {
-                tracing::debug!(
-                    "[Stream] poll_write: Successfully sent {} bytes to channel for stream {}",
-                    buf_len,
-                    stream_id
-                );
-                Poll::Ready(Ok(buf.len()))
-            }
-            Err(e) => {
-                tracing::error!(
-                    "[Stream] poll_write: Failed to send {} bytes to channel for stream {}: {:?}",
-                    buf_len,
-                    stream_id,
-                    e
-                );
-                Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "session channel closed",
-                )))
-            }
-        }
+        self.poll_write_data(cx, buf)
     }
-
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.poll_flush_data(cx)
     }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        // Emit a FIN and evict this stream from the session maps.
-        self.close();
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        self.poll_shutdown_data(cx)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::StreamReader;
+    use crate::session::writer::WriteRequest;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::mpsc;
+
+    fn stream() -> (Stream, mpsc::UnboundedReceiver<WriteRequest>) {
+        let (writer, rx) = StreamWriter::channel();
+        let (_, reader_rx) = mpsc::unbounded_channel();
+        (
+            Stream::new(1, StreamReader::new(1, reader_rx), writer).0,
+            rx,
+        )
+    }
+
+    fn frame(request: WriteRequest) -> Frame {
+        match request {
+            WriteRequest::Frame { frame, .. } => frame,
+            WriteRequest::Flush(_) => panic!("expected frame"),
+        }
+    }
 
     #[tokio::test]
-    async fn test_stream_write() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let (_reader_tx, reader_rx) = mpsc::unbounded_channel();
+    async fn writes_are_bounded_and_fin_follows_accepted_data() {
+        let (mut stream, mut rx) = stream();
+        assert_eq!(stream.write(&[]).await.unwrap(), 0);
+        assert!(rx.try_recv().is_err());
+        for _ in 0..64 {
+            stream.write_all(b"data").await.unwrap();
+        }
+        let mut write = Box::pin(stream.write(b"blocked"));
+        assert!(
+            write
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(write);
+        stream.close();
+        assert!(
+            stream
+                .send_data(Bytes::from_static(b"after-fin"))
+                .await
+                .is_err()
+        );
+        for _ in 0..64 {
+            assert_eq!(frame(rx.recv().await.unwrap()).data, b"data"[..]);
+        }
+        assert_eq!(frame(rx.recv().await.unwrap()).cmd, Command::Fin);
+        stream.close();
+        assert!(rx.try_recv().is_err());
+    }
 
-        let reader = StreamReader::new(1, reader_rx);
-        let (mut stream, _synack_rx) = Stream::new(1, reader, tx);
+    #[tokio::test]
+    async fn oversized_tcp_write_is_chunked() {
+        let (mut stream, mut rx) = stream();
+        let data = vec![42; MAX_FRAME_PAYLOAD + 5];
+        stream.write_all(&data).await.unwrap();
+        assert_eq!(
+            frame(rx.recv().await.unwrap()).data.len(),
+            MAX_FRAME_PAYLOAD
+        );
+        assert_eq!(frame(rx.recv().await.unwrap()).data.len(), 5);
+        assert!(stream.send_data(Bytes::from(data)).await.is_err());
+    }
 
-        // 写入数据
-        stream.write_all(b"hello").await.unwrap();
+    #[tokio::test]
+    async fn flush_waits_for_writer_acknowledgement() {
+        let (mut stream, mut rx) = stream();
+        let mut flush = Box::pin(stream.flush());
+        assert!(
+            flush
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        match rx.recv().await.unwrap() {
+            WriteRequest::Flush(tx) => tx.send(Ok(())).unwrap(),
+            _ => panic!("expected flush"),
+        }
+        flush.await.unwrap();
+    }
 
-        // 验证数据发送到 channel
-        let (stream_id, data) = rx.recv().await.unwrap();
-        assert_eq!(stream_id, 1);
-        assert_eq!(data.as_ref(), b"hello");
+    #[tokio::test]
+    async fn close_wakes_a_blocked_async_send() {
+        let (mut stream, _rx) = stream();
+        for _ in 0..64 {
+            stream.write_all(b"data").await.unwrap();
+        }
+        let mut send = Box::pin(stream.send_data(Bytes::from_static(b"blocked")));
+        assert!(
+            send.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        stream.close();
+        assert!(send.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_acknowledge_a_flush_before_fin() {
+        let (mut stream, mut rx) = stream();
+        let mut flush = Box::pin(stream.flush());
+        assert!(
+            flush
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        drop(flush);
+        let WriteRequest::Flush(old_flush) = rx.recv().await.unwrap() else {
+            panic!("expected flush")
+        };
+        let mut shutdown = Box::pin(stream.shutdown());
+        assert!(
+            shutdown
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        let _ = old_flush.send(Ok(()));
+        assert!(
+            shutdown
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(frame(rx.recv().await.unwrap()).cmd, Command::Fin);
+        let WriteRequest::Flush(new_flush) = rx.recv().await.unwrap() else {
+            panic!("expected flush")
+        };
+        new_flush.send(Ok(())).unwrap();
+        shutdown.await.unwrap();
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn test_stream_read() {
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (writer, _rx) = StreamWriter::channel();
         let (reader_tx, reader_rx) = mpsc::unbounded_channel();
-
-        let reader = StreamReader::new(1, reader_rx);
-        let (mut stream, _synack_rx) = Stream::new(1, reader, tx);
-
-        // 发送数据到 reader
-        reader_tx.send(Bytes::from("world")).unwrap();
-
-        // 读取数据
-        let mut buf = vec![0u8; 10];
-        let n = stream.read(&mut buf).await.unwrap();
-
-        assert_eq!(n, 5);
-        assert_eq!(&buf[..n], b"world");
-    }
-
-    #[tokio::test]
-    async fn test_stream_read_write() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let (reader_tx, reader_rx) = mpsc::unbounded_channel();
-
-        let reader = StreamReader::new(1, reader_rx);
-        let (mut stream, _synack_rx) = Stream::new(1, reader, tx);
-
-        // 同时读写
-        reader_tx.send(Bytes::from("input")).unwrap();
-        stream.write_all(b"output").await.unwrap();
-
-        // 验证读取
-        let mut buf = vec![0u8; 10];
-        let n = stream.read(&mut buf).await.unwrap();
-        assert_eq!(n, 5);
-        assert_eq!(&buf[..n], b"input");
-
-        // 验证写入
-        let (stream_id, data) = rx.recv().await.unwrap();
-        assert_eq!(stream_id, 1);
-        assert_eq!(data.as_ref(), b"output");
+        let (mut stream, _) = Stream::new(1, StreamReader::new(1, reader_rx), writer);
+        reader_tx.send(Bytes::from_static(b"world")).unwrap();
+        let mut buf = [0; 10];
+        assert_eq!(stream.read(&mut buf).await.unwrap(), 5);
+        assert_eq!(&buf[..5], b"world");
     }
 }

@@ -482,9 +482,12 @@ async fn proxy_tcp_connection_data_forwarding(
                 }
             };
 
-            // 写入 stream（使用 send_data，完全无锁！）
+            // Queue one complete frame with session-wide backpressure.
             use bytes::Bytes;
-            if let Err(e) = stream_for_write.send_data(Bytes::copy_from_slice(&buf[..n])) {
+            if let Err(e) = stream_for_write
+                .send_data(Bytes::copy_from_slice(&buf[..n]))
+                .await
+            {
                 tracing::error!(
                     "[Proxy-Task2] Stream write error (stream_id={}, iteration={}): {:?}",
                     stream_id,

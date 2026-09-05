@@ -13,14 +13,12 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anytls_rs::client::Client as AnytlsClient;
 use anytls_rs::client::UDP_OVER_TCP_MAGIC_ADDR;
 use anytls_rs::padding::PaddingFactory;
-use anytls_rs::protocol::{Command, Frame};
 use anytls_rs::session::{Session, Stream as AnytlsStream, StreamReader};
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -116,7 +114,7 @@ impl ProxyAdapter for AnytlsAdapter {
     }
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-        let host = metadata.rule_host().to_string();
+        let host = anytls_tcp_destination(metadata)?;
         let port = metadata.dst_port;
         let (stream, session) = self
             .client
@@ -155,41 +153,45 @@ impl ProxyAdapter for AnytlsAdapter {
     }
 }
 
+/// Select the actual TCP dial target without substituting a sniffed rule host.
+///
+/// IP-only inbounds leave `host` empty, so fall back to `dst_ip`.  A sniffed
+/// hostname is useful for rule matching but must not silently replace the
+/// address the client actually requested.
+fn anytls_tcp_destination(metadata: &Metadata) -> Result<String> {
+    if !metadata.host.is_empty() {
+        return Ok(metadata.host.to_string());
+    }
+    metadata
+        .dst_ip
+        .map(|ip| ip.to_string())
+        .ok_or_else(|| MeowError::Proxy("anytls dial: missing destination host and IP".to_string()))
+}
+
 /// Bridge `(Arc<Stream>, Arc<Session>)` into a `ProxyConn`-shaped value.
 ///
 /// The upstream `Stream` impls `AsyncRead`/`AsyncWrite` on `Pin<&mut Self>`,
 /// but `create_proxy_stream` only hands us an `Arc<Stream>` — we can never
-/// obtain `&mut Stream`. So we re-implement the trait against the public
-/// `Stream::reader()` and `Session::write_data_frame()` API surface that the
-/// crate's own SOCKS5 client uses (`src/client/socks5.rs`).
-// The pending futures are `Send` but not `Sync`; `ProxyConn` requires `Sync`,
-// so we wrap them in `parking_lot::Mutex` (which is `Sync` whenever its
-// payload is `Send`). The mutex is uncontended in practice because all
-// access happens through `Pin<&mut Self>` from the AsyncRead/AsyncWrite
-// trait, but the type-level `Sync` bound on `ProxyConn` is what forces the
-// wrapping.
+/// obtain `&mut Stream`. So we re-implement the traits against its public
+/// reader and cancellation-safe writer-channel APIs.
+// The pending read future is `Send` but not `Sync`; `ProxyConn` requires
+// `Sync`, so it is wrapped in `parking_lot::Mutex`.
 type PendingRead = Pin<Box<dyn std::future::Future<Output = io::Result<Vec<u8>>> + Send>>;
-type PendingWrite = Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send>>;
 
 struct AnytlsConn {
     stream: Arc<AnytlsStream>,
-    session: Arc<Session>,
-    stream_id: u32,
+    // Keep the owning pooled session alive even if the adapter is dropped
+    // while this connection is still in use.
+    _session: Arc<Session>,
     pending_read: Mutex<Option<PendingRead>>,
-    pending_write: Mutex<Option<PendingWrite>>,
-    fin_sent: AtomicBool,
 }
 
 impl AnytlsConn {
     fn new(stream: Arc<AnytlsStream>, session: Arc<Session>) -> Self {
-        let stream_id = stream.id();
         Self {
             stream,
-            session,
-            stream_id,
+            _session: session,
             pending_read: Mutex::new(None),
-            pending_write: Mutex::new(None),
-            fin_sent: AtomicBool::new(false),
         }
     }
 
@@ -198,26 +200,10 @@ impl AnytlsConn {
     /// proxied target connection and evicts the per-stream map entry (issue
     /// #201 item 4). The session is pooled and multiplexes other streams, so
     /// this must never close the session itself.
-    ///
-    /// The registry `anytls-rs` exposes only an async session writer (the
-    /// git fork's synchronous `Stream::close()` is not published), so the frame
-    /// is sent fire-and-forget on the current runtime. If no runtime is active
-    /// (e.g. dropped outside tokio), the FIN is skipped — the connection is
-    /// being torn down regardless.
     fn fin_stream(&self) {
-        if self.fin_sent.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let session = Arc::clone(&self.session);
-        let stream_id = self.stream_id;
-        handle.spawn(async move {
-            let _ = session
-                .write_control_frame(Frame::control(Command::Fin, stream_id))
-                .await;
-        });
+        // `Stream::close` uses the same FIFO as `send_data`, so all accepted
+        // data is written before FIN. It is synchronous and idempotent.
+        self.stream.close();
     }
 }
 
@@ -269,50 +255,15 @@ impl AsyncWrite for AnytlsConn {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let len = buf.len();
-        let mut guard = self.pending_write.lock();
-        if guard.is_none() {
-            let session = Arc::clone(&self.session);
-            let stream_id = self.stream_id;
-            let data = Bytes::copy_from_slice(buf);
-            let fut = async move {
-                session
-                    .write_data_frame(stream_id, data)
-                    .await
-                    .map_err(|e| io::Error::other(format!("anytls write: {e}")))
-            };
-            *guard = Some(Box::pin(fut));
-        }
-        let fut = guard.as_mut().expect("just set");
-        match fut.as_mut().poll(cx) {
-            Poll::Ready(Ok(())) => {
-                *guard = None;
-                Poll::Ready(Ok(len))
-            }
-            Poll::Ready(Err(e)) => {
-                *guard = None;
-                Poll::Ready(Err(e))
-            }
-            Poll::Pending => Poll::Pending,
-        }
+        self.stream.poll_write_data(cx, buf)
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // The upstream session writer is unbuffered (each write_data_frame
-        // pushes onto a tokio mpsc that's drained on the wire side), so
-        // there's nothing to flush.
-        Poll::Ready(Ok(()))
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.stream.poll_flush_data(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Tear down just this stream (not the whole session, which is pooled
-        // and multiplexes other streams): `Stream::close` emits a FIN frame so
-        // the server releases the proxied target connection and evicts the
-        // stream from the session maps. Without this the server-side proxied
-        // socket and the session's per-stream map entry leaked on every dial
-        // (issue #201 item 4). Idempotent.
-        self.fin_stream();
-        Poll::Ready(Ok(()))
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.stream.poll_shutdown_data(cx)
     }
 }
 
@@ -495,23 +446,19 @@ async fn read_uot_addr(reader: &mut StreamReader) -> Result<SocketAddr> {
 /// `pending_request` mutex, which doubles as the lazy-request slot.
 struct AnytlsPacketConn {
     stream: Arc<AnytlsStream>,
-    session: Arc<Session>,
-    stream_id: u32,
+    // See `AnytlsConn::_session`.
+    _session: Arc<Session>,
     /// uot request, sent coalesced with the first datagram (upstream
     /// `uot.NewLazyConn`); `None` once it has gone out.
     pending_request: tokio::sync::Mutex<Option<Vec<u8>>>,
-    fin_sent: AtomicBool,
 }
 
 impl AnytlsPacketConn {
     fn new(stream: Arc<AnytlsStream>, session: Arc<Session>, request: Vec<u8>) -> Self {
-        let stream_id = stream.id();
         Self {
             stream,
-            session,
-            stream_id,
+            _session: session,
             pending_request: tokio::sync::Mutex::new(Some(request)),
-            fin_sent: AtomicBool::new(false),
         }
     }
 
@@ -519,19 +466,7 @@ impl AnytlsPacketConn {
     /// release the server's UDP socket and the session's stream-map entry
     /// without tearing down the pooled session.
     fn fin_stream(&self) {
-        if self.fin_sent.swap(true, Ordering::Relaxed) {
-            return;
-        }
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let session = Arc::clone(&self.session);
-        let stream_id = self.stream_id;
-        handle.spawn(async move {
-            let _ = session
-                .write_control_frame(Frame::control(Command::Fin, stream_id))
-                .await;
-        });
+        self.stream.close();
     }
 }
 
@@ -584,8 +519,7 @@ impl ProxyPacketConn for AnytlsPacketConn {
         frame.extend_from_slice(&length.to_be_bytes());
         frame.extend_from_slice(buf);
 
-        // The anytls frame header is a `u16` too, and the codec truncates
-        // silently rather than erroring — reject instead of corrupting.
+        // The AnyTLS frame header is a u16 too; reject oversized datagrams.
         if frame.len() > MAX_UOT_FRAME {
             return Err(MeowError::Proxy(format!(
                 "anytls udp: framed packet too large ({} > {MAX_UOT_FRAME})",
@@ -593,10 +527,10 @@ impl ProxyPacketConn for AnytlsPacketConn {
             )));
         }
 
-        self.session
-            .write_data_frame(self.stream_id, Bytes::from(frame))
+        self.stream
+            .send_data(Bytes::from(frame))
             .await
-            .map_err(|e| MeowError::Proxy(format!("anytls udp write: {e}")))?;
+            .map_err(|_| MeowError::Proxy("anytls udp write: session writer closed".to_string()))?;
         *pending = None;
         Ok(buf.len())
     }
@@ -768,12 +702,47 @@ fn install_anytls_bridges() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anytls_rs::protocol::Command;
     use meow_common::Network;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
     fn reader_over(bytes: &[u8]) -> StreamReader {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tx.send(Bytes::copy_from_slice(bytes)).unwrap();
         StreamReader::new(0, rx)
+    }
+
+    async fn test_session() -> (Arc<Session>, DuplexStream) {
+        let (io, peer) = tokio::io::duplex(64);
+        let (reader, writer) = tokio::io::split(io);
+        // Server sessions skip padding, making the wire assertions exact.
+        let session = Arc::new(Session::new_server(
+            reader,
+            writer,
+            PaddingFactory::default(),
+        ));
+        let writer_session = Arc::clone(&session);
+        tokio::spawn(async move {
+            writer_session.process_stream_data().await.unwrap();
+        });
+        (session, peer)
+    }
+
+    async fn wire_frame(peer: &mut DuplexStream) -> (Command, u32, Vec<u8>) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut header = [0; 7];
+            peer.read_exact(&mut header).await.unwrap();
+            let mut data = vec![0; u16::from_be_bytes([header[5], header[6]]) as usize];
+            peer.read_exact(&mut data).await.unwrap();
+            (
+                Command::from(header[0]),
+                u32::from_be_bytes(header[1..5].try_into().unwrap()),
+                data,
+            )
+        })
+        .await
+        .expect("writer stalled")
     }
 
     fn metadata_for(host: &str, ip: Option<IpAddr>, port: u16) -> Metadata {
@@ -784,6 +753,126 @@ mod tests {
             dst_port: port,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn tcp_destination_uses_original_host_then_ip() {
+        let mut metadata =
+            metadata_for("requested.example", Some("192.0.2.1".parse().unwrap()), 443);
+        metadata.network = Network::Tcp;
+        metadata.sniff_host = smol_str::SmolStr::from("sniffed.example");
+        assert_eq!(
+            anytls_tcp_destination(&metadata).unwrap(),
+            "requested.example",
+            "a sniffed rule host must not replace the requested dial target"
+        );
+
+        metadata.host = smol_str::SmolStr::default();
+        assert_eq!(anytls_tcp_destination(&metadata).unwrap(), "192.0.2.1");
+
+        metadata.dst_ip = Some("2001:db8::1".parse().unwrap());
+        assert_eq!(anytls_tcp_destination(&metadata).unwrap(), "2001:db8::1");
+
+        metadata.dst_ip = None;
+        assert!(anytls_tcp_destination(&metadata)
+            .unwrap_err()
+            .to_string()
+            .contains("missing destination host and IP"));
+    }
+
+    #[tokio::test]
+    async fn tcp_drop_during_partial_frame_preserves_other_streams() {
+        let (session, mut peer) = test_session().await;
+        let (first, _) = session.open_stream().await.unwrap();
+        let first_id = first.id();
+        let (second, _) = session.open_stream().await.unwrap();
+        let second_id = second.id();
+        assert_eq!(wire_frame(&mut peer).await.0, Command::Syn);
+        assert_eq!(wire_frame(&mut peer).await.0, Command::Syn);
+        let mut first = AnytlsConn::new(first, Arc::clone(&session));
+        let mut second = AnytlsConn::new(second, Arc::clone(&session));
+        first.write_all(&[42; 512]).await.unwrap();
+
+        // A 64-byte duplex cannot fit this frame. Seeing its prefix proves
+        // the writer has started, while the rest is still backpressured.
+        let mut prefix = [0; 4];
+        peer.read_exact(&mut prefix).await.unwrap();
+        drop(first);
+        second.write_all(b"still-aligned").await.unwrap();
+
+        let mut remainder = vec![0; 7 + 512 - prefix.len()];
+        peer.read_exact(&mut remainder).await.unwrap();
+        let mut full_frame = prefix.to_vec();
+        full_frame.extend_from_slice(&remainder);
+        assert_eq!(full_frame[0], u8::from(Command::Push));
+        assert_eq!(
+            u32::from_be_bytes(full_frame[1..5].try_into().unwrap()),
+            first_id
+        );
+        assert_eq!(&full_frame[7..], &[42; 512]);
+        assert_eq!(
+            wire_frame(&mut peer).await,
+            (Command::Fin, first_id, vec![])
+        );
+        assert_eq!(
+            wire_frame(&mut peer).await,
+            (Command::Push, second_id, b"still-aligned".to_vec())
+        );
+        drop(second);
+        assert_eq!(
+            wire_frame(&mut peer).await,
+            (Command::Fin, second_id, vec![])
+        );
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_data_and_fin_use_the_stream_writer_fifo() {
+        let (session, mut peer) = test_session().await;
+        let (stream, _) = session.open_stream().await.unwrap();
+        let id = stream.id();
+        assert_eq!(wire_frame(&mut peer).await.0, Command::Syn);
+        let conn = AnytlsPacketConn::new(stream, Arc::clone(&session), vec![0xaa]);
+        let destination: SocketAddr = "192.0.2.2:53".parse().unwrap();
+
+        assert_eq!(conn.write_packet(b"udp", &destination).await.unwrap(), 3);
+        drop(conn);
+        let (cmd, stream_id, data) = wire_frame(&mut peer).await;
+        assert_eq!((cmd, stream_id), (Command::Push, id));
+        assert_eq!(data[0], 0xaa, "the lazy UoT request must be coalesced");
+        assert_eq!(wire_frame(&mut peer).await, (Command::Fin, id, vec![]));
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_cancelled_admission_preserves_lazy_request_and_close_order() {
+        let (session, mut peer) = test_session().await;
+        let (stream, _) = session.open_stream().await.unwrap();
+        let id = stream.id();
+        assert_eq!(wire_frame(&mut peer).await.0, Command::Syn);
+        // Fill the session budget while the first frame blocks on the wire.
+        for _ in 0..64 {
+            stream.send_data(Bytes::from(vec![42; 512])).await.unwrap();
+        }
+        let conn = AnytlsPacketConn::new(stream, Arc::clone(&session), vec![0xaa]);
+        let destination: SocketAddr = "192.0.2.2:53".parse().unwrap();
+        let mut write = Box::pin(conn.write_packet(b"cancelled", &destination));
+        assert!(futures::poll!(&mut write).is_pending());
+        drop(write);
+        assert_eq!(*conn.pending_request.try_lock().unwrap(), Some(vec![0xaa]));
+
+        let mut write = Box::pin(conn.write_packet(b"closed", &destination));
+        assert!(futures::poll!(&mut write).is_pending());
+        conn.close().unwrap();
+        assert!(write.await.is_err(), "close must wake blocked admission");
+        for _ in 0..64 {
+            assert_eq!(
+                wire_frame(&mut peer).await,
+                (Command::Push, id, vec![42; 512])
+            );
+        }
+        assert_eq!(wire_frame(&mut peer).await, (Command::Fin, id, vec![]));
+        session.close().await.unwrap();
     }
 
     /// The request header uses SOCKS5 family bytes, *not* the uot ones.

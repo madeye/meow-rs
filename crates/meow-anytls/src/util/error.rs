@@ -27,6 +27,10 @@ pub enum AnyTlsError {
     #[error("Session closed")]
     SessionClosed,
 
+    /// Stream has been closed
+    #[error("Stream closed")]
+    StreamClosed,
+
     /// Invalid or malformed frame
     #[error("Invalid frame: {0}")]
     InvalidFrame(String),
