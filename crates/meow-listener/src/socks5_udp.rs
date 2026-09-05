@@ -8,7 +8,7 @@
 //! reply task is dropped).
 //!
 //! Routing mirrors `meow_tunnel::udp::handle_udp`: fake-IP rewrite → pre-resolve
-//! → port-53 DIRECT bypass → rule match → `dial_udp`. A small per-association
+//! → rule match → `dial_udp`. A small per-association
 //! NAT (`dst -> session`) dedups outbound conns; each session has a reply task
 //! that reads server→client datagrams and writes them back wrapped in the
 //! SOCKS5 UDP header.
@@ -21,7 +21,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use meow_common::{with_dial_timeout, ConnType, Metadata, Network, ProxyAdapter, ProxyPacketConn};
+use meow_common::{with_dial_timeout, ConnType, Metadata, Network, ProxyPacketConn};
 use meow_tunnel::Tunnel;
 use smallvec::SmallVec;
 use tokio::io::AsyncReadExt;
@@ -208,21 +208,12 @@ async fn handle_client_datagram(
         return Ok(());
     }
 
-    // Slow path: pick an outbound and dial. Port 53 bypasses rule matching to
-    // DIRECT, mirroring meow_tunnel::udp::handle_udp (avoid looping client DNS
-    // back through a proxy / the in-process resolver).
-    let proxy: Arc<dyn ProxyAdapter> = if metadata.dst_port == 53 {
-        Arc::clone(&inner.direct) as Arc<dyn ProxyAdapter>
-    } else {
-        match inner.resolve_proxy(&metadata) {
-            Some((p, _rule, _payload)) => p,
-            None => {
-                return Err(format!(
-                    "no matching rule for {}",
-                    metadata.remote_address()
-                ))
-            }
-        }
+    // Client UDP follows the configured routing policy, including port 53.
+    let Some((proxy, _rule, _payload)) = inner.resolve_proxy(&metadata) else {
+        return Err(format!(
+            "no matching rule for {}",
+            metadata.remote_address()
+        ));
     };
 
     let conn: Arc<dyn ProxyPacketConn> = Arc::from(
@@ -360,6 +351,60 @@ fn encode_udp_header(out: &mut SmallVec<[u8; 1500]>, addr: &SocketAddr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn udp_port_53_obeys_reject_rule() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let tunnel = crate::test_rule_tunnel();
+            let stats = Arc::clone(tunnel.statistics());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let mut control = TcpStream::connect(addr).await.unwrap();
+            let (server, peer) = listener.accept().await.unwrap();
+            let task = tokio::spawn(async move {
+                crate::socks5::handle_socks5(
+                    &tunnel,
+                    server,
+                    peer,
+                    None,
+                    None,
+                    "socks",
+                    addr.port(),
+                )
+                .await;
+            });
+            control.write_all(&[5, 1, 0]).await.unwrap();
+            let mut greeting = [0; 2];
+            control.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 0]);
+            control
+                .write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut bound = [0; 10];
+            control.read_exact(&mut bound).await.unwrap();
+            assert_eq!(&bound[..4], &[5, 0, 0, 1]);
+            let relay = SocketAddr::from((
+                [bound[4], bound[5], bound[6], bound[7]],
+                u16::from_be_bytes([bound[8], bound[9]]),
+            ));
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            for port in [53, 5353] {
+                let mut packet = SmallVec::new();
+                encode_udp_header(&mut packet, &SocketAddr::from(([127, 0, 0, 1], port)));
+                packet.extend_from_slice(b"not a DNS query");
+                client.send_to(&packet, relay).await.unwrap();
+            }
+            while stats.rule_match.snapshot() != vec![(("MATCH", "REJECT"), 2)] {
+                tokio::task::yield_now().await;
+            }
+            drop(control);
+            task.await.unwrap();
+        })
+        .await
+        .expect("both destinations must reach MATCH,REJECT");
+    }
 
     /// (label, datagram, expected ip, expected host, expected port, expected payload)
     type ParseUdpRequestCase = (

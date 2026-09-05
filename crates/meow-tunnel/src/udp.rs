@@ -1,6 +1,5 @@
 use crate::tunnel::TunnelInner;
 use dashmap::DashMap;
-use meow_common::adapter::ProxyAdapter;
 use meow_common::atomic::AtomicU;
 use meow_common::{with_dial_timeout, Metadata, ProxyPacketConn};
 use std::net::SocketAddr;
@@ -190,25 +189,10 @@ pub async fn handle_udp(
         return;
     }
 
-    // Slow path: new session — match rules and dial.
-    //
-    // UDP DNS bypass: any UDP packet destined for port 53 short-circuits
-    // rule matching and is dialled DIRECT. Routing client DNS through a
-    // proxy would defeat the whole point of the in-process DNS resolver
-    // (rule-set selection, fake-IP, snooping) and on Android would push
-    // queries through the VPN tun rather than over the protected fd.
-    let (proxy, rule_name, rule_payload) = if metadata.dst_port == 53 {
-        (
-            Arc::clone(&tunnel.direct) as Arc<dyn ProxyAdapter>,
-            smol_str::SmolStr::new_static("DnsBypass"),
-            smol_str::SmolStr::default(),
-        )
-    } else {
-        let Some(matched) = tunnel.resolve_proxy(&metadata) else {
-            warn!("no matching rule for UDP {}", metadata.remote_address());
-            return;
-        };
-        matched
+    // Slow path: all client UDP, including port 53, follows routing policy.
+    let Some((proxy, rule_name, rule_payload)) = tunnel.resolve_proxy(&metadata) else {
+        warn!("no matching rule for UDP {}", metadata.remote_address());
+        return;
     };
 
     info!(
@@ -276,6 +260,7 @@ mod tests {
     use super::*;
     use crate::tunnel::Tunnel;
     use async_trait::async_trait;
+    use meow_common::adapter::ProxyAdapter;
     use meow_common::error::Result as MeowResult;
     use meow_common::{
         AdapterType, DelayHistory, DnsMode, MeowError, Network, Proxy, ProxyConn, ProxyHealth,
@@ -306,6 +291,56 @@ mod tests {
             dst_ip: Some(dst.ip()),
             dst_port: dst.port(),
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_port_53_obeys_reject_rule() {
+        let tunnel = mk_tunnel();
+        tunnel.update_proxies(
+            meow_config::rebuild_from_raw(&Default::default())
+                .unwrap()
+                .0,
+        );
+        tunnel.update_rules(vec![Box::new(meow_rules::final_rule::FinalRule::new(
+            "REJECT",
+        ))]);
+        let src = "127.0.0.1:12345".parse().unwrap();
+        for port in [53, 5353] {
+            let dst = SocketAddr::from(([127, 0, 0, 1], port));
+            handle_udp(
+                tunnel.inner(),
+                b"not a DNS query",
+                src,
+                mk_metadata(src, dst),
+            )
+            .await;
+            let session = tunnel.inner().nat_table.get(&(src, dst)).unwrap();
+            assert_eq!(&*session.proxy_name, "REJECT");
+            assert!(
+                session.conn.local_addr().is_err(),
+                "must not open a DIRECT socket"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn udp_port_53_obeys_proxy_rule_and_global_mode() {
+        for mode in [TunnelMode::Rule, TunnelMode::Global] {
+            let tunnel = mk_tunnel();
+            tunnel.set_mode(mode);
+            let proxy = Arc::new(SlowDialProxy::new());
+            let mut proxies: HashMap<SmolStr, Arc<dyn Proxy>> = HashMap::new();
+            proxies.insert("GLOBAL".into(), Arc::clone(&proxy) as Arc<dyn Proxy>);
+            tunnel.update_proxies(proxies);
+            tunnel.update_rules(vec![Box::new(meow_rules::final_rule::FinalRule::new(
+                "GLOBAL",
+            ))]);
+            let src = "127.0.0.1:12345".parse().unwrap();
+            let dst = "127.0.0.1:53".parse().unwrap();
+            handle_udp(tunnel.inner(), b"query", src, mk_metadata(src, dst)).await;
+            assert_eq!(proxy.dials.load(Ordering::SeqCst), 1);
+            assert_eq!(proxy.conns.lock().unwrap()[0].0.load(Ordering::SeqCst), 1);
         }
     }
 

@@ -133,6 +133,7 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --no-default-features -- -D warnings
 cargo clippy --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo test -p meow-listener --all-features --lib udp_port_53
 
 # Mirrors the "Unit + integration tests (default features)" CI step. `--lib`
 # alone is not enough: it skips every `--test` target, so a broken integration
